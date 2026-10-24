@@ -98,6 +98,32 @@ function hostOf(account: string): string {
 export const registryKey = (row: Pick<RegistryAccount, "id" | "machine">) =>
   row.machine === LOCAL_MACHINE ? row.id : `${row.id}@${row.machine}`;
 
+/** How a duplicate sign-in names a machine's own login (`sameAccountOnMachine`). */
+export const THE_DEFAULT_LOGIN = "the default login";
+
+/**
+ * A sign-in that finished on `email` duplicates an account already on `machine`: the label of
+ * the profile there with that e-mail (`except` the new profile's own key), else the machine's
+ * default login when its e-mail (`defaultEmail`) is that one; `null` when it is new there.
+ */
+export function sameAccountOnMachine(
+  registry: readonly RegistryAccount[],
+  machine: string,
+  email: string,
+  o: { except?: string; defaultEmail?: string | null } = {},
+): string | null {
+  const want = normalizeEmail(email);
+  const row = registry.find(
+    (r) =>
+      r.machine === machine &&
+      registryKey(r) !== o.except &&
+      r.email !== undefined &&
+      normalizeEmail(r.email) === want,
+  );
+  if (row !== undefined) return row.label;
+  return o.defaultEmail && normalizeEmail(o.defaultEmail) === want ? THE_DEFAULT_LOGIN : null;
+}
+
 /**
  * The profiles waiting for sign-in: registry rows that never finished one and have no usage
  * record. Each is a row of its own, never a card.

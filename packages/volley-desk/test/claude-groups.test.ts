@@ -19,6 +19,7 @@ import {
   openLimitDecisions,
   pendingProfiles,
   picksLine,
+  sameAccountOnMachine,
   usageTriple,
 } from "../src/store/claude";
 import type { RegistryAccount } from "../src/store/claude";
@@ -753,5 +754,36 @@ describe("agent-level account decisions and events (T8)", () => {
     // An account_chosen without a why still names its account.
     const bare = ev("account_chosen", 6, { task: "T1", role: "implementer", account: "work" });
     expect(accountWhy([bare], "T1", "implementer")).toBe("work");
+  });
+});
+
+describe("sameAccountOnMachine (#498)", () => {
+  const SIGNED = "2026-10-18T12:00:00.000Z";
+  const reg: RegistryAccount[] = [
+    {
+      id: "team",
+      label: "Team",
+      machine: "box-a",
+      email: "Team@Example.com",
+      signed_in_at: SIGNED,
+    },
+    { id: "team-2", label: "Team (2)", machine: "box-a", email: "team@example.com" },
+    { id: "here", label: "Here", machine: "local", email: "team@example.com" },
+  ];
+
+  it("names the profile on that machine with that e-mail, never the new one itself", () => {
+    expect(sameAccountOnMachine(reg, "box-a", "TEAM@example.com", { except: "team-2@box-a" })).toBe(
+      "Team",
+    );
+    expect(sameAccountOnMachine(reg, "local", "team@example.com", { except: "x" })).toBe("Here");
+    expect(sameAccountOnMachine(reg, "box-b", "team@example.com")).toBeNull();
+    expect(sameAccountOnMachine(reg, "box-a", "other@example.com")).toBeNull();
+  });
+
+  it("or the machine's default login when its e-mail matches", () => {
+    expect(
+      sameAccountOnMachine([], "box-a", "me@example.com", { defaultEmail: "Me@Example.com" }),
+    ).toBe("the default login");
+    expect(sameAccountOnMachine([], "box-a", "me@example.com", { defaultEmail: null })).toBeNull();
   });
 });

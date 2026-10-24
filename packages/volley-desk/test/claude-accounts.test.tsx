@@ -290,7 +290,7 @@ describe("ClaudeAccounts", () => {
       expect.any(String),
       expect.any(Number),
     );
-    expect(screen.getByText(/Waiting for the sign-in to finish/)).toBeInTheDocument();
+    expect(screen.getByText("Waiting for sign-in…")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
 
     const waiting = reduceAll(state, [
@@ -488,10 +488,11 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const p = within(cards[0] as HTMLElement);
     expect(p.getByText(/^primary · /)).toHaveTextContent("primary · Claude Code's default login");
     expect(p.queryByText((_, el) => el?.classList.contains("chip") === true)).toBeNull();
+    // volleyd is asked to read it (claude_prime): no usage until it answers
     for (const name of ["5-hour", "7-day"]) {
       const m = p.getByRole("meter", { name });
-      expect(m).toHaveAttribute("aria-valuetext", "no usage reported yet");
-      expect(m.closest(".meter")).toHaveTextContent("no usage reported yet");
+      await waitFor(() => expect(m).toHaveAttribute("aria-valuetext", "no reading yet"));
+      expect(m.closest(".meter")).toHaveTextContent("no reading yet");
     }
   });
 
@@ -510,9 +511,11 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     );
     const card = screen.getByRole("article", { name: "This machine's Claude login" });
     expect(await within(card).findByText("max")).toHaveClass("chip");
-    expect(within(card).getByRole("meter", { name: "5-hour" })).toHaveAttribute(
-      "aria-valuetext",
-      "no usage reported yet",
+    await waitFor(() =>
+      expect(within(card).getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+        "aria-valuetext",
+        "no reading yet",
+      ),
     );
   });
 
@@ -896,10 +899,12 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     });
   });
 
-  it("a card with no e-mail says so and has no eye button", () => {
+  it("a card with no e-mail says so, never a command, and has no eye button", () => {
     render(view({ work: own, "primary@box": { ...peer, account: "primary@box" } }));
     const c = within(screen.getByRole("article", { name: "primary@box" }));
-    expect(c.getByText("e-mail not reported yet (run the machine's doctor)")).toBeInTheDocument();
+    // read-only: nothing can ask volleyd for it
+    expect(c.getByText("no reading yet", { selector: ".s-hint:not(.cc-updated)" })).toBeInTheDocument();
+    expect(c.queryByText(/doctor/i)).toBeNull();
     expect(c.queryByRole("button", { name: /email/ })).toBeNull();
   });
 
@@ -1887,5 +1892,215 @@ describe("the demo Desk: remove a profile, and every Settings section follows (#
     } finally {
       Reflect.deleteProperty(Element.prototype, "scrollIntoView");
     }
+  });
+});
+
+describe("ClaudeAccounts › adding ends primed (#498)", () => {
+  const EMAIL = "team@example.com";
+  /** A control that answers claude_accounts with `rows` and records every op. */
+  const answering = (rows: () => unknown[]) => {
+    const ops: { op: string; fields: Record<string, unknown> }[] = [];
+    const fn = vi.fn(async (op: string, fields: Record<string, unknown>) => {
+      ops.push({ op, fields });
+      if (op === "claude_accounts")
+        return { ok: true, result: { accounts: rows(), primary: {}, sharing: {} } };
+      if (op === "claude_account_add")
+        return { ok: true, result: { acct: "team-2", url: "https://example.com/oauth" } };
+      return { ok: true };
+    }) as unknown as ControlFn;
+    return { fn, ops, primes: () => ops.filter((o) => o.op === "claude_prime") };
+  };
+  const card = (name: string) => within(screen.getByRole("article", { name }));
+  const team = { id: "team", label: "Team", machine: "local", signed_in_at: SIGNED };
+  const view = (
+    control: ControlFn | null,
+    now: number,
+    more: Partial<ClaudeAccountsProps> = {},
+  ) => (
+    <ClaudeAccounts
+      group="accounts"
+      accounts={{}}
+      signins={{}}
+      waves={{}}
+      config={config}
+      control={control}
+      configTransport={null}
+      now={now}
+      {...more}
+    />
+  );
+
+  it("a card with no e-mail asks volleyd once on mount and not again within 5 min", async () => {
+    const c = answering(() => [team]);
+    const r = render(view(c.fn, NOW));
+    await screen.findByRole("article", { name: "Team" });
+    await waitFor(() => expect(c.primes().map((p) => p.fields)).toContainEqual({ acct: "team" }));
+    expect(card("Team").getByText("reading…")).toBeInTheDocument();
+    expect(card("Team").queryByText(/doctor/i)).toBeNull();
+    const sent = c.primes().filter((p) => p.fields.acct === "team").length;
+    expect(sent).toBe(1);
+    r.rerender(view(c.fn, NOW + 4 * 60_000));
+    expect(c.primes().filter((p) => p.fields.acct === "team")).toHaveLength(1);
+    r.rerender(view(c.fn, NOW + 5 * 60_000 + 1));
+    await waitFor(() => expect(c.primes().filter((p) => p.fields.acct === "team")).toHaveLength(2));
+  });
+
+  it("after a prior probe the e-mail row says how old the last reading is", async () => {
+    const c = answering(() => [team]);
+    const record: ClaudeAccountPayload = {
+      account: "team",
+      label: "Team",
+      five_hour: null,
+      weekly: null,
+      agents: [],
+      waves: [],
+      sampled_at: "2026-10-18T14:02:00.000Z",
+      probe: { machine: "local", state: "error", attempted_at: "2026-10-18T14:02:00.000Z" },
+    };
+    render(view(c.fn, NOW, { accounts: { team: record } }));
+    expect(await card("Team").findByText("reading… · last read 4 min ago")).toBeInTheDocument();
+  });
+
+  it("without control: `no reading yet`, and nothing is sent", () => {
+    const record: ClaudeAccountPayload = {
+      account: "team",
+      label: "Team",
+      five_hour: null,
+      weekly: null,
+      agents: [],
+      waves: [],
+      sampled_at: "2026-10-18T14:02:00.000Z",
+    };
+    render(view(null, NOW, { accounts: { team: record } }));
+    // the e-mail row, and the two windows' hints
+    expect(card("Team").getAllByText("no reading yet").length).toBeGreaterThanOrEqual(3);
+    expect(card("Team").queryByText(/reading…|doctor/)).toBeNull();
+    for (const name of ["5-hour", "7-day"])
+      expect(card("Team").getByRole("meter", { name })).toHaveAttribute(
+        "aria-valuetext",
+        "no reading yet",
+      );
+  });
+
+  it("the meters read `reading…` while a prime is in flight", async () => {
+    let answer: (v: { ok: boolean }) => void = () => {};
+    const fn = vi.fn((op: string) =>
+      op === "claude_prime"
+        ? new Promise((r) => {
+            answer = r;
+          })
+        : Promise.resolve({ ok: true, result: { accounts: [team], primary: {}, sharing: {} } }),
+    ) as unknown as ControlFn;
+    render(view(fn, NOW));
+    await screen.findByRole("article", { name: "Team" });
+    await waitFor(() =>
+      expect(card("Team").getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+        "aria-valuetext",
+        "reading…",
+      ),
+    );
+    await act(async () => answer({ ok: true }));
+    expect(card("Team").getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+      "aria-valuetext",
+      "no reading yet",
+    );
+  });
+
+  it("Add: step 2 waits for sign-in; done says who signed in, with the plan chip; the card follows", async () => {
+    let rows: unknown[] = [];
+    const c = answering(() => rows);
+    const signinUrl = signinMsg("team-2", "claude_signin_url", {
+      url: "https://example.com/oauth",
+    });
+    const r = render(view(c.fn, NOW));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team 2" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    expect(screen.getByText("Waiting for sign-in…")).toBeInTheDocument();
+    const done = reduceAll(initialState(), [
+      signinUrl,
+      signinMsg("team-2", "claude_signin_done", { plan: "max", email: "new@example.com" }),
+    ]);
+    rows = [
+      {
+        id: "team-2",
+        label: "Team 2",
+        machine: "local",
+        signed_in_at: SIGNED,
+        email: "new@example.com",
+      },
+    ];
+    const record: ClaudeAccountPayload = {
+      account: "team-2",
+      label: "Team 2",
+      email: "new@example.com",
+      five_hour: { pct: 3, resets_at: "2026-10-18T18:10:00.000Z" },
+      weekly: { pct: 9, resets_at: "2026-10-21T09:00:00.000Z" },
+      agents: [],
+      waves: [],
+      sampled_at: "2026-10-18T14:05:00.000Z",
+    };
+    r.rerender(view(c.fn, NOW, { signins: done.signins ?? {}, accounts: { "team-2": record } }));
+    const signed = await screen.findByText(/^Signed in as/);
+    expect(signed).toHaveTextContent("Signed in as n•••@example.com");
+    expect(within(signed).getByText("max")).toHaveClass("chip");
+    const teamCard = await screen.findByRole("article", { name: "Team 2" });
+    expect(within(teamCard).getByText("n•••@example.com")).toBeInTheDocument();
+    expect(within(teamCard).getAllByRole("meter")).toHaveLength(3);
+  });
+
+  it("a sign-in matching an account already on that machine says so and offers Keep both / Remove the new profile", async () => {
+    const rows = () => [
+      { ...team, email: EMAIL },
+      { id: "team-2", label: "Team 2", machine: "local", signed_in_at: SIGNED, email: EMAIL },
+    ];
+    const c = answering(rows);
+    const r = render(view(c.fn, NOW));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team 2" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    const done = reduceAll(initialState(), [
+      signinMsg("team-2", "claude_signin_done", { plan: "team", email: EMAIL }),
+    ]);
+    r.rerender(view(c.fn, NOW, { signins: done.signins ?? {} }));
+    expect(
+      await screen.findByText("This is the same account as Team on this machine."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Keep both" })).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Remove the new profile" }));
+    });
+    expect(c.ops).toContainEqual({ op: "claude_account_remove", fields: { acct: "team-2" } });
+  });
+
+  it("Keep both dismisses the prompt", async () => {
+    const rows = () => [
+      { ...team, email: EMAIL },
+      { id: "team-2", label: "Team 2", machine: "local", signed_in_at: SIGNED, email: EMAIL },
+    ];
+    const c = answering(rows);
+    const r = render(view(c.fn, NOW));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team 2" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    const done = reduceAll(initialState(), [
+      signinMsg("team-2", "claude_signin_done", { plan: "team", email: EMAIL }),
+    ]);
+    r.rerender(view(c.fn, NOW, { signins: done.signins ?? {} }));
+    fireEvent.click(await screen.findByRole("button", { name: "Keep both" }));
+    expect(screen.queryByText(/same account as/)).toBeNull();
+    expect(c.ops.some((o) => o.op === "claude_account_remove")).toBe(false);
   });
 });

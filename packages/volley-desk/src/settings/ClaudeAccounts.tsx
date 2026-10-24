@@ -61,6 +61,7 @@ import {
   type RegistryAccount,
   accountFigures,
   accountList,
+  agoText,
   configuredMachines,
   deskAccountGroups,
   fableHint,
@@ -78,6 +79,7 @@ import {
   registryKey,
   resetsIn,
   resolveFields,
+  sameAccountOnMachine,
   windowPct,
   withPrimary,
 } from "../store/claude";
@@ -121,6 +123,17 @@ const METER_WARN = 70;
 
 /** volleyd answers `agent_move_account` after the respawn; stopping alone may take a minute. */
 export const MOVE_ACCOUNT_TIMEOUT_MS = 120_000;
+/**
+ * A card missing its e-mail or its meters asks volleyd to read the login again (`claude_prime`):
+ * at most once per account in this long, as volleyd itself allows.
+ */
+export const PRIME_EVERY_MS = 5 * 60_000;
+/** volleyd answers `claude_prime` once the login's usage probe has run. */
+const PRIME_TIMEOUT_MS = 60_000;
+/** What a card says of data volleyd is reading now, and of data nobody can ask for. */
+const READING = "reading…";
+const NO_READING = "no reading yet";
+
 /** How often the "resets in" times re-read the clock. */
 const CLOCK_TICK_MS = 30_000;
 
@@ -248,7 +261,7 @@ function Meter({
   label,
   w,
   now,
-  missingHint = "no usage reported yet",
+  missingHint = NO_READING,
   ageText,
 }: {
   label: string;
@@ -286,19 +299,29 @@ function Meter({
   );
 }
 
-/** An account's three meters: 5-hour and 7-day (the freshest reading), and its Fable week. */
-function Meters({ g, now }: { g: AccountGroup; now: number }) {
+/**
+ * An account's three meters: 5-hour and 7-day (the freshest reading), and its Fable week.
+ * `reading`: volleyd is reading the login now (a `claude_prime` in flight).
+ */
+function Meters({ g, now, reading }: { g: AccountGroup; now: number; reading: boolean }) {
   const fable = fableShown(g);
   const hint = fableHint(g.probe, now);
+  const missing = reading ? READING : NO_READING;
   return (
     <div className="cc-meters">
-      <Meter label="5-hour" w={g.fiveHour} now={now} />
-      <Meter label="7-day" w={g.weekly} now={now} />
+      <Meter label="5-hour" w={g.fiveHour} now={now} missingHint={missing} />
+      <Meter label="7-day" w={g.weekly} now={now} missingHint={missing} />
       <Meter
         label="Fable (7-day)"
         w={fable}
         now={now}
-        missingHint={g.probe?.state === "ok" ? "no Fable window reported" : hint}
+        missingHint={
+          g.probe?.state === "ok"
+            ? "no Fable window reported"
+            : reading && g.probe === null
+              ? READING
+              : hint
+        }
         {...(fable ? { ageText: hint } : {})}
       />
     </div>
@@ -324,10 +347,26 @@ function MaskedEmail({ email }: { email: string }) {
   );
 }
 
-/** The login's e-mail, masked until its eye button shows it (per card, never persisted). */
-function EmailRow({ email }: { email: string | null }) {
+/**
+ * The login's e-mail, masked until its eye button shows it (per card, never persisted). Not known
+ * yet: `reading…` while the Desk can ask volleyd for it (with the last reading's age), else
+ * `no reading yet`.
+ */
+function EmailRow({
+  email,
+  asking,
+  lastRead,
+}: {
+  email: string | null;
+  asking: boolean;
+  lastRead: string | null;
+}) {
   if (email === null)
-    return <div className="s-hint">e-mail not reported yet (run the machine's doctor)</div>;
+    return (
+      <div className="s-hint">
+        {asking ? `${READING}${lastRead ? ` · last read ${lastRead}` : ""}` : NO_READING}
+      </div>
+    );
   return (
     <div className="cc-email">
       <MaskedEmail email={email} />
@@ -483,6 +522,8 @@ function AccountCard({
   onSignInOn,
   onRename,
   onRemove,
+  asking,
+  reading,
   now,
 }: {
   g: AccountGroup;
@@ -497,6 +538,10 @@ function AccountCard({
   onRename: ((label: string) => Promise<string | null>) | null;
   /** Remove… (opens the sheet); `null` as for `onRename`. */
   onRemove: (() => void) | null;
+  /** The Desk can ask volleyd to read the login (`claude_prime`). */
+  asking: boolean;
+  /** A `claude_prime` for the card is in flight. */
+  reading: boolean;
   now: number;
 }) {
   const only = g.members.length === 1 ? g.members[0] : undefined;
@@ -519,8 +564,8 @@ function AccountCard({
         </div>
         {g.plan && <span className="chip">{g.plan}</span>}
       </div>
-      <EmailRow email={g.email} />
-      <Meters g={g} now={now} />
+      <EmailRow email={g.email} asking={asking} lastRead={lastReadOf(g, now)} />
+      <Meters g={g} now={now} reading={reading} />
       <ul className="cc-machines" aria-label="Machines">
         {rows.map((r) =>
           r.state === "missing" ? (
@@ -566,6 +611,50 @@ function AccountCard({
       </div>
     </article>
   );
+}
+
+/** How old the login's last reading is (its probe's read, else its freshest sample), if any. */
+const lastReadOf = (g: AccountGroup, now: number): string | null => {
+  const at = g.probe?.readAt ?? g.freshest?.sampledAt ?? null;
+  return at ? agoText(at, now) : null;
+};
+
+/** A card missing its e-mail or both its usage windows: what `claude_prime` reads. */
+const missingData = (g: AccountGroup) =>
+  g.email === null || (g.fiveHour === null && g.weekly === null);
+
+/**
+ * Ask volleyd to read each card missing data (`claude_prime { acct }`, its first login), once per
+ * account per `PRIME_EVERY_MS` while `control` is available. The accounts with one in flight.
+ */
+function usePrime(control: ControlFn | null, groups: AccountGroup[], now: number) {
+  const sent = useRef(new Map<string, number>());
+  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(() => new Set());
+  const due = groups
+    .filter(missingData)
+    .map((g) => g.members[0]?.account)
+    .filter((a): a is string => a !== undefined);
+  const key = due.join("\n");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for `due`
+  useEffect(() => {
+    if (!control) return;
+    for (const acct of due) {
+      const last = sent.current.get(acct);
+      if (last !== undefined && now - last < PRIME_EVERY_MS) continue;
+      sent.current.set(acct, now);
+      setInFlight((s) => new Set(s).add(acct));
+      void control("claude_prime", { acct }, `volley claude prime ${acct}`, PRIME_TIMEOUT_MS)
+        .catch(() => undefined)
+        .finally(() =>
+          setInFlight((s) => {
+            const next = new Set(s);
+            next.delete(acct);
+            return next;
+          }),
+        );
+    }
+  }, [control, key, now]);
+  return inFlight;
 }
 
 /**
@@ -701,6 +790,8 @@ function AddAccount({
   signins,
   control,
   onStarted,
+  sameAs,
+  removeNew,
   onClose,
 }: {
   /** This machine first, then each paired host. */
@@ -717,8 +808,19 @@ function AddAccount({
   control: ControlFn;
   /** Hears the sign-in's account id once volleyd has started it. */
   onStarted?: (acct: string, label: string, machine: string) => void;
+  /**
+   * The account already on `machine` a sign-in that finished on `email` duplicates (its profile's
+   * name, or the default login), never the new profile `acct` itself; `null`: none.
+   */
+  sameAs?: (machine: string, email: string, acct: string) => string | null;
+  /** Remove the new profile (`claude_account_remove`): volleyd's refusal, or null. */
+  removeNew?: (acct: string) => Promise<string | null>;
   onClose: () => void;
 }) {
+  /** The duplicate prompt's answer: kept both, removed (or why not), or not answered. */
+  const [dupAnswer, setDupAnswer] = useState<
+    { kept: true } | { removed: true } | { error: string } | null
+  >(null);
   const [s, setS] = useState<Adding>(() =>
     preset ? { phase: "waiting", machine: preset.machine, label: preset.label } : { phase: "pick" },
   );
@@ -737,6 +839,9 @@ function AddAccount({
   const url = signin?.url ?? r.url;
   const machine = s.phase === "waiting" ? s.machine : (chosen?.op ?? LOCAL_MACHINE);
   const remote = machine !== LOCAL_MACHINE;
+  const newAcct = s.phase === "waiting" ? s.acct : undefined;
+  const dup =
+    done && signin?.email && newAcct ? (sameAs?.(machine, signin.email, newAcct) ?? null) : null;
 
   const start = async (machine: string, name = label.trim()) => {
     if (!name) return;
@@ -888,14 +993,19 @@ function AddAccount({
             </p>
           ) : remote ? (
             url ? (
-              <SigninLink
-                machine={machine}
-                url={url}
-                flow={signin?.flow ?? r.flow}
-                attach={signin?.attach ?? r.attach}
-                manualUrl={signin?.manual_url ?? r.manual_url}
-                lead={`Sign in on Anthropic’s own page; the profile lives on ${machine}.`}
-              />
+              <>
+                <SigninLink
+                  machine={machine}
+                  url={url}
+                  flow={signin?.flow ?? r.flow}
+                  attach={signin?.attach ?? r.attach}
+                  manualUrl={signin?.manual_url ?? r.manual_url}
+                  lead={`Sign in on Anthropic’s own page; the profile lives on ${machine}.`}
+                />
+                <div className="waiting">
+                  <span className="spinner" aria-hidden="true" /> Waiting for sign-in…
+                </div>
+              </>
             ) : (
               <p className="dim">
                 <span className="spinner" aria-hidden="true" /> Starting the sign-in on {machine}…
@@ -917,7 +1027,7 @@ function AddAccount({
                   ` If it shows a code, paste it into the sign-in terminal${signin.attach ? ` (tmux attach -t ${signin.attach})` : ""}, never here.`}
               </p>
               <div className="waiting">
-                <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
+                <span className="spinner" aria-hidden="true" /> Waiting for sign-in…
               </div>
             </>
           )}
@@ -929,6 +1039,53 @@ function AddAccount({
         </Step>
         <Step title="Done" description="Added">
           <h3>Added: {label.trim()}</h3>
+          {signin?.email && (
+            <p className="cc-signed-in">
+              Signed in as <MaskedEmail email={signin.email} />
+              {signin.plan && <span className="chip">{signin.plan}</span>}
+            </p>
+          )}
+          {dup && newAcct && !(dupAnswer !== null && "kept" in dupAnswer) && (
+            // biome-ignore lint/a11y/useSemanticElements: a status line with its answers, not a form <output>
+            <div className="needs-you" role="status">
+              <p className="ny-q">
+                This is the same account as {dup} on {machineName(machine)}.
+              </p>
+              {dupAnswer !== null && "removed" in dupAnswer ? (
+                <p className="s-hint">Removed the new profile.</p>
+              ) : (
+                <>
+                  {dupAnswer !== null && "error" in dupAnswer && (
+                    <p className="s-error" role="alert">
+                      {dupAnswer.error}
+                    </p>
+                  )}
+                  <div className="ny-actions">
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setDupAnswer({ kept: true })}
+                    >
+                      Keep both
+                    </button>
+                    {removeNew && (
+                      <button
+                        type="button"
+                        className="btn btn--hot"
+                        onClick={() =>
+                          void removeNew(newAcct).then((why) =>
+                            setDupAnswer(why === null ? { removed: true } : { error: why }),
+                          )
+                        }
+                      >
+                        Remove the new profile
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <p className="dim">
             {signin?.plan ? `${signin.plan} · ` : ""}signed in on {machineName(machine)}. Pick it
             for new waves under Defaults, or let them take the account with the most headroom.
@@ -954,6 +1111,8 @@ export function SignInOnDialog(p: {
   signins: Record<string, ClaudeSignin>;
   control: ControlFn;
   onStarted?: (acct: string, label: string, machine: string) => void;
+  sameAs?: (machine: string, email: string, acct: string) => string | null;
+  removeNew?: (acct: string) => Promise<string | null>;
   onClose: () => void;
 }) {
   return <AddAccount machines={[]} {...p} />;
@@ -1062,6 +1221,25 @@ export function ClaudeAccounts({
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
+  const reading = usePrime(registryControl, groups, now);
+  /** A finished sign-in's e-mail already on its machine: the duplicate prompt (`AddAccount`). */
+  const sameAs = (machine: string, email: string, acct: string) =>
+    sameAccountOnMachine(registry, machine, email, {
+      except: acct,
+      defaultEmail:
+        groups.find((g) => g.members.some((m) => m.isPrimary && m.machine === machine))?.email ??
+        null,
+    });
+  const removeNew = async (acct: string) => {
+    if (!registryControl) return "the Desk cannot steer";
+    const r = await registryControl(
+      "claude_account_remove",
+      { acct },
+      `volley claude remove ${acct}`,
+      REMOVE_ACCOUNT_TIMEOUT_MS,
+    );
+    return r.ok ? null : (r.error ?? "volleyd refused to remove it");
+  };
   const addMachines = (holds: string[]): AddMachine[] =>
     configured.map((m) => ({ ...m, holds: holds.includes(m.op) }));
 
@@ -1311,6 +1489,8 @@ export function ClaudeAccounts({
                   }
                 : null
             }
+            asking={registryControl !== null}
+            reading={g.members[0] !== undefined && reading.has(g.members[0].account)}
             now={now}
           />
         ))}
@@ -1350,6 +1530,8 @@ export function ClaudeAccounts({
           onStarted={(acct, label, op) =>
             setTries((ts) => [...ts, { key: signingIn.key, op, label, acct }])
           }
+          sameAs={sameAs}
+          removeNew={removeNew}
           onClose={() => {
             setSigningIn(null);
             setClosed((n) => n + 1);
@@ -1362,6 +1544,8 @@ export function ClaudeAccounts({
           baseLabel={adding.label}
           signins={signins}
           control={control}
+          sameAs={sameAs}
+          removeNew={removeNew}
           onClose={() => {
             setAdding(null);
             setClosed((n) => n + 1);
