@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
- * The fakes must never reach a real install: their bin directory is never on the services' PATH
- * (`stableServicePath`, volley-cli's setup/service-path.ts) and never linked by the installer
- * (install.sh, packaging/). Only `volley sim env` puts it on a shell's PATH, on request.
+ * The fakes must never reach a real install: their bin directory is never on the services' stable
+ * PATH (`stableServicePath`, volley-cli's setup/service-path.ts) and never linked by the installer
+ * (install.sh, packaging/). Only a request puts it on a PATH: `volley sim env` a shell's, and a
+ * `volley setup` run simulated (`--simulated`, or `VOLLEY_SIMULATED=1`) the services' it writes
+ * (`withSimulator`, setup/first-wave.ts; a run without the simulator writes them without it).
  */
 
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));

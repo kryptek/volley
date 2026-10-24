@@ -13,6 +13,7 @@ import { backupPath, writeConfig } from "../auth/config";
 import { installedBrokerUrl, withoutLogin } from "../peer/profile-checks";
 import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
+import { withSimulator } from "./first-wave";
 import { deskBrokerHost } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
 import { serviceEnv, servicePath } from "./service-path";
@@ -638,7 +639,7 @@ async function planServicesWith(ctx: SetupContext, withCmux: boolean): Promise<S
     return out;
   }
   const { platform, bun } = ctx.deps;
-  const env = serviceEnv(ctx);
+  const env = withSimulator(ctx, serviceEnv(ctx));
   const push = (c: Change | null) => {
     if (c !== null) out.changes.push(c);
   };
