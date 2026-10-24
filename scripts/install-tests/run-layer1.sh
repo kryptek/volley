@@ -141,19 +141,19 @@ common_checks() {
   curl -fsS "http://127.0.0.1:${DESK_PORT:-5199}/version.json" >"$OUT/version.json" 2>>"$TRANSCRIPT" ||
     fail "the Desk did not answer /version.json on port ${DESK_PORT:-5199}"
 
+  # Only after a run that finished: a rerun of one that did not would only repeat it.
   say "A second volley setup --yes applies nothing"
-  before=$(wc -l <"$vh/setup.log" 2>/dev/null || echo 0)
-  setup_run || fail "the second volley setup --yes exited non-zero"
-  tail -n +"$((before + 1))" "$vh/setup.log" >"$OUT/setup-rerun.log" 2>/dev/null
-  others=$(grep -cv '"event":"done"' "$OUT/setup-rerun.log" 2>/dev/null) || true
-  [ -s "$OUT/setup-rerun.log" ] || fail "the second run wrote nothing to setup.log"
-  [ "${others:-0}" -eq 0 ] || fail "the second run did more than report done ($others events; setup-rerun.log)"
-
-  say "Collecting the logs"
-  cp "$vh/setup.log" "$OUT/setup.log" 2>/dev/null || fail "no setup.log"
-  cp "$vh/volleyd.log" "$OUT/volleyd.log" 2>/dev/null || fail "no volleyd.log"
-  cp "$vh/desk.log" "$OUT/desk.log" 2>/dev/null || fail "no desk.log"
-  cp "${VOLLEY_SIM_HOME:-$HOME/.volley/sim}/unknown.jsonl" "$OUT/unknown.jsonl" 2>/dev/null || true
+  if [ -n "$SETUP_OK" ]; then
+    before=$(wc -l <"$vh/setup.log" 2>/dev/null || echo 0)
+    setup_run || fail "the second volley setup --yes exited non-zero"
+    tail -n +"$((before + 1))" "$vh/setup.log" >"$OUT/setup-rerun.log" 2>/dev/null
+    others=$(grep -cv '"event":"done"' "$OUT/setup-rerun.log" 2>/dev/null) || true
+    [ -s "$OUT/setup-rerun.log" ] || fail "the second run wrote nothing to setup.log"
+    [ "${others:-0}" -eq 0 ] || fail "the second run did more than report done ($others events; setup-rerun.log)"
+    collect_logs
+  else
+    fail "not rerun: the first volley setup did not finish"
+  fi
 
   say "No secrets in the logs"
   collect_secrets
@@ -166,10 +166,23 @@ common_checks() {
     --total-ms "$total_ms" || fail "a target was missed (summary.md)"
 }
 
-# The run's metrics, kept before a rerun replaces them.
+# The run's metrics, kept before a rerun replaces them, and its logs (a job cut off later still
+# uploads them).
+SETUP_OK=''
 keep_metrics() {
   cp "$(volleyd_home)/setup-metrics.json" "$OUT/setup-metrics.json" 2>/dev/null ||
     fail "setup wrote no setup-metrics.json"
+  collect_logs
+  collect_secrets
+  [ -s "$OUT/volleyd.log" ] || fail "no volleyd.log"
+  [ -s "$OUT/desk.log" ] || fail "no desk.log"
+}
+
+collect_logs() {
+  vh=$(volleyd_home)
+  for f in setup.log volleyd.log desk.log; do cp "$vh/$f" "$OUT/$f" 2>/dev/null; done
+  cp "${VOLLEY_SIM_HOME:-$HOME/.volley/sim}/unknown.jsonl" "$OUT/unknown.jsonl" 2>/dev/null
+  return 0
 }
 
 finish() {
@@ -179,6 +192,8 @@ finish() {
   if [ "$FAILED" -ne 0 ]; then
     say "Layer 1 failed. setup's output (redacted):"
     cat "$OUT/transcript.log" 2>/dev/null
+    say "volleyd.log, its last 80 lines (redacted):"
+    tail -n 80 "$OUT/volleyd.log" 2>/dev/null | metrics redact ${SECRETS[@]+"${SECRETS[@]}"}
     exit 1
   fi
   say "Layer 1 passed."
@@ -210,14 +225,18 @@ linux_inside() {
   eval "$(volley sim env)"
 
   say "volley setup --yes --no-lan --layout container --simulated"
-  if ! setup_run; then
+  if setup_run; then
+    SETUP_OK=1
+  elif grep -q 'restart your container yourself' "$TRANSCRIPT"; then
     # The container layout leaves the broker's restart to the person: do it, then rerun.
-    if grep -q 'restart your container yourself' "$TRANSCRIPT"; then
-      say "Restarting the broker, as setup asks"
-      broker_restart && { setup_run || fail "volley setup failed after the broker restart"; }
+    say "Restarting the broker, as setup asks"
+    if broker_restart && setup_run; then
+      SETUP_OK=1
     else
-      fail "volley setup exited non-zero"
+      fail "volley setup failed after the broker restart"
     fi
+  else
+    fail "volley setup exited non-zero"
   fi
   total_ms=$(($(date +%s%3N) - t0))
   keep_metrics
@@ -258,7 +277,7 @@ macos() {
   AUTH_DIR="$(brew --prefix)/etc/mosquitto/volley"
 
   say "volley setup --yes --no-lan --simulated"
-  setup_run || fail "volley setup exited non-zero"
+  if setup_run; then SETUP_OK=1; else fail "volley setup exited non-zero"; fi
   total_ms=$(($(now_ms) - t0))
   keep_metrics
 
