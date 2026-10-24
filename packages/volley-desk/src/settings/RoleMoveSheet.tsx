@@ -78,10 +78,19 @@ type Phase =
       undo?: boolean;
       steps: RolePlan["steps"];
     }
-  | { k: "done"; from: string; moveId: string; link?: string; error?: string }
+  | {
+      k: "done";
+      from: string;
+      moveId: string;
+      link?: string;
+      error?: string;
+      /** Undo this move was sent and volleyd has not answered yet. */
+      undoing?: boolean;
+    }
   | {
       k: "failed";
       from: string;
+      moveId?: string;
       error: string;
       step?: string;
       line?: string;
@@ -143,11 +152,32 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
     void plan(target);
   }, []);
 
-  /** volleyd's answer to the move (or its late one), unless the record finished it first. */
-  const settle = (t: Target, shown: RolePlan, a: RoleMoveAnswer) => {
-    if (!live.current) return;
+  /** Each send (and Undo) takes the next number: an answer to an earlier one is stale. */
+  const sent = useRef(0);
+
+  /**
+   * volleyd's answer to the move (or its late one). When the record finished the move first,
+   * the answer still adds what only it carries: a Desk move's link, whether a failure was undone.
+   */
+  const settle = (t: Target, shown: RolePlan, a: RoleMoveAnswer, mine: number) => {
+    if (!live.current || mine !== sent.current) return;
     setPhase((ph) => {
+      if (ph.k === "done") {
+        return a.ok && a.moveId === ph.moveId && a.link ? { ...ph, link: a.link } : ph;
+      }
+      if (ph.k === "failed") {
+        if (a.ok || a.moveId === undefined || a.moveId !== ph.moveId) return ph;
+        const title = shown.steps.find((s) => s.id === a.step)?.title;
+        return {
+          ...ph,
+          ...(ph.step === undefined && (title ?? a.step) !== undefined
+            ? { step: (title ?? a.step) as string }
+            : {}),
+          ...(a.rolledBack !== undefined ? { rolledBack: a.rolledBack } : {}),
+        };
+      }
       if (ph.k !== "moving") return ph;
+      if (ph.moveId !== undefined && a.moveId !== undefined && a.moveId !== ph.moveId) return ph;
       if (a.ok) {
         if (a.status === "done") {
           return {
@@ -176,6 +206,7 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
         return {
           k: "failed",
           from: ph.from,
+          moveId: a.moveId,
           error: a.error,
           ...(title !== undefined ? { step: title } : {}),
           ...(line !== undefined ? { line } : {}),
@@ -194,6 +225,7 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
   };
 
   const send = async (t: Target, shown: RolePlan, drain: boolean) => {
+    const mine = ++sent.current;
     setPhase({
       k: "moving",
       from: shown.from,
@@ -203,17 +235,21 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
     });
     const a = await p.ops.move(
       { role: t.role, to: t.to, planId: shown.planId, ...(drain ? { drain: true } : {}) },
-      { onLate: (late) => settle(t, shown, late) },
+      { onLate: (late) => settle(t, shown, late, mine) },
     );
-    settle(t, shown, a);
+    settle(t, shown, a, mine);
   };
 
   const undo = async (moveId: string, from: string) => {
+    if (phase.k !== "done" || phase.undoing) return;
     const back: Target = { role: target.role, to: from };
+    ++sent.current;
+    const { error: _, ...shown } = phase;
+    setPhase({ ...shown, undoing: true });
     const a = await p.ops.rollback(moveId);
     if (!live.current) return;
     if (!a.ok) {
-      setPhase((ph) => (ph.k === "done" ? { ...ph, error: a.error } : ph));
+      setPhase((ph) => (ph.k === "done" ? { ...ph, undoing: false, error: a.error } : ph));
       return;
     }
     setChain(false);
@@ -241,7 +277,9 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
           .sort((a, b) => b.since.localeCompare(a.since))[0]
     : undefined;
 
-  // A finished record ends the move, whether or not its answer has come.
+  // A finished record ends the move, whether or not its answer has come. Whether a failed move
+  // was undone only its answer says (`rolled_back`); `rolled_back` on a record marks a finished
+  // move a later rollback undid, never this one while it runs.
   useEffect(() => {
     if (!rec || (rec.status !== "done" && rec.status !== "failed")) return;
     setPhase((ph) => {
@@ -251,6 +289,7 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
       return {
         k: "failed",
         from: ph.from,
+        moveId: rec.move_id,
         error: rec.error ?? "the move failed",
         ...(failed ? { step: failed.title } : {}),
         ...(failed?.line !== undefined ? { line: failed.line } : {}),
@@ -280,7 +319,8 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
     }
   }, [phase]);
 
-  const closable = phase.k === "plan" || phase.k === "done" || phase.k === "failed";
+  const closable =
+    phase.k === "plan" || (phase.k === "done" && !phase.undoing) || phase.k === "failed";
   const label =
     phase.k === "moving" && phase.undo
       ? `Move ${name} back to ${target.to}`
@@ -389,9 +429,16 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
             <button
               type="button"
               className="btn"
+              disabled={phase.undoing === true}
               onClick={() => void undo(phase.moveId, phase.from)}
             >
-              Undo this move
+              {phase.undoing ? (
+                <>
+                  <span className="spinner" aria-hidden="true" /> Undoing…
+                </>
+              ) : (
+                "Undo this move"
+              )}
             </button>
             <button type="button" className="btn btn--hot" onClick={p.onClose}>
               Done
@@ -409,7 +456,9 @@ export function RoleMoveSheet(p: RoleMoveSheetProps) {
           <p className="s-hint">
             {phase.rolledBack === false
               ? `Its steps were not undone${phase.logPath ? `: the log is ${phase.logPath}` : ""}.`
-              : `Every step done so far was rolled back: ${name} stays on ${phase.from}.`}
+              : phase.rolledBack
+                ? `Every step done so far was rolled back: ${name} stays on ${phase.from}.`
+                : `volleyd has not said yet whether its steps were undone${phase.logPath ? `: the log is ${phase.logPath}` : ""}.`}
           </p>
           <div className="ny-actions">
             <button type="button" className="btn" onClick={() => void plan(target)}>
@@ -493,8 +542,8 @@ function PlanView({
               <ul className="m-plan" aria-label={`You run on ${where}`}>
                 {plan.terminal
                   .filter((t) => t.where === where)
-                  .map((t) => (
-                    <li key={t.command}>
+                  .map((t, i) => (
+                    <li key={`${i}:${t.command}`}>
                       <span className="s-hint">{t.reason}</span>
                       <CopyCommand text={t.command} ready />
                     </li>
@@ -506,8 +555,8 @@ function PlanView({
             <>
               <h4 className="m-sheet-sub">Blocked:</h4>
               <ul className="m-plan rm-blocked" aria-label="Blocked">
-                {plan.blocked.map((b) => (
-                  <li key={b.why}>
+                {plan.blocked.map((b, i) => (
+                  <li key={`${i}:${b.why}`}>
                     {b.why}
                     {b.fix && <span className="s-hint rm-fix">{b.fix}</span>}
                   </li>
@@ -517,8 +566,8 @@ function PlanView({
           )}
           {plan.warnings.length > 0 && (
             <ul className="m-plan rm-warnings" aria-label="Warnings">
-              {plan.warnings.map((w) => (
-                <li key={w}>{w}</li>
+              {plan.warnings.map((w, i) => (
+                <li key={`${i}:${w}`}>{w}</li>
               ))}
             </ul>
           )}
@@ -526,8 +575,8 @@ function PlanView({
             <>
               <h4 className="m-sheet-sub">After the move:</h4>
               <ul className="m-plan" aria-label="After the move">
-                {plan.after.map((a) => (
-                  <li key={a}>{a}</li>
+                {plan.after.map((a, i) => (
+                  <li key={`${i}:${a}`}>{a}</li>
                 ))}
               </ul>
             </>

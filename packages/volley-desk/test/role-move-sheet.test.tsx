@@ -413,6 +413,94 @@ describe("RoleMoveSheet: moving", () => {
     expect(ops.rollback).toHaveBeenCalledWith("mv-desk-1");
     expect(sheet().getByText(/Moving the Desk back to studio/)).toBeInTheDocument();
   });
+
+  it("a Desk move's link still shows when the done record lands before the answer", async () => {
+    const p = pendingMove();
+    const { rerender } = setup({ role: "desk" }, { move: p.move });
+    await confirm();
+    rerender({
+      moves: { "mv-desk-9": record({ move_id: "mv-desk-9", role: "desk", status: "done" }) },
+    });
+    expect(sheet().getByText("volley role rollback mv-desk-9")).toBeInTheDocument();
+    await p.answer({
+      ok: true,
+      moveId: "mv-desk-9",
+      status: "done",
+      link: "http://box-a:5199/#signin=vly_signin_abc_def",
+    });
+    expect(sheet().getByText("http://box-a:5199/#signin=vly_signin_abc_def")).toBeInTheDocument();
+    expect(sheet().getByRole("img", { name: /QR/ })).toBeInTheDocument();
+  });
+
+  it("a failed record that lands first claims no rollback, and the answer says whether there was one", async () => {
+    const p = pendingMove();
+    const { rerender } = setup({ role: "desk" }, { move: p.move });
+    await confirm();
+    rerender({
+      moves: {
+        "mv-desk-9": record({
+          move_id: "mv-desk-9",
+          role: "desk",
+          status: "failed",
+          error: "the health check failed",
+          log_path: "/path/to/move.log",
+        }),
+      },
+    });
+    expect(sheet().getByRole("alert")).toHaveTextContent("the health check failed");
+    expect(sheet().queryByText(/rolled back:/)).toBeNull();
+    await p.answer({
+      ok: false,
+      error: "the health check failed",
+      moveId: "mv-desk-9",
+      step: "check",
+      rolledBack: false,
+    });
+    expect(sheet().getByText(/not undone: the log is \/path\/to\/move\.log/)).toBeInTheDocument();
+    expect(sheet().queryByText(/rolled back:/)).toBeNull();
+  });
+
+  it("the broker's late answer does not finish the supervisor move that followed it", async () => {
+    const answers: ((a: RoleMoveAnswer) => void)[] = [];
+    const move = vi.fn(
+      () =>
+        new Promise<RoleMoveAnswer>((r) => {
+          answers.push(r);
+        }),
+    );
+    const { rerender } = setup({}, { move });
+    await confirm();
+    rerender({ moves: { "mv-broker-1": record({ status: "done" }) } });
+    await act(flush);
+    expect(move).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByRole("dialog", { name: "Move the supervisor to box-a" }),
+    ).toBeInTheDocument();
+    await act(async () => answers[0]?.({ ok: true, moveId: "mv-broker-1", status: "done" }));
+    expect(screen.getByText(/Moving the supervisor|Starting the move/)).toBeInTheDocument();
+    expect(screen.queryByText(/The supervisor runs on box-a/)).toBeNull();
+  });
+
+  it("Undo shows it is undoing and sends one rollback however often it is clicked", async () => {
+    let answer: (a: { ok: true; moveId: string; rollsBack: string }) => void = () => {};
+    const rollback = vi.fn(
+      () =>
+        new Promise<{ ok: true; moveId: string; rollsBack: string }>((r) => {
+          answer = r;
+        }),
+    );
+    const { onClose } = setup({ role: "desk" }, { rollback });
+    await confirm();
+    fireEvent.click(sheet().getByRole("button", { name: "Undo this move" }));
+    const undoing = sheet().getByRole("button", { name: /Undoing/ });
+    expect(undoing).toBeDisabled();
+    fireEvent.click(undoing);
+    pressEscape();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(rollback).toHaveBeenCalledTimes(1);
+    await act(async () => answer({ ok: true, moveId: "mv-undo-1", rollsBack: "mv-desk-1" }));
+    expect(sheet().getByText(/Moving the Desk back to studio/)).toBeInTheDocument();
+  });
 });
 
 describe("RoleMoveSheet: closing", () => {

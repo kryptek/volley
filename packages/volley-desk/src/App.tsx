@@ -505,10 +505,10 @@ export default function App() {
     () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
     [authOps],
   );
-  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
-  // an admin Desk then checks in with volleyd hourly, so Broker accounts never calls it stale.
   // The machine-role ops (SPEC §4.6.24): Move a role here… on a machine card.
   const roleOps = useMemo(() => (authOps ? createRoleOps(authOps) : null), [authOps]);
+  // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
+  // an admin Desk then checks in with volleyd hourly, so Broker accounts never calls it stale.
   useEffect(() => {
     if (peerOps === null || authOps === null) return;
     return keepAdminSeen(peerOps, authOps);
