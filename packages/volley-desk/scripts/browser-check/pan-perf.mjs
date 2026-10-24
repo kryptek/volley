@@ -5,8 +5,10 @@
 //  - desktop: 1440 × 900, mouse, reduced motion; the same backdrop-filter count and a
 //    screenshot of the first window (its sha256, to compare before and after)
 // Runs on the demo (`?demo=1`, no broker needed). Writes <out>/pan-perf-<tag>.json and the
-// desktop crop <out>/pan-perf-<tag>-window.png.
-//   node pan-perf.mjs <out dir> [tag]
+// desktop crop <out>/pan-perf-<tag>-window.png. A current-step effect and a theme after the tag
+// set the look's `fx` and `theme` (the #370 release run: `glint` and `aurora` in Volley and
+// Material Lighter); without them the look keeps its defaults.
+//   node pan-perf.mjs <out dir> [tag] [fx] [theme]
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +16,15 @@ import { DESKTOP, DESK_URL, PHONE, launch, outDir } from "./lib.mjs";
 
 const out = outDir();
 const tag = process.argv[3] ?? "after";
-const LOOK = { bg: "none", narr: "plain", tethers: false, autoArrange: true };
+const [fx, theme] = process.argv.slice(4);
+const LOOK = {
+  bg: "none",
+  narr: "plain",
+  tethers: false,
+  autoArrange: true,
+  ...(fx ? { fx } : {}),
+  ...(theme ? { theme } : {}),
+};
 const b = await launch();
 
 async function open(options) {
@@ -127,7 +137,7 @@ async function desktop() {
   };
 }
 
-const report = { tag, url: DESK_URL, phone: await phone(), desktop: await desktop() };
+const report = { tag, url: DESK_URL, look: LOOK, phone: await phone(), desktop: await desktop() };
 await b.close();
 writeFileSync(join(out, `pan-perf-${tag}.json`), `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify(report, null, 2));

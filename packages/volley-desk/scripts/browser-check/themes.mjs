@@ -17,6 +17,20 @@
 // crop is byte-equal. The sign-in card shows only when the dev server has no credentials of its
 // own (no `VITE_VOLLEY_*` sign-in): otherwise it is skipped.
 //   node themes.mjs <out dir> [tag] [theme...]
+//
+// `--matrix` (#370) is the release run: every theme (or the ones named) × the current-step
+// effects Glint, Aurora, Liquid and Classic × desktop and phone, with motion on. Each cell records
+// the computed `--ground`, `--t-acc` and `--cur1`, crops the whole Desk (desktop), the first agent
+// window, a running wave window (status-chip), the ended one (onboarding, brought back with
+// Show), Settings › Appearance (and its Current step cards at desktop) and the sign-in card, and
+// counts axe's
+// `color-contrast` violations on the canvas, Appearance and the sign-in card. Then the
+// still-frame pass: reduced motion, Volley and Material Lighter × all nine effects, two shots of
+// the current step 400 ms apart, byte-equal. Writes <out>/matrix-<tag>.json, the sheet
+// <out>/matrix-<tag>.html (one row per theme, one column per effect × device, the crops beside
+// it) and <out>/matrix-<theme>-<fx>-<device>-<what>-<tag>.png; fails on any violation, a missing
+// cell or crop, or a step that moves under reduced motion.
+//   node themes.mjs <out dir> [tag] --matrix [theme...]
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -25,9 +39,11 @@ import { DESKTOP, DESK_URL, PHONE, launch, outDir } from "./lib.mjs";
 import { canvasTextContrast, textContrast } from "./text-contrast.mjs";
 
 const out = outDir();
-const tag = process.argv[3] ?? "after";
+const MATRIX = process.argv.includes("--matrix");
+const args = process.argv.slice(3).filter((a) => a !== "--matrix");
+const tag = args[0] ?? "after";
 // Volley always runs: it is the baseline the other themes' offenders are compared with.
-const themes = [...new Set(["volley", ...process.argv.slice(4)])];
+const themes = [...new Set(["volley", ...args.slice(1)])];
 const b = await launch();
 const report = {};
 
@@ -123,19 +139,27 @@ async function centre(page, win) {
 
 const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
-async function open(theme, icons, viewport, device, demo) {
+async function open(theme, icons, viewport, device, demo, { fx, reducedMotion = "reduce" } = {}) {
   const ctx = await b.newContext({
     viewport,
     deviceScaleFactor: 2,
     hasTouch: device === "phone",
     isMobile: device === "phone",
-    reducedMotion: "reduce",
+    reducedMotion,
   });
   await ctx.addInitScript(
     (look) => {
       localStorage.setItem("volley-desk-look", JSON.stringify(look));
     },
-    { bg: "none", narr: "plain", tethers: false, autoArrange: true, theme, icons },
+    {
+      bg: "none",
+      narr: "plain",
+      tethers: false,
+      autoArrange: true,
+      theme,
+      icons,
+      ...(fx ? { fx } : {}),
+    },
   );
   const page = await ctx.newPage();
   // A fixed clock: the demo's feed, timestamps and sprites are the same on every run.
@@ -153,6 +177,230 @@ const tokens = (page) =>
       ["--ground", "--t-acc", "--ink"].map((p) => [p, s.getPropertyValue(p).trim()]),
     );
   });
+
+// ---------------------------------------------------------------- the release matrix (#370)
+
+// `THEME_LABEL` in src/look/themes.ts, in the picker's order.
+const ALL_THEMES = [
+  "volley",
+  "oceanic",
+  "darker",
+  "palenight",
+  "deepocean",
+  "lighter",
+  "dracula",
+  "nightowl",
+  "onedark",
+  "github",
+  "monokai",
+  "solarized",
+];
+const MATRIX_FX = ["glint", "aurora", "liquid", "classic"];
+// `STEP_FX` in src/look/useLook.ts: the still-frame pass runs every one.
+const ALL_FX = [
+  "glint",
+  "pulse",
+  "aurora",
+  "scan",
+  "ember",
+  "liquid",
+  "circuit",
+  "prism",
+  "classic",
+];
+const STILL_THEMES = ["volley", "lighter"];
+const DEVICES = [
+  ["desktop", DESKTOP],
+  ["phone", PHONE],
+];
+const RUNNING_WAVE = "status-chip";
+const ENDED_WAVE = "onboarding";
+
+/** Run `jobs` (functions returning promises) `n` at a time. */
+async function pool(jobs, n) {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(n, jobs.length) }, async () => {
+      while (next < jobs.length) await jobs[next++]();
+    }),
+  );
+}
+
+const matrixTokens = (page) =>
+  page.evaluate(() => {
+    const s = getComputedStyle(document.documentElement);
+    return Object.fromEntries(
+      ["--ground", "--t-acc", "--cur1"].map((p) => [p, s.getPropertyValue(p).trim()]),
+    );
+  });
+
+/** One cell: a theme, an effect, a device, with motion on. */
+async function matrixCell(theme, fx, device, viewport) {
+  const cell = { crops: {}, violations: 0, offenders: {} };
+  const shot = async (what, locator) => {
+    const path = join(out, `matrix-${theme}-${fx}-${device}-${what}-${tag}.png`);
+    try {
+      await locator.screenshot({ path, animations: "disabled", timeout: 10000 });
+      cell.crops[what] = path;
+    } catch (e) {
+      cell.crops[what] = null;
+      cell.errors = [...(cell.errors ?? []), `${what}: ${e.message.split("\n")[0]}`];
+    }
+  };
+  const audit = async (what, page) => {
+    const axe = await contrastAudit(page);
+    cell.violations += axe.length;
+    if (axe.length > 0) cell.offenders[what] = axe;
+  };
+  const opts = { fx, reducedMotion: "no-preference" };
+  const { ctx, page } = await open(theme, "clawd", viewport, device, true, opts);
+  await page.clock.runFor(1000);
+  await page.locator(".world section.win").first().waitFor({ timeout: 30000 });
+  await page.clock.runFor(2500); // the demo settles and auto-arrange places the windows
+  cell.tokens = await matrixTokens(page);
+  if (device === "desktop") await shot("desk", page);
+  const agent = page.locator(
+    ".world section.win:has(.win-bar .clawd-sprite, .win-bar .status-mark)",
+  );
+  await shot("agent", agent.first());
+  await shot("wave-running", page.getByRole("region", { name: RUNNING_WAVE, exact: true }));
+  await audit("canvas", page);
+  // The ended wave folds under the coordinators' Ended group: Show puts it back and fits to it.
+  // The fit can leave the list off-screen on a phone: click it where it is.
+  const coords = page.getByRole("region", { name: "Wave coordinators" });
+  await coords.getByRole("button", { name: /^Ended · / }).dispatchEvent("click");
+  await page.clock.runFor(300);
+  await coords
+    .getByRole("button", { name: `Show ${ENDED_WAVE} on the canvas` })
+    .dispatchEvent("click");
+  await page.clock.runFor(1500);
+  await shot("wave-ended", page.getByRole("region", { name: ENDED_WAVE, exact: true }));
+  await page.locator(".dock-wrap").getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await dialog.waitFor();
+  await dialog
+    .getByRole("navigation", { name: "Settings sections" })
+    .getByRole("button", { name: "Appearance", exact: true })
+    .click();
+  await page.clock.runFor(400);
+  await shot("appearance", dialog);
+  if (device === "desktop") await shot("current-step", dialog.locator("fieldset.fx-grid"));
+  await audit("appearance", page);
+  await ctx.close();
+
+  const signin = await open(theme, "clawd", viewport, device, false, opts);
+  const card = signin.page.locator(".signin-card");
+  await signin.page.clock.runFor(1000);
+  if (
+    await card.waitFor({ timeout: 8000 }).then(
+      () => true,
+      () => false,
+    )
+  ) {
+    await signin.page.clock.runFor(800);
+    await shot("signin", card);
+    await audit("signin", signin.page);
+  } else {
+    cell.crops.signin = "skipped: the dev server signed in on its own";
+  }
+  await signin.ctx.close();
+  return cell;
+}
+
+/** Under reduced motion the current step is its first keyframe: two shots 400 ms apart match. */
+async function stillCell(theme, fx) {
+  const { ctx, page } = await open(theme, "clawd", DESKTOP, "desktop", true, { fx });
+  await page.locator(".world .pipe li.fx-cur").first().waitFor({ timeout: 30000 });
+  await page.waitForTimeout(1500);
+  const cur = page.locator(".world .pipe li.fx-cur").first();
+  const a = await cur.screenshot();
+  await page.waitForTimeout(400);
+  const c = await cur.screenshot();
+  await ctx.close();
+  return a.equals(c);
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** The sheet: one row per theme, one column per effect × device, each cell its agent crop. */
+function matrixSheet(m) {
+  const cols = MATRIX_FX.flatMap((fx) => DEVICES.map(([d]) => [fx, d]));
+  const rel = (p) => (p ? p.slice(p.lastIndexOf("/") + 1) : null);
+  const td = (theme, fx, d) => {
+    const c = m.cells[`${theme}/${fx}/${d}`];
+    if (!c) return `<td class="bad">missing</td>`;
+    const links = Object.entries(c.crops)
+      .filter(([, p]) => p && !p.startsWith("skipped"))
+      .map(([w, p]) => `<a href="${esc(rel(p))}">${esc(w)}</a>`)
+      .join(" · ");
+    const t = c.tokens ?? {};
+    return `<td class="${c.violations || c.errors ? "bad" : ""}">${c.crops.agent ? `<img src="${esc(rel(c.crops.agent))}">` : ""}<div class="v">ground ${esc(t["--ground"])} · acc ${esc(t["--t-acc"])} · cur ${esc(t["--cur1"])}</div><div class="v">contrast violations: ${c.violations}${c.errors ? ` · ${esc(c.errors.join("; "))}` : ""}</div><div class="v">${links}</div></td>`;
+  };
+  const head = cols.map(([fx, d]) => `<th>${esc(fx)} · ${esc(d)}</th>`).join("");
+  const rows = m.themes
+    .map((t) => `<tr><th>${esc(t)}</th>${cols.map(([fx, d]) => td(t, fx, d)).join("")}</tr>`)
+    .join("");
+  const still = Object.entries(m.still)
+    .map(([k, v]) => `<span class="${v ? "" : "bad"}">${esc(k)}: ${v ? "still" : "MOVES"}</span>`)
+    .join(" · ");
+  return `<!doctype html><meta charset="utf-8"><title>Theme × effect matrix (${esc(m.tag)})</title><style>
+body{margin:0;padding:20px;background:#0b0c14;color:#e8ecf4;font:12px system-ui,sans-serif}
+h1{font-size:16px;margin:0 0 6px} p{margin:0 0 12px;color:#9aa3b8} table{border-collapse:separate;border-spacing:6px}
+th{text-align:left;vertical-align:top;font-weight:600} td{vertical-align:top;background:#151826;border-radius:8px;padding:6px;width:200px}
+td.bad{outline:2px solid #ff6b6b} img{display:block;max-width:200px;max-height:220px} .v{margin-top:4px;color:#9aa3b8;font-size:10px;word-break:break-all}
+a{color:#7fd4ff} .bad{color:#ff9a9a}
+</style><h1>Theme × effect matrix (${esc(m.tag)}): ${m.themes.length} themes × ${MATRIX_FX.length} effects × ${DEVICES.length} devices</h1>
+<p>axe color-contrast violations: ${m.violations} · cells: ${Object.keys(m.cells).length}/${m.expected} · missing crops: ${m.missingCrops}</p>
+<p>Still under reduced motion: ${still}</p><table><tr><th></th>${head}</tr>${rows}</table>`;
+}
+
+async function matrix() {
+  const named = args.slice(1);
+  const mThemes = named.length > 0 ? named : ALL_THEMES;
+  const m = { tag, url: DESK_URL, themes: mThemes, fx: MATRIX_FX, cells: {}, still: {} };
+  const jobs = mThemes.flatMap((theme) =>
+    MATRIX_FX.flatMap((fx) =>
+      DEVICES.map(([device, viewport]) => async () => {
+        const key = `${theme}/${fx}/${device}`;
+        try {
+          m.cells[key] = await matrixCell(theme, fx, device, viewport);
+        } catch (e) {
+          console.error(`${key}: ${e.message.split("\n")[0]}`);
+          return;
+        }
+        console.error(`${key}: ${m.cells[key].violations} violations`);
+      }),
+    ),
+  );
+  await pool(jobs, Number(process.env.MATRIX_JOBS ?? 3));
+  for (const theme of STILL_THEMES)
+    for (const fx of ALL_FX) m.still[`${theme}/${fx}`] = await stillCell(theme, fx);
+  m.expected = jobs.length;
+  m.violations = Object.values(m.cells).reduce((n, c) => n + c.violations, 0);
+  m.missingCrops = Object.values(m.cells).reduce(
+    (n, c) => n + Object.values(c.crops).filter((p) => p === null).length,
+    0,
+  );
+  writeFileSync(join(out, `matrix-${tag}.json`), `${JSON.stringify(m, null, 2)}\n`);
+  writeFileSync(join(out, `matrix-${tag}.html`), matrixSheet(m));
+  const moving = Object.entries(m.still).filter(([, v]) => !v);
+  console.log(
+    `matrix: ${Object.keys(m.cells).length}/${m.expected} cells; axe color-contrast violations: ${m.violations}; missing crops: ${m.missingCrops}; moving under reduced motion: ${moving.map(([k]) => k).join(", ") || "none"}`,
+  );
+  console.log(`sheet → ${join(out, `matrix-${tag}.html`)}`);
+  const bad =
+    m.violations > 0 ||
+    m.missingCrops > 0 ||
+    Object.keys(m.cells).length < m.expected ||
+    moving.length > 0;
+  return bad ? 1 : 0;
+}
+
+if (MATRIX) {
+  const code = await matrix();
+  await b.close();
+  process.exit(code);
+}
 
 const runs = themes.flatMap((theme) =>
   (LIGHT.has(theme) ? ["clawd", "classic"] : ["clawd"]).map((icons) => [theme, icons]),
