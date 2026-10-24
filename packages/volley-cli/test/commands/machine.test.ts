@@ -35,6 +35,11 @@ const BOX_KEY = "ssh-ed25519 AAAAC3NzaBOX dev@box";
 const HOST_KEY = "ssh-ed25519 AAAAC3NzaHOST";
 const VOLLEY_ARGV = ["bun", "/path/to/volley/packages/volley-cli/src/cli.ts"];
 const UTILS = ["sh", "cat", "cp", "mkdir", "grep", "sed", "head", "touch", "chmod", "tr"];
+/**
+ * The probe's PATH ends in /opt/homebrew/bin:/usr/local/bin: a bun there is this machine's, and the
+ * box then needs no unzip (a CI runner's bun is in ~/.bun/bin, so there it does).
+ */
+const HOST_BUN = ["/opt/homebrew/bin/bun", "/usr/local/bin/bun"].some((p) => existsSync(p));
 
 /** The real doctor's report of a fake peer machine at the hub's version. */
 async function report(o: FakeMachineOptions): Promise<DoctorReport> {
@@ -340,7 +345,9 @@ describe("volley machine add (#462)", () => {
     box = await fakeBox({ keyed: true, tools: ["curl", "gh"] });
     const r = await add(box);
     expect(r.code).toBe(0);
-    const announced = r.stdout.indexOf("box lacks git, tmux: the installer runs sudo there");
+    const announced = r.stdout.indexOf(
+      `box lacks git, tmux${HOST_BUN ? "" : ", unzip"}: the installer runs sudo there`,
+    );
     expect(announced).toBeGreaterThan(0);
     expect(r.stdout).toContain("the password prompt is sudo's");
     const tty = box.calls.filter((c) => c.tty === true);
@@ -359,10 +366,8 @@ describe("volley machine add (#462)", () => {
     writeFileSync(join(box.stubs, "dpkg"), "#!/bin/sh\nexit 1\n");
     const r = await add(box);
     expect(r.code).toBe(0);
-    // The probe's PATH ends in /opt/homebrew/bin:/usr/local/bin: a bun there is this machine's.
-    const hostBun = ["/opt/homebrew/bin/bun", "/usr/local/bin/bun"].some((p) => existsSync(p));
     expect(r.stdout).toContain(
-      `box lacks ca-certificates${hostBun ? "" : ", unzip"}: the installer runs sudo there`,
+      `box lacks ca-certificates${HOST_BUN ? "" : ", unzip"}: the installer runs sudo there`,
     );
     expect(box.calls.filter((c) => c.tty === true)).toHaveLength(1);
   });
