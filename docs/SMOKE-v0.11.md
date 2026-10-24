@@ -164,7 +164,7 @@ the phone works, and the Mac's sessions work again after that one line.
   --step claude-code`) and `/volley list` answers. Stop the broker left on box-a there.
 
 **Pass:** everything is on the Mac again, the phone and the Mac's sessions work, and box-a's
-broker is only stopped by hand.
+broker is left running until you stop it there.
 
 ### B. Teardown
 
