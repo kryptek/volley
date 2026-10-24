@@ -17,6 +17,7 @@ import {
   runMachineAdd,
 } from "../src/machine-add";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
 import { fakeExec } from "./helpers/fake-exec";
 import { GREEN_DOCTOR as GREEN } from "./helpers/fake-host";
@@ -477,9 +478,9 @@ describe("machine_add (the admin op, its rows on the reply topic)", () => {
     release = () => {};
     const first = await op("admin-1", REQ);
     // Wait until the first run is at its doctor (it holds the name).
-    await expect
-      .poll(() => s.box.calls.some((c) => c.input?.includes("volley-pubkey=")), { timeout: 5000 })
-      .toBe(true);
+    await eventually(() => s.box.calls.some((c) => c.input?.includes("volley-pubkey=")), {
+      what: "the first machine_add at its doctor",
+    });
     const second = await op("admin-1", REQ);
     const r = await second.reply;
     expect(r).toMatchObject({ ok: false, op: "machine_add" });
