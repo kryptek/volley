@@ -665,7 +665,7 @@ describe("volleyd validate: an owner/name repo: resolved offline as run resolves
     );
     expect(pinned.exitCode).toBe(1);
     expect(pinned.stderr).toContain(
-      "tasks.T1.host: no clone of b/b on control: set placement: auto so it runs on box, or add the clone (volley repo add b/b --machine control)",
+      "tasks.T1.host: no clone of b/b on control: drop its host: local (or set host: auto) so it runs on box, or add the clone (volley repo add b/b --machine control)",
     );
   });
 

@@ -56,6 +56,8 @@ import { AGENT_BRANCH } from "./worktree";
  *       gh pr merge <n> --merge --match-head-commit <sha40>
  *     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
  *     heads it contains, read as merged. Never --squash.
+ *   Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+ *   supervisor holds no clone of (#448).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -394,14 +396,24 @@ export function mintTrainToken(t: TrainToken): TrainToken {
 }
 
 /**
+ * A `--repo` value naming the repository a supervisor holds no clone of (#448): `owner/name`, or
+ * `host/owner/name` off github.com.
+ */
+const isRepoName = (v: string): boolean =>
+  isSlug(v) || (/^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(v) && isSlug(v.slice(v.indexOf("/") + 1)));
+
+/**
  * `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` for a MergeToken's n and
- * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly.
+ * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly; each
+ * may end in exactly `--repo <owner/name>` (a wave the supervisor holds no clone of, #448).
  */
 function mergeVerdict(
-  args: readonly string[],
+  all: readonly string[],
   token: MergeToken | undefined,
   train: TrainToken | undefined,
 ): Verdict {
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isRepoName(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const squash = token !== undefined && merges.has(token);
   const commit = train !== undefined && trains.has(train);
   if (!squash && !commit) return deny("gh pr merge");

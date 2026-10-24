@@ -204,7 +204,7 @@ describe("two repositories on a supervisor and one paired box (#439)", () => {
     await expect(
       f.submit("wb3", "placement: auto\n", "  T1: { issue: 42, host: local }\n", undefined, B),
     ).rejects.toThrow(
-      `tasks.T1.host: no clone of ${B} on ${LOCAL}: set placement: auto so it runs on ${PEER}, or add the clone (volley repo add ${B} --machine ${LOCAL})`,
+      `tasks.T1.host: no clone of ${B} on ${LOCAL}: drop its host: local (or set host: auto) so it runs on ${PEER}, or add the clone (volley repo add ${B} --machine ${LOCAL})`,
     );
   });
 

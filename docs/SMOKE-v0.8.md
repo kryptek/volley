@@ -99,7 +99,7 @@ Each step says what to run and what you should see. Tick the box only when you s
   ```
   `volleyd validate wave-b.yaml` prints `repo: <you>/smoke-b (no clone on this machine; held by
   box-a: its tasks run there)`. With `T1: { issue: <n>, host: local }` instead it fails at
-  `tasks.T1.host` (`set placement: auto so it runs on box-a, …`); put it back.
+  `tasks.T1.host` (`drop its host: local (or set host: auto) so it runs on box-a, …`); put it back.
   `volleyd run wave-a.yaml`, then `volleyd run wave-b.yaml`.
 - [ ] `smoke-b-1`'s T1 runs on the box. Its machine chip's tooltip shows the Mac's candidate line,
   `ineligible: no ready clone of <you>/smoke-b (blocked: <you>/smoke-b is not assigned to <mac>:

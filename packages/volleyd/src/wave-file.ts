@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { NO_PLAYBOOK } from "./autopilot/playbook";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { dropRetired, rewordWeights } from "./config-store";
 import type { Tree } from "./footprint";
@@ -130,10 +131,11 @@ export function formatPlacement(p: WavePlacement, paired: number): string {
  * The wave's `repo:` as the supervisor runs it. An `owner/name` slug resolves to its clone on the
  * supervisor's own machine `local` (`cloneFor`: adopted, else managed under `fleet.repo_root`,
  * `~` being `home`); when only paired machines hold it by config (`holdersOf`) the slug is kept
- * and its tasks are placed on them, a task pinned to `local` being a WaveFileError at
- * `tasks.<id>.host`; a slug no machine holds is a WaveFileError at `repo` (#448). Any other value
- * is a path and is kept. (A relative path shaped like a slug is written `./owner/name`.) Pure:
- * decided from config alone, so `volleyd validate` agrees offline.
+ * and its tasks are placed on them, each task pinned to `local` being a WaveFileError at
+ * `tasks.<id>.host` and a release playbook one at `playbook`; a slug no machine holds is a
+ * WaveFileError at `repo` (#448). Any other value is a path and is kept. (A relative path shaped
+ * like a slug is written `./owner/name`.) Pure: decided from config alone, so `volleyd validate`
+ * agrees offline.
  */
 export function resolveWaveRepo(
   wave: Wave,
@@ -152,11 +154,27 @@ export function resolveWaveRepo(
     const reason = `no clone of ${slug} on any machine: add it to one (Settings → Repositories, or volley repo add ${slug} --machine ${paired[0] ?? local})`;
     throw new WaveFileError([{ path: "repo", reason }], source);
   }
-  const pinned = Object.keys(wave.tasks).find((id) => wave.tasks[id]?.host === "local");
-  if (pinned !== undefined) {
-    const reason = `no clone of ${slug} on ${local}: set placement: auto so it runs on ${holders.join(", ")}, or add the clone (volley repo add ${slug} --machine ${local})`;
-    throw new WaveFileError([{ path: `tasks.${pinned}.host`, reason }], source);
-  }
+  const on = holders.join(", ");
+  const add = `add the clone (volley repo add ${slug} --machine ${local})`;
+  // Under placement: auto a task's `local` is its own `host: local`; under placement: local it
+  // may be either, so both are named.
+  const fix =
+    wave.placement === "auto"
+      ? `drop its host: local (or set host: auto) so it runs on ${on}`
+      : `set placement: auto (and drop any host: local) so it runs on ${on}`;
+  const errors: PathError[] = Object.keys(wave.tasks)
+    .filter((id) => wave.tasks[id]?.host === "local")
+    .map((id) => ({
+      path: `tasks.${id}.host`,
+      reason: `no clone of ${slug} on ${local}: ${fix}, or ${add}`,
+    }));
+  // The release train runs its playbook in the supervisor's clone of the wave's repository.
+  if (wave.playbook !== undefined && wave.playbook !== NO_PLAYBOOK)
+    errors.push({
+      path: "playbook",
+      reason: `no clone of ${slug} on ${local} to run a release playbook in: set playbook: none, or ${add}`,
+    });
+  if (errors.length > 0) throw new WaveFileError(errors, source);
   return wave;
 }
 

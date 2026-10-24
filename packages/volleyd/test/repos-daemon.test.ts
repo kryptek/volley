@@ -141,7 +141,7 @@ describe("a wave file's repo: naming a repository only paired machines hold (#44
     });
     expect(r.ok).toBe(false);
     expect(r.error).toContain(
-      "tasks.A.host: no clone of b/b on control: set placement: auto so it runs on box, or add the clone (volley repo add b/b --machine control)",
+      "tasks.A.host: no clone of b/b on control: drop its host: local (or set host: auto) so it runs on box, or add the clone (volley repo add b/b --machine control)",
     );
   });
 });

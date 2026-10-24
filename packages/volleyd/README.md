@@ -2645,14 +2645,20 @@ names the repository by `owner/name`: the wave keeps it (its state's `repo` is t
 the supervisor needs no checkout of it, and its tasks are placed on the machines that hold one and
 spawn in worktrees of their clones. A task of it that would spawn on the supervisor's machine
 (`host: local`, or no `host:` under `placement: local`) is refused at submit at
-`tasks.<id>.host`: `no clone of <owner/name> on <machine>: set placement: auto so it runs on
-<machines>, or add the clone (volley repo add <owner/name> --machine <machine>)`. For such a wave
-the supervisor runs its `gh` work (the issue lifecycle, the release PR lookup, held decisions, a
-red head's PR, the repository's visibility) with `--repo <owner/name>`, and skips what needs a
-checkout of its own: the fetch and release-branch check, the tree footprints are resolved against
-(Files lists stay as written), its own doctor, the CI-queue admission sample (the wave runs
-without that signal), restart reconciliation's branch probe, a red head's CI re-read, and a
-repo-relative `brief_preface` (an absolute one is still read). A wave may instead name a checkout
+`tasks.<id>.host`, each such task once: `no clone of <owner/name> on <machine>: drop its host:
+local (or set host: auto) so it runs on <machines>, or add the clone (volley repo add
+<owner/name> --machine <machine>)` under `placement: auto`, `set placement: auto (and drop any
+host: local) so it runs on <machines>, …` under `placement: local`. A release `playbook:` other
+than `none` is refused at `playbook` (the release train runs in the supervisor's clone), and the
+default `.volley/release.yaml` is not looked for. For such a wave the supervisor runs its `gh`
+work (the issue lifecycle, the release PR lookup, held decisions, a red head's PR, the
+repository's visibility, and the pipeline's PR, CI and merge reads and writes, the merge under
+`merge: auto` included) with `--repo <owner/name>` and no working directory, and skips what needs
+a checkout of its own: the fetch and release-branch check, the tree footprints are resolved
+against (Files lists stay as written), its own doctor, the CI-queue admission sample (the wave
+runs without that signal), restart reconciliation's branch probe, a red head's CI re-read, the
+pipeline's git checks once a task's worktree is gone, the merge train (its PRs merge one by one),
+and a repo-relative `brief_preface` (an absolute one is still read; the skip is logged). A wave may instead name a checkout
 of such a repository on the supervisor by path, as before; that checkout is the supervisor's
 alone and a task that names `host: local` runs there. A repository config does not name (a
 single-repository setup from before repositories) runs on the supervisor's machine as before.
@@ -4182,6 +4188,8 @@ MERGE (only with a token, checked by identity like consent tokens; either unlock
       gh pr merge <n> --merge --match-head-commit <sha40>
     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
     heads it contains, read as merged. Never --squash.
+  Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+  supervisor holds no clone of (#448).
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):

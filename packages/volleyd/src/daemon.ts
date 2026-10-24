@@ -757,10 +757,6 @@ export interface SpawnerOptions {
   remoteExec?: ExecFn;
 }
 
-/**
- * `repo_visibility_detected` data: the repo's visibility for a wave version, and why, plus its
- * GitHub name and URL when `gh repo view` read them.
- */
 /** Where the supervisor runs a wave's `gh` work (`ghFor`). */
 interface GhIn {
   exec: ExecFn;
@@ -769,6 +765,10 @@ interface GhIn {
   clone: boolean;
 }
 
+/**
+ * `repo_visibility_detected` data: the repo's visibility for a wave version, and why, plus its
+ * GitHub name and URL when `gh repo view` read them.
+ */
 interface VisibilityFacts {
   visibility: RepoVisibility | null;
   source: "gh" | "config";
@@ -11572,7 +11572,13 @@ export class Daemon {
   ): { info: BriefPrefaceInfo | null; path: string } | { refusal: Reply } {
     const path = briefPrefacePath(wave.repo, wave.brief_preface);
     // A wave named by an `owner/name` has no clone here to read a repo-relative preface in (#448).
-    if (isSlugRepo(wave) && !isAbsolute(path)) return { info: null, path };
+    if (isSlugRepo(wave) && !isAbsolute(path)) {
+      if (wave.brief_preface !== undefined)
+        this.log(
+          `wave ${wave.wave}: brief_preface ${wave.brief_preface} not read: no clone of ${wave.repo} here (name it by an absolute path)`,
+        );
+      return { info: null, path };
+    }
     const max =
       wave.config.brief_preface_max_bytes ?? this.config.effective().brief_preface_max_bytes;
     try {
@@ -12117,14 +12123,16 @@ export class Daemon {
   /**
    * How the supervisor runs a wave's `gh` work (`ghRepoContext`): in its clone, or, for a wave
    * named by an `owner/name` it holds no clone of (#448), with `--repo <owner/name>` appended to
-   * every `gh` argv and no `cwd`. A wave without a repo runs in the daemon's directory.
+   * every `gh` argv but `gh api` (which rejects it; its endpoint names the repository) and no
+   * `cwd`. A wave without a repo runs in the daemon's directory.
    */
   private ghFor(repo: string | undefined): GhIn {
     const ctx = ghRepoContext(repo ?? process.cwd());
     if (ctx.cwd !== undefined) return { exec: this.host.exec, cwd: repoDir(ctx.cwd), clone: true };
     const exec: ExecFn = (argv, opts = {}) => {
       const { cwd: _cwd, ...rest } = opts;
-      return this.host.exec(argv[0] === "gh" ? [...argv, ...ctx.args] : argv, rest);
+      const named = argv[0] === "gh" && argv[1] !== "api";
+      return this.host.exec(named ? [...argv, ...ctx.args] : argv, rest);
     };
     return { exec, cwd: process.cwd(), clone: false };
   }

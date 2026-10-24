@@ -474,7 +474,7 @@ describe("resolveWaveRepo: a wave file's repo: may be an owner/name slug (D9)", 
     expect(() =>
       resolveWaveRepo(wave("example-org/widgets"), cfg, "other", "/path/to/home"),
     ).toThrow(
-      "tasks.T1.host: no clone of example-org/widgets on other: set placement: auto so it runs on control",
+      "tasks.T1.host: no clone of example-org/widgets on other: set placement: auto (and drop any host: local) so it runs on control",
     );
   });
 
@@ -502,12 +502,48 @@ describe("resolveWaveRepo: a wave file's repo: may be an owner/name slug (D9)", 
           "/path/to/home",
         );
       expect(run).toThrow(
-        "tasks.T1.host: no clone of b/b on control: set placement: auto so it runs on box, mini, or add the clone (volley repo add b/b --machine control)",
+        "tasks.T1.host: no clone of b/b on control: set placement: auto (and drop any host: local) so it runs on box, mini, or add the clone (volley repo add b/b --machine control)",
       );
       // No host: under placement local is the supervisor's machine too.
       expect(() =>
         resolveWaveRepo(withTasks("  T1: { issue: 1 }\n"), boxOnly, "control", "/path/to/home"),
       ).toThrow("tasks.T1.host: no clone of b/b on control");
+    });
+
+    it("under placement: auto, names the task's own host: local; every pinned task is reported", () => {
+      const w = parseWaveFile(
+        `${HEADER.replace("/path/to/example-repo", "b/b")}placement: auto\ntasks:\n  T1: { issue: 1, host: local }\n  T2: { issue: 2 }\n  T3: { issue: 3, host: local }\n`,
+      );
+      let err: unknown;
+      try {
+        resolveWaveRepo(w, boxOnly, "control", "/path/to/home");
+      } catch (e) {
+        err = e;
+      }
+      expect((err as WaveFileError).errors).toEqual(
+        ["T1", "T3"].map((id) => ({
+          path: `tasks.${id}.host`,
+          reason:
+            "no clone of b/b on control: drop its host: local (or set host: auto) so it runs on box, mini, or add the clone (volley repo add b/b --machine control)",
+        })),
+      );
+    });
+
+    it("a release playbook is refused at playbook; playbook: none is fine", () => {
+      const head = `${HEADER.replace("/path/to/example-repo", "b/b")}placement: auto\n`;
+      const tasks = "tasks:\n  T1: { issue: 1 }\n";
+      expect(() =>
+        resolveWaveRepo(
+          parseWaveFile(`${head}playbook: .volley/release.yaml\n${tasks}`),
+          boxOnly,
+          "control",
+          "/path/to/home",
+        ),
+      ).toThrow(
+        "playbook: no clone of b/b on control to run a release playbook in: set playbook: none, or add the clone (volley repo add b/b --machine control)",
+      );
+      const none = parseWaveFile(`${head}playbook: none\n${tasks}`);
+      expect(resolveWaveRepo(none, boxOnly, "control", "/path/to/home")).toBe(none);
     });
 
     it("on a machine that holds it, it is that machine's clone", () => {
