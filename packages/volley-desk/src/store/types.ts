@@ -226,6 +226,8 @@ export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "
 
 export interface WaveCoordinator {
   agent_id: string;
+  /** The owner's presence (SPEC §7.5); absent from a supervisor that predates it. */
+  presence?: "online" | "offline";
   state: CoordinatorState;
   question?: string;
   session_url?: string;

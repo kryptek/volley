@@ -5,6 +5,7 @@ import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, defaultsFor } from "../src/config-def
 import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
 import { Journal, readJournalFile } from "../src/journal";
 import { SYSTEM_WAVE } from "../src/types";
+import { parseWaveFile } from "../src/wave-file";
 import { envelope, schemaErrors } from "./helpers/schema";
 import { tempDir } from "./helpers/tmp";
 
@@ -273,14 +274,73 @@ describe("retained _config payload", () => {
   it("derives version and updated_by from the _system journal across restarts", () => {
     const c = open();
     expect(c.applyPatch({ hard_ceiling: 5 }, "coordinator-ab12").applied).toBe(true);
-    expect(c.applyPatch({ claim_after_s: 900 }, "desk").applied).toBe(true);
+    expect(c.applyPatch({ idle_grace_s: 900 }, "desk").applied).toBe(true);
     const again = open();
     const p = again.retainedPayload();
     expect(p.version).toBe(3);
     expect(p.updated_by).toBe("desk");
     expect(p.hard_ceiling).toBe(5);
-    expect(p.claim_after_s).toBe(900);
+    expect(p.idle_grace_s).toBe(900);
     expect(schemaErrors("config.schema.json", envelope("_waves/_config", "config", p))).toEqual([]);
+  });
+});
+
+describe("retired keys", () => {
+  const RETIRED =
+    "claim_after_s is retired: a wave is claimable once its owner's session is gone (SPEC §7.5)";
+
+  it("a config.yaml carrying claim_after_s loads without it and logs the retired line once", () => {
+    writeFileSync(join(home, "config.yaml"), "claim_after_s: 1800\nhard_ceiling: 7\n");
+    const lines: string[] = [];
+    const c = ConfigStore.load({
+      home,
+      system: Journal.open(join(home, "waves", SYSTEM_WAVE)),
+      now,
+      log: (l) => lines.push(l),
+    });
+    expect(lines.filter((l) => l.includes(RETIRED))).toHaveLength(1);
+    expect(c.get("hard_ceiling")).toBe(7);
+    const p = c.retainedPayload();
+    expect(Object.hasOwn(p, "claim_after_s")).toBe(false);
+    expect(schemaErrors("config.schema.json", envelope("_waves/_config", "config", p))).toEqual([]);
+    // The next write leaves it out of the file.
+    expect(c.applyPatch({ hard_ceiling: 8 }, "desk").applied).toBe(true);
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).not.toContain("claim_after_s");
+  });
+
+  it("config_set { claim_after_s } is refused naming why", () => {
+    const res = open().applyPatch({ claim_after_s: 900 } as never, "desk");
+    expect(res).toEqual({
+      applied: false,
+      rejected: [{ path: "claim_after_s", reason: RETIRED }],
+    });
+  });
+
+  it("a wave's stored config: override carrying it is dropped", () => {
+    const c = open();
+    c.setWaveOverrides("w1", { claim_after_s: 60, hard_ceiling: 3 } as never);
+    expect(Object.hasOwn(c.effective("w1"), "claim_after_s")).toBe(false);
+    expect(c.effective("w1").hard_ceiling).toBe(3);
+  });
+
+  it("a wave file's config: { claim_after_s } validates with the key dropped, and a note", () => {
+    const notes: string[] = [];
+    const wave = parseWaveFile(
+      `wave: w1
+repo: /path/to/example-repo
+release_branch: release/w1
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+config: { claim_after_s: 900, hard_ceiling: 4 }
+tasks:
+  A: { issue: 1 }
+`,
+      "w1.yaml",
+      undefined,
+      notes,
+    );
+    expect(wave.config).toEqual({ hard_ceiling: 4 });
+    expect(notes).toEqual([`config.${RETIRED}`]);
   });
 });
 

@@ -90,7 +90,7 @@ describe("config_set hot-apply", () => {
   });
 
   it("returns { applied: true, rejected: [] } in the ack", async () => {
-    const ack = await configSet({ claim_after_s: 900 });
+    const ack = await configSet({ idle_grace_s: 900 });
     expect(ack).toMatchObject({ ok: true, applied: true, rejected: [], acked_type: "query" });
   });
 

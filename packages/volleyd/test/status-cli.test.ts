@@ -454,22 +454,67 @@ describe("volleyd status formatting", () => {
       open_decisions: ["d1"],
       coordinator: {
         agent_id: "coordinator-c7d9",
+        presence: "online" as const,
         state: "working" as const,
         last_seen: "2026-10-18T12:00:00.000Z",
       },
     };
     const header = formatWave(named, { caller: "coordinator-c7d9" }).split("\n")[0];
-    expect(header).toContain("owner: coord-main (via coordinator-c7d9)  tasks:");
+    expect(header).toContain("owner: coord-main (via coordinator-c7d9) · online  tasks:");
     expect(header).toContain("needs you: 1");
     expect(formatWave(named, { caller: "coord-main" }).split("\n")[0]).toContain("needs you: 1");
-    expect(
-      formatWave({ ...named, coordinator: { ...named.coordinator, state: "reconnecting" } }).split(
-        "\n",
-      )[0],
-    ).toContain("owner: coord-main (via coordinator-c7d9, reconnecting)");
-    // An agent-id owner reads as before.
+    // An agent-id owner reads as before, with its presence.
     const own = { ...named, owner: "coordinator-c7d9" };
-    expect(formatWave(own).split("\n")[0]).toContain("owner: coordinator-c7d9  tasks:");
+    expect(formatWave(own).split("\n")[0]).toContain("owner: coordinator-c7d9 · online  tasks:");
+    // No coordinator seen yet: the owner alone.
+    const { coordinator: _, ...unseen } = named;
+    expect(formatWave(unseen).split("\n")[0]).toContain("owner: coord-main  tasks:");
+  });
+
+  it("says the owner's presence: online, away (autopilot), away, gone with what waits, reconnecting", () => {
+    const now = Date.parse("2026-10-18T14:00:00.000Z");
+    const via = "owner: coord-main (via coordinator-c7d9)";
+    const at = (
+      presence: "online" | "offline",
+      state: "working" | "reconnecting" | "away" | "gone",
+      lastSeen: string,
+      enabled = true,
+    ) => ({
+      ...plain,
+      owner: "coord-main",
+      autopilot: { enabled, auto_resolved: 0, escalated: 0, budgets: {} },
+      coordinator: { agent_id: "coordinator-c7d9", presence, state, last_seen: lastSeen },
+    });
+    const head = (s: Parameters<typeof formatWave>[0], ctx = {}) =>
+      formatWave(s, { now, ...ctx }).split("\n")[0];
+    expect(head(at("online", "working", "2026-10-18T12:00:00.000Z"))).toContain(
+      `${via} · online  tasks:`,
+    );
+    expect(head(at("offline", "away", "2026-10-18T12:00:00.000Z"))).toContain(
+      `${via} · away (autopilot) · last seen 2h ago  tasks:`,
+    );
+    expect(head(at("offline", "away", "2026-10-18T13:55:00.000Z", false))).toContain(
+      `${via} · away · last seen 5m ago  tasks:`,
+    );
+    expect(head(at("offline", "reconnecting", "2026-10-18T13:55:00.000Z"))).toContain(
+      `${via} · reconnecting  tasks:`,
+    );
+    const gone = { ...at("offline", "gone", "2026-10-18T13:00:00.000Z"), open_decisions: ["d1"] };
+    const d1 = {
+      wave: plain.wave,
+      decision_id: "d1",
+      kind: "plan_change" as const,
+      task: null,
+      question: "Split A?",
+      pointers: {},
+      opened_at: "2026-10-18T13:30:00.000Z",
+      escalated: { why: "owner_only" },
+    };
+    expect(head(gone, { decisions: [d1] })).toContain(`${via} · gone · 1 decision waits for you`);
+    // Gone over a gate or an inbox item (no open decision): the line names no decisions.
+    expect(head(gone)).toContain(`${via} · gone · something waits for you`);
+    const gateOnly = { ...at("offline", "gone", "2026-10-18T13:00:00.000Z"), open_decisions: [] };
+    expect(head(gateOnly)).toContain(`${via} · gone · something waits for you  tasks:`);
   });
 
   it("shows a task's queued steers", () => {

@@ -2,10 +2,13 @@ import { opCommand } from "../controls";
 
 const HELP = `Usage: volleyd claim <wave> [--by <agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
-Take ownership of a wave. Succeeds when the current owner's status is reaped/done/failed, or it
-has been silent (registry, status, heartbeats) for the configured claim_after_s.
-Otherwise refused, naming the owner. The claim is journaled. Needs an identity: --by, else
-VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR.
+Take ownership of a wave. Succeeds when the current owner is offline: its session is gone (its
+retained status is reaped/done/failed: the will fired or it shut down). A coordinator-name owner
+is claimable once its bound session has been offline past autopilot.reconnect_grace_s (while it
+reads "reconnecting" it may come back). A quiet connected owner is never claimable. Otherwise
+refused, naming the owner and when a claim will be allowed. The claim is journaled. Needs an
+identity: --by, else VOLLEY_AGENT_ID, else the session registered for this directory, else
+VOLLEY_COORDINATOR.
 `;
 
 export const claim = opCommand({

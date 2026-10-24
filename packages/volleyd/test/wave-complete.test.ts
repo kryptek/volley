@@ -180,7 +180,7 @@ describe("coordinator attention", () => {
   const coordinator = async () =>
     (await retainedState()).coordinator as Record<string, unknown> | undefined;
 
-  it("follows the owner's status and progress: working → awaiting_input (question) → gone", async () => {
+  it("follows the owner's status and progress: working → awaiting_input (question) → away", async () => {
     await as("status", "working");
     await waitFor(async () => (await coordinator())?.state === "working");
     expect(await coordinator()).toMatchObject({ agent_id: "coord-a", state: "working" });
@@ -208,8 +208,10 @@ describe("coordinator attention", () => {
     await waitFor(async () => (await coordinator())?.state === "working");
     expect(await coordinator()).not.toHaveProperty("question");
 
+    // Offline with nothing waiting on it: autopilot runs the wave.
     await as("status", "reaped");
-    await waitFor(async () => (await coordinator())?.state === "gone");
+    await waitFor(async () => (await coordinator())?.state === "away");
+    expect(await coordinator()).toMatchObject({ presence: "offline" });
   });
 
   it("keeps no attention or finished status for agents that own no wave (bounded memory)", async () => {
@@ -229,9 +231,9 @@ describe("coordinator attention", () => {
     await waitFor(() => maps.statusOf.has("agent-y"));
     await from("agent-y", "status", "done");
     await waitFor(() => !maps.statusOf.has("agent-y"));
-    // The owner's entries stay: its `coordinator` turns `gone`.
+    // The owner's entries stay: its `coordinator` turns `away` (offline, nothing waits).
     await as("status", "done");
-    await waitFor(async () => (await coordinator())?.state === "gone");
+    await waitFor(async () => (await coordinator())?.state === "away");
     expect(maps.attentionOf.has("agent-x")).toBe(false);
   });
 

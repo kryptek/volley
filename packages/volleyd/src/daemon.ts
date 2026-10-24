@@ -369,6 +369,7 @@ import {
 } from "./placement";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
+import { OWNER_GONE, ownerState, presenceOf, waitsOnOwner } from "./presence";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
 import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
@@ -1122,9 +1123,6 @@ const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
 
-/** Owner statuses that make its `coordinator.state` `gone`. */
-const OWNER_GONE = new Set(["reaped", "done", "failed"]);
-
 /** The wave_complete decision's id (one per wave, never shared with another wave). */
 const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete", wave);
 
@@ -1322,8 +1320,11 @@ export class Daemon {
   >();
   /** Digests of recent progress messages: a copy delivered twice is handled once. */
   private readonly seenProgress = new Set<string>();
-  /** The latest status (type, wall_time) of every agent id, for a wave owner's `coordinator`. */
-  private readonly statusOf = new Map<string, { type: string; at: string }>();
+  /**
+   * The latest status (type, wall_time, a clean shutdown's `reason`) of every agent id, for a
+   * wave owner's `coordinator`.
+   */
+  private readonly statusOf = new Map<string, { type: string; at: string; reason?: "shutdown" }>();
   /**
    * The terminal statuses `statusOf` forgot (agents owning no wave, with no coordinator name known),
    * the newest `dedupe_max`: the status replay can arrive before the registry replay, and a
@@ -1333,13 +1334,8 @@ export class Daemon {
   /** What each agent's progress says about its attention (a wave owner's `coordinator`). */
   private readonly attentionOf = new Map<
     string,
-    Omit<CoordinatorAttention, "agent_id" | "last_seen">
+    Omit<CoordinatorAttention, "agent_id" | "last_seen" | "presence">
   >();
-  /**
-   * When each wave owner's `coordinator` was last re-published for its attention (epoch ms): a
-   * quiet but heard-from owner's `last_seen` is refreshed every `claim_after_s / 4`.
-   */
-  private readonly attentionPublishedAt = new Map<string, number>();
   /** Registry entries that carry a coordinator name (SPEC §6.2), by agent id. */
   private readonly namedEntries = new Map<string, RegistryEntry>();
   /** The workspace each registered session's entry names: whose screen a ref is (`carryInboxAnswer`). */
@@ -1591,6 +1587,7 @@ export class Daemon {
     this.config = ConfigStore.load({
       home: opts.home,
       system: this.system,
+      log: (line) => this.log(line),
       now: () => dateOf(this.time),
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
@@ -2228,9 +2225,8 @@ export class Daemon {
   /**
    * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
    * question, session and workspace) until anything else but `idle` or `heartbeat` says it works
-   * again. An unchanged state is re-published anyway once `claim_after_s / 4` has passed, so the
-   * retained `coordinator.last_seen` of a coordinator that only heartbeats stays fresh for a cold
-   * Desk.
+   * again. Only a change re-publishes: presence comes from the owner's status (its will), so no
+   * timer keeps `last_seen` fresh.
    */
   private noteAttention(agent: string, env: Envelope): void {
     // Only wave owners have a `coordinator`: other agents' attention would just pile up.
@@ -2238,7 +2234,7 @@ export class Daemon {
     const p = (
       typeof env.payload === "object" && env.payload !== null ? env.payload : {}
     ) as Record<string, unknown>;
-    const next: Omit<CoordinatorAttention, "agent_id" | "last_seen"> =
+    const next: Omit<CoordinatorAttention, "agent_id" | "last_seen" | "presence"> =
       env.type === "awaiting_input"
         ? {
             state: "awaiting_input",
@@ -2258,25 +2254,7 @@ export class Daemon {
           : { state: "working" };
     const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
     this.attentionOf.set(agent, next);
-    const now = this.now();
-    const stale =
-      now - (this.attentionPublishedAt.get(agent) ?? Number.NEGATIVE_INFINITY) >=
-      this.lastSeenRefreshMs(agent);
-    if (before !== JSON.stringify(next) || stale) {
-      this.attentionPublishedAt.set(agent, now);
-      this.ownerChanged(agent);
-    }
-  }
-
-  /** `claim_after_s / 4` of the waves `agent` owns (the shortest), in ms. */
-  private lastSeenRefreshMs(agent: string): number {
-    let s = Number.POSITIVE_INFINITY;
-    for (const [wave, log] of this.waves) {
-      const owner = log.record.state?.owner;
-      if (owner != null && this.actsAs(agent, owner))
-        s = Math.min(s, this.config.effective(wave).claim_after_s);
-    }
-    return secondsMs(s) / 4;
+    if (before !== JSON.stringify(next)) this.ownerChanged(agent);
   }
 
   /** Does `agent` own a wave itself, or as the agent bound to the coordinator name owning it? */
@@ -2304,11 +2282,13 @@ export class Daemon {
   }
 
   /**
-   * wave-state `coordinator` for `owner` (through its binding when it is a coordinator name);
-   * undefined until anything of it was seen. A bound agent that went away is `reconnecting` for
-   * `autopilot.reconnect_grace_s`, then `gone`.
+   * wave-state `coordinator` for `owner` of `wave` (through its binding when it is a coordinator
+   * name); undefined until anything of it was seen. Its presence is its retained status
+   * (presence.ts): a bound agent that went away is `reconnecting` for
+   * `autopilot.reconnect_grace_s`; an offline owner is then `gone` while something in the wave
+   * waits on it (`waitsOnOwner`), else `away`.
    */
-  private coordinatorFor(owner: string): CoordinatorAttention | undefined {
+  private coordinatorFor(owner: string, wave: WaveId): CoordinatorAttention | undefined {
     const binding = this.bindings.get(owner);
     const agent = binding?.agent_id ?? owner;
     const status = this.statusOf.get(agent);
@@ -2322,14 +2302,33 @@ export class Daemon {
       .filter((t): t is number => t !== undefined && !Number.isNaN(t))
       .sort((a, b) => b - a)[0];
     const last_seen = new Date(seen ?? this.now()).toISOString();
-    if (status !== undefined && OWNER_GONE.has(status.type)) {
+    const presence = presenceOf(status);
+    if (presence === "online")
+      return { agent_id: agent, presence, ...(attention ?? { state: "working" }), last_seen };
+    const state = ownerState({
+      presence,
+      attention,
       // Not yet stamped: the status was just seen and its rebind is still queued.
-      const away = binding?.gone_at ?? this.wentAwayAt(status.at);
-      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
-      const state = binding !== undefined && this.now() - away < grace ? "reconnecting" : "gone";
-      return { agent_id: agent, state, last_seen };
-    }
-    return { agent_id: agent, ...(attention ?? { state: "working" }), last_seen };
+      awayAt: binding !== undefined ? (binding.gone_at ?? this.wentAwayAt(status?.at)) : undefined,
+      graceMs: secondsMs(this.config.effective().autopilot.reconnect_grace_s),
+      now: this.now(),
+      waits: this.waitsOnOwner(wave),
+    });
+    return { agent_id: agent, presence, state, last_seen };
+  }
+
+  /** What in `wave` only its owner can answer (`waitsOnOwner`); null when nothing. */
+  private waitsOnOwner(wave: WaveId) {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.state == null) return null;
+    const eff = this.config.effective(wave);
+    return waitsOnOwner({
+      decisions: rec.state.open_decisions.flatMap((id) => rec.decisions[id] ?? []),
+      inbox: [...this.inbox.values()].filter((i) => i.wave === wave),
+      autopilotEnabled: eff.autopilot.enabled,
+      mergeMode: rec.wave?.merge ?? eff.autopilot.merge,
+      gates: rec.state.gates,
+    });
   }
 
   /**
@@ -2392,7 +2391,13 @@ export class Daemon {
    * `autopilot.reconnect_grace_s` passes. Runs on the queue.
    */
   private async rebind(name: string): Promise<void> {
-    const statuses = new Map([...this.statusOf].map(([id, s]) => [id, s.type]));
+    // A clean shutdown's `blocked` ended the session as a `done` would (SPEC §7.5).
+    const statuses = new Map(
+      [...this.statusOf].map(([id, s]) => [
+        id,
+        s.reason === "shutdown" && presenceOf(s) === "offline" ? "done" : s.type,
+      ]),
+    );
     const prev = this.bindings.get(name);
     let next = bindOwner([...this.namedEntries.values()], statuses, name);
     // An older entry whose status was never seen is most likely a session long gone (its status
@@ -2859,7 +2864,12 @@ export class Daemon {
               this.endedStatusOf.delete(this.endedStatusOf.keys().next().value as string);
           } else {
             this.endedStatusOf.delete(holder);
-            this.statusOf.set(holder, { type: env.type, at: env.wall_time });
+            const reason = (env.payload as { reason?: unknown } | null)?.reason;
+            this.statusOf.set(holder, {
+              type: env.type,
+              at: env.wall_time,
+              ...(reason === "shutdown" ? { reason } : {}),
+            });
           }
           if (prev !== env.type) {
             this.ownerChanged(holder);
@@ -9723,7 +9733,7 @@ export class Daemon {
         (t.stage === "queued" && t.why_waiting?.startsWith("awaiting decision") === true);
       if (unsettled.length > 0 && unsettled.every(stuck)) state.status = "awaiting_decision";
     }
-    const coordinator = state.owner !== null ? this.coordinatorFor(state.owner) : undefined;
+    const coordinator = state.owner !== null ? this.coordinatorFor(state.owner, wave) : undefined;
     if (coordinator !== undefined) state.coordinator = coordinator;
     state.account = this.waveAccountState(wave);
     return state;
@@ -11647,7 +11657,9 @@ export class Daemon {
       return { ok: false, error: `${op} requires payload.wave_yaml` };
     const source = typeof p.source === "string" ? p.source : undefined;
     try {
-      const first = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
+      const dropped: string[] = [];
+      const first = parseWaveFile(p.wave_yaml, source, this.placementDefaults(), dropped);
+      for (const n of dropped) this.log(`wave ${first.wave}: ${n}`);
       // A known wave: parsed again under its own placement (the file's own placement: still wins).
       const wave =
         this.waves.get(first.wave)?.record.wave == null
@@ -12708,25 +12720,36 @@ export class Daemon {
     }
   }
 
-  /** `claim`: take a wave over when its owner is gone (status, registry age, heartbeats). */
+  /**
+   * `claim`: take a wave over when its owner is offline (its retained status, SPEC §7.5); a
+   * coordinator name once its binding has been offline past `autopilot.reconnect_grace_s`.
+   */
   private async claim(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     const owner = w.log.record.state?.owner ?? null;
     // A coordinator name is measured by its newest binding, never by an agent id it left.
-    const bound = owner !== null ? this.bindings.get(owner)?.agent_id : undefined;
+    const binding = owner !== null ? this.bindings.get(owner) : undefined;
+    const bound = binding?.agent_id;
     const agent = bound ?? owner;
-    const info = agent !== null && agent !== by ? await this.ownerLiveness(agent) : null;
+    const status =
+      agent !== null && agent !== by
+        ? (this.statusOf.get(agent) ?? (await this.ownerLiveness(agent)))
+        : null;
     const verdict = claimVerdict({
       owner,
       by,
       ...(bound !== undefined ? { bound } : {}),
-      status: info?.status ?? null,
-      registryAt: info?.registryAt ?? null,
-      heartbeatAt: agent !== null ? (this.lastSeen.get(agent) ?? this.startedAt) : null,
-      ownedSince: ownedSince(this.journalEvents(w.wave), this.now()),
+      presence: presenceOf(status),
+      // As `coordinatorFor` reads it, so a wave shown `reconnecting` is never claimable.
+      awayAt:
+        binding !== undefined
+          ? (binding.gone_at ?? this.wentAwayAt(status?.at))
+          : status != null
+            ? this.wentAwayAt(status.at)
+            : null,
+      graceMs: secondsMs(this.config.effective().autopilot.reconnect_grace_s),
       now: this.now(),
-      claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
     // The agent bound to a coordinator-name owner already acts for it: the name keeps the wave.
@@ -12742,25 +12765,22 @@ export class Daemon {
     return { ok: true, result: { wave: w.wave, owner: by, previous: owner, why: verdict.why } };
   }
 
-  /** The owner's retained status and registry timestamps. */
-  private async ownerLiveness(owner: string) {
-    if (!isValidAgentId(owner)) return { status: null, registryAt: null };
-    const [st, reg] = await Promise.all([
-      this.broker.queryRetained(
-        buildTopic(this.opts.namespace, owner, "status"),
-        DAEMON_DEFAULTS.probe_ms,
-      ),
-      this.broker.queryRetained(registryTopic(owner), DAEMON_DEFAULTS.probe_ms),
-    ]);
-    const status = st !== null && st !== "" ? parseEnvelope(st) : null;
-    const entry = reg !== null && reg !== "" ? parseEnvelope(reg) : null;
-    const started = (entry?.payload as { started_at?: unknown } | undefined)?.started_at;
-    const times = [entry?.wall_time, typeof started === "string" ? started : undefined].filter(
-      (t): t is string => t !== undefined,
+  /** The owner's retained status, for an owner the daemon has not seen; null when none. */
+  private async ownerLiveness(
+    owner: string,
+  ): Promise<{ type: string; at: string; reason?: string } | null> {
+    if (!isValidAgentId(owner)) return null;
+    const st = await this.broker.queryRetained(
+      buildTopic(this.opts.namespace, owner, "status"),
+      DAEMON_DEFAULTS.probe_ms,
     );
+    const status = st !== null && st !== "" ? parseEnvelope(st) : null;
+    if (status === null) return null;
+    const reason = (status.payload as { reason?: unknown } | null)?.reason;
     return {
-      status: status !== null ? { type: status.type, at: status.wall_time } : null,
-      registryAt: times.length > 0 ? (times.sort().at(-1) ?? null) : null,
+      type: status.type,
+      at: status.wall_time,
+      ...(typeof reason === "string" ? { reason } : {}),
     };
   }
 
@@ -13537,15 +13557,6 @@ function clipText(text: string): string {
   const one = text.replace(/\s+/g, " ").trim();
   const max = DAEMON_DEFAULTS.decision_text_max;
   return one.length > max ? `${one.slice(0, max - 1)}…` : one;
-}
-
-/** When the current owner got the wave: the latest `owner_claimed`, else `wave_submitted`. */
-function ownedSince(events: readonly JournalEvent[], now: number): string {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i] as JournalEvent;
-    if (e.type === "owner_claimed" || e.type === "wave_submitted") return e.at;
-  }
-  return new Date(now).toISOString();
 }
 
 /** Open every wave journal under `<home>/waves/`, oldest submission first. */

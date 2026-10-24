@@ -20,7 +20,6 @@ export const CONFIG_DEFAULTS: Tunables = {
     ci_queue_max: 10,
     hysteresis_samples: 3,
   },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   idle_grace_s: 180,
   background_wait_max_s: 7200,
