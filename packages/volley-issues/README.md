@@ -8,23 +8,23 @@ is swapped from claude-peers/ScheduleWakeup to Volley.
 
 ## Prerequisites
 
-- A running MQTT broker: `brew services start mosquitto`.
-- The [`volley-mcp`](../volley-mcp/) server registered with Claude Code via
-  `claude mcp add-json -s user volley '...'`, with a `VOLLEY_AGENT_ID` for
-  this session and `VOLLEY_NAMESPACE=example-dispatch`. (Claude Code stores MCP
-  servers separately from `settings.json`; do NOT hand-edit `settings.json`.)
-  The install script prints the recommended `claude mcp add-json` command
-  with the path filled in.
-- `gh` CLI authenticated to the target repo.
-- `claude` CLI installed and on `$PATH` (the spawned agents are real `claude`
-  CLI processes).
-- `cmux` CLI installed and on `$PATH` (the dispatched workspaces are cmux
-  workspaces).
-- For the default **volleyd path**: the [`volleyd`](../volleyd/) supervisor
-  running (`volleyd status` exits 0). Without it the skill falls back to the
-  legacy path.
+Volley installed with the one command (the root README's
+[Quickstart](../../README.md#quickstart)). `volley setup` provides everything
+the skill needs, and `volley setup --check` names whatever is missing:
+
+- the broker, and the [`volleyd`](../volleyd/) supervisor running as a service
+  (`volleyd status` exits 0; without it the skill falls back to the legacy
+  path);
+- the [`volley-mcp`](../volley-mcp/) server registered with Claude Code (no
+  password in it), with `VOLLEY_AGENT_ID=coordinator`, your coordinator name
+  and `VOLLEY_NAMESPACE=default`, and this skill linked;
+- `claude` and `gh` signed in (the spawned agents are real `claude` CLI
+  processes; `gh` opens and merges the PRs);
+- a terminal for the agents: cmux on a Mac that has it, else tmux.
 
 ## Install
+
+`volley setup` links it (its Claude Code step). By hand:
 
 ```sh
 bash packages/volley-issues/scripts/install.sh
@@ -69,9 +69,12 @@ issues JSON in, wave YAML out.
 for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
 bun run scripts/wave-from-issues.ts issues.json --wave 2026-10-18-example \
   --repo "$(git rev-parse --show-toplevel)" --release-branch release/2026-10-18-example \
-  --model claude-opus-4-7 --merge auto --autopilot on --branch-update merge \
+  --model <model> --merge auto --autopilot on --branch-update merge \
   --out .volley/waves/2026-10-18-example.yaml
 ```
+
+`<model>` is the model the wave's agents run: Volley's default is `DEFAULT_MODEL` in
+`packages/volleyd/src/config-defaults.ts`.
 
 Each issue becomes a task named by its title's task tag (`O0: …` → `O0`), else `i<N>`; `Depends on: #101` becomes `after: [i101]` (or the tag of #101).
 `--repo-slug <owner/repo>` also accepts `owner/repo#N` references and issue

@@ -36,7 +36,13 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 
 ## Install
 
-The CLI ships as a Bun-runnable TypeScript file. From the repo root, after `bun install`:
+The one command installs it, with everything else (the root README's [Quickstart](../../README.md#quickstart); [`docs/INSTALL.md`](../../docs/INSTALL.md) has every flag):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
+```
+
+`volley setup --check` then says what is missing, without changing anything. The CLI itself ships as a Bun-runnable TypeScript file. From a clone, after `bun install`:
 
 ```sh
 # Run directly via bun:

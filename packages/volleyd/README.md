@@ -83,7 +83,7 @@ coordinator session.
 
 ## Quick start
 
-On a machine set up with `volley setup` (root README, quickstart step 2), volleyd is already
+On a machine set up with the one command (the root README's [Quickstart](../../README.md#quickstart), or `volley setup`), volleyd is already
 running as a service, logged in to the broker with `$VOLLEYD_HOME/broker.json`, and `volleyd` is
 installed in `~/.volley/bin`. To run it by hand instead, from the repo root, after `bun install`:
 
@@ -91,7 +91,8 @@ installed in `~/.volley/bin`. To run it by hand instead, from the repo root, aft
 # Validate a wave file (no daemon needed)
 bun packages/volleyd/src/cli.ts validate wave.yaml
 
-# Run the daemon in the foreground (or `volleyd install` for launchd)
+# Run the daemon in the foreground (`volley setup --step services` installs it as a service:
+# launchd on macOS, systemd --user on Linux)
 bun packages/volleyd/src/cli.ts daemon
 
 # In another terminal: submit (owned by your stable coordinator name) and watch
@@ -110,7 +111,7 @@ State lives in `$VOLLEYD_HOME` (default `~/.volley/volleyd`). The broker and nam
 wave: 2026-10-20-example            # wave id, [a-z0-9][a-z0-9_-]{0,62}
 repo: ~/repos/example
 release_branch: release/2026-10-20-example
-model: claude-opus-5-5
+model: <model>                      # Volley's default: DEFAULT_MODEL in src/config-defaults.ts
 pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]   # nested = parallel
 tasks:
   T0: { issue: 101 }
@@ -560,7 +561,7 @@ volley claude rename work "Work account"  # rename the account (every profile of
 volley claude remove work           # remove a profile: its dir, usage record and registry entry
 volley claude remove work@peer-a    # … one kept on a paired machine
 volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
-volley claude balance --model claude-opus-5-5 --machine peer-a  # … for one model on one machine
+volley claude balance --model <model> --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
 ```
 
@@ -2376,8 +2377,8 @@ Claude Code reports it only after the first response: a `[1m]` suffix, the nativ
 (`fable`, `opus`, `sonnet`, `haiku`) are 1M; anything else, including an id it cannot read (an
 ARN, a gateway name), is 200K. Provider-qualified ids are matched on their
 `claude-<family>-<major>[-<minor>]` part. A wrong row only moves the compaction point (Claude
-Code caps the window at the model's own). So at 85, `claude-opus-5-5` compacts at 850000 tokens
-and `claude-opus-4-6` at 170000: where the Desk's context meter turns red, after its 70% pulse
+Code caps the window at the model's own). So at 85, a model with a 1M window compacts at 850000 tokens
+and one with 200K at 170000: where the Desk's context meter turns red, after its 70% pulse
 has warned. `0` exports nothing and Claude Code's own default applies. The line sits right after
 the profile block; the fence accepts it there only, as an integer in range, and
 `agent_spawned` records `auto_compact_window`. The Desk meter keeps measuring the full window
@@ -2468,8 +2469,8 @@ decision). The SessionStart hook publishes `working` when it finds no retained s
 a hook-only registration never shows as `unknown`.
 
 - `model_source: "harness-hook"`: the model id is compared exactly with the task's. Only an
-  8-digit date suffix or a `[1m]` context suffix is ignored, so `claude-opus-5` is a mismatch for
-  `claude-opus-5-5`. A mismatch opens decision `model_switch` and leaves the agent running.
+  8-digit date suffix or a `[1m]` context suffix is ignored, so `claude-<family>-5` is a mismatch for
+  `claude-<family>-5-5`. A mismatch opens decision `model_switch` and leaves the agent running.
 - `model_source: "unknown"` (the hook input had no model): the terminal's status line is read
   once as the model source; unreadable → `model_verified: false`.
 

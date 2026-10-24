@@ -4,9 +4,8 @@ These steps verify the skill against a real mosquitto + a fake agent. CI cannot 
 
 ## Setup (once)
 
-- [ ] `brew services start mosquitto` (or any MQTT broker on localhost:1883)
-- [ ] Symlink the skill: `bash packages/volley-skill/scripts/install.sh`
-- [ ] In a fresh Claude Code session, confirm `vol_list_agents` appears in the available MCP tools list. If not, see SKILL.md's Prerequisites for the `claude mcp add-json` command (the install script also prints a ready-to-paste version).
+- [ ] Volley installed with the one command (the root README's Quickstart), or `volley setup` run on this machine: `volley setup --check` reports every row `done` (the broker, the MCP server and this skill are in place)
+- [ ] In a fresh Claude Code session, confirm `vol_list_agents` appears in the available MCP tools list. If not, see SKILL.md's Prerequisites (`volley setup --step claude-code`).
 
 ## Seed two fake agents
 
@@ -86,9 +85,9 @@ hasn't called `vol_register` yet — re-check.
 
 ## BROKER_DOWN check
 
-- [ ] `brew services stop mosquitto`
-- [ ] `/volley list` prints `volley: cannot reach broker — make sure mosquitto is running.` and the install hint, then stops without retrying.
-- [ ] `brew services start mosquitto` (cleanup)
+- [ ] Stop the broker: `brew services stop mosquitto` (Linux snap: `sudo snap stop mosquitto`)
+- [ ] `/volley list` prints `volley: cannot reach broker — make sure mosquitto is running.` and the `volley setup --check` hint, then stops without retrying.
+- [ ] Start it again (cleanup): `brew services restart mosquitto` (Linux snap: `sudo snap start mosquitto`)
 
 ## Tear-down (after sign-off)
 

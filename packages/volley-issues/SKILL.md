@@ -17,9 +17,9 @@ Before invoking `/volley-issues`:
 
 **This skill is current.** This file declares `version: 0.10` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
-1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
+1. **Volley installed.** The one command in the root README's Quickstart (it ends with `volley setup`) sets up the broker and everything below. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
-2. **Run `volley setup --check`.** It prints one row per setup step and exits 0 only when nothing is missing. Its Claude Code row covers what this skill needs: the volley MCP server registered at user scope (env `VOLLEY_AGENT_ID=coordinator`, `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE`, `VOLLEY_BROKER_URL`, `VOLLEY_AUTH_DIR`, and no password: the server logs in with `coordinator.json` from that auth dir), the skills linked, the hooks installed, and your **coordinator name**. Anything pending: run `volley setup` (it shows each change before making it), then quit Claude Code (Cmd-Q) and reopen. If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
+2. **Run `volley setup --check`.** It prints one row per setup step and exits 0 only when nothing is missing. Its Claude Code row covers what this skill needs: the volley MCP server registered at user scope (env `VOLLEY_AGENT_ID=coordinator`, `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE`, `VOLLEY_BROKER_URL`, `VOLLEY_AUTH_DIR`, and no password: the server logs in with `coordinator.json` from that auth dir), the skills linked, the hooks installed, and your **coordinator name**. Anything pending: run `volley setup` (it shows each change before making it), then restart Claude Code (exit the session and start `claude` again). If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
 
    The coordinator name is chosen once, during setup (agent-id grammar `[a-z0-9][a-z0-9_-]{0,62}`, e.g. `coord-main`), and saved in `$VOLLEYD_HOME/setup.json`. Waves are owned by the name, not by the per-restart agent id, so this session keeps resolving, steering, pausing and stopping them after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is what lets the autopilot flow's coordinator session end after submitting (Step 5): a later session with the same name picks the wave up. `volleyd run` without `--owner` uses it (and says so), and the other `volleyd` commands identify you by it without `--by`; `VOLLEY_COORDINATOR` in the environment still wins.
 
@@ -27,9 +27,9 @@ Before invoking `/volley-issues`:
 
    **No broker password in the shell.** On the supervisor's machine `volley wait`, `volley sub` and the `volleyd` commands find the coordinator's login on their own (the macOS keychain, then `coordinator.json`), so nothing needs exporting. Elsewhere, or for `mosquitto_pub`, export `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` yourself; without a login every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one).
 
-3. **gh + claude + cmux on PATH.** Run `command -v gh claude cmux` and confirm all three resolve. If any is missing, tell the user how to install (`brew install gh`; the `claude` CLI ships with Claude Code; cmux install instructions live in the `cmux` repo).
+3. **gh + claude on PATH, and cmux for the legacy path.** Run `command -v gh claude` and confirm both resolve. If either is missing, the one command installs it (setup's Sign-ins step signs both in). The volleyd path starts agents in cmux or tmux, whichever `volley setup` chose; the legacy path launches cmux workspaces itself, so it needs `command -v cmux` too (cmux install instructions live in the `cmux` repo).
 
-4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "claude-opus-4-7", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace, coordinator }` (`coordinator` only when `VOLLEY_COORDINATOR` is set; on the volleyd path check it is there, since it is the name the wave's owner is). The `agent_id` is the
+4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "<the model this session runs>", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace, coordinator }` (`coordinator` only when `VOLLEY_COORDINATOR` is set; on the volleyd path check it is there, since it is the name the wave's owner is). The `agent_id` is the
    auto-suffixed value `coordinator-XXXX` (NOT the literal env prefix);
    this is the value to embed in dispatched children's spawn brief as
    their `parent_id`.
@@ -132,7 +132,7 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --release-branch release/$WAVE \
   --model <model> \
   --repo-slug "$(gh repo view --json nameWithOwner -q .nameWithOwner)" \
-  [--satisfied 5,6] [--namespace example-dispatch] \
+  [--satisfied 5,6] [--namespace <ns>] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
   --merge auto --autopilot on --branch-update merge \
   --out .volley/waves/$WAVE.yaml
@@ -383,7 +383,7 @@ For each issue in the dispatch set:
      --command "claude --dangerously-skip-permissions 'Read ISSUE.md and implement GitHub issue <N>. Use ultrathink for complex decisions. Do NOT commit or push. When done, write a DEPLOY.md listing all deployment steps required but do NOT git add or commit DEPLOY.md.
 
    IMMEDIATELY on startup, in this order:
-     1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"claude-opus-4-7\", title=\"<brief-title>\", links={ repo: \"<owner/name>\", issue: <N> } (the Desk shows the title on your window; your agent id says nothing about the work). The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
+     1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"<model>\", title=\"<brief-title>\", links={ repo: \"<owner/name>\", issue: <N> } (the Desk shows the title on your window; your agent id says nothing about the work). The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
      2. Call vol_publish with channel=\"status\", type=\"working\", payload={ issue: <N>, started_at: <ISO timestamp> }.
 
    AT MEANINGFUL CHECKPOINTS, publish progress via vol_publish. Include a numeric progress field (0-100) in every payload so dashboards / coordinators can render a determinate progress bar instead of an indeterminate sweep. Suggested progression for a coding task — adjust the percentages to match the actual work shape, but always include the field:
@@ -430,7 +430,7 @@ For each issue in the dispatch set:
    seconds for the child to vol_register, then:
 
    ```
-   vol_list_agents({ namespace: "example-dispatch" })
+   vol_list_agents({ namespace: "default" })
    ```
 
    Find the entry whose `parent_id` equals the coordinator's agent_id AND
@@ -497,7 +497,7 @@ Each `volley wait` call blocks until that specific agent publishes a terminal st
 # discovery resolves the child's auto-suffixed agent_id):
 bun run packages/volley-cli/src/cli.ts wait \
   --agent-id <discovered-child-id> \
-  --namespace example-dispatch \
+  --namespace default \
   --terminal-states done,blocked,failed,reaped \
   --timeout 14400 &
 ```
@@ -514,7 +514,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
 
 1. Read the retained terminal status to confirm the type:
    ```
-   vol_query({ topic: "volley/example-dispatch/<agent-id>/status" })
+   vol_query({ topic: "volley/default/<agent-id>/status" })
    ```
    The response's `payload.type` is one of `done | blocked | failed | reaped`.
 
@@ -531,7 +531,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
    - Either send a steering mailbox (`vol_send_mailbox({ to_agent_id: "<id>", type: "steering", payload: { text: "<guidance>" } })`) and re-background `volley wait`, OR abandon (close the workspace, reopen the issue on GitHub with a comment summarizing what was tried).
 
 4. **If `failed`**:
-   - Read the retained `result` topic (`vol_query({ topic: "volley/example-dispatch/<agent-id>/result" })`) for any artifact pointer the agent left behind.
+   - Read the retained `result` topic (`vol_query({ topic: "volley/default/<agent-id>/result" })`) for any artifact pointer the agent left behind.
    - Tell the user what failed and where to look. Do not auto-retry; failure is a coordination signal that needs human review.
 
 5. **If `reaped`** (broker-detected disconnect — LWT fired):
@@ -547,7 +547,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
 
 The coordinator's job stays open until every dispatched agent has reached a terminal state AND been processed. As each agent terminates, its `volley wait` background exits and you wake to handle it. There is no separate polling loop; the broker's retained-message delivery to `volley wait`'s open subscription is the entire signaling fabric.
 
-If the user asks "are they done?" mid-dispatch, call `vol_list_agents({ namespace: "example-dispatch" })` and render an `/volley list`-style table — that's the canonical real-time view.
+If the user asks "are they done?" mid-dispatch, call `vol_list_agents({ namespace: "default" })` and render an `/volley list`-style table — that's the canonical real-time view.
 
 ### Crash detection is free
 

@@ -4,12 +4,11 @@ This is the Claude Code skill bundle for [Volley](../../README.md). Installed, i
 
 ## Prerequisites
 
-- A running MQTT broker (mosquitto recommended): `brew services start mosquitto`.
-- The [`volley-mcp`](../volley-mcp/) server registered with Claude Code via `claude mcp add-json -s user volley '...'`. (Claude Code stores MCP servers separately from `settings.json`; do NOT hand-edit `settings.json`.) See `SKILL.md`'s Prerequisites section for the exact command, or run the install script below — it prints a ready-to-paste version with the absolute path filled in.
+Volley installed with the one command (the root README's [Quickstart](../../README.md#quickstart)): `volley setup` sets up the broker, registers the [`volley-mcp`](../volley-mcp/) server with Claude Code (no password in it) and links this skill. `volley setup --check` says what is missing (the Broker, Claude Code and Services rows); `volley setup --repair` fixes it.
 
 ## Install
 
-From the repo root:
+`volley setup` links it (its Claude Code step). By hand, from the repo root:
 
 ```sh
 bash packages/volley-skill/scripts/install.sh
@@ -27,7 +26,7 @@ In a fresh Claude Code session:
 /volley list
 ```
 
-You should see either a list of agents or `(no agents registered)`. If `vol_list_agents` isn't in the tool list, the volley-mcp server isn't registered. Run `claude mcp list` to check; if `volley` is missing, see SKILL.md Prerequisites for the `claude mcp add-json` command.
+You should see either a list of agents or `(no agents registered)`. If `vol_list_agents` isn't in the tool list, the volley-mcp server isn't registered. Run `claude mcp list` to check; if `volley` is missing, `volley setup --step claude-code` registers it, then restart the Claude Code session.
 
 ## Subcommands
 

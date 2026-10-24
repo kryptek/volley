@@ -28,22 +28,13 @@ The Volley protocol's Claude Code interface. The volley-mcp server (see `package
 
 Before running any subcommand:
 
-1. Confirm the `volley-mcp` server is registered in this Claude Code session. If `vol_list_agents`, `vol_query`, etc. don't appear in the tool list, the user needs to register the MCP server. Claude Code stores MCP servers separately from `settings.json` — they are managed via the `claude mcp` CLI (`mcpServers` is NOT a valid top-level `settings.json` field; the schema validator rejects it). Tell them to run, substituting `<volley-repo>` with their absolute path to the Volley repo (e.g. `~/repos/volley`):
+1. Confirm the `volley-mcp` server is registered in this Claude Code session. If `vol_list_agents`, `vol_query`, etc. don't appear in the tool list, the user needs to register the MCP server. Claude Code stores MCP servers separately from `settings.json` — they are managed via the `claude mcp` CLI (`mcpServers` is NOT a valid top-level `settings.json` field; the schema validator rejects it). Tell them to run:
 
    ```sh
-   claude mcp add-json -s user volley '{
-     "command": "bun",
-     "args": ["run", "<volley-repo>/packages/volley-mcp/src/index.ts"],
-     "env": {
-       "VOLLEY_AGENT_ID": "coordinator",
-       "VOLLEY_NAMESPACE": "default",
-       "VOLLEY_AUTH_USERNAME": "coordinator",
-       "VOLLEY_AUTH_PASSWORD": "<coordinator password from `volley auth init`>"
-     }
-   }'
+   volley setup --step claude-code
    ```
 
-   `-s user` registers at user scope (available across all projects). Then quit Claude Code completely (Cmd-Q) and reopen — registration is read at startup. Verify with `claude mcp list`; you should see `volley` and "✓ Connected". In a new Claude Code conversation, the seven `vol_*` tools should appear.
+   It registers the server at user scope (`claude mcp add-json -s user volley`) with env `VOLLEY_AGENT_ID=coordinator`, `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE=default`, `VOLLEY_BROKER_URL` and `VOLLEY_AUTH_DIR`, and no password: the server logs in with `coordinator.json` from that auth dir. `volley setup --check` shows whether it is registered. Volley not installed at all: the one command in the root README's Quickstart. Then restart Claude Code (exit the session and start `claude` again) — registration is read at startup. Verify with `claude mcp list`; you should see `volley` and "✓ Connected". In a new Claude Code conversation, the seven `vol_*` tools should appear.
 
    The `env` block sets this MCP server's agent_id **prefix**.
    `vol_register` reads `VOLLEY_AGENT_ID` from env at startup and appends a
@@ -63,9 +54,7 @@ Before running any subcommand:
    expect the `coordinator-XXXX` id. For a separate registry (a smoke run, a dispatch batch),
    change `VOLLEY_NAMESPACE` rather than the prefix.
 
-   If `~/.claude/skills/volley/SKILL.md` exists but the MCP isn't registered, also try running `bash <volley-repo>/packages/volley-skill/scripts/install.sh` — the installer prints a ready-to-paste `claude mcp add-json` command with the path already filled in.
-
-2. Confirm the broker is reachable. If any tool call returns `{ code: "BROKER_DOWN" }`, stop and tell the user to start mosquitto: `brew services start mosquitto`. Do NOT retry the tool call until they confirm.
+2. Confirm the broker is reachable. If any tool call returns `{ code: "BROKER_DOWN" }`, stop and tell the user the broker is down and to run `volley setup --check` (its Broker row says what is wrong; `volley setup --repair` fixes it). Do NOT retry the tool call until they confirm.
 
 ## What You Must Do When Invoked
 
@@ -96,11 +85,11 @@ The tool returns `{ agents: AgentSummary[] }` where each `AgentSummary` is:
 ```json
 {
   "agent_id": "issue-42-fix-7a3f",
-  "namespace": "example-dispatch",
+  "namespace": "default",
   "status": "working",
   "parent_id": "coordinator-abcd",
   "cwd": "/private/tmp/example-issue-42",
-  "model": "claude-opus-4-7",
+  "model": "<model id>",
   "capabilities": ["implements-issue", "writes-tests"],
   "last_seen": "2026-05-14T02:11:23.000Z"
 }
@@ -114,7 +103,7 @@ The tool returns `{ agents: AgentSummary[] }` where each `AgentSummary` is:
 
 ```
 AGENT_ID                NAMESPACE      STATUS        PARENT                  CWD                            LAST_SEEN
-issue-42-fix-7a3f      example-dispatch   🔄 working    coordinator-abcd     /private/tmp/example-issue-42     2m ago
+issue-42-fix-7a3f       default        🔄 working    coordinator-abcd        /private/tmp/example-issue-42  2m ago
 volley-cli-spec-aaaa    default        ✅ done       -                       /path/to/volley                 14s ago
 ```
 
@@ -133,7 +122,7 @@ Status emoji map (apply to the `status` column):
 
 Empty registry: print `(no agents registered)` and stop. Don't render an empty table.
 
-BROKER_DOWN: if `vol_list_agents` returns `{ code: "BROKER_DOWN" }`, the broker was unreachable at the moment the tool was called — there is no separate pre-flight check. Print the friendly error message and the install hint (`brew services start mosquitto`) and stop; do NOT retry.
+BROKER_DOWN: if `vol_list_agents` returns `{ code: "BROKER_DOWN" }`, the broker was unreachable at the moment the tool was called — there is no separate pre-flight check. Print the friendly error message and the hint (`volley setup --check`) and stop; do NOT retry.
 
 ### `watch` — live tail
 
@@ -298,7 +287,7 @@ BROKER_DOWN: same handling as `list`.
 
 ### `tap` — wildcard debug stream
 
-The user typed `/volley tap <pattern> [flags]`. The single positional `<pattern>` is an MQTT topic filter (e.g. `volley/+/+/status`, `volley/example-dispatch/#`). Validate the filter format BEFORE invoking the tool:
+The user typed `/volley tap <pattern> [flags]`. The single positional `<pattern>` is an MQTT topic filter (e.g. `volley/+/+/status`, `volley/default/#`). Validate the filter format BEFORE invoking the tool:
 
 - Must be non-empty and contain no spaces.
 - `#` may only appear at the end of the filter.
@@ -373,7 +362,7 @@ Validate the resolved namespace against `^[a-z0-9][a-z0-9_-]{0,62}$` per SPEC §
 **BROKER_DOWN handling.** Any tool call may return `{ code: "BROKER_DOWN" }`. When you see it:
 
 1. Print: `volley: cannot reach broker — make sure mosquitto is running.`
-2. Print: `  → brew services start mosquitto`
+2. Print: `  → volley setup --check   (volley setup --repair fixes what it finds)`
 3. Stop. Do NOT retry, do NOT auto-start the broker yourself.
 
 **Reserved-namespace writes refused** (`pub`-style writes are not in this skill, but `msg` writes to mailboxes). If a write tool returns `{ code: "RESERVED_TOPIC_WRITE" }`, that's a bug in this skill — surface the error verbatim and link the user to the SKILL.md.
