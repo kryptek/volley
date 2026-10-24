@@ -7,8 +7,12 @@ import { isAbsolute } from "node:path";
  * (`isFirstWaveCommand`) allows exactly these shapes.
  */
 
-/** The test wave's id: its state is `volley/_waves/hello/state`. */
-export const HELLO_WAVE = "hello";
+/**
+ * A test wave's id, `hello-<4>` (the scratch repository's suffix): its state is
+ * `volley/_waves/hello-<4>/state`. Every run has its own, since volleyd takes a second submit of
+ * an id as a new version of that wave, which an ended one refuses.
+ */
+export const helloWave = (suffix: string) => `hello-${suffix}`;
 export const HELLO_ISSUE_TITLE = "Add HELLO.md";
 export const HELLO_ISSUE_BODY =
   "Add a file HELLO.md at the repository root holding one line: `Hello from Volley.`\n\nFiled by `volley setup`'s test wave.";
@@ -25,9 +29,10 @@ export function helloSuffix(random: () => number = Math.random): string {
   return Array.from({ length: 4 }, () => abc[Math.floor(random() * abc.length)] ?? "a").join("");
 }
 
-/** `release/<YYYY-MM-DD>-hello` (the UTC date). */
-export const helloRelease = (now: Date) => `release/${now.toISOString().slice(0, 10)}-hello`;
-const RELEASE = /^release\/\d{4}-\d{2}-\d{2}-hello$/;
+/** `release/<YYYY-MM-DD>-hello-<4>` (the UTC date, the wave's id). */
+export const helloRelease = (now: Date, wave: string) =>
+  `release/${now.toISOString().slice(0, 10)}-${wave}`;
+const RELEASE = /^release\/\d{4}-\d{2}-\d{2}-hello-[a-z0-9]{4}$/;
 
 export const ghRepoCreateArgv = (name: string) => [
   "gh",
@@ -137,6 +142,7 @@ export function issueNumberOf(stdout: string): number | null {
  * (`merge: auto`), with no reviews: the shortest pipeline that still opens and merges a PR.
  */
 export function helloWaveYaml(w: {
+  wave: string;
   repo: string;
   release: string;
   model: string;
@@ -144,7 +150,7 @@ export function helloWaveYaml(w: {
 }): string {
   return [
     "# volley setup's 1-issue test wave (the first-wave step).",
-    `wave: ${HELLO_WAVE}`,
+    `wave: ${w.wave}`,
     `repo: ${JSON.stringify(w.repo)}`,
     `release_branch: ${w.release}`,
     `model: ${w.model}`,

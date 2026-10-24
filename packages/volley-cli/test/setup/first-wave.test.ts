@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SIM_BIN } from "volley-sim/env";
 import { DEFAULT_MODEL } from "volleyd/config-defaults";
@@ -18,11 +18,11 @@ import { helloRelease, helloSuffix, isFirstWaveCommand } from "../../src/setup/f
 import { completeLine } from "../../src/setup/metrics";
 import { type StepPlan, fencedExec, setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
-import { type FakeMachine, HELLO_PR, NOW, fakeMachine } from "../helpers/setup-machine";
+import { type FakeMachine, HELLO_PR, MERGING, NOW, fakeMachine } from "../helpers/setup-machine";
 import { tempDir } from "../helpers/tmp";
 
 const SLUG = "octo-volley/volley-hello-aaaa";
-const RELEASE = "release/2026-10-18-hello";
+const RELEASE = "release/2026-10-18-hello-aaaa";
 
 describe("setup: the test wave (first-wave)", () => {
   let fake: FakeDynsec;
@@ -150,7 +150,7 @@ describe("setup: the test wave (first-wave)", () => {
       expect([...at].sort((a, b) => a - b)).toEqual(at);
       // The repository is cloned under fleet.repo_root by volleyd: the wave runs from that clone.
       const managed = join(m.firstWave.repoRoot, SLUG);
-      expect(existsSync(join(managed, ".volley", "waves", "hello.yaml"))).toBe(true);
+      expect(existsSync(join(managed, ".volley", "waves", "hello-aaaa.yaml"))).toBe(true);
       expect(lines).toContain(`Filed ${SLUG}#7 "Add HELLO.md"`);
       expect(lines.join("\n")).toContain(`gh repo delete ${SLUG} --yes`);
     });
@@ -177,18 +177,26 @@ describe("setup: the test wave (first-wave)", () => {
         expect.arrayContaining(["--repo", "octo-volley/mine"]),
       ]);
       expect(ran(`bun ${volleyCli()} repo`)).toEqual([]);
-      const wave = readFileSync(join(clone, ".volley", "waves", "hello.yaml"), "utf-8");
+      const wave = readFileSync(join(clone, ".volley", "waves", "hello-aaaa.yaml"), "utf-8");
       expect(wave).toContain("T1: { issue: 7 }");
 
       m.execCalls.length = 0;
-      await applyAll(
-        await planFirstWave({ ...m.ctx, yes: true, firstWave: { repo: clone, issue: 42 } }),
-      );
+      m.firstWave.states = [...MERGING];
+      const plan = await planFirstWave({
+        ...m.ctx,
+        yes: true,
+        deps: { ...m.deps, random: () => 0.5 },
+        firstWave: { repo: clone, issue: 42 },
+      });
+      expect(plan.changes[0]?.detail).toContain(`cut from ${clone}'s checked-out commit (HEAD)`);
+      await applyAll(plan);
       expect(ran("gh issue create")).toEqual([]);
-      expect(readFileSync(join(clone, ".volley", "waves", "hello.yaml"), "utf-8")).toContain(
+      expect(readFileSync(join(clone, ".volley", "waves", "hello-ssss.yaml"), "utf-8")).toContain(
         "T1: { issue: 42 }",
       );
-      expect(ran(`git -C ${clone} push origin HEAD:refs/heads/${RELEASE}`)).toHaveLength(1);
+      expect(
+        ran(`git -C ${clone} push origin HEAD:refs/heads/release/2026-10-18-hello-ssss`),
+      ).toHaveLength(1);
     });
 
     it("refuses a --repo clone with no origin, naming volleyd validate's rule", async () => {
@@ -210,17 +218,17 @@ describe("setup: the test wave (first-wave)", () => {
       expect(helloSuffix(() => 0)).toBe("aaaa");
       expect(helloSuffix(() => 0.999)).toBe("9999");
       expect(helloSuffix()).toMatch(/^[a-z0-9]{4}$/);
-      expect(helloRelease(new Date(NOW))).toBe(RELEASE);
+      expect(helloRelease(new Date(NOW), "hello-aaaa")).toBe(RELEASE);
     });
   });
 
   describe("the wave", () => {
-    it("hello.yaml: implement then merge_ready, merge: auto, the default model, one task", async () => {
+    it("hello-<suffix>.yaml: implement then merge_ready, merge: auto, the default model, one task", async () => {
       await applyAll(await planFirstWave({ ...m.ctx, yes: true }));
-      const file = join(m.firstWave.repoRoot, SLUG, ".volley", "waves", "hello.yaml");
+      const file = join(m.firstWave.repoRoot, SLUG, ".volley", "waves", "hello-aaaa.yaml");
       const text = readFileSync(file, "utf-8");
       const wave = parseWaveFile(text, file);
-      expect(wave.wave).toBe("hello");
+      expect(wave.wave).toBe("hello-aaaa");
       expect(wave.pipeline).toEqual(["implement", "merge_ready"]);
       expect(wave.merge).toBe("auto");
       expect(wave.model).toBe(DEFAULT_MODEL);
@@ -258,7 +266,7 @@ describe("setup: the test wave (first-wave)", () => {
         ["bun", volleyCli(), "repo", "add", "octo/other", "--wait"],
         ["bun", volleyCli(), "repo", "remove", SLUG, "--wait"],
         ["bun", volleydCli(), "run", "/x/wave.yaml", "--owner", "studio"],
-        ["bun", volleydCli(), "stop", "/x/.volley/waves/hello.yaml", "--owner", "studio"],
+        ["bun", volleydCli(), "stop", "/x/.volley/waves/hello-aaaa.yaml", "--owner", "studio"],
       ]) {
         expect(() => fence(bad), bad.join(" ")).toThrow(/does not run/);
         expect(isFirstWaveCommand(bad)).toBe(false);
@@ -285,7 +293,7 @@ describe("setup: the test wave (first-wave)", () => {
           open_decisions: ["d-1"],
         },
       ];
-      const jdir = join(m.ctx.volleydHome, "waves", "hello");
+      const jdir = join(m.ctx.volleydHome, "waves", "hello-aaaa");
       mkdirSync(jdir, { recursive: true });
       writeFileSync(
         join(jdir, "journal.jsonl"),
@@ -347,6 +355,73 @@ describe("setup: the test wave (first-wave)", () => {
       expect(m.questions).toEqual([]);
       expect(m.execCalls).toEqual([]);
     });
+
+    it("a rerun after a blocked test wave runs a wave of its own: a fresh id and state, the earlier scratch repository still named", async () => {
+      m.firstWave.states = [
+        { status: "running", tasks: [{ id: "T1", stage: "blocked" }], open_decisions: ["d-1"] },
+      ];
+      const first = await applyAll(await planFirstWave({ ...m.ctx, yes: true })).catch(
+        (e: Error) => e.message,
+      );
+      expect(first).toContain("blocked: task T1 is blocked");
+      expect(first).toContain("volleyd status hello-aaaa");
+
+      // The rerun: another suffix (0.5 → "ssss"), and the earlier wave's state still retained.
+      m.firstWave.states = [...MERGING];
+      m.ctx.deps = { ...m.deps, random: () => 0.5 };
+      const plan = await planFirstWave({ ...m.ctx, yes: true });
+      expect(plan.found.join("\n")).toContain(`gh repo delete ${SLUG} --yes`);
+      const lines = await applyAll(plan);
+      const runs = ran(`bun ${volleydCli()} run`).map((a) => basename(a[3] as string));
+      expect(runs).toEqual(["hello-aaaa.yaml", "hello-ssss.yaml"]);
+      expect(lines).toContain(`Merged ${HELLO_PR} in 0 m 2 s`);
+      const out = lines.join("\n");
+      expect(out).toContain("gh repo delete octo-volley/volley-hello-ssss --yes");
+      expect(out).toContain(`gh repo delete ${SLUG} --yes`);
+      expect(readFirstWave(m.ctx.volleydHome)).toMatchObject({
+        merged: true,
+        wave: "hello-ssss",
+        scratch: "octo-volley/volley-hello-ssss",
+        earlier: [SLUG],
+      });
+    });
+
+    it("--repo after a merged scratch test wave runs its own wave (volleyd refuses a resubmitted id)", async () => {
+      await applyAll(await planFirstWave({ ...m.ctx, yes: true }));
+      m.firstWave.states = [...MERGING];
+      m.ctx.deps = { ...m.deps, random: () => 0.5 };
+      const clone = join(dir, "mine");
+      mkdirSync(clone);
+      const lines = await applyAll(
+        await planFirstWave({ ...m.ctx, yes: true, firstWave: { repo: clone } }),
+      );
+      expect(lines).toContain(`Merged ${HELLO_PR} in 0 m 2 s`);
+      expect(existsSync(join(clone, ".volley", "waves", "hello-ssss.yaml"))).toBe(true);
+      expect(
+        ran(`git -C ${clone} push origin HEAD:refs/heads/release/2026-10-18-hello-ssss`),
+      ).toHaveLength(1);
+    });
+
+    it("the 15 minutes start at the submit, and a broker error is named when it gives up", async () => {
+      m.ctx.deps = {
+        ...m.deps,
+        waveState: async () => {
+          throw new Error("Connection refused: Not authorized");
+        },
+      };
+      const before = m.clock;
+      const plan = await planFirstWave({ ...m.ctx, yes: true });
+      // repo add is slow: two minutes before the wave is submitted.
+      const exec = m.ctx.deps.exec;
+      m.ctx.deps.exec = async (argv, o) => {
+        if (argv.includes("add") && argv.includes("--wait")) m.clock += 120_000;
+        return exec(argv, o);
+      };
+      const err = await applyAll(plan).catch((e: Error) => e.message);
+      expect(err).toContain("did not finish within 15 minutes");
+      expect(err).toContain("Not authorized");
+      expect(m.clock - before).toBeGreaterThanOrEqual(FIRST_WAVE_DEFAULTS.timeout_ms + 120_000);
+    });
   });
 
   describe("--simulated", () => {
@@ -368,7 +443,7 @@ describe("setup: the test wave (first-wave)", () => {
       expect(ran(`bun ${volleyCli()} repo`)).toEqual([]);
       expect(m.execEnvs.every((e) => e?.VOLLEY_SIMULATED === "1")).toBe(true);
       const clone = join(m.ctx.volleydHome, "first-wave", "volley-hello-aaaa");
-      expect(existsSync(join(clone, ".volley", "waves", "hello.yaml"))).toBe(true);
+      expect(existsSync(join(clone, ".volley", "waves", "hello-aaaa.yaml"))).toBe(true);
     });
   });
 

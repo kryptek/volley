@@ -662,9 +662,10 @@ before changing anything.
                when a phone cannot reach the WebSocket listener (LAN access off)
   9. Test wave a 1-issue test wave, asked once ("Run a 1-issue test wave now?", Enter: yes):
                a scratch private repository volley-hello-<4> (gh repo create), a README, one
-               issue, a release branch, \`volley repo add … --wait\`, .volley/waves/hello.yaml
-               (volleyd validate, volleyd run --owner <coordinator>), followed until volleyd
-               merged its PR (at most 15 minutes); the end prints \`gh repo delete …\` to remove it
+               issue, a release branch, \`volley repo add … --wait\`, .volley/waves/hello-<4>.yaml
+               (volleyd validate, volleyd run --owner <coordinator>; every run its own wave),
+               followed until volleyd merged its PR (at most 15 minutes from the submit); the
+               end prints \`gh repo delete …\` to remove it
 
 Rerunning changes nothing that is in place. The one-time admin token and the phone's link
 count as in place while they are pending or once redeemed: a rerun after they expired unused

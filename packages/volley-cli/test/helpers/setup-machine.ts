@@ -123,6 +123,8 @@ export interface FirstWaveWorld {
   repoRoot: string;
   /** An exit code for the command whose argv starts with this (a failure to inject). */
   fail?: { prefix: string; code: number; stderr: string };
+  /** The wave ids `volleyd run` accepted: a second submit of one is refused, as the daemon does. */
+  submitted: Set<string>;
 }
 
 export const HELLO_PR = "https://github.com/octo-volley/volley-hello-aaaa/pull/1";
@@ -181,6 +183,7 @@ export function fakeMachine(
       nextIssue: 7,
       states: [...MERGING],
       repoRoot: join(home, ".volley", "repos"),
+      submitted: new Set(),
     },
     clock: NOW,
     loaded: new Set(),
@@ -240,7 +243,19 @@ export function fakeMachine(
         }),
       );
     }
-    if (a[0] === "bun" && a[1] === volleydCli && (a[2] === "validate" || a[2] === "run")) {
+    if (a[0] === "bun" && a[1] === volleydCli && a[2] === "validate") return ok();
+    if (a[0] === "bun" && a[1] === volleydCli && a[2] === "run") {
+      // The daemon takes a second submit of a wave id as a new version of that wave, which an
+      // ended wave refuses: the step must give every run its own id.
+      const id = /^wave: (\S+)$/m.exec(readText(a[3] as string) ?? "")?.[1] ?? "";
+      if (fw.submitted.has(id)) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: `wave '${id}' is complete; a new version applies only to a live wave`,
+        };
+      }
+      fw.submitted.add(id);
       return ok();
     }
     if (line === layout.restart) {
@@ -407,8 +422,12 @@ export function fakeMachine(
     },
     now: () => m.clock,
     random: () => 0,
-    waveState: async () =>
-      (m.firstWave.states.length > 1 ? m.firstWave.states.shift() : m.firstWave.states[0]) ?? null,
+    // A wave volleyd was never given has no state.
+    waveState: async (wave: string) =>
+      !m.firstWave.submitted.has(wave)
+        ? null
+        : ((m.firstWave.states.length > 1 ? m.firstWave.states.shift() : m.firstWave.states[0]) ??
+          null),
     platform: opts.platform ?? "darwin",
     uid: 501,
     lanHost: () => "desk.example",

@@ -7,7 +7,6 @@ import {
   GH_REPO_VIEW,
   HELLO_ISSUE_TITLE,
   HELLO_README,
-  HELLO_WAVE,
   ghIssueCreateArgv,
   ghRepoCreateArgv,
   ghRepoDeleteLine,
@@ -19,6 +18,7 @@ import {
   helloRelease,
   helloRepoName,
   helloSuffix,
+  helloWave,
   helloWaveYaml,
   issueNumberOf,
 } from "./first-wave-repo";
@@ -31,10 +31,10 @@ import type { SetupContext, StepPlan } from "./step";
  * makes a scratch private repository (`gh repo create volley-hello-<4> --private --clone`; or
  * takes the clone `--repo` names), files one issue ("Add HELLO.md"), pushes a release branch,
  * adds the repository to the fleet (`volley repo add <owner/name> --wait`: volleyd clones it
- * under `fleet.repo_root` and trusts it), writes `.volley/waves/hello.yaml` in that clone, checks
- * it (`volleyd validate`), submits it (`volleyd run … --owner <coordinator>`), and follows
- * `volley/_waves/hello/state` until the PR is merged, the wave fails or blocks, or 15 minutes
- * pass. `--simulated` (CI, the soak) runs it against volley-sim's fake `gh` and `claude`: the
+ * under `fleet.repo_root` and trusts it), writes `.volley/waves/hello-<4>.yaml` in that clone
+ * (every run its own wave id), checks it (`volleyd validate`), submits it (`volleyd run …
+ * --owner <coordinator>`), and follows `volley/_waves/hello-<4>/state` until the PR is merged,
+ * the wave fails or blocks, or 15 minutes after the submit pass. `--simulated` (CI, the soak) runs it against volley-sim's fake `gh` and `claude`: the
  * origin is a bare repository under `$VOLLEY_SIM_HOME`, and the wave runs from the scratch clone
  * itself (volleyd cannot clone a simulated repository from GitHub).
  *
@@ -80,10 +80,18 @@ export interface WaveView {
 /** `$VOLLEYD_HOME/first-wave.json`: the last test wave's outcome. */
 export interface FirstWaveRecord extends FirstWaveMetrics {
   at: string;
+  /** The wave's id (`hello-<4>`). */
+  wave: string;
   /** The scratch repository setup made (absent for `--repo`): what to delete. */
   scratch?: string;
+  /** The scratch repositories earlier runs made: still there to delete. */
+  earlier?: string[];
   repo: string;
 }
+
+/** Every scratch repository a record names, the earliest first. */
+const scratchesOf = (r: FirstWaveRecord | null): string[] =>
+  r === null ? [] : [...(r.earlier ?? []), ...(r.scratch !== undefined ? [r.scratch] : [])];
 
 export const firstWaveFile = (volleydHome: string) => join(volleydHome, "first-wave.json");
 
@@ -227,6 +235,9 @@ export async function planFirstWave(ctx: SetupContext): Promise<StepPlan> {
   if (record !== null && !record.merged) {
     plan.found.push(`The last test wave did not merge (${record.at.slice(0, 10)})`);
   }
+  for (const s of scratchesOf(record)) {
+    plan.found.push(`Scratch repository of an earlier test wave: ${s} (${ghRepoDeleteLine(s)})`);
+  }
   if (o.simulated === true) plan.found.push("Simulated: volley-sim's gh and claude, no GitHub");
 
   // The one question (Enter: yes); never asked under --yes or --simulated.
@@ -238,7 +249,10 @@ export async function planFirstWave(ctx: SetupContext): Promise<StepPlan> {
   }
   plan.confirmed = true;
 
-  const name = helloRepoName(helloSuffix(deps.random));
+  const suffix = helloSuffix(deps.random);
+  const name = helloRepoName(suffix);
+  const wave = helloWave(suffix);
+  const release = helloRelease(new Date(now(ctx)), wave);
   const issue = o.issue !== undefined ? `issue #${o.issue}` : `a new issue "${HELLO_ISSUE_TITLE}"`;
   plan.changes.push({
     summary:
@@ -254,14 +268,16 @@ export async function planFirstWave(ctx: SetupContext): Promise<StepPlan> {
         : o.issue === undefined
           ? [`gh issue create "${HELLO_ISSUE_TITLE}"`]
           : []),
-      `the release branch ${helloRelease(new Date(now(ctx)))} pushed`,
+      o.repo !== undefined
+        ? `the release branch ${release} pushed, cut from ${o.repo}'s checked-out commit (HEAD)`
+        : `the release branch ${release} pushed`,
       ...(o.repo === undefined && o.simulated !== true
         ? ["volley repo add <owner/name> --wait (cloned under fleet.repo_root, trusted)"]
         : []),
-      `.volley/waves/${HELLO_WAVE}.yaml (model ${DEFAULT_MODEL}, merge: auto), volleyd validate, volleyd run --owner ${coordinator}`,
-      `followed until merged (at most ${FIRST_WAVE_DEFAULTS.timeout_ms / 60_000} minutes)`,
+      `.volley/waves/${wave}.yaml (model ${DEFAULT_MODEL}, merge: auto), volleyd validate, volleyd run --owner ${coordinator}`,
+      `followed until merged (at most ${FIRST_WAVE_DEFAULTS.timeout_ms / 60_000} minutes from the submit)`,
     ].join("\n"),
-    apply: () => runFirstWave(ctx, { ...o, coordinator, name, env }),
+    apply: () => runFirstWave(ctx, { ...o, coordinator, name, wave, env }),
   });
   return plan;
 }
@@ -273,6 +289,7 @@ async function runFirstWave(
   o: FirstWaveOptions & {
     coordinator: string;
     name: string;
+    wave: string;
     env: Record<string, string | undefined>;
   },
 ): Promise<string[]> {
@@ -295,7 +312,8 @@ async function runFirstWave(
     return r.stdout;
   };
   const lines: string[] = [];
-  const release = helloRelease(new Date(t0));
+  const release = helloRelease(new Date(t0), o.wave);
+  const earlier = scratchesOf(readFirstWave(ctx.volleydHome));
   let clone: string;
   let scratch: string | undefined;
   if (o.repo === undefined) {
@@ -355,19 +373,29 @@ async function runFirstWave(
     lines.push(`Added ${scratch} to the fleet: ${waveRepo} (ready)`);
   }
 
-  const file = join(waveRepo, ".volley", "waves", `${HELLO_WAVE}.yaml`);
+  const file = join(waveRepo, ".volley", "waves", `${o.wave}.yaml`);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, helloWaveYaml({ repo: waveRepo, release, model: DEFAULT_MODEL, issue }));
+  writeFileSync(
+    file,
+    helloWaveYaml({ wave: o.wave, repo: waveRepo, release, model: DEFAULT_MODEL, issue }),
+  );
   await x([deps.bun, volleydCli(repoRoot), "validate", file]);
   await x([deps.bun, volleydCli(repoRoot), "run", file, "--owner", o.coordinator]);
   lines.push(`Submitted ${file} (owner ${o.coordinator})`);
 
-  const until = t0 + FIRST_WAVE_DEFAULTS.timeout_ms;
+  // The cap counts from the submit: the repository's setup does not eat into the wave's time.
+  const until = now(ctx) + FIRST_WAVE_DEFAULTS.timeout_ms;
   const waveState = deps.waveState as NonNullable<typeof deps.waveState>;
   let end: WaveOutcome = null;
   let last: WaveView | null = null;
+  let readError: string | null = null;
   for (;;) {
-    last = await waveState(HELLO_WAVE).catch(() => null);
+    try {
+      last = await waveState(o.wave);
+    } catch (e) {
+      last = null;
+      readError = e instanceof Error ? e.message : String(e);
+    }
     end = waveOutcome(last);
     if (end !== null || now(ctx) >= until) break;
     await deps.sleep(FIRST_WAVE_DEFAULTS.poll_ms);
@@ -381,9 +409,12 @@ async function runFirstWave(
     wall_ms: wall,
     pr,
     merged,
+    wave: o.wave,
     repo: waveRepo,
     ...(scratch !== undefined ? { scratch } : {}),
+    ...(earlier.length > 0 ? { earlier } : {}),
   });
+  const deletes = [...earlier, ...(scratch !== undefined ? [scratch] : [])].map(ghRepoDeleteLine);
   if (end?.end === "done") {
     lines.push(`Merged ${pr ?? "the PR"} in ${formatWall(wall)}`);
     if (scratch !== undefined) {
@@ -391,20 +422,22 @@ async function runFirstWave(
         `Delete the scratch repository when you no longer want it: ${ghRepoDeleteLine(scratch)} (and its clones: ${clone}${waveRepo !== clone ? `, ${waveRepo}` : ""})`,
       );
     }
+    for (const s of earlier)
+      lines.push(`An earlier test wave's scratch repository: ${ghRepoDeleteLine(s)}`);
     return lines;
   }
   const why =
     end === null
-      ? `did not finish within ${FIRST_WAVE_DEFAULTS.timeout_ms / 60_000} minutes`
+      ? `did not finish within ${FIRST_WAVE_DEFAULTS.timeout_ms / 60_000} minutes${last === null && readError !== null ? ` (reading its state: ${readError})` : ""}`
       : `${end.end}: ${end.why}`;
-  const tail = journalTail(ctx.volleydHome, HELLO_WAVE, FIRST_WAVE_DEFAULTS.journal_tail);
+  const tail = journalTail(ctx.volleydHome, o.wave, FIRST_WAVE_DEFAULTS.journal_tail);
   const decisions = last?.open_decisions ?? [];
   throw new Error(
     [
       `the test wave ${why}${pr !== null ? ` (PR ${pr})` : ""}`,
       ...(tail.length > 0 ? ["  journal (last events):", ...tail.map((l) => `    ${l}`)] : []),
       `  open decisions: ${decisions.length > 0 ? decisions.join(", ") : "none"}`,
-      `  follow it with \`volleyd status ${HELLO_WAVE}\`; rerun \`${FIRST_WAVE_LATER}\` once it is fixed${scratch !== undefined ? `; delete the scratch repository with ${ghRepoDeleteLine(scratch)}` : ""}`,
+      `  follow it with \`volleyd status ${o.wave}\`; rerun \`${FIRST_WAVE_LATER}\` once it is fixed (a rerun runs a wave of its own)${deletes.length > 0 ? `; delete the scratch repositories with ${deletes.join(", ")}` : ""}`,
     ].join("\n"),
   );
 }

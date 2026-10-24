@@ -314,8 +314,8 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
 }
 
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/volley-hello-[a-z0-9]{4}$/;
-/** A test wave's file: `<abs clone>/.volley/waves/hello.yaml`. */
-const HELLO_FILE = /^\/[^\n\0]*\/\.volley\/waves\/hello\.yaml$/;
+/** A test wave's file: `<abs clone>/.volley/waves/hello-<4>.yaml`. */
+const HELLO_FILE = /^\/[^\n\0]*\/\.volley\/waves\/hello-[a-z0-9]{4}\.yaml$/;
 
 /** `volley repo add <owner/volley-hello-…> --wait` and `volley repo status <it> --json`. */
 function firstWaveVolley(rest: readonly string[]): boolean {
@@ -328,7 +328,7 @@ function firstWaveVolley(rest: readonly string[]): boolean {
   );
 }
 
-/** `volleyd validate <hello.yaml>` and `volleyd run <hello.yaml> --owner <name>`. */
+/** `volleyd validate <hello-<4>.yaml>` and `volleyd run <it> --owner <name>`. */
 function firstWaveVolleyd(rest: readonly string[]): boolean {
   const [verb, file, flag, owner] = rest;
   if (!HELLO_FILE.test(file ?? "")) return false;

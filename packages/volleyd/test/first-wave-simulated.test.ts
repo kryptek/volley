@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { type WaveView, waveOutcome } from "volley-cli/setup/first-wave";
-import { HELLO_WAVE, helloWaveYaml } from "volley-cli/setup/first-wave-repo";
+import { helloWaveYaml } from "volley-cli/setup/first-wave-repo";
 import { DEFAULT_MODEL } from "../src/config-defaults";
 import { waveStateTopic } from "../src/control";
 import { type SoakEnv, WAVE, makeSoakEnv } from "./helpers/soak-env";
@@ -21,16 +21,13 @@ afterEach(async () => {
 
 describe("the test wave (volley setup's first-wave step), simulated", () => {
   it(
-    "runs the step's hello.yaml to done: the PR merged, read back as done",
+    "runs the step's hello-<4>.yaml to done: the PR merged, read back as done",
     { timeout: 120_000 },
     async () => {
       s = await makeSoakEnv({
         tasks: ["T1"],
         yaml: ({ repo, release, config }) =>
-          `${helloWaveYaml({ repo, release, model: DEFAULT_MODEL, issue: 300 }).replace(
-            `wave: ${HELLO_WAVE}`,
-            `wave: ${WAVE}`,
-          )}config: ${config}\n`,
+          `${helloWaveYaml({ wave: WAVE, repo, release, model: DEFAULT_MODEL, issue: 300 })}config: ${config}\n`,
       });
       const env = s;
       await env.until(() => env.daemon.snapshot(WAVE)?.status === "complete", "the wave complete");
