@@ -305,14 +305,20 @@ code {
 .win--compact .acct-pick option {
   color: var(--ink);
 }
-/* "Why here" popovers and tooltips: the wave window's host chips and the agent window's machine chip. */
+/*
+ * "Why here" popovers and tooltips: the wave window's host chips and the agent window's machine
+ * chip. `look/Popover.tsx` portals them into <body> and sets left/top in screen pixels, so no
+ * window clips them and the canvas never scales them. Screen layers: hud 4, top bar 5, dock 6,
+ * popovers 9, pop-outs 10, sheets 20 / machine sheets 60.
+ */
 .host-pop {
-  position: absolute;
-  z-index: 5;
-  top: calc(100% + 4px);
-  left: 0;
+  position: fixed;
+  z-index: 9;
   width: max-content;
-  max-width: min(360px, 80vw);
+  max-width: min(360px, calc(100vw - 16px));
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--ink);
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
