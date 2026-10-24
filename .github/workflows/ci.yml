@@ -92,7 +92,8 @@ jobs:
           PR: ${{ needs.reuse.outputs.pr }}
           URL: ${{ needs.reuse.outputs.url }}
           TREE: ${{ needs.reuse.outputs.tree }}
-        run: echo "PR #$PR, run $URL, tree $TREE" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "PR #$PR, run $URL, tree $TREE" | tee -a "$GITHUB_STEP_SUMMARY"
 
   validate-schemas:
     name: Schema validation

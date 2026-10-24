@@ -33,6 +33,9 @@ import {
   machineTopic,
   peerDoctorStamp,
   peerFile,
+  peerHeartbeat,
+  peerTunnel,
+  readPeerConfig,
   realDeps,
   redeemScript,
   runPeer,
@@ -1736,6 +1739,230 @@ describe("volley peer run (the service)", () => {
     const io = makeBufferIO();
     expect(await runService(io, deps(fakeExec(() => ({})).exec))).toBe(1);
     expect(io.readStderr()).toContain("volley peer join");
+  });
+});
+
+describe("every machine through its own tunnel (#460)", () => {
+  const cfg: PeerConfig = {
+    name: "box-a",
+    host: "dev@host",
+    target: "dev@box-a",
+    namespace: "default",
+    broker: { host: "127.0.0.1", port: 1883 },
+    remote_port: 21883,
+    username: "box-a",
+    password: "peer-secret",
+    joined_at: "2026-10-19T09:00:00.000Z",
+  };
+  const writeCfg = (over: Partial<PeerConfig> = {}) => {
+    mkdirSync(join(home, ".volley"), { recursive: true });
+    writeFileSync(peerFile(home), JSON.stringify({ ...cfg, ...over }), { mode: 0o600 });
+  };
+  /** The service for `beats` heartbeats; the URLs it connected to. */
+  async function serve(beats: number, f = fakeExec(() => ({}))) {
+    const stop = new AbortController();
+    let n = 0;
+    const urls: string[] = [];
+    const base = deps(f.exec);
+    const d = deps(f.exec, {
+      sleep: async (ms) => {
+        if (ms !== PEER_DEFAULTS.heartbeat_ms) return;
+        await new Promise((r) => setTimeout(r, 20));
+        if (++n >= beats) stop.abort();
+      },
+      connect: async (url, auth, will) => {
+        urls.push(url);
+        return base.connect(url, auth, will);
+      },
+    });
+    const code = await runService(makeBufferIO(), d, stop.signal);
+    return { code, urls, f };
+  }
+
+  it("a peer.json without the new keys reads as tunnel: ssh, heartbeat: true", () => {
+    writeCfg();
+    const read = readPeerConfig(home);
+    expect(peerTunnel(read)).toBe("ssh");
+    expect(peerHeartbeat(read)).toBe(true);
+    writeCfg({ tunnel: "none", heartbeat: false });
+    expect(peerTunnel(readPeerConfig(home))).toBe("none");
+    expect(peerHeartbeat(readPeerConfig(home))).toBe(false);
+  });
+
+  it("tunnel: none spawns no ssh and connects to the broker on this machine's loopback", async () => {
+    writeCfg({ tunnel: "none", remote_port: 1883 });
+    const { code, urls, f } = await serve(2);
+    expect(code).toBe(0);
+    expect(f.calls.some((c) => c.argv[0] === "ssh")).toBe(false);
+    expect(urls[0]).toBe("mqtt://127.0.0.1:1883");
+  });
+
+  it("heartbeat: false publishes no record and still keeps the tunnel", async () => {
+    writeCfg({ heartbeat: false });
+    const reader = new VolleyBroker();
+    await reader.connect({ url: tb.url, agentId: "reader" });
+    const records: string[] = [];
+    const unsubscribe = await reader.subscribeStream(machineTopic("box-a"), ({ payload }) => {
+      records.push(payload);
+    });
+    const { code, urls, f } = await serve(3);
+    await new Promise((r) => setTimeout(r, 100));
+    await unsubscribe();
+    await reader.disconnect();
+    expect(code).toBe(0);
+    expect(urls).toEqual([]);
+    expect(records).toEqual([]);
+    expect(f.calls.find((c) => c.argv[1] === "-N")?.argv).toEqual(tunnelArgv(cfg));
+  });
+
+  /** retarget on a fake clock: the probe answers from `answersAt` (ms after the start) on. */
+  function retargetDeps(f: ReturnType<typeof fakeExec>, answersAt: number | null) {
+    let t = Date.parse("2026-10-19T09:00:00.000Z");
+    const start = t;
+    const probed: number[] = [];
+    const d = deps(f.exec, {
+      now: () => new Date(t),
+      sleep: async (ms) => {
+        t += ms;
+      },
+      probePort: async (port) => {
+        probed.push(port);
+        return answersAt !== null && t - start >= answersAt;
+      },
+    });
+    return { d, probed };
+  }
+
+  it("retarget rewrites host and remote_port, restarts the unit and exits 0 once the tunnel answers", async () => {
+    writeCfg({ repos: { "acme/widgets": "/path/to/repo" } });
+    const f = fakeExec(() => ({}));
+    const { d, probed } = retargetDeps(f, 3_000);
+    const r = await run(["retarget", "--to", "dev@other", "--port", "21884"], d);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    const after = JSON.parse(readFileSync(peerFile(home), "utf-8")) as PeerConfig;
+    expect(after).toMatchObject({
+      ...cfg,
+      host: "dev@other",
+      remote_port: 21884,
+      tunnel: "ssh",
+      repos: { "acme/widgets": "/path/to/repo" },
+    });
+    expect(statSync(peerFile(home)).mode & 0o777).toBe(0o600);
+    expect(f.calls.filter((c) => c.argv[0] === "systemctl").map((c) => c.argv)).toEqual([
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", SYSTEMD_UNIT],
+      ["systemctl", "--user", "restart", SYSTEMD_UNIT],
+    ]);
+    expect(new Set(probed)).toEqual(new Set([21884]));
+    expect(r.stdout).toContain("dev@other");
+    expect(r.stdout).toContain("21884");
+  });
+
+  it("retarget exits 1 when the tunnel does not answer within 30 s", async () => {
+    writeCfg();
+    const f = fakeExec(() => ({}));
+    const { d, probed } = retargetDeps(f, null);
+    const r = await run(["retarget", "--to", "dev@other"], d);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("did not answer");
+    expect(r.stderr).toContain("30 s");
+    expect(probed.length).toBeGreaterThan(1);
+    expect(probed.length).toBeLessThanOrEqual(32);
+  });
+
+  it("retarget --tunnel none points remote_port at the broker's port and runs no ssh", async () => {
+    writeCfg();
+    const f = fakeExec(() => ({}));
+    const { d, probed } = retargetDeps(f, 0);
+    const r = await run(["retarget", "--to", "dev@broker-box", "--tunnel", "none"], d);
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8"))).toMatchObject({
+      host: "dev@broker-box",
+      tunnel: "none",
+      remote_port: 1883,
+    });
+    expect(probed).toEqual([1883]);
+    expect(f.calls.some((c) => c.argv[0] === "ssh")).toBe(false);
+  });
+
+  it("retarget from none to ssh without --port takes the tunnel's default port, not the broker's", async () => {
+    writeCfg({ tunnel: "none", remote_port: 1883 });
+    const f = fakeExec(() => ({}));
+    const { d, probed } = retargetDeps(f, 0);
+    const r = await run(["retarget", "--to", "dev@other", "--tunnel", "ssh"], d);
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8"))).toMatchObject({
+      tunnel: "ssh",
+      remote_port: PEER_DEFAULTS.remote_port,
+    });
+    expect(probed).toEqual([PEER_DEFAULTS.remote_port]);
+  });
+
+  it("retarget puts peer.json back when the service cannot be restarted", async () => {
+    writeCfg();
+    const before = JSON.parse(readFileSync(peerFile(home), "utf-8"));
+    const f = fakeExec((c) => (c.argv[0] === "systemctl" ? { code: 1, stderr: "no" } : {}));
+    const { d } = retargetDeps(f, 0);
+    const r = await run(["retarget", "--to", "dev@other"], d);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("not restarted");
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8"))).toEqual(before);
+  });
+
+  it("retarget refuses a missing or option-like --to and a bad --tunnel", async () => {
+    writeCfg();
+    const f = fakeExec(() => ({}));
+    const { d } = retargetDeps(f, 0);
+    expect((await run(["retarget"], d)).exitCode).toBe(2);
+    expect((await run(["retarget", "--to=-oProxyCommand=x"], d)).exitCode).toBe(2);
+    expect((await run(["retarget", "--to", "dev@a b"], d)).exitCode).toBe(2);
+    expect((await run(["retarget", "--to", "dev@x", "--tunnel", "udp"], d)).exitCode).toBe(2);
+    expect(f.calls).toEqual([]);
+  });
+
+  it("join --tunnel none asks for no tunnel, and peer.json keeps it", async () => {
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify({ ...JOINED, remote_port: 1883 }) }));
+    const r = await run(
+      [
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@host",
+        "--name",
+        "box-a",
+        "--target",
+        "dev@box-a",
+        "--tunnel",
+        "none",
+        "--repo",
+        box.repoPath,
+        "--no-service",
+      ],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(0);
+    const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
+    expect(redeemRequest(ssh[1]?.input as string).request).toMatchObject({ tunnel: "none" });
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8"))).toMatchObject({
+      tunnel: "none",
+      remote_port: 1883,
+    });
+  });
+
+  it("join without --tunnel sends and writes no tunnel key (an ssh tunnel is the default)", async () => {
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath, "--no-service"],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(0);
+    const ssh = f.calls.filter((c) => c.argv[0] === "ssh");
+    expect(redeemRequest(ssh[1]?.input as string).request.tunnel).toBeUndefined();
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8")).tunnel).toBeUndefined();
+    expect((await run(["join", "X", "--to", "h", "--tunnel", "udp"], deps(f.exec))).exitCode).toBe(
+      2,
+    );
   });
 });
 

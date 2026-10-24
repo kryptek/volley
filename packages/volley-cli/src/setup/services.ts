@@ -243,6 +243,29 @@ async function systemdChange(
   };
 }
 
+/**
+ * volleyd's systemd user unit (Linux): `volleyd daemon` with the services' env. Also what
+ * `volley role receive` installs on a supervisor's new machine.
+ */
+export function volleydUnitSpec(
+  bun: string,
+  volleydCli: string,
+  env: Record<string, string>,
+  volleydHome: string,
+): ServiceSpec {
+  return {
+    name: "volleyd",
+    label: "systems.volley.volleyd",
+    description: "Volley wave supervisor (volleyd)",
+    args: [bun, volleydCli, "daemon"],
+    env,
+    log: join(volleydHome, "volleyd.log"),
+    workdir: volleydHome,
+    // volleyd may start the local tmux server: a restart (`volley deploy`) must not kill it.
+    killMode: "process",
+  };
+}
+
 /** Where setup links the `volley` and `volleyd` commands. */
 export const binDir = (ctx: SetupContext) => join(ctx.home, ".volley", "bin");
 
@@ -659,17 +682,7 @@ async function planServicesWith(ctx: SetupContext, withCmux: boolean): Promise<S
   } else if (platform === "linux") {
     volleydService = await systemdChange(
       ctx,
-      {
-        name: "volleyd",
-        label: "systems.volley.volleyd",
-        description: "Volley wave supervisor (volleyd)",
-        args: [bun, volleydCli, "daemon"],
-        env,
-        log: join(ctx.volleydHome, "volleyd.log"),
-        workdir: ctx.volleydHome,
-        // volleyd may start the local tmux server: a restart (`volley deploy`) must not kill it.
-        killMode: "process",
-      },
+      volleydUnitSpec(bun, volleydCli, env, ctx.volleydHome),
       "Install volleyd as a systemd user service (volleyd.service)",
       out.found,
     );

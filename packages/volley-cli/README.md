@@ -352,6 +352,27 @@ what it safely can. On the machine to pair: `volley peer join <code> --to <user@
 non-interactive ssh `PATH`, else as `~/.volley/bin/volley` (where `volley setup` installs it; a
 Mac's ssh `PATH` has neither bun nor volley); `--remote-volley <command>` names another.
 
+Every machine reaches the broker through its own tunnel, kept in `~/.volley/peer.json`: `tunnel:
+ssh` (the default) keeps `ssh -N -L 127.0.0.1:<port>:<broker>` to `--to` up; `join --tunnel none`
+is for the machine the broker runs on, which reaches it at `127.0.0.1:<broker port>` with no ssh
+at all (the port volleyd answers; before that the doctor checks against `--port`, else 1883).
+peer.json's `heartbeat: false` keeps the tunnel but publishes no machine record: the supervisor's
+own machine, which publishes its own. A peer.json without either key is `tunnel: ssh, heartbeat:
+true`.
+
+### `volley peer retarget`
+
+```sh
+volley peer retarget --to dev@box-b                  # the broker moved to box-b: re-point the tunnel
+volley peer retarget --to dev@box-b --port 21884     # and use another local port
+volley peer retarget --to dev@box-a --tunnel none    # the broker is on this machine now
+```
+
+Rewrites peer.json's `host` (and `remote_port` and `tunnel` when given; with `--tunnel none` the
+port defaults to the broker's), restarts the `volley peer run` service through the same unit files
+`join` writes, and exits 0 only once `127.0.0.1:<port>` answers; 1 when it does not within 30 s.
+volleyd's `peer_retarget` runs it on a paired machine over ssh during a broker move.
+
 ### `volley peer remove`
 
 ```sh
@@ -597,6 +618,48 @@ volley role status --json       # the whole record: the broker's address, lan, v
 With no record (volleyd has never run against this broker) it exits 1 with
 `no roles record: is volleyd running?`. `--timeout <s>` (default 2) bounds the wait for the
 retained record; `--broker-url`, `--username` and `--password` as everywhere.
+
+### Moving the supervisor to another machine
+
+An admin moves the supervisor (`volleyd` and its home) to a paired machine with the `role_plan` /
+`role_move` ops (SPEC §4.6.24). The fleet must be quiet first: no wave running, paused or
+releasing and no agent live (or the move waits with `drain`). The plan checks the target is
+paired and up, at the supervisor's version, signed in to GitHub with write access and to Claude,
+that it can ssh to every other paired machine, and which terminal its agents will use.
+
+**What travels**, in one bundle the old supervisor copies over ssh: the journals (`waves/`),
+`config.yaml`, the paired machines and their codes (`peers.json`, `peer-codes.json`),
+`claude-usage.json`, `roles.json`, the auth dir's `accounts.json`, `tokens.json`, `admin.json`
+and `coordinator.json`, and the Claude account registry (`~/.volley/claude/accounts.json`).
+**What does not**: worktrees, `cmux.json`, logs, `setup.json`, Claude profile directories (sign
+the target's Claude logins in there) and the keychain. The broker stays where it is: the new
+supervisor reaches it through the target's own peer tunnel.
+
+On the target, volleyd runs:
+
+```sh
+volley role receive supervisor <bundle> --from <old machine> \
+  [--local-terminal cmux|tmux] [--local-agents never] [--broker-url <url>]
+```
+
+It checks the bundle's manifest (a mismatch changes nothing), restores the files (anything
+already there is kept under `$VOLLEYD_HOME/roles/<move_id>/replaced/`), makes `config.yaml` name
+this machine (`fleet.local_name`; its own `hosts.<name>` entry is dropped), stops this machine's
+own heartbeat (`peer.json` `heartbeat: false`; its tunnel stays), rotates volleyd's broker login
+(`broker.json`, `dynsec-admin.json`, mode 0600: the old process can never reconnect), installs
+and starts volleyd as a service, and prints a pairing code for the old machine last. The new
+supervisor continues the move: it re-pairs the old machine as an ssh + tmux peer and writes the
+roles record. If re-pairing fails the move still ends `done`, with a warning: re-pair it by hand
+(`volley peer invite --for <old>` here, `volley peer join … --tunnel none` there). Exit codes: 0
+received; 1 nothing changed; 3 a step after the rotation failed and was undone, but volleyd's login
+has a password the old machine does not know (the old supervisor rotates it again).
+
+Waves stopped for the move replay as `stopped` on the new machine: continue one with
+`volleyd resume <wave>`. Within 7 days, the admin op `role_rollback { move_id }` moves the
+supervisor back as a new supervisor move (a `volley role rollback` verb is still to come): a fresh
+bundle of the current home travels back, so what changed since the move goes with it. The move
+undone is marked `rolled_back` at that hand-over; a rollback that fails leaves it `done`. After
+7 days the move's record is removed.
 
 ---
 

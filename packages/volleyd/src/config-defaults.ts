@@ -400,6 +400,26 @@ export const DAEMON_DEFAULTS = {
   local_doctor_timeout_ms: 120_000,
   /** Bound on a `peer_doctor` run on a box (a `--fix` may check out and install volley there). */
   peer_doctor_timeout_ms: 900_000,
+  /** Bound on `volley peer retarget` on a box (`peer_retarget`): it waits up to 30 s for its tunnel. */
+  peer_retarget_timeout_ms: 90_000,
+  /** How long `peer_retarget` waits for the box's record to come `up` through the new tunnel. */
+  peer_retarget_grace_ms: 120_000,
+  // --- Machine roles (roles/, SPEC §4.6.24) ---
+  /**
+   * How long a finished role move (its log, record and what it replaced) is kept for a
+   * `role_rollback`: 7 days, fixed by the SPEC (no tunable). The supervisor's next start after
+   * that removes it.
+   */
+  role_move_retention_ms: 7 * 86_400_000,
+  /** A role move's health check: how many times it is tried, and how long apart. */
+  role_health_attempts: 6,
+  role_health_wait_ms: 5_000,
+  /** Bound on one step of a role move run over ssh (a Desk install builds the Desk). */
+  role_step_timeout_ms: 600_000,
+  /** How long a Desk move's sign-in link for the new address stays valid. */
+  role_signin_ttl_s: 3_600,
+  /** Bound on a supervisor move's ssh-back probe from its target to one other machine. */
+  role_ssh_probe_timeout_s: 10,
   // --- Fleet: merge nudge (overlap.ts) ---
   /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
   nudge_files_shown: 5,
