@@ -312,7 +312,7 @@ describe("ClaudeAccounts", () => {
     const send = vi.fn(async () => ({ applied: true, rejected: [] }));
     setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
-    expect(within(group).getByRole("radio", { name: "Most headroom" })).toHaveAttribute(
+    expect(within(group).getByRole("radio", { name: "Balanced" })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -330,7 +330,7 @@ describe("ClaudeAccounts", () => {
     expect(screen.queryByRole("button", { name: "Move to Personal" })).toBeNull();
     rerender(view(undefined, { group: "defaults" }));
     expect(screen.queryByRole("radiogroup")).toBeNull();
-    expect(screen.getByText("Most headroom")).toBeInTheDocument();
+    expect(screen.getByText("Balanced")).toBeInTheDocument();
   });
 });
 

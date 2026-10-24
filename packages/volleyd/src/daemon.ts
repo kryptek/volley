@@ -1749,7 +1749,12 @@ export class Daemon {
         ? { signinEntryWaitMs: opts.claude.signinEntryWaitMs }
         : {}),
       rank: (candidates, model) =>
-        rankAccounts(accountRecords(this.usage), candidates, { model, now: this.now() }),
+        rankAccounts(accountRecords(this.usage), candidates, {
+          model,
+          now: this.now(),
+          ...this.config.effective().claude.balance,
+        }),
+      capPct: () => this.config.effective().claude.balance.cap_pct,
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
       onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
       // --- Fleet (F8): a paired machine's sign-in (`primary@<name>`) and its forward ---
@@ -4758,6 +4763,7 @@ export class Daemon {
       rankAccounts(accountRecords(this.usage), this.claude.candidates(machine), {
         model,
         now: this.now(),
+        ...this.config.effective().claude.balance,
       });
     const withCandidates = (sel: SelectedAccount): SelectedAccount =>
       sel.candidates !== undefined ? sel : { ...sel, candidates: rank() };
@@ -5962,6 +5968,7 @@ export class Daemon {
         ? pin
         : (rankAccounts(records, this.claude.candidates(isLocal ? LOCAL_MACHINE : name), {
             now: this.now(),
+            ...this.config.effective().claude.balance,
           })[0]?.account ?? null);
     return {
       name,

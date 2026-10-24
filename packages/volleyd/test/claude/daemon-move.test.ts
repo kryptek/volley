@@ -280,6 +280,19 @@ describe("agent_account_limit (D2): autopilot moves a running agent off a hot ac
     const chosen = s.journal().filter((e) => e.type === "account_chosen");
     expect(chosen.map((e) => e.data.source)).toEqual(["default", "move"]);
     expect(chosen[1]?.data).toMatchObject({ account: "work", attempt: 2, why });
+    // the daemon's ranking journals the rank rule's fields on every candidate
+    const cands = chosen[1]?.data.candidates as Record<string, unknown>[];
+    expect(cands.length).toBeGreaterThan(0);
+    for (const c of cands)
+      expect(Object.keys(c)).toEqual(
+        expect.arrayContaining([
+          "score",
+          "binding",
+          "eligible",
+          "binding_left",
+          "binding_resets_at",
+        ]),
+      );
     const spawned = s.journal().filter((e) => e.type === "agent_spawned");
     expect(spawned[1]?.data).toMatchObject({ claude_account: "work", account_why: why });
     const wt = join(s.env.home, "wt", "w1", "T1-implementer");

@@ -726,12 +726,20 @@ export function demoClaudeAccounts() {
 
 /** The demo's `claude_balance` answer: per machine, the account each family's next spawn takes. */
 export function demoClaudeBalance() {
+  // The 5-hour window resets on the hour, about three hours out (the same in every answer).
+  const resets = new Date((Math.floor(Date.now() / 3_600_000) + 3) * 3_600_000).toISOString();
   const candidate = (account: string, five: number, weekly: number) => ({
     account,
-    headroom: 100 - five,
+    headroom: 100 - Math.max(five, weekly),
     five_hour_pct: five,
     weekly_pct: weekly,
     agents: 0,
+    // the 5-hour window binds, about three hours from its reset
+    score: ((100 - five) * 5) / (100 * 3),
+    binding: "five_hour" as const,
+    eligible: true,
+    binding_left: 100 - five,
+    binding_resets_at: resets,
   });
   return {
     machines: [

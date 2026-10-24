@@ -67,6 +67,11 @@ const unranked = (account: string): Ranked => ({
   five_hour_pct: null,
   weekly_pct: null,
   agents: 0,
+  score: null,
+  binding: null,
+  eligible: true,
+  binding_left: null,
+  binding_resets_at: null,
 });
 
 /**
@@ -111,6 +116,8 @@ export interface ClaudeServiceDeps {
    * (claude/usage.ts rankAccounts): the balancing rule a spawn picks by.
    */
   rank?: (candidates: readonly string[], model: string | null) => Ranked[];
+  /** `claude.balance.cap_pct` as the rank rule applies it, for the pick's `why`. */
+  capPct?: () => number;
   /**
    * The primary's plan or sign-in state changed (`claude_accounts` asked): its usage record is
    * out of date.
@@ -228,10 +235,15 @@ export class ClaudeService {
     model?: string | null;
   }): SelectedAccount {
     const rank = this.d.rank;
+    const capPct = this.d.capPct?.();
     return selectAccount(
       this.d.root,
       () => readRegistry(this.d.root),
-      want,
+      {
+        ...want,
+        ...(capPct !== undefined ? { capPct } : {}),
+        now: (this.d.now ?? this.clock.now)(),
+      },
       rank !== undefined ? (c) => rank(c, want.model ?? null) : undefined,
     );
   }

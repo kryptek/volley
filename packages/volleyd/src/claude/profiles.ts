@@ -2,8 +2,10 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize } from "node:path";
 import { ID_PATTERN } from "volley-mcp/topics";
+import { systemClock } from "../clock";
+import { CONFIG_DEFAULTS } from "../config-defaults";
 import { familyOf } from "./context-window";
-import type { Ranked } from "./usage";
+import { type Ranked, untilLabel } from "./usage";
 
 /**
  * Claude account profiles: one Claude Code profile per account, each its own
@@ -17,7 +19,10 @@ import type { Ranked } from "./usage";
  */
 
 export const PRIMARY_ACCOUNT = "primary";
-/** `claude.default_account` value that balances, as `null` does (D3; kept as a synonym). */
+/**
+ * `claude.default_account` value that balances, as `null` does (D3): the legacy name for balancing,
+ * kept as a synonym (the rule ranks by pace now, not by headroom alone).
+ */
 export const MOST_HEADROOM = "most_headroom";
 /** The machine a profile lives on when `--machine` names none: the supervisor's own. */
 export const LOCAL_MACHINE = "local";
@@ -274,6 +279,10 @@ export function selectAccount(
     machine?: string;
     /** The agent's model: its family's weekly window counts (and is named in `why`). */
     model?: string | null;
+    /** `claude.balance.cap_pct`, named in `why` (default: the tunable's default). */
+    capPct?: number;
+    /** The clock `why` measures resets against (default: now). */
+    now?: number;
   },
   /** The candidates ranked (claude/usage.ts rankAccounts); absent: no usage data. */
   rank?: (candidates: readonly string[]) => Ranked[],
@@ -351,7 +360,11 @@ export function selectAccount(
     dir,
     source: "balance",
     machine,
-    why: balanceLine(ranked, machine, familyOf(want.model)),
+    why: balanceLine(ranked, machine, familyOf(want.model), {
+      cap: want.capPct ?? CONFIG_DEFAULTS.claude.balance.cap_pct,
+      // real clock: the default when the caller injects no clock
+      now: want.now ?? systemClock.now(),
+    }),
     candidates: ranked,
   };
 }
@@ -362,28 +375,59 @@ const unknownRank = (account: string): Ranked => ({
   five_hour_pct: null,
   weekly_pct: null,
   agents: 0,
+  score: null,
+  binding: null,
+  eligible: true,
+  binding_left: null,
+  binding_resets_at: null,
 });
 
+const capitalized = (s: string) => `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
+
 /**
- * `work: most headroom on peer-a (5h 12%, 7d 40%; primary@peer-a 5h 88%)`: the pick's figures,
- * then each other candidate's 5-hour one.
+ * `work: 18% left, resets in 52m (use it or lose it) on peer-a; primary@peer-a 7d 72% left,
+ * resets in 2d 4h; spare over the 97% cap (5h 98%)`: the pick's binding window (named unless it
+ * is the 5-hour one), then each other candidate's. Ids and record keys only, never an e-mail.
  */
-function balanceLine(ranked: readonly Ranked[], machine: string, family: string | null): string {
+function balanceLine(
+  ranked: readonly Ranked[],
+  machine: string,
+  family: string | null,
+  o: { cap: number; now: number },
+): string {
   const [best, ...rest] = ranked;
   if (best === undefined) return `no candidate account on ${machine}`;
   const pct = (n: number) => `${Math.round(n)}%`;
-  const own = [
-    ...(best.five_hour_pct !== null ? [`5h ${pct(best.five_hour_pct)}`] : []),
-    ...(best.weekly_pct !== null ? [`7d ${pct(best.weekly_pct)}`] : []),
-    ...(best.model_weekly_pct !== undefined && family !== null
-      ? [`${family.charAt(0).toUpperCase()}${family.slice(1)} ${pct(best.model_weekly_pct)}`]
-      : []),
-  ];
-  const others = rest.map((r) =>
-    r.five_hour_pct !== null
-      ? `${r.account} 5h ${pct(r.five_hour_pct)}`
-      : `${r.account} no usage yet`,
-  );
-  const figures = [own.length > 0 ? own.join(", ") : "no usage yet", ...others].join("; ");
-  return `${bareId(best.account)}: most headroom on ${machine} (${figures})`;
+  const label = (kind: Ranked["binding"]) =>
+    kind === "weekly"
+      ? "7d"
+      : kind === "model_weekly" && family !== null
+        ? capitalized(family)
+        : "5h";
+  const left = (r: Ranked) =>
+    `${r.binding === "five_hour" ? "" : `${label(r.binding)} `}${pct(r.binding_left ?? 0)} left, resets in ${untilLabel(r.binding_resets_at, o.now)}`;
+  const overCap = (r: Ranked) => {
+    const windows: [Ranked["binding"], number | null | undefined][] = [
+      ["five_hour", r.five_hour_pct],
+      ["weekly", r.weekly_pct],
+      ["model_weekly", r.model_weekly_pct],
+    ];
+    const [kind, p] = windows.find(([, p]) => p != null && p >= o.cap) ?? [r.binding, null];
+    const figure = p != null ? ` (${label(kind)} ${pct(p)})` : "";
+    return `over the ${o.cap}% cap${figure}`;
+  };
+  const other = (r: Ranked) =>
+    r.binding === null
+      ? `${r.account} no usage yet`
+      : r.eligible
+        ? `${r.account} ${left(r)}`
+        : `${r.account} ${overCap(r)}`;
+  const id = bareId(best.account);
+  const head =
+    best.binding === null
+      ? `${id}: no usage yet (balanced) on ${machine}`
+      : best.eligible
+        ? `${id}: ${left(best)} (use it or lose it) on ${machine}`
+        : `${id}: over the ${o.cap}% cap, least over on ${machine} (${label(best.binding)} ${pct(100 - (best.binding_left ?? 0))}, resets in ${untilLabel(best.binding_resets_at, o.now)})`;
+  return [head, ...rest.map(other)].join("; ");
 }

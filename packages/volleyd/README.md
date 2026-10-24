@@ -560,7 +560,7 @@ volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP ser
 volley claude rename work "Work account"  # rename the account (every profile of its login)
 volley claude remove work           # remove a profile: its dir, usage record and registry entry
 volley claude remove work@peer-a    # … one kept on a paired machine
-volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
+volley claude balance               # per machine: accounts in balance order (the room that expires first), each family's next pick
 volley claude balance --model <model> --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
 ```
@@ -691,7 +691,7 @@ exactly that `CLAUDE_CONFIG_DIR`, and a local spawn naming it is refused.
 
 **Selection.** An agent runs under its last account move, else its task's `account:`, else the
 wave's, else `claude.default_account` when it names `primary` or a registry id. Otherwise (the
-default `null`, or `most_headroom`, a synonym) volleyd **balances**: the agent runs under the
+default `null`, or `most_headroom`, its legacy name) volleyd **balances**: the agent runs under the
 account `rankAccounts` (see "Usage metering") puts first among the signed-in accounts of the
 machine it runs on, for its model. On the supervisor's machine those are `primary` and every
 signed-in local profile; on a paired machine `primary@<name>` and every signed-in profile kept
@@ -699,8 +699,9 @@ for it (`<id>@<name>`). With the primary alone there is nothing to balance, so a
 machine runs as before. Every pick is journaled right before `agent_spawned`, as
 `account_chosen { task, role, attempt, account, machine, source, why, candidates }` (`source`:
 `task`, `wave`, `config`, `balance`, `move`, or `default` for the primary alone), and
-`agent_spawned.data.account_why` repeats `why`, e.g. `work: most headroom on peer-a (5h 12%,
-7d 40%; primary@peer-a 5h 88%)`, `task names work`, `moved off primary (5h 91%) by autopilot`.
+`agent_spawned.data.account_why` repeats `why`, e.g. `work: 18% left, resets in 52m (use it
+or lose it) on peer-a; primary@peer-a 7d 72% left, resets in 2d 4h; spare over the 97% cap (5h
+98%)`, `task names work`, `moved off primary (5h 91%) by autopilot`.
 No e-mail is in either. `claude_balance { model?, machine? }` answers each machine's ranked
 candidates and the pick per model family. A spawn under an unknown account, one
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
@@ -774,13 +775,28 @@ open `account_limit`) as soon as the restarted daemon reads it. A remote host's 
 that host's own Claude login: its samples fold into `<acct>@<host>` (e.g. `primary@gpu-box`),
 never the local `primary`, and that record opens no decision (a wave move cannot reach it).
 
-**The rank rule** (`rankAccounts`, SPEC §4.6.12): an account's headroom is the smallest of
-`100 − five_hour`, `100 − weekly` and, when the model's family (`fable`, `opus`, `sonnet`,
-`haiku`; `familyOf`) has a `model_weekly` window on the record, `100 − model_weekly[family]`. A
-window whose reset passed counts as empty, one not reported is left out, and a probe reading
-that is no longer fresh still counts until its `resets_at`. An account with no usage at all
-ranks after every known one, signed-in profiles before the primary. Highest headroom wins; ties
-go to fewer agents, then candidate order.
+**The rank rule** (`rankAccounts`, SPEC §4.6.12): spend the room that expires first, without
+hitting a limit. The windows that count are the 5-hour, the 7-day and, when the model's family
+(`fable`, `opus`, `sonnet`, `haiku`; `familyOf`) has a `model_weekly` window on the record,
+`model_weekly[family]`; one not reported is left out, and a probe reading that is no longer fresh
+still counts until its `resets_at`. Each window's **pace** is its room left against the time to
+its reset, in units of its own length (5 h, or 168 h for a weekly one):
+`(left / 100) / (hours to reset / length)`, the hours floored at one minute. 1 is on pace to use
+the window exactly as it resets; above 1 the room expires unused (spend it); below 1 the account
+would hit the limit first (spare it). A window whose reset passed counts as 0% and a full window
+away; a `null` `resets_at` counts as a full window away. The account's `score` is its smallest
+pace and `binding` the window that sets it: the tightest window decides, so a 95% 5-hour window
+loses to a comfortable one however much weekly room is expiring. An account is `eligible` while
+every window it reported is under `claude.balance.cap_pct` (default 97). Eligible accounts come
+first, then the rest (the least over first: the cap orders, it never refuses a spawn; the
+all-hot `account_limit` below is the notification). Each group goes by score, highest first; an
+account with no usage at all counts as on pace (1). Scores within `claude.balance.tie_band_pct`
+(default 10) percent of a band's leader count as equal and go to fewer agents, then signed-in
+profiles before the primary (its interactive use goes unreported), then candidate order. Both
+tunables are the supervisor's (`volleyd config set claude.balance.cap_pct=95`); a wave's own
+`config:` does not change them. `account_chosen` candidates carry `score`, `binding`,
+`eligible`, `binding_left` and `binding_resets_at`; `headroom` keeps its meaning (the smallest
+room left) for the readers that show it.
 
 **Running agents** (D2). When an account a supervised agent runs under reaches the wave's
 `claude.warn_at_pct` in a window that counts for it (5-hour, 7-day, or its model family's weekly
@@ -798,8 +814,8 @@ moving, or a second time for the same task role, account, window and `resets_at`
 **Pinned waves.** When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a
 wave's `config:` can override it), each running wave with agents on that account whose account
 is pinned (its task, its `account:` or `claude.default_account` names one) gets one wave-level
-`account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
-most headroom among those under the threshold in both windows, else a signed-in account that
+`account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account the rank
+rule puts first among those under the threshold in both windows, else a signed-in account that
 has not reported 5-hour usage yet (labelled "no usage yet", or "no 5-hour usage yet" when it has
 reported weekly usage; a signed-in profile before `primary`, whose interactive use goes
 unreported; none: only `not now`), with
@@ -810,8 +826,8 @@ one is refused and the decision stays open) journals `wave_account_moved { from,
 decision_id }`: the wave's new agents that would have started under `from` start under `to`,
 and running agents finish where they are. A balanced wave gets no `move wave` decision; only
 when every candidate on a machine it uses is at or over the level in its 5-hour window does it
-get one `account_limit` with no suggestion (`not now`: new agents take the one with the most
-room until the window resets).
+get one `account_limit` with no suggestion (`not now`: new agents take the one the balance puts
+first until the window resets).
 
 **Switching a wave's account.** `wave_account_set { wave, acct }` (the Desk's wave window: its
 `Account:` chip) sets the account the wave's agents not yet spawned start under, ahead of its
