@@ -13,6 +13,7 @@ import {
   REACT_BITS_BACKGROUNDS,
   isLazyBackground,
 } from "../src/look/backgrounds";
+import { STEP_FX_LABEL } from "../src/look/options";
 import { THEMES, THEME_LABEL } from "../src/look/themes";
 import { LOOK0, LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import { Appearance } from "../src/settings/Appearance";
@@ -35,7 +36,7 @@ function Harness({ onArrange = () => {} }: { onArrange?: () => void }) {
   const [look, setLook] = useLook();
   latest = look;
   // As App does: the theme applies to <html> on every change.
-  useEffect(() => applyLookToDocument({ theme: look.theme }), [look.theme]);
+  useEffect(() => applyLookToDocument({ theme: look.theme, fx: look.fx }), [look.theme, look.fx]);
   return (
     <>
       <Background which={look.bg} dim={look.dim} backgrounds={stub} />
@@ -202,6 +203,57 @@ describe("Settings › Appearance and General", () => {
       expect(seg(group, name)).toHaveAttribute("aria-checked", "true");
     }
     expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("current step: nine effect cards under Theme, Glint pressed; a click stores and applies one", () => {
+    render(<Harness />);
+    const group = screen.getByRole("group", { name: "Current step" });
+    const cards = within(group).getAllByRole("button");
+    expect(cards.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Glint",
+      "Pulse",
+      "Aurora",
+      "Scanline",
+      "Ember",
+      "Liquid",
+      "Circuit",
+      "Prism",
+      "Classic",
+    ]);
+    expect(STEP_FX_LABEL.map(([id]) => id)).toEqual([
+      "glint",
+      "pulse",
+      "aurora",
+      "scan",
+      "ember",
+      "liquid",
+      "circuit",
+      "prism",
+      "classic",
+    ]);
+    expect(cards.filter((b) => b.getAttribute("aria-pressed") === "true")).toHaveLength(1);
+    expect(within(group).getByRole("button", { name: "Glint" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings.indexOf("Current step")).toBe(headings.indexOf("Theme") + 1);
+    STEP_FX_LABEL.forEach(([id, , desc], i) => {
+      const card = cards[i] as HTMLElement;
+      expect(card).toHaveAccessibleDescription(desc);
+      // The preview lives in its own shadow root, out of reach of <html>'s data-fx.
+      const demo = card.querySelector(".fx-demo")?.shadowRoot;
+      expect(demo?.querySelector(`[data-fx="${id}"] > .fx-cur`), id).toHaveTextContent("fixup");
+    });
+    expect(document.documentElement.dataset.fx).toBe("glint");
+    fireEvent.click(within(group).getByRole("button", { name: "Classic" }));
+    expect(stored().fx).toBe("classic");
+    expect(latest.fx).toBe("classic");
+    expect(document.documentElement.dataset.fx).toBe("classic");
+    expect(within(group).getByRole("button", { name: "Classic" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("agent icons: a Windows-group segment, Clawd characters by default", () => {

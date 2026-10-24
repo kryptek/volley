@@ -355,6 +355,30 @@ describe("Pipeline", () => {
   });
 });
 
+describe("Pipeline depth classes", () => {
+  const items = () =>
+    within(screen.getByRole("list", { name: "Pipeline stage" })).getAllByRole("listitem");
+
+  it("the demo's fixup agent: done, done, current, future", () => {
+    renderAgent(stateWith(), FIXUP);
+    const li = items();
+    expect(li.map((el) => el.className)).toEqual([
+      "done fx-done",
+      "done fx-done",
+      "cur fx-cur",
+      "fx-future",
+    ]);
+    expect(li[2]).toHaveAttribute("aria-current", "step");
+    expect(li[2]).toHaveAccessibleName("fixup");
+  });
+
+  it("a held stage adds held to the current item", () => {
+    render(<Pipeline stage="awaiting_decision" agentRole="implementer" />);
+    const cur = screen.getByRole("listitem", { current: "step" });
+    expect(cur).toHaveClass("cur", "fx-cur", "held");
+  });
+});
+
 describe("AgentWindow: the account it runs under (T8)", () => {
   const ev = (type: string, seq: number, data: Record<string, unknown>): DeskMessage => ({
     topic: "volley/_waves/status-chip/events",

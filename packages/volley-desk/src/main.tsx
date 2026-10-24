@@ -5,6 +5,7 @@ import { SignInGate } from "./auth/SignInGate";
 import { applyLookToDocument } from "./look/applyLook";
 import { loadLook } from "./look/useLook";
 import "./styles/desk.css";
+import "./styles/stepfx.css";
 import "./styles/responsive.css";
 import "./styles/lite.css";
 
