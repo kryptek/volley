@@ -4,7 +4,13 @@ import { dateOf, systemClock } from "../clock";
 import { defaultsFor } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
-import { Daemon, type DaemonOptions, type SpawnerOptions, realLocalDoctor } from "../daemon";
+import {
+  Daemon,
+  type DaemonOptions,
+  type SpawnerOptions,
+  realLocalDoctor,
+  realLocalProbe,
+} from "../daemon";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { ghIssueBody } from "../overlap";
 
@@ -57,7 +63,7 @@ export async function daemon({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     d = await Daemon.start({
       ...daemonStartOptions(target, env, spawner),
       // The supervisor is its own machine's doctor (SPEC §4.6.15).
-      fleet: { localDoctor: realLocalDoctor() },
+      fleet: { localDoctor: realLocalDoctor(), localProbe: realLocalProbe() },
       // With the spawner on, `stop` presses Escape in the agent's workspace and resolved
       // decisions land in the task's worktree (`.volley/decisions.md`); both from agent_spawned.
       // real clock: the log line's timestamp, for the human reading the log

@@ -32,11 +32,19 @@ afterEach(() => env.cleanup());
 /** What `claude auth status` says for Claude Code's default profile (no CLAUDE_CONFIG_DIR). */
 const PRIMARY_STATUS = { loggedIn: true, subscriptionType: "pro" };
 
-/** Claude Code signing a profile in: it records the login in the profile's `.claude.json`. */
+/**
+ * Claude Code signing a profile in: it records the login in the profile's `.claude.json`, keeping
+ * what the file holds (a later `claude auth status`, a prime's, leaves the seeded keys).
+ */
 function signedInAs(dir: string) {
+  let prior: Record<string, unknown> = {};
+  try {
+    prior = JSON.parse(readFileSync(join(dir, ".claude.json"), "utf-8"));
+  } catch {}
   writeFileSync(
     join(dir, ".claude.json"),
     JSON.stringify({
+      ...prior,
       userID: "c0ffee",
       oauthAccount: {
         accountUuid: "11111111-2222-3333-4444-555555555555",

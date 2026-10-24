@@ -492,8 +492,10 @@ describe("demo mode's read-only control", () => {
     expect((await reads("wave_account_set", { wave: "status-chip", acct: null })).ok).toBe(true);
     expect((await reads("claude_account_rename", {})).ok).toBe(true);
     expect((await reads("claude_account_remove", {})).ok).toBe(true);
+    // a card missing data asks volleyd to read it: the demo answers ok
+    expect((await reads("claude_prime", { acct: "team" })).ok).toBe(true);
     for (const op of ["claude_account_add", "claude_signin", "resolve"])
       expect((await reads(op, {})).ok).toBe(false);
-    expect(control).toHaveBeenCalledTimes(5);
+    expect(control).toHaveBeenCalledTimes(6);
   });
 });

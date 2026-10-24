@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
+import type { ProbeLogin } from "../claude/usage";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
@@ -16,7 +17,7 @@ import {
   TMUX_SIZE,
 } from "../fence";
 import { fetchFailure, lockedFetch } from "../git-lock";
-import { type DoctorReport, parseDoctorReport } from "../machines";
+import { type DoctorReport, parseDoctorReport, parseProbeReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { type MachineFacts, cloneSource, managedWorktreeRoot } from "../repos";
 import { SpawnError } from "../spawn-error";
@@ -218,6 +219,11 @@ export interface RemoteHost extends Host {
    * added one without a clone is cloned. Throws when ssh fails or the doctor printed no report.
    */
   runDoctor(opts: DoctorRunOptions): Promise<DoctorReport>;
+  /**
+   * One Claude login's usage probe on the box (`volley peer doctor --json --probe-login
+   * <profile>`, a prime): its `claude_logins`. Null when the box's volley has no such flag.
+   */
+  probeLogin?(profile: string): Promise<ProbeLogin[] | null>;
 }
 
 /** What a doctor run on a box is asked to do (`RemoteHost.runDoctor`). */
@@ -791,6 +797,20 @@ export class SshTmuxHost implements RemoteHost {
     if (r === null || transportFailed(r)) throw this.sshFailed("PATH probe", r);
     // `command -v` exits 1 when a name is missing: what it printed is the answer either way.
     return parsePathProbe(r.stdout);
+  }
+
+  async probeLogin(profile: string): Promise<ProbeLogin[] | null> {
+    const r = await this.run(
+      [
+        {
+          argv: ["volley", "peer", "doctor", "--json", "--probe-login", profile],
+          cwd: this.spec.volley_dir,
+        },
+      ],
+      { timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms },
+    ).catch(this.noResult("usage probe"));
+    if (r === null || transportFailed(r)) throw this.sshFailed("volley peer doctor", r);
+    return parseProbeReport(r.stdout);
   }
 
   async runDoctor(opts: DoctorRunOptions): Promise<DoctorReport> {

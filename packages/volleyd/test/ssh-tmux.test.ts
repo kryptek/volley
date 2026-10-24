@@ -1213,6 +1213,25 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     ]);
   });
 
+  it("probeLogin runs the doctor's one-login probe and reads its claude_logins (#498)", async () => {
+    const login = { profile: "work", state: "ok", attempted_at: "2026-10-19T09:00:00.000Z" };
+    const r = remote(() => ({ code: 0, stdout: JSON.stringify({ claude_logins: [login] }) }));
+    expect(await r.host.probeLogin("work")).toEqual([login]);
+    expect(r.steps()).toEqual([
+      {
+        argv: ["volley", "peer", "doctor", "--json", "--probe-login", "work"],
+        cwd: SPEC.volley_dir,
+      },
+    ]);
+  });
+
+  it("probeLogin is null on a volley older than --probe-login, and throws when ssh fails", async () => {
+    const old = remote(() => ({ code: 2, stderr: "volley peer: Unknown option '--probe-login'" }));
+    expect(await old.host.probeLogin("default")).toBeNull();
+    const down = remote(() => ({ code: 255, stderr: "Permission denied (publickey)" }));
+    await expect(down.host.probeLogin("default")).rejects.toThrow(/Permission denied/);
+  });
+
   it("runDoctor throws with ssh's reason, or when the doctor printed no report", async () => {
     const down = remote(() => ({ code: 255, stderr: "Permission denied (publickey)" }));
     await expect(down.host.runDoctor({ fix: false })).rejects.toThrow(

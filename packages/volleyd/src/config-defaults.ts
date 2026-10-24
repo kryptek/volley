@@ -362,6 +362,8 @@ export const DAEMON_DEFAULTS = {
   claude_signin_timeout_ms: 900_000,
   /** Bound on one `claude auth status`. */
   claude_auth_status_timeout_ms: 15_000,
+  /** A login is primed (`claude_prime`: identity, plan, usage probe) at most once in this long. */
+  claude_prime_interval_ms: 300_000,
   /**
    * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before its URL is
    * published: an ssh that exits sooner (the local port is taken) restarts the sign-in once.

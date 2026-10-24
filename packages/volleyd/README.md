@@ -406,6 +406,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir?, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
 | `claude_account_add` | `label`, `machine?` (a paired machine: the profile is created and signed in there, as `<acct>@<machine>`), `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
 | `claude_signin` | `acct` (a registry account, `primary@<name>` or `<acct>@<name>`), `by` | the same, for an existing profile |
+| `claude_prime` | `acct` (a registry account, `<acct>@<name>`, `primary` or `primary@<name>`), `by` | `{ acct, machine, plan? }` once the login's identity and plan are read again into the registry and its machine's usage probe of that one login has folded (`volley peer doctor --json --probe-login <profile>`, the whole doctor on a volley older than the flag); every `claude_signin_done` primes too. Refused inside 5 min of the login's last prime: `primed 2 min ago; next in 3 min` |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
 | `claude_account_rename` | `acct` (`<acct>` or `<acct>@<name>`), `label`, `by` | `{ acct, label, renamed: [<acct>…] }`; refused for an empty or reserved label, the primary or an unknown account |
 | `claude_account_remove` | `acct` (`<acct>` or `<acct>@<name>`), `by` | `{ acct, machine, dir_removed, dir_left? }`; refused while an agent, a running wave or `claude.default_account` uses the profile |
@@ -4176,6 +4177,8 @@ ALLOW (program by bare name only — never a path):
   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
     §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
     an absolute path with no `.`/`..` segment and no control character
+  volley peer doctor --json --probe-login PROFILE   (a prime: one login's usage reading;
+    PROFILE `default` or a profile id)
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
@@ -4285,6 +4288,7 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+  volley peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
     <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no

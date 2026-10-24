@@ -101,6 +101,7 @@ const HELP = `Usage:
                        [--repo-add <owner/name>[=<path>]]... [--repo-remove <owner/name>]...
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
                        [--sharing <json>] [--supervisor-volley-dir <path>]
+                       [--probe-login <profile>]
                                                Check this machine; --fix applies the safe fixes
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
@@ -148,6 +149,8 @@ doctor options:
                            The checkout the supervisor launches this machine's agents from
                            (its hosts.<name>.volley_dir; volleyd's Repair passes it): every
                            volley MCP entry must run it as well as this checkout
+  --probe-login <profile>  Only the usage probe of one Claude login (\`default\` or a profile
+                           id), no checks: what volleyd runs to prime a login it signed in
 
 Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -181,6 +184,7 @@ const OPTIONS = {
   release: { type: "string" },
   sharing: { type: "string" },
   "supervisor-volley-dir": { type: "string" },
+  "probe-login": { type: "string" },
   ttl: { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
@@ -202,6 +206,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   release: ["doctor"],
   sharing: ["doctor"],
   "supervisor-volley-dir": ["doctor"],
+  "probe-login": ["doctor"],
   for: ["invite"],
   replace: ["join"],
   drain: ["remove"],
@@ -1804,6 +1809,15 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
   if (supervisorDir !== undefined && !isAbsolute(supervisorDir)) {
     io.stderr("volley peer doctor: --supervisor-volley-dir must be an absolute path\n");
     return EXIT.USAGE;
+  }
+  const probeLogin = v["probe-login"];
+  if (probeLogin !== undefined) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(probeLogin)) {
+      io.stderr("volley peer doctor: --probe-login takes `default` or a profile id\n");
+      return EXIT.USAGE;
+    }
+    // A prime's probe: one login's reading, nothing else checked, saved or republished.
+    return doctor(io, deps, { json: v.json === true, probeLogin });
   }
   let flagSharing: Sharing | null = null;
   if (v.sharing !== undefined) {

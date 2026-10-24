@@ -13,6 +13,7 @@ import {
   parseSigninUrl,
   signinFlow,
   signinSession,
+  statusIdentity,
   stoppedReason,
 } from "./signin";
 import {
@@ -307,7 +308,7 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
         type: "claude_signin_done",
         acct,
         ...(s.plan !== undefined ? { plan: s.plan } : {}),
-        ...(profileDir !== null ? await identity(profileDir) : {}),
+        ...(profileDir !== null ? await statusIdentity(s, () => identity(profileDir)) : {}),
       });
     if ((await run([{ argv: ["tmux", "has-session", "-t", session] }]))?.code !== 0)
       return fail("claude auth login exited before the sign-in finished");
