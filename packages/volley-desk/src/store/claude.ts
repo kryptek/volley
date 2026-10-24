@@ -706,6 +706,9 @@ export interface BalanceCandidate {
   eligible?: boolean;
   binding_left?: number | null;
   binding_resets_at?: string | null;
+  /** Agents counted against it and its binding window's projection with them; absent from an older volleyd. */
+  in_flight?: number;
+  projected_pct?: number | null;
 }
 
 /** volleyd's `claude_balance` answer (SPEC §4.6.11): per machine, its ranking and the picks. */

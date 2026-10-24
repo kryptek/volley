@@ -68,6 +68,8 @@ describe("spawn under a Claude account", () => {
         eligible: true,
         binding_left: 18,
         binding_resets_at: "2026-10-21T00:52:00.000Z",
+        in_flight: 0,
+        projected_pct: 82,
       },
       {
         account: "primary",
@@ -80,6 +82,8 @@ describe("spawn under a Claude account", () => {
         eligible: true,
         binding_left: 72,
         binding_resets_at: "2026-10-23T04:00:00.000Z",
+        in_flight: 1,
+        projected_pct: 29.25,
       },
     ];
     const out = await spawnAgent(

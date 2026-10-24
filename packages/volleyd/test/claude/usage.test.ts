@@ -20,6 +20,7 @@ import {
   parseMoveAnswer,
   parseUsage,
   pruneBook,
+  publishedRecord,
   rankAccounts,
   restoreBook,
   sampleAccount,
@@ -53,6 +54,9 @@ function sample(
     captured_at: at,
   };
 }
+
+/** #556's rank options: nothing in flight (the projection is the identity). */
+const none = { in_flight: () => 0 };
 
 const fold = (book: UsageBook, agent: string, wave: string | null, p: UsagePayload) =>
   foldUsage(book, { agent, wave, account: p.account as string, payload: p });
@@ -126,7 +130,8 @@ describe("rankAccounts", () => {
     b = fold(b, "a2", null, sample("primary", 60, at, 20));
     return accountRecords(b);
   };
-  const o = { now: NOW, cap_pct: 97, tie_band_pct: 10 };
+  // #556's rule: nothing in flight, so the projection is the identity
+  const o = { now: NOW, cap_pct: 97, tie_band_pct: 10, in_flight: () => 0 };
   const iso = (hours: number) => new Date(NOW + hours * 3.6e6).toISOString();
   /** A window `pct` used whose reset is `resetsInHours` from NOW (`null`: unknown). */
   const win = (pct: number, resetsInHours: number | null): UsageWindow => ({
@@ -338,6 +343,8 @@ describe("rankAccounts", () => {
       eligible: true,
       binding_left: 20,
       binding_resets_at: iso(144),
+      in_flight: 0,
+      projected_pct: 80,
     });
     expect(rankAccounts(accounts, ["fresh"], o)[0]).toEqual({
       account: "fresh",
@@ -350,6 +357,8 @@ describe("rankAccounts", () => {
       eligible: true,
       binding_left: null,
       binding_resets_at: null,
+      in_flight: 0,
+      projected_pct: null,
     });
     expect(mostHeadroom(three(), [], NOW)).toBeNull();
   });
@@ -366,6 +375,270 @@ describe("rankAccounts", () => {
       "work",
     ]);
     expect(order(rankAccounts(accounts, ["primary", "fresh"], o))).toEqual(["fresh", "primary"]);
+  });
+});
+
+describe("rankAccounts: agents in flight (#557)", () => {
+  const at = NOW_ISO;
+  const o = {
+    now: NOW,
+    cap_pct: 97,
+    tie_band_pct: 10,
+    reserve_h: 1,
+    agent_cost_pct_h: 10,
+    agent_cost_weekly_pct_h: 1.25,
+  };
+  const iso = (hours: number) => new Date(NOW + hours * 3.6e6).toISOString();
+  const win = (pct: number, hours: number): UsageWindow => ({ pct, resets_at: iso(hours) });
+  const recs = (
+    spec: Record<string, { five?: UsageWindow; weekly?: UsageWindow }>,
+  ): Record<string, AccountUsage> =>
+    Object.fromEntries(
+      Object.entries(spec).map(([account, s]) => [
+        account,
+        {
+          account,
+          five_hour: s.five ?? null,
+          weekly: s.weekly ?? null,
+          agents: [],
+          waves: [],
+          sampled_at: at,
+        },
+      ]),
+    );
+
+  /** One spawn pass: `picks` picks, each seeing the ones before it as in flight. */
+  const pass = (accounts: Record<string, AccountUsage>, cands: string[], picks: number) => {
+    const reserved: Record<string, number> = Object.fromEntries(cands.map((c) => [c, 0]));
+    const rows: ReturnType<typeof rankAccounts>[] = [];
+    for (let i = 0; i < picks; i++) {
+      const ranked = rankAccounts(accounts, cands, {
+        ...o,
+        in_flight: (a) => reserved[a] ?? 0,
+      });
+      rows.push(ranked);
+      const r = ranked[0];
+      if (r === undefined) throw new Error("no pick");
+      reserved[r.account] = (reserved[r.account] ?? 0) + 1;
+    }
+    return { reserved, rows };
+  };
+
+  it("twelve spawns in one pass spread over the accounts that fit; the 95% one takes none", () => {
+    const accounts = recs({
+      hot: { five: win(95, 3), weekly: win(20, 100) },
+      mid: { five: win(40, 3), weekly: win(20, 100) },
+      cool: { five: win(10, 3), weekly: win(20, 100) },
+    });
+    const { reserved, rows } = pass(accounts, ["hot", "mid", "cool"], 12);
+    expect(reserved.hot).toBe(0);
+    expect((reserved.mid ?? 0) + (reserved.cool ?? 0)).toBe(12);
+    expect(reserved.mid).toBeLessThanOrEqual(5);
+    // after each pick its account's projected 5-hour usage stays under the cap
+    const after: Record<string, number> = { hot: 0, mid: 0, cool: 0 };
+    for (const ranked of rows) {
+      const pick = ranked[0] as (typeof ranked)[number];
+      after[pick.account] = (after[pick.account] ?? 0) + 1;
+      expect(pick.eligible).toBe(true);
+      const sampled = pick.five_hour_pct as number;
+      expect(sampled + (after[pick.account] as number) * 10).toBeLessThan(97);
+    }
+    // the 95% account ranks last from the first pick (its window must last 3 more hours)
+    expect(rows[0]?.at(-1)).toMatchObject({ account: "hot", projected_pct: 95, in_flight: 0 });
+    // with one agent in flight it projects over the cap: ineligible
+    const one = rankAccounts(accounts, ["hot"], { ...o, in_flight: () => 1 })[0];
+    expect(one).toMatchObject({ eligible: false, projected_pct: 100, in_flight: 1 });
+  });
+
+  it("when nothing fits, every pick is still made and the picks spread", () => {
+    const accounts = recs({
+      a: { five: win(95, 3) },
+      b: { five: win(96, 3) },
+      c: { five: win(96, 3) },
+    });
+    const { reserved, rows } = pass(accounts, ["a", "b", "c"], 12);
+    expect(Object.values(reserved).reduce((x, y) => x + y, 0)).toBe(12);
+    for (const n of Object.values(reserved)) expect(n).toBeLessThanOrEqual(5);
+    // each fits one agent under the cap; from then on every row is over it
+    for (const ranked of rows.slice(3)) expect(ranked.every((r) => !r.eligible)).toBe(true);
+  });
+
+  it("running agents reduce the projected headroom the score and the cap use", () => {
+    const accounts = recs({ work: { five: win(60, 2) } });
+    const three = rankAccounts(accounts, ["work"], { ...o, in_flight: () => 3 })[0];
+    expect(three).toMatchObject({ projected_pct: 90, in_flight: 3, five_hour_pct: 60 });
+    expect(three?.score).toBeCloseTo((10 * 5) / (100 * 2), 10);
+    expect(three?.binding_left).toBe(40);
+    const none = rankAccounts(accounts, ["work"], { ...o, in_flight: () => 0 })[0];
+    expect(none?.score).toBeCloseTo((40 * 5) / (100 * 2), 10);
+    expect(none).toMatchObject({ projected_pct: 60, in_flight: 0 });
+  });
+
+  it("in flight defaults to the record's sampled agents", () => {
+    const accounts = recs({ work: { five: win(60, 2) } });
+    (accounts.work as AccountUsage).agents = ["a1", "a2"];
+    expect(rankAccounts(accounts, ["work"], o)[0]).toMatchObject({
+      in_flight: 2,
+      projected_pct: 80,
+    });
+  });
+
+  it("a window whose reset has passed projects from 0 on a fresh window", () => {
+    const accounts = recs({ work: { five: win(90, -1) } });
+    const r = rankAccounts(accounts, ["work"], { ...o, in_flight: () => 2 })[0];
+    expect(r).toMatchObject({ projected_pct: 20, eligible: true });
+  });
+
+  it("the look-ahead is capped by the time to reset", () => {
+    const accounts = recs({ work: { five: win(50, 0.5) } });
+    expect(rankAccounts(accounts, ["work"], { ...o, in_flight: () => 1 })[0]?.projected_pct).toBe(
+      55,
+    );
+  });
+
+  it("weekly windows reserve the weekly default cost", () => {
+    const accounts = recs({ work: { five: win(10, 4), weekly: win(96, 100) } });
+    const one = { ...o, in_flight: () => 1 };
+    const hot = rankAccounts(accounts, ["work"], one)[0];
+    expect(hot).toMatchObject({ eligible: false, binding: "weekly", projected_pct: 97.25 });
+    const cheap = rankAccounts(accounts, ["work"], { ...one, agent_cost_weekly_pct_h: 0.5 })[0];
+    expect(cheap).toMatchObject({ eligible: true, projected_pct: 96.5 });
+  });
+
+  it("an account with no usage data projects nothing", () => {
+    expect(rankAccounts({}, ["fresh"], { ...o, in_flight: () => 4 })[0]).toMatchObject({
+      in_flight: 4,
+      projected_pct: null,
+      eligible: true,
+      score: null,
+    });
+  });
+});
+
+describe("rate learning (#557)", () => {
+  const T = (min: number) => new Date(NOW + min * 60_000).toISOString();
+  const five = (pct: number, min: number, resets = RESETS): UsagePayload => ({
+    ...sample("work", pct, T(min), null),
+    rate_limits: { five_hour: { pct, resets_at: resets } },
+  });
+  const learn = (book: UsageBook, p: UsagePayload, agents: number) =>
+    foldUsage(book, { agent: "a1", wave: "w1", account: "work", payload: p }, agents);
+  const rateOf = (b: UsageBook) => accountRecords(b).work?.rates?.five_hour;
+  const o = {
+    now: NOW + 120 * 60_000,
+    cap_pct: 97,
+    tie_band_pct: 10,
+    reserve_h: 1,
+    agent_cost_pct_h: 10,
+    agent_cost_weekly_pct_h: 1.25,
+    in_flight: () => 1,
+  };
+
+  it("two samples an hour apart with two agents teach 10 %/agent-hour; a third blends by EMA", () => {
+    let b = learn(emptyBook(), five(30, -60), 2);
+    expect(rateOf(b)).toBeUndefined();
+    b = learn(b, five(50, 0), 2);
+    expect(rateOf(b)).toMatchObject({ pct_per_agent_h: 10, samples: 1, at: T(0) });
+    // one observation: the default still applies (10, at a 1-hour look-ahead → 60)
+    const once = rankAccounts(accountRecords(b), ["work"], { ...o, now: NOW });
+    expect(once[0]?.projected_pct).toBe(60);
+    b = learn(b, five(60, 60), 2);
+    expect(rateOf(b)?.pct_per_agent_h).toBeCloseTo(10 * 0.7 + 5 * 0.3, 10);
+    expect(rateOf(b)?.samples).toBe(2);
+    const learned = rankAccounts(accountRecords(b), ["work"], { ...o, now: NOW + 60 * 60_000 });
+    expect(learned[0]?.projected_pct).toBeCloseTo(68.5, 10);
+  });
+
+  it("does not teach on a short gap, a falling percentage, a new window or no agents", () => {
+    const base = learn(learn(emptyBook(), five(30, -60), 2), five(50, 0), 2);
+    const seen = rateOf(base);
+    // a short gap: no observation, and the comparison point stays (a later sample still teaches)
+    const short = learn(base, five(52, 2), 2);
+    expect(rateOf(short)).toEqual(seen);
+    expect(accountRecords(short).work?.five_hour?.pct).toBe(52);
+    expect(rateOf(learn(short, five(60, 60), 2))?.samples).toBe(2);
+    for (const next of [
+      learn(base, five(40, 60), 2),
+      learn(base, five(70, 60, "2026-10-18T23:00:00.000Z"), 2),
+      learn(base, five(70, 60), 0),
+    ]) {
+      expect(rateOf(next)).toEqual(seen);
+      // the comparison point moved to the newer sample: an hour later teaches from it
+      const kept = next.accounts.work?.five_hour;
+      const then = learn(next, five((kept?.pct ?? 0) + 10, 120, kept?.resets_at ?? RESETS), 1);
+      expect(rateOf(then)?.samples).toBe(2);
+    }
+  });
+
+  it("a learned rate is kept across a reset; the projection starts from the fresh window", () => {
+    let b = learn(learn(emptyBook(), five(30, -120), 1), five(40, -60), 1);
+    b = learn(b, five(50, 0), 1);
+    expect(rateOf(b)).toMatchObject({ pct_per_agent_h: 10, samples: 2 });
+    const after = Date.parse(RESETS) + 60_000;
+    const r = rankAccounts(accountRecords(b), ["work"], { ...o, now: after })[0];
+    expect(r?.projected_pct).toBe(10);
+    b = learn(b, five(5, 260, "2026-10-18T23:10:00.000Z"), 1);
+    expect(rateOf(b)).toMatchObject({ pct_per_agent_h: 10, samples: 2 });
+  });
+
+  it("caps an observation at 100 %/agent-hour", () => {
+    const b = learn(learn(emptyBook(), five(0, -5), 1), five(100, 0), 1);
+    expect(rateOf(b)?.pct_per_agent_h).toBe(100);
+  });
+
+  it("probe readings teach the 5-hour and model-family rates", () => {
+    const login = (min: number, pct: number): ProbeLogin => ({
+      profile: "work",
+      state: "ok",
+      attempted_at: T(min),
+      reading: {
+        read_at: T(min),
+        five_hour: { pct, resets_at: RESETS },
+        model_weekly: { fable: { pct: pct / 2, resets_at: "2026-10-21T09:00:00.000Z" } },
+      },
+    });
+    const probe = (b: UsageBook, l: ProbeLogin) =>
+      foldProbe(b, { account: "work", machine: "local", login: l }, 1);
+    const b = probe(probe(emptyBook(), login(-60, 20)), login(0, 40));
+    const rates = accountRecords(b).work?.rates;
+    expect(rates?.five_hour).toMatchObject({ pct_per_agent_h: 20, samples: 1 });
+    expect(rates?.["model_weekly.fable"]).toMatchObject({ pct_per_agent_h: 10, samples: 1 });
+  });
+
+  it("learned rates survive a restart; an older book restores without them", () => {
+    const b = learn(learn(emptyBook(), five(30, -60), 2), five(50, 0), 2);
+    const back = restoreBook(bookState(b));
+    expect(accountRecords(back).work?.rates).toEqual(accountRecords(b).work?.rates);
+    // the comparison point is kept too: the next sample an hour on teaches
+    expect(rateOf(learn(back, five(60, 60), 2))?.samples).toBe(2);
+    // a book written before #557: no rates, no comparison points
+    const old = JSON.parse(bookState(b), (k, v) =>
+      k === "rates" || k === "rate_base" ? undefined : v,
+    ) as { accounts: Record<string, Record<string, unknown>> };
+    expect(old.accounts.work).not.toHaveProperty("rates");
+    const restored = restoreBook(JSON.stringify(old));
+    expect(restored.accounts.work).toBeDefined();
+    expect(accountRecords(restored).work).not.toHaveProperty("rates");
+    const corrupt = JSON.parse(bookState(b)) as typeof old;
+    (corrupt.accounts.work as Record<string, unknown>).rates = {
+      five_hour: { pct_per_agent_h: "fast", samples: 1, at: T(0) },
+      weekly: { pct_per_agent_h: 1, samples: 2, at: T(0) },
+    };
+    const kept = restoreBook(JSON.stringify(corrupt));
+    expect(kept.accounts.work?.five_hour?.pct).toBe(50);
+    expect(accountRecords(kept).work?.rates).toEqual({
+      weekly: { pct_per_agent_h: 1, samples: 2, at: T(0) },
+    });
+  });
+
+  it("the published claude_account record leaves the rates out and validates", () => {
+    const b = learn(learn(emptyBook(), five(30, -60), 2), five(50, 0), 2);
+    const rec = accountRecords(b).work as AccountUsage;
+    expect(rec.rates).toBeDefined();
+    const pub = publishedRecord(rec);
+    expect(pub).not.toHaveProperty("rates");
+    const env = envelope("_system/claude-accounts", "claude_account", pub);
+    expect(schemaErrors("claude-account.schema.json", env)).toEqual([]);
   });
 });
 
@@ -402,6 +675,7 @@ describe("limitDecisions", () => {
       candidates: ["primary", "work", "spare"],
       existing: [],
       now: NOW,
+      balance: none,
     });
     expect(out).toEqual([
       {
@@ -526,6 +800,7 @@ describe("limitDecisions", () => {
       candidates: ["primary", "work", "behind"],
       existing: [],
       now: NOW,
+      balance: none,
     })[0];
     expect(behind?.extra.suggested).toBe("primary");
     b = fold(b, "y", null, sample("spare", 5, at));
@@ -535,6 +810,7 @@ describe("limitDecisions", () => {
       candidates: ["primary", "work", "spare"],
       existing: [],
       now: NOW,
+      balance: none,
     });
     expect(d?.extra.suggested).toBe("spare");
     expect(d?.input.question).toContain("Move wave w1 to spare (5%)?");
@@ -614,9 +890,10 @@ describe("limitDecisions under balancing", () => {
       existing: [],
       now: NOW,
       balanced: () => true,
+      balance: none,
     };
     expect(limitDecisions(base)[0]?.extra.acct).toBe("work");
-    const out = limitDecisions({ ...base, balance: { cap_pct: 99, tie_band_pct: 10 } });
+    const out = limitDecisions({ ...base, balance: { ...none, cap_pct: 99, tie_band_pct: 10 } });
     expect(out[0]?.extra.acct).toBe("primary");
     expect(out[0]?.input.question).toContain("the one the balance puts first (primary, 91%)");
   });

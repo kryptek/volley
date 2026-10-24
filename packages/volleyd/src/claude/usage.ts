@@ -132,9 +132,30 @@ export interface ProbeSeen {
   read_at?: string;
 }
 
+/** A rate a window's percentage is learned under: `five_hour`, `weekly`, `model_weekly.<family>`. */
+export type RateKind = "five_hour" | "weekly" | `model_weekly.${ModelFamily}`;
+
+/** An account's learned burn in one window kind: percentage points per agent-hour. */
+export interface RateSeen {
+  pct_per_agent_h: number;
+  /** Observations folded in; the rank rule trusts the rate from `RATE_MIN_SAMPLES`. */
+  samples: number;
+  /** The newest observation's sample time. */
+  at: string;
+}
+
+/** Observations a learned rate needs before the rank rule uses it over the tunable default. */
+export const RATE_MIN_SAMPLES = 2;
+/** The shortest interval between two samples that teaches a rate (a shorter one is noise). */
+export const RATE_MIN_GAP_MS = 5 * 60_000;
+/** The weight of a new observation in the learned rate (an exponential moving average). */
+export const RATE_EMA_ALPHA = 0.3;
+const RATE_MAX = 100;
+
 /**
  * What the daemon knows: which account and wave each agent's latest sample was on, and each
- * account's windows (kept when its agents are gone: the limits are the account's).
+ * account's windows (kept when its agents are gone: the limits are the account's), and the rate
+ * at which its agents spend each window, learned from consecutive samples.
  */
 export interface UsageBook {
   /** Each agent's account, wave and the model of its latest sample. */
@@ -150,6 +171,10 @@ export interface UsageBook {
       sampled_at: string;
       /** The agent of the newest statusLine sample; absent while only probes reported. */
       sampled_by?: string;
+      /** Each window kind's learned rate (the account's burn: kept across a window's reset). */
+      rates?: Partial<Record<RateKind, RateSeen>>;
+      /** Each window kind's comparison point: the sample the next observation is measured from. */
+      rate_base?: Partial<Record<RateKind, SeenWindow>>;
     }
   >;
 }
@@ -163,14 +188,82 @@ function pickWindow(prev: SeenWindow | null, w: UsageWindow | undefined, at: str
   return prev !== null && !newer(at, prev.at) ? prev : { ...w, at };
 }
 
-/** Fold one sample of `agent` (resolved to `account`, in `wave`) into the book. */
+type Learned = Pick<UsageBook["accounts"][string], "rates" | "rate_base">;
+
+/**
+ * Learn from one newer window of `kind` (SPEC §4.6.12): against the kept comparison point with
+ * the same `resets_at`, at least `RATE_MIN_GAP_MS` later and not lower, with `agents` on the
+ * account, the observation `Δpct / (Δhours × agents)` (capped) blends into the rate by EMA. A
+ * different window, a fall or no agents moves the comparison point without teaching; a short gap
+ * keeps it (statusLine samples arrive every message). The rate is never reset: it is the
+ * account's burn, not the window's.
+ */
+export function learnRate(l: Learned, kind: RateKind, next: SeenWindow, agents: number): Learned {
+  const base = l.rate_base?.[kind];
+  if (base !== undefined && !newer(next.at, base.at)) return l;
+  const moved = (rates = l.rates): Learned => ({
+    ...(rates !== undefined ? { rates } : {}),
+    rate_base: { ...l.rate_base, [kind]: next },
+  });
+  if (base === undefined || base.resets_at !== next.resets_at || next.pct < base.pct || agents < 1)
+    return moved();
+  const ms = Date.parse(next.at) - Date.parse(base.at);
+  if (ms < RATE_MIN_GAP_MS) return l;
+  const obs = Math.min(RATE_MAX, (next.pct - base.pct) / ((ms / 3.6e6) * agents));
+  const prev = l.rates?.[kind];
+  const rate: RateSeen = {
+    pct_per_agent_h:
+      prev === undefined ? obs : prev.pct_per_agent_h * (1 - RATE_EMA_ALPHA) + obs * RATE_EMA_ALPHA,
+    samples: (prev?.samples ?? 0) + 1,
+    at: next.at,
+  };
+  return moved({ ...l.rates, [kind]: rate });
+}
+
+const learnedOf = (a: Learned | undefined): Learned => ({
+  ...(a?.rates !== undefined ? { rates: a.rates } : {}),
+  ...(a?.rate_base !== undefined ? { rate_base: a.rate_base } : {}),
+});
+
+/** `learnRate` over each window a fold took (`[kind, before, after]`): the ones that changed. */
+function learnAll(
+  l: Learned,
+  windows: readonly (readonly [
+    RateKind,
+    SeenWindow | null | undefined,
+    SeenWindow | null | undefined,
+  ])[],
+  agents: number,
+): Learned {
+  let out = l;
+  for (const [kind, before, after] of windows)
+    if (after !== null && after !== undefined && after !== before)
+      out = learnRate(out, kind, after, agents);
+  return out;
+}
+
+/**
+ * Fold one sample of `agent` (resolved to `account`, in `wave`) into the book; `agents` is how
+ * many agents run on the account now (the rates' denominator; 0 teaches nothing).
+ */
 export function foldUsage(
   book: UsageBook,
   s: { agent: string; wave: string | null; account: string; payload: UsagePayload },
+  agents = 0,
 ): UsageBook {
   const at = s.payload.captured_at;
   const prev = book.accounts[s.account];
   const latest = prev === undefined || newer(at, prev.sampled_at);
+  const five = pickWindow(prev?.five_hour ?? null, s.payload.rate_limits.five_hour, at);
+  const weekly = pickWindow(prev?.weekly ?? null, s.payload.rate_limits.weekly, at);
+  const learned = learnAll(
+    learnedOf(prev),
+    [
+      ["five_hour", prev?.five_hour, five],
+      ["weekly", prev?.weekly, weekly],
+    ],
+    agents,
+  );
   return {
     agents: {
       ...book.agents,
@@ -180,10 +273,11 @@ export function foldUsage(
       ...book.accounts,
       [s.account]: {
         ...prev,
-        five_hour: pickWindow(prev?.five_hour ?? null, s.payload.rate_limits.five_hour, at),
-        weekly: pickWindow(prev?.weekly ?? null, s.payload.rate_limits.weekly, at),
+        five_hour: five,
+        weekly,
         sampled_at: latest ? at : (prev?.sampled_at ?? at),
         sampled_by: latest ? s.agent : (prev?.sampled_by ?? s.agent),
+        ...learned,
       },
     },
   };
@@ -198,6 +292,7 @@ export function foldUsage(
 export function foldProbe(
   book: UsageBook,
   p: { account: string; machine: string; login: ProbeLogin },
+  agents = 0,
 ): UsageBook {
   const prev = book.accounts[p.account];
   const r = p.login.reading;
@@ -216,6 +311,19 @@ export function foldProbe(
           attempted_at: p.login.attempted_at,
           ...(r !== undefined ? { read_at: r.read_at } : {}),
         };
+  const five = pickWindow(prev?.five_hour ?? null, r?.five_hour, at);
+  const weekly = pickWindow(prev?.weekly ?? null, r?.weekly, at);
+  const learned = learnAll(
+    learnedOf(prev),
+    [
+      ["five_hour", prev?.five_hour, five],
+      ["weekly", prev?.weekly, weekly],
+      ...MODEL_FAMILIES.map(
+        (f) => [`model_weekly.${f}`, prev?.model_weekly?.[f], families[f]] as const,
+      ),
+    ],
+    agents,
+  );
   const sampledAt =
     prev === undefined
       ? at
@@ -227,12 +335,13 @@ export function foldProbe(
     accounts: {
       ...book.accounts,
       [p.account]: {
-        five_hour: pickWindow(prev?.five_hour ?? null, r?.five_hour, at),
-        weekly: pickWindow(prev?.weekly ?? null, r?.weekly, at),
+        five_hour: five,
+        weekly,
         ...(Object.keys(families).length > 0 ? { model_weekly: families } : {}),
         probe,
         sampled_at: sampledAt,
         ...(prev?.sampled_by !== undefined ? { sampled_by: prev.sampled_by } : {}),
+        ...learned,
       },
     },
   };
@@ -281,6 +390,30 @@ function restoreProbe(v: unknown): ProbeSeen | undefined {
   };
 }
 
+const RATE_KINDS: readonly RateKind[] = [
+  "five_hour",
+  "weekly",
+  ...MODEL_FAMILIES.map((f) => `model_weekly.${f}` as const),
+];
+
+function restoreRate(v: unknown): RateSeen | undefined {
+  const r = obj(v);
+  if (r === null || typeof r.pct_per_agent_h !== "number" || !isDate(r.at)) return;
+  if (!(r.pct_per_agent_h >= 0 && r.pct_per_agent_h <= RATE_MAX)) return;
+  if (!Number.isInteger(r.samples) || (r.samples as number) < 1) return;
+  return { pct_per_agent_h: r.pct_per_agent_h, samples: r.samples as number, at: r.at as string };
+}
+
+/** The readable entries of a kept `rates` / `rate_base` map (absent: none readable). */
+function restoreKinds<T>(v: unknown, one: (x: unknown) => T | null | undefined) {
+  const out: Partial<Record<RateKind, T>> = {};
+  for (const k of RATE_KINDS) {
+    const x = one(obj(v)?.[k]);
+    if (x !== undefined && x !== null) out[k] = x;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** A book from `bookState` text, no agents; an unreadable file or entry is left out. */
 export function restoreBook(text: string): UsageBook {
   let raw: unknown;
@@ -304,6 +437,8 @@ export function restoreBook(text: string): UsageBook {
       if (w !== undefined && w !== null) families[f] = w;
     }
     const probe = restoreProbe(a.probe);
+    const rates = restoreKinds(a.rates, restoreRate);
+    const base = restoreKinds(a.rate_base, restoreWindow);
     accounts[id] = {
       five_hour: five,
       weekly,
@@ -311,6 +446,8 @@ export function restoreBook(text: string): UsageBook {
       ...(probe !== undefined ? { probe } : {}),
       sampled_at: a.sampled_at as string,
       ...(typeof a.sampled_by === "string" ? { sampled_by: a.sampled_by } : {}),
+      ...(rates !== undefined ? { rates } : {}),
+      ...(base !== undefined ? { rate_base: base } : {}),
     };
   }
   return { agents: {}, accounts };
@@ -354,6 +491,14 @@ export interface AccountUsage {
   waves: string[];
   sampled_at: string;
   sampled_by?: string;
+  /** The learned rates (internal: `publishedRecord` leaves them off the retained record). */
+  rates?: Partial<Record<RateKind, RateSeen>>;
+}
+
+/** The retained `claude_account` payload of a record: without the internal `rates`. */
+export function publishedRecord(r: AccountUsage): Omit<AccountUsage, "rates"> {
+  const { rates: _internal, ...rest } = r;
+  return rest;
 }
 
 const bare = (w: SeenWindow | null): UsageWindow | null =>
@@ -375,6 +520,7 @@ export function accountRecords(book: UsageBook): Record<string, AccountUsage> {
       waves: [...new Set(mine.flatMap(([, x]) => (x.wave !== null ? [x.wave] : [])))].sort(),
       sampled_at: a.sampled_at,
       ...(a.sampled_by !== undefined ? { sampled_by: a.sampled_by } : {}),
+      ...(a.rates !== undefined ? { rates: a.rates } : {}),
     };
   }
   return out;
@@ -411,6 +557,10 @@ export interface Ranked {
   /** The binding window's room left (percent) and its reset: what `why` and the CLI print. */
   binding_left: number | null;
   binding_resets_at: string | null;
+  /** Agents counted against it: running, or picked earlier in the same spawn pass. */
+  in_flight: number;
+  /** The binding window's projected usage with `in_flight` reserved; null with no window. */
+  projected_pct: number | null;
 }
 
 interface LiveWindow {
@@ -482,19 +632,51 @@ export function untilLabel(resetsAt: string | null, now: number): string {
  * record, `model_weekly[family]`) gets a pace, `(left / 100) / (hours to reset / window length)`;
  * the account's `score` is the smallest, and the window attaining it is `binding` (the tightest
  * window decides). A window whose reset passed counts as empty and a full window away from its
- * next reset, as does one whose `resets_at` is null; one not reported is left out. An account is
- * `eligible` while every window it reported is under `cap_pct`. Eligible accounts come first,
+ * next reset, as does one whose `resets_at` is null; one not reported is left out. Each window
+ * is scored on its projection (`projectedPct`): the live percentage plus each of the account's
+ * `in_flight` agents' rate (learned, else the tunable default) over the look-ahead, so a pass's
+ * picks see each other before a sample lands; with nothing in flight it is the live percentage.
+ * An account is `eligible` while every window it reported projects under `cap_pct`. Eligible accounts come first,
  * then the rest (the cap orders, it never refuses); each group by score, highest first (so an
  * over-cap account goes by pace too, not by how far over it is), an account with no usage data
  * counting as on pace (1). Scores within `tie_band_pct` percent of a band's leader form a band,
- * ordered by fewer agents, then signed-in profiles before the primary (interactive sessions use
+ * ordered by fewer agents (sampled or in flight, the more), then signed-in profiles before the primary (interactive sessions use
  * the owner's own login without reporting usage, so its silence says least), then candidate
  * order. Every candidate is returned.
  */
-/** `claude.balance`: the rank rule's cap and tie band (CONFIG_DEFAULTS when absent). */
+/**
+ * `claude.balance` (CONFIG_DEFAULTS when absent): the rank rule's cap and tie band, the look-ahead
+ * each agent in flight reserves, and the default per-agent cost of the 5-hour and weekly windows.
+ */
 export interface RankBalance {
   cap_pct?: number;
   tie_band_pct?: number;
+  reserve_h?: number;
+  agent_cost_pct_h?: number;
+  agent_cost_weekly_pct_h?: number;
+  /** Agents in flight on an account (running and reserved); default: its sampled agents. */
+  in_flight?: (account: string) => number;
+}
+
+/**
+ * A window's projected usage with `n` agents in flight: its live percentage plus each agent's
+ * rate over the look-ahead, capped by the time to reset (a passed or unknown reset: a full
+ * window), at most 100.
+ */
+export function projectedPct(
+  w: { pct: number; resets_at: string | null; kind: WindowKind },
+  n: number,
+  rate: number,
+  o: { now: number; reserve_h: number },
+): number {
+  const horizon = Math.min(o.reserve_h, hoursUntil(w.resets_at, o.now, WINDOW_HOURS[w.kind]));
+  return Math.min(100, w.pct + n * rate * horizon);
+}
+
+/** The per-agent rate a window reserves: the account's learned one once trusted, else `fallback`. */
+function rateFor(a: AccountUsage | undefined, kind: RateKind, fallback: number): number {
+  const r = a?.rates?.[kind];
+  return r !== undefined && r.samples >= RATE_MIN_SAMPLES ? r.pct_per_agent_h : fallback;
 }
 
 export function rankAccounts(
@@ -503,15 +685,28 @@ export function rankAccounts(
   o: RankBalance & { model?: string | null; now: number },
 ): Ranked[] {
   const family = familyOf(o.model);
-  const cap = o.cap_pct ?? CONFIG_DEFAULTS.claude.balance.cap_pct;
-  const band = o.tie_band_pct ?? CONFIG_DEFAULTS.claude.balance.tie_band_pct;
+  const d = CONFIG_DEFAULTS.claude.balance;
+  const cap = o.cap_pct ?? d.cap_pct;
+  const band = o.tie_band_pct ?? d.tie_band_pct;
+  const reserve = { now: o.now, reserve_h: o.reserve_h ?? d.reserve_h };
+  const cost: Record<WindowKind, number> = {
+    five_hour: o.agent_cost_pct_h ?? d.agent_cost_pct_h,
+    weekly: o.agent_cost_weekly_pct_h ?? d.agent_cost_weekly_pct_h,
+    model_weekly: o.agent_cost_weekly_pct_h ?? d.agent_cost_weekly_pct_h,
+  };
   const rows = candidates.map((account, i) => {
     const a = accounts[account];
-    const ws = liveWindows(a, family, o.now);
+    const n = o.in_flight?.(account) ?? a?.agents.length ?? 0;
+    const kindOf = (k: WindowKind): RateKind =>
+      k === "model_weekly" ? `model_weekly.${family as ModelFamily}` : k;
+    const ws = liveWindows(a, family, o.now).map((w) => ({
+      ...w,
+      projected: projectedPct(w, n, rateFor(a, kindOf(w.kind), cost[w.kind]), reserve),
+    }));
     const pctOf = (k: WindowKind) => ws.find((w) => w.kind === k)?.pct ?? null;
-    let bind: (LiveWindow & { score: number }) | null = null;
+    let bind: ((typeof ws)[number] & { score: number }) | null = null;
     for (const w of ws) {
-      const score = paceOf(w.pct, w.resets_at, o.now, w.kind);
+      const score = paceOf(w.projected, w.resets_at, o.now, w.kind);
       if (bind === null || score < bind.score) bind = { ...w, score };
     }
     const model = pctOf("model_weekly");
@@ -524,13 +719,16 @@ export function rankAccounts(
       agents: a?.agents.length ?? 0,
       score: bind?.score ?? null,
       binding: bind?.kind ?? null,
-      eligible: ws.every((w) => w.pct < cap),
+      eligible: ws.every((w) => w.projected < cap),
       binding_left: bind !== null ? 100 - bind.pct : null,
       binding_resets_at: bind?.resets_at ?? null,
+      in_flight: n,
+      projected_pct: bind?.projected ?? null,
     };
     // `primary@<name>` is a paired machine's own login: last there too
     const primaryLast = account.split("@")[0] === PRIMARY_ACCOUNT ? 1 : 0;
-    return { r, i, primaryLast, s: r.score ?? 1 };
+    // fewer agents: its sampled ones, or its agents in flight when more (a same-pass pick)
+    return { r, i, primaryLast, s: r.score ?? 1, load: Math.max(r.agents, n) };
   });
   type Row = (typeof rows)[number];
   const ordered = (group: Row[]): Row[] => {
@@ -541,7 +739,7 @@ export function rankAccounts(
       let end = at + 1;
       while (end < group.length && leader - (group[end] as Row).s <= (leader * band) / 100) end++;
       const members = group.slice(at, end);
-      members.sort((x, y) => x.r.agents - y.r.agents || x.primaryLast - y.primaryLast || x.i - y.i);
+      members.sort((x, y) => x.load - y.load || x.primaryLast - y.primaryLast || x.i - y.i);
       out.push(...members);
       at = end;
     }

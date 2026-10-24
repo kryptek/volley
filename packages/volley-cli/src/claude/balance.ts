@@ -24,6 +24,9 @@ export interface BalanceCandidate {
   eligible?: boolean;
   binding_left?: number | null;
   binding_resets_at?: string | null;
+  /** Agents counted against it, and its binding window's projection with them (SPEC §4.6.12). */
+  in_flight?: number;
+  projected_pct?: number | null;
 }
 
 export interface BalanceAnswer {
@@ -56,16 +59,27 @@ const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round
 
 const WINDOW_LABEL = { five_hour: "5h", weekly: "7d", model_weekly: "model" } as const;
 
-/** `5h 18% left in 52m`, `over cap`; `headroom N` from a volleyd that predates the rank rule. */
+/** ` (12% after 3 in flight)` when agents in flight move the binding window's projection. */
+function inFlight(c: BalanceCandidate, used: boolean): string {
+  const p = c.projected_pct;
+  if (!c.in_flight || p == null || (c.binding_left != null && p === 100 - c.binding_left))
+    return "";
+  return ` (${pct(used ? p : 100 - p)} after ${c.in_flight} in flight)`;
+}
+
+/**
+ * `5h 18% left in 52m`, with `(12% after 3 in flight)` when agents in flight move it; `over cap`;
+ * `headroom N` from a volleyd that predates the rank rule.
+ */
 function bindingFigure(c: BalanceCandidate, family: string | undefined, now: number): string {
-  if (c.eligible === false) return "over cap";
+  if (c.eligible === false) return `over cap${inFlight(c, true)}`;
   if (c.binding == null || c.binding_left == null)
     return `headroom ${c.headroom === null ? "—" : Math.round(c.headroom)}`;
   const label =
     c.binding === "model_weekly" && family !== undefined
       ? `${family.charAt(0).toUpperCase()}${family.slice(1)}`
       : WINDOW_LABEL[c.binding];
-  return `${label} ${pct(c.binding_left)} left in ${untilLabel(c.binding_resets_at ?? null, now)}`;
+  return `${label} ${pct(c.binding_left)} left in ${untilLabel(c.binding_resets_at ?? null, now)}${inFlight(c, false)}`;
 }
 
 /** Columns padded to the widest cell of each, joined by two spaces. */

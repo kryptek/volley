@@ -16,7 +16,7 @@
       "account": "work",
       "machine": "peer-a",
       "source": "balance",
-      "why": "work: 18% left, resets in 52m (use it or lose it) on peer-a; primary@peer-a 7d 72% left, resets in 2d 4h; spare@peer-a no usage yet",
+      "why": "work: 18% left (9% after 1 in flight), resets in 52m (use it or lose it) on peer-a; primary@peer-a 7d 72% left (70% after 2 in flight), resets in 2d 4h; spare@peer-a no usage yet",
       "candidates": [
         {
           "account": "work@peer-a",
@@ -24,11 +24,13 @@
           "weekly_pct": 40,
           "agents": 0,
           "headroom": 18,
-          "score": 1.73,
+          "score": 0.54,
           "binding": "five_hour",
           "eligible": true,
           "binding_left": 18,
-          "binding_resets_at": "2026-10-21T14:54:10.000Z"
+          "binding_resets_at": "2026-10-21T14:54:10.000Z",
+          "in_flight": 1,
+          "projected_pct": 90.67
         },
         {
           "account": "primary@peer-a",
@@ -40,7 +42,9 @@
           "binding": "weekly",
           "eligible": true,
           "binding_left": 72,
-          "binding_resets_at": "2026-10-23T18:02:10.000Z"
+          "binding_resets_at": "2026-10-23T18:02:10.000Z",
+          "in_flight": 2,
+          "projected_pct": 30.5
         },
         {
           "account": "spare@peer-a",
@@ -52,7 +56,9 @@
           "binding": null,
           "eligible": true,
           "binding_left": null,
-          "binding_resets_at": null
+          "binding_resets_at": null,
+          "in_flight": 0,
+          "projected_pct": null
         }
       ]
     }

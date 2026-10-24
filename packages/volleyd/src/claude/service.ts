@@ -72,6 +72,8 @@ const unranked = (account: string): Ranked => ({
   eligible: true,
   binding_left: null,
   binding_resets_at: null,
+  in_flight: 0,
+  projected_pct: null,
 });
 
 /**

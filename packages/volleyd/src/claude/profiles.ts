@@ -380,6 +380,8 @@ const unknownRank = (account: string): Ranked => ({
   eligible: true,
   binding_left: null,
   binding_resets_at: null,
+  in_flight: 0,
+  projected_pct: null,
 });
 
 const capitalized = (s: string) => `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
@@ -387,7 +389,8 @@ const capitalized = (s: string) => `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
 /**
  * `work: 18% left, resets in 52m (use it or lose it) on peer-a; primary@peer-a 7d 72% left,
  * resets in 2d 4h; spare over the 97% cap (5h 98%)`: the pick's binding window (named unless it
- * is the 5-hour one), then each other candidate's. Ids and record keys only, never an e-mail.
+ * is the 5-hour one), then each other candidate's; with agents in flight its projection too
+ * (`18% left (8% after 1 in flight)`). Ids and record keys only, never an e-mail.
  */
 function balanceLine(
   ranked: readonly Ranked[],
@@ -404,8 +407,17 @@ function balanceLine(
       : kind === "model_weekly" && family !== null
         ? capitalized(family)
         : "5h";
-  const left = (r: Ranked) =>
-    `${r.binding === "five_hour" ? "" : `${label(r.binding)} `}${pct(r.binding_left ?? 0)} left, resets in ${untilLabel(r.binding_resets_at, o.now)}`;
+  // `(8% after 1 in flight)`: the binding window's projection, when agents in flight move it
+  const projected = (r: Ranked) =>
+    r.in_flight > 0 && r.projected_pct !== null && r.projected_pct !== 100 - (r.binding_left ?? 0)
+      ? r.projected_pct
+      : null;
+  const after = (r: Ranked, p: number, used: boolean) =>
+    `${pct(used ? p : 100 - p)} after ${r.in_flight} in flight`;
+  const left = (r: Ranked) => {
+    const p = projected(r);
+    return `${r.binding === "five_hour" ? "" : `${label(r.binding)} `}${pct(r.binding_left ?? 0)} left${p !== null ? ` (${after(r, p, false)})` : ""}, resets in ${untilLabel(r.binding_resets_at, o.now)}`;
+  };
   // the first window at or over the cap, with its reset when it is the binding one (the only
   // reset a ranked row carries)
   const overWindow = (r: Ranked, withReset: boolean) => {
@@ -415,6 +427,10 @@ function balanceLine(
       ["model_weekly", r.model_weekly_pct],
     ];
     const [kind, p] = windows.find(([, p]) => p != null && p >= o.cap) ?? [r.binding, null];
+    // under the cap as sampled, over it with the agents in flight: the binding window's figures
+    const proj = projected(r);
+    if (p == null && proj !== null && r.binding_left !== null)
+      return ` (${label(r.binding)} ${pct(100 - r.binding_left)}, ${after(r, proj, true)}${withReset ? `, resets in ${untilLabel(r.binding_resets_at, o.now)}` : ""})`;
     if (p == null) return "";
     const reset =
       withReset && kind === r.binding

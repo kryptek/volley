@@ -296,6 +296,27 @@
                   "maximum": 50,
                   "default": 10,
                   "description": "Accounts whose pace scores are within this percentage of the band's leader count as equal and go to the one with fewer agents (spec section 4.6.12)."
+                },
+                "reserve_h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5,
+                  "default": 1,
+                  "description": "How many hours ahead each agent in flight on an account (running, or picked earlier in the same spawn pass) reserves its use against the account's windows, capped at each window's time to reset (spec section 4.6.12). The cap and the pace score apply to that projection; 0 turns the reservation off."
+                },
+                "agent_cost_pct_h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 10,
+                  "description": "The 5-hour window's percentage one agent is assumed to spend per hour until the account has learned its own rate from its usage samples (spec section 4.6.12). Deliberately conservative: a busy agent on a Max-tier plan."
+                },
+                "agent_cost_weekly_pct_h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 1.25,
+                  "description": "The same for the 7-day and the model-family weekly windows (spec section 4.6.12). Deliberately conservative; a learned rate replaces it."
                 }
               }
             }

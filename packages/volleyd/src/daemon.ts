@@ -180,6 +180,7 @@ import {
   requestOf,
 } from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
+import { InFlightLedger } from "./claude/in-flight";
 import { lastAccountMove, moveAgentAccount, moveRespawn } from "./claude/move";
 import {
   ClaudeAccountError,
@@ -200,6 +201,7 @@ import {
   type AgentOnAccount,
   type LimitSeen,
   type ProbeLogin,
+  type RankBalance,
   USAGE_FILTER,
   type UsageBook,
   accountRecords,
@@ -1529,6 +1531,8 @@ export class Daemon {
   // --- Fleet (F6): down, drain and remove-now ---
   /** Agents launched and still being verified (not supervised yet), by id. */
   private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
+  /** The balance's reservations: picks whose agent has not reported usage yet (claude/in-flight.ts). */
+  private readonly reserved = new InFlightLedger();
   /** Decisions a launch's verification opened, settled once that launch is supervised. */
   private readonly unsettled = new Map<string, Array<{ wave: WaveId; id: string }>>();
   /**
@@ -1752,7 +1756,7 @@ export class Daemon {
         rankAccounts(accountRecords(this.usage), candidates, {
           model,
           now: this.now(),
-          ...this.config.effective().claude.balance,
+          ...this.rankBalance(),
         }),
       capPct: () => this.config.effective().claude.balance.cap_pct,
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
@@ -4504,6 +4508,8 @@ export class Daemon {
       await this.spawnFailed(wave, task, role, err);
       throw err;
     }
+    // The pick counts against its account until the agent reports usage (same-pass picks see it).
+    this.reserved.reserve(wave, task, role, accountKey(account.id, account.machine));
     this.spawning.add(key);
     try {
       const attempt = this.agentAttempt(wave, task, role, pipeline.stage?.name);
@@ -4546,6 +4552,8 @@ export class Daemon {
       const res = await spawnAgent(req, deps);
       const host = deps.host;
       const tunnel = remote !== undefined ? forwardOf(remote) : undefined;
+      if (res.kind === "launched") this.reserved.launched(wave, task, role, res.agentId);
+      else this.reserved.failed(wave, task, role);
       if (res.kind === "launched") {
         this.refused.delete(key);
         this.launching.set(res.agentId, { wave, task, role });
@@ -4572,6 +4580,7 @@ export class Daemon {
       }
       return res;
     } catch (e) {
+      this.reserved.failed(wave, task, role);
       await this.spawnFailed(wave, task, role, e);
       throw e;
     } finally {
@@ -4763,7 +4772,7 @@ export class Daemon {
       rankAccounts(accountRecords(this.usage), this.claude.candidates(machine), {
         model,
         now: this.now(),
-        ...this.config.effective().claude.balance,
+        ...this.rankBalance(),
       });
     const withCandidates = (sel: SelectedAccount): SelectedAccount =>
       sel.candidates !== undefined ? sel : { ...sel, candidates: rank() };
@@ -5797,7 +5806,8 @@ export class Daemon {
     for (const login of logins) {
       const account = this.claude.accountForLogin(machine, login.profile);
       if (account === null) continue;
-      this.usage = foldProbe(this.usage, { account, machine: name, login });
+      const agents = this.agentsOnAccount(account).length;
+      this.usage = foldProbe(this.usage, { account, machine: name, login }, agents);
     }
     const after = bookState(this.usage);
     if (after === before) return false;
@@ -5968,7 +5978,7 @@ export class Daemon {
         ? pin
         : (rankAccounts(records, this.claude.candidates(isLocal ? LOCAL_MACHINE : name), {
             now: this.now(),
-            ...this.config.effective().claude.balance,
+            ...this.rankBalance(),
           })[0]?.account ?? null);
     return {
       name,
@@ -7440,6 +7450,7 @@ export class Daemon {
     status: string,
     credentials: AgentCredentials | undefined = this.credentials,
   ): Promise<void> {
+    this.reserved.release(agentId);
     const a = this.supervised.get(agentId);
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
@@ -10635,7 +10646,11 @@ export class Daemon {
           : sampleAccount(p, spawn?.host ?? "local", (dir) => this.claude.accountForDir(dir));
       if (p === null || account === null) return;
       const before = bookState(this.usage);
-      this.usage = foldUsage(this.usage, { agent, wave: spawn?.wave ?? null, account, payload: p });
+      const agents = this.agentsOnAccount(account).length;
+      const s = { agent, wave: spawn?.wave ?? null, account, payload: p };
+      this.usage = foldUsage(this.usage, s, agents);
+      // its own sample counts it from now on: the pick's reservation is spent
+      this.reserved.release(agent);
       const after = bookState(this.usage);
       if (after !== before) writeFileAtomic(this.usageFile, after);
     }
@@ -10701,6 +10716,31 @@ export class Daemon {
     return out.sort();
   }
 
+  /**
+   * The agents counted against `key` by the balance: the supervised ones on it, the launched ones
+   * whose sample is on it, and the picks not sampled yet (`reserved`), each once.
+   */
+  private inFlight(key: string): number {
+    const launched = [...this.launching.keys()].filter(
+      (id) => this.usage.agents[id]?.account === key,
+    );
+    return new Set([...this.agentsOnAccount(key), ...launched, ...this.reserved.on(key)]).size;
+  }
+
+  /**
+   * The rank rule's options: the supervisor's `claude.balance` and the agents in flight, counted
+   * once per account for the ranks that share these options (a usage pass ranks per agent).
+   */
+  private rankBalance(): RankBalance {
+    const counted = new Map<string, number>();
+    const in_flight = (a: string) => {
+      const n = counted.get(a) ?? this.inFlight(a);
+      counted.set(a, n);
+      return n;
+    };
+    return { ...this.config.effective().claude.balance, in_flight };
+  }
+
   /** The waves still running whose wave file pins profile `id` (the wave's or a task's account). */
   private wavesPinning(id: string): string[] {
     return [...this.waves]
@@ -10756,7 +10796,7 @@ export class Daemon {
       balanced: (w) => this.balanced(w),
       existing,
       now: this.now(),
-      balance: this.config.effective().claude.balance,
+      balance: this.rankBalance(),
     })) {
       const status = this.waves.get(lim.wave)?.record.state?.status;
       if (status === undefined || status === "complete" || status === "stopped") continue;
@@ -10823,7 +10863,7 @@ export class Daemon {
       warnAtPct: (w) => this.config.effective(w).claude.warn_at_pct,
       existing,
       now: this.now(),
-      balance: this.config.effective().claude.balance,
+      balance: this.rankBalance(),
     })) {
       await this.openDecisionNow(lim.wave, lim.input, lim.extra).catch((e: unknown) =>
         this.log(

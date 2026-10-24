@@ -41,7 +41,17 @@ export const CONFIG_DEFAULTS: Tunables = {
   stop_grace_s: 30,
   dynsec_batch_ms: 50,
   credential_sweep_interval_s: 600,
-  claude: { default_account: null, warn_at_pct: 90, balance: { cap_pct: 97, tie_band_pct: 10 } },
+  claude: {
+    default_account: null,
+    warn_at_pct: 90,
+    balance: {
+      cap_pct: 97,
+      tie_band_pct: 10,
+      reserve_h: 1,
+      agent_cost_pct_h: 10,
+      agent_cost_weekly_pct_h: 1.25,
+    },
+  },
   branch_update: "rebase",
   agent_mcp: "strict",
   agent_mcp_allow: [],
