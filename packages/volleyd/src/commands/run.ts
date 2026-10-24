@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { withSetupCoordinator } from "volley-cli/auth/coordinator-login";
 import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
@@ -98,7 +99,10 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   }
 
   return withClient(target, io, "volleyd run", async (client) => {
-    const owner = await resolveCaller(client, parsed.values.owner, env);
+    // Without --owner (or VOLLEY_COORDINATOR), the coordinator name `volley setup` saved.
+    const named = withSetupCoordinator(env);
+    const owner = await resolveCaller(client, parsed.values.owner, named.env);
+    const fromSetup = owner.auto && named.saved !== null && owner.id === named.saved;
     if (owner.warning !== undefined) io.stderr(`warning: ${owner.warning}\n`);
     if (owner.id === null) io.stderr(`warning: ${noOwnerWarning(wave.wave)}\n`);
     const res = await client.request(
@@ -143,7 +147,11 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
         `submitted wave ${state.wave} plan v${res.plan.version}\n${repoLine}${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${plan}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
-      const auto = owner.auto ? " (auto)" : "";
+      const auto = fromSetup
+        ? " (auto: the coordinator name `volley setup` saved)"
+        : owner.auto
+          ? " (auto)"
+          : "";
       io.stdout(
         `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${repoLine}${warnings}${playbookLine}${placementLine}${placement}${plan}${formatWave(state)}`,
       );

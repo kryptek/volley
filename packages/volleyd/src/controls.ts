@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { withSetupCoordinator } from "volley-cli/auth/coordinator-login";
 import { RELEASE_TASK } from "./autopilot/release-train";
 import { type Clock, systemClock } from "./clock";
 import {
@@ -279,7 +280,10 @@ export function opCommand(spec: OpCommand): Command {
     }
     return withClient(target, io, `volleyd ${spec.name}`, async (client) => {
       const flag = typeof parsed.values.by === "string" ? parsed.values.by : undefined;
-      const who = spec.needsCaller === false ? null : await resolveCaller(client, flag, env);
+      const who =
+        spec.needsCaller === false
+          ? null
+          : await resolveCaller(client, flag, withSetupCoordinator(env).env);
       const caller = who?.id ?? null;
       if (spec.takesOwnership === true) {
         if (caller === null) {

@@ -24,12 +24,16 @@ const READ_ONLY = (a: string[]) =>
   a.includes("--dry-run") ||
   (a[0] === "launchctl" && a[1] === "print") ||
   (a[0] === "security" && a[1] === "find-generic-password") ||
+  // The sign-ins' status, and who gh is signed in as.
+  (a[0] === "claude" && a[1] === "auth" && a[2] === "status") ||
+  (a[0] === "gh" && a[1] === "auth" && a[2] === "status") ||
+  (a[0] === "gh" && a[1] === "api" && a[2] === "user") ||
   // Who listens on the Desk's port.
   a[0] === "lsof" ||
   a[0] === "ss";
 
 /** What the run's last lines say once every step is in place. */
-const COMPLETE = "Setup complete.";
+const COMPLETE = "Setup complete in ";
 
 describe("volley setup", () => {
   let dir: string;
@@ -72,8 +76,8 @@ describe("volley setup", () => {
     m.answers = [false, false];
     const r = await run([]);
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("[1/6] Broker");
-    expect(r.stdout).toContain("[2/6] Security");
+    expect(r.stdout).toContain("[1/8] Broker");
+    expect(r.stdout).toContain("[2/8] Security");
     expect(r.stdout).toContain("-allow_anonymous true");
     expect(r.stdout).toContain("+allow_anonymous false");
     expect(r.stdout).toContain("Nothing was changed");
@@ -140,8 +144,12 @@ describe("volley setup", () => {
       "accounts",
       "accounts",
       "accounts",
+      "signin",
+      "claude-code",
+      "claude-code",
+      "claude-code",
+      "claude-code",
       "terminal",
-      "services",
       "services",
       "services",
       "services",
@@ -211,6 +219,10 @@ describe("volley setup", () => {
       desk_port: 5288,
       lan: true,
       terminal: "tmux",
+      coordinator: "coord-studio",
+      namespace: "default",
+      broker_url: fake.url,
+      metrics: join(m.ctx.volleydHome, "setup-metrics.json"),
     });
     expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
   });
@@ -361,7 +373,7 @@ describe("volley setup", () => {
     const clients = fake.clients();
     const r = await run([]);
     expect(r.code).toBe(0);
-    expect(r.stdout.match(/already done/g)).toHaveLength(6);
+    expect(r.stdout.match(/already done/g)).toHaveLength(8);
     expect(m.questions).toEqual([]);
     expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
     expect(fake.clients()).toEqual(clients);
@@ -393,7 +405,7 @@ describe("volley setup", () => {
     const r = await run(["--repair", "--yes"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Create the missing identity desk");
-    expect(r.stdout.match(/already done/g)).toHaveLength(5);
+    expect(r.stdout.match(/already done/g)).toHaveLength(7);
     const after = fake.clients();
     expect([...after.keys()].sort()).toEqual([...before.keys(), "desk"].sort());
     for (const [u, c] of before) expect(after.get(u)?.password).toBe(c.password);
@@ -409,17 +421,24 @@ describe("volley setup", () => {
   });
 
   it("asks once per step with changes, interactively", async () => {
-    m.answers = [true, true, true, true, true, true];
+    m.answers = [true, true, true, true, true, true, true, true];
+    m.typed = ["coord-main"];
     const r = await run([]);
     expect(r.code).toBe(0);
     expect(m.questions).toEqual([
       LAN_QUESTION,
       "Apply these 3 changes (Security)?",
       "Apply these 3 changes (Accounts)?",
+      "Apply this change (Sign-ins)?",
+      "Apply these 4 changes (Claude Code)?",
       "Apply this change (Terminal)?",
-      "Apply these 5 changes (Services)?",
+      "Apply these 4 changes (Services)?",
       "Apply this change (Phone)?",
     ]);
+    // The coordinator name is asked once, typed visibly.
+    expect(m.asked).toEqual(["Coordinator name [coord-studio]: "]);
+    expect(readSetupInstall(m.ctx.volleydHome)?.coordinator).toBe("coord-main");
+    expect(r.stdout).toMatch(/Setup complete in \d+ m \d+ s \(9 questions, 0 sign-ins, 0 sudo\)\n/);
   });
 
   it("stops at a blocked step, naming why", async () => {
@@ -427,7 +446,7 @@ describe("volley setup", () => {
     const r = await run(["--yes"]);
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("BROKER_TOO_OLD");
-    expect(r.stdout).not.toContain("[2/6]");
+    expect(r.stdout).not.toContain("[2/8]");
     expect(readFileSync(m.layout.config, "utf-8")).toBe(ANONYMOUS_CONFIG);
   });
 
@@ -441,16 +460,16 @@ describe("volley setup", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("no such service");
     expect(journal().slice(-1)[0]).toMatchObject({ step: "security", event: "failed" });
-    expect(r.stdout).not.toContain("[3/6]");
+    expect(r.stdout).not.toContain("[3/8]");
   });
 
   it("--step runs only the steps it names", async () => {
     const r = await run(["--step", "services", "--yes"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("[5/6] Services");
-    expect(r.stdout).not.toContain("[1/6]");
-    expect(r.stdout).not.toContain("[4/6]");
-    expect(r.stdout).not.toContain("[6/6]");
+    expect(r.stdout).toContain("[7/8] Services");
+    expect(r.stdout).not.toContain("[1/8]");
+    expect(r.stdout).not.toContain("[6/8]");
+    expect(r.stdout).not.toContain("[8/8]");
     expect(m.loaded.has("systems.volley.desk")).toBe(true);
     expect((await run(["--step", "nope"])).code).toBe(2);
   });
@@ -461,7 +480,7 @@ describe("volley setup", () => {
     writeFileSync(config, "spawn:\n  ceiling: 3\n");
     const r = await run(["--yes", "--lan"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("[4/6] Terminal");
+    expect(r.stdout).toContain("[6/8] Terminal");
     expect(r.stdout).toContain("cmux is not installed");
     expect(readFileSync(config, "utf-8")).toBe(
       "spawn:\n  ceiling: 3\nfleet:\n  local_terminal: tmux\n",
@@ -479,7 +498,7 @@ describe("volley setup", () => {
     expect(r.stdout).toContain(
       "  ✗ Blocked: neither cmux nor tmux is installed, and volleyd starts local agents in one of them: install tmux (brew install tmux)",
     );
-    expect(r.stdout).not.toContain("[5/6]");
+    expect(r.stdout).not.toContain("[7/8]");
     expect(journal().slice(-1)[0]).toMatchObject({ step: "terminal", event: "blocked" });
     expect(existsSync(join(m.ctx.volleydHome, "config.yaml"))).toBe(false);
   });
@@ -490,7 +509,7 @@ describe("volley setup", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("– skipped: running as root");
     expect(r.stdout).toContain(
-      "Setup finished, except the steps skipped above (Terminal, Services)",
+      "Setup finished, except the steps skipped above (Sign-ins, Claude Code, Terminal, Services)",
     );
     expect(r.stdout).toMatch(/#signin=vly_signin_/);
     expect(m.loaded.size).toBe(0);

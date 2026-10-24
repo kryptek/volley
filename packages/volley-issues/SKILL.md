@@ -19,34 +19,13 @@ Before invoking `/volley-issues`:
 
 1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
-2. **volley-mcp registered in this session.** Claude Code stores MCP servers separately from `settings.json` and manages them via the `claude mcp` CLI (`mcpServers` is NOT a valid top-level `settings.json` field). Register the server at user scope with `env.VOLLEY_AGENT_ID` set to the coordinator's role prefix (e.g. `coordinator`) and `env.VOLLEY_NAMESPACE=example-dispatch`:
+2. **Run `volley setup --check`.** It prints one row per setup step and exits 0 only when nothing is missing. Its Claude Code row covers what this skill needs: the volley MCP server registered at user scope (env `VOLLEY_AGENT_ID=coordinator`, `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE`, `VOLLEY_BROKER_URL`, `VOLLEY_AUTH_DIR`, and no password: the server logs in with `coordinator.json` from that auth dir), the skills linked, the hooks installed, and your **coordinator name**. Anything pending: run `volley setup` (it shows each change before making it), then quit Claude Code (Cmd-Q) and reopen. If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
 
-   ```sh
-   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_COORDINATOR":"coord-main","VOLLEY_NAMESPACE":"example-dispatch","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password>"}}'
-   ```
+   The coordinator name is chosen once, during setup (agent-id grammar `[a-z0-9][a-z0-9_-]{0,62}`, e.g. `coord-main`), and saved in `$VOLLEYD_HOME/setup.json`. Waves are owned by the name, not by the per-restart agent id, so this session keeps resolving, steering, pausing and stopping them after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is what lets the autopilot flow's coordinator session end after submitting (Step 5): a later session with the same name picks the wave up. `volleyd run` without `--owner` uses it (and says so), and the other `volleyd` commands identify you by it without `--by`; `VOLLEY_COORDINATOR` in the environment still wins.
 
-   Also set `VOLLEY_COORDINATOR` there (the autopilot flow needs it): a stable **coordinator name** you choose once (agent-id grammar `[a-z0-9][a-z0-9_-]{0,62}`, e.g. `coord-main`). Waves submitted with `--owner "$VOLLEY_COORDINATOR"` are owned by the name, not by the per-restart agent id, so this session keeps resolving, steering, pausing and stopping them after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is what lets the autopilot flow's coordinator session end after submitting (Step 5): a later session with the same name picks the wave up. Export the same value in your shell profile (`export VOLLEY_COORDINATOR=coord-main`, next to the credentials below): `volleyd` commands then identify you by it without `--by`.
+   `VOLLEY_AGENT_ID` is a **prefix**: `vol_register` appends a fresh `-XXXX` (4 characters from `[a-z0-9]`), so this coordinator's agent_id is `coordinator-XXXX` (the suffix changes on each MCP restart) and two sessions sharing the registration get different ids. To discover it, call `vol_register` (its response includes `agent_id`) or `vol_list_agents` and look for the entry whose `capabilities` include `coordinator`.
 
-   Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — expect `volley: ... ✓ Connected`. Run `bash packages/volley-issues/scripts/install.sh` to get a ready-to-paste command with the absolute path baked in. If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
-
-   The `env` block sets this MCP server's agent_id **prefix**.
-   `vol_register` reads `VOLLEY_AGENT_ID` from env at startup and appends a
-   fresh `-XXXX` (4 lowercase-alphanumeric chars from `[a-z0-9]`) suffix — so this coordinator's agent_id is
-   `coordinator-XXXX` (the suffix changes on each MCP restart). Two Claude Code
-   sessions on this machine sharing one user-scope MCP registration get DIFFERENT
-   agent_ids (each MCP server picks its own suffix), so two coordinators no longer
-   collide. To discover the auto-generated id, call `vol_register` (its response
-   includes `agent_id`) or `vol_list_agents` and look for the entry whose
-   `capabilities` include `coordinator`.
-
-   **Broker credentials in the shell.** The reference broker config requires a login (`examples/mosquitto-auth/`). The MCP registration's `env` block reaches only the MCP server, not this session's Bash tool, so export the same identity in your shell profile and restart the session:
-
-   ```sh
-   export VOLLEY_AUTH_USERNAME=coordinator
-   export VOLLEY_AUTH_PASSWORD='<coordinator password from `volley auth init`>'
-   ```
-
-   Without them every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one), and `mosquitto_pub` cleanup is refused.
+   **No broker password in the shell.** On the supervisor's machine `volley wait`, `volley sub` and the `volleyd` commands find the coordinator's login on their own (the macOS keychain, then `coordinator.json`), so nothing needs exporting. Elsewhere, or for `mosquitto_pub`, export `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` yourself; without a login every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one).
 
 3. **gh + claude + cmux on PATH.** Run `command -v gh claude cmux` and confirm all three resolve. If any is missing, tell the user how to install (`brew install gh`; the `claude` CLI ships with Claude Code; cmux install instructions live in the `cmux` repo).
 

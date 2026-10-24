@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { withSetupCoordinator } from "volley-cli/auth/coordinator-login";
 import { churnCauses } from "../autopilot/digest";
 import { formatBriefPreface } from "../brief";
 import { systemClock } from "../clock";
@@ -69,7 +70,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     if (states.some((s) => s.open_decisions.length > 0)) {
       const d = await client.request("decisions", wave !== undefined ? { wave } : {});
       decisions = d.ok ? (d.result as { decisions: DecisionPayload[] }).decisions : [];
-      caller = (await resolveCaller(client, parsed.values.by, env)).id;
+      caller = (await resolveCaller(client, parsed.values.by, withSetupCoordinator(env).env)).id;
     }
     io.stdout(
       (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +

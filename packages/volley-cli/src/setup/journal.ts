@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
+import { withoutLogin } from "../peer/profile-checks";
 import type { SetupContext, StepName } from "./step";
 import {
   type CmuxSocketMode,
@@ -89,19 +90,34 @@ export interface SetupInstall {
   cmux_socket_mode?: CmuxSocketMode;
   /** The terminal volleyd starts local agents in, as the Terminal step chose it (config.yaml's `fleet.local_terminal`). */
   terminal?: LocalTerminal;
+  /**
+   * The coordinator name chosen once (the Claude Code step): `VOLLEY_COORDINATOR` for `volley` and
+   * `volleyd` when the env sets none, and `volleyd run`'s default `--owner`.
+   */
+  coordinator?: string;
+  /** The namespace the coordinator's MCP server registers in. */
+  namespace?: string;
+  /** The broker the run used (never with a login): a later run's default. */
+  broker_url?: string;
+  /** The run's setup-metrics.json. */
+  metrics?: string;
 }
+
+/** The agent-id grammar a coordinator name follows (SPEC §2.2). */
+export const COORDINATOR_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
 
 /** Record the install `ctx` runs against. A record, not a gate, like the journal. */
-export function writeSetupInstall(ctx: SetupContext): void {
+export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
   // A run that skipped the security step (`--step services`) keeps the LAN choice on record.
   const prior = readSetupInstall(ctx.volleydHome);
   const lan = ctx.lan ?? prior?.lan;
   // A run whose Services step did not check cmux keeps the mode on record too.
   const cmux = ctx.cmuxSocketMode ?? prior?.cmux_socket_mode;
-  // And a run that skipped the Terminal step keeps its choice.
+  // And a run that skipped the Terminal step keeps its choice; and the coordinator's name.
   const terminal = ctx.terminal ?? prior?.terminal;
+  const coordinator = ctx.coordinator ?? prior?.coordinator;
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -112,6 +128,14 @@ export function writeSetupInstall(ctx: SetupContext): void {
     ...(lan !== undefined ? { lan } : {}),
     ...(cmux !== undefined ? { cmux_socket_mode: cmux } : {}),
     ...(terminal !== undefined ? { terminal } : {}),
+    ...(coordinator !== undefined ? { coordinator, namespace: prior?.namespace ?? "default" } : {}),
+    // Never with a login.
+    broker_url: withoutLogin(ctx.tcpUrl).url,
+    ...(metrics !== undefined
+      ? { metrics }
+      : prior?.metrics !== undefined
+        ? { metrics: prior.metrics }
+        : {}),
   };
   saveInstall(ctx, install);
 }
@@ -169,6 +193,14 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
       ...(typeof v.lan === "boolean" ? { lan: v.lan } : {}),
       ...(isCmuxSocketMode(v.cmux_socket_mode) ? { cmux_socket_mode: v.cmux_socket_mode } : {}),
       ...(isLocalTerminal(v.terminal) ? { terminal: v.terminal } : {}),
+      ...(str("coordinator") !== null && COORDINATOR_NAME.test(str("coordinator") as string)
+        ? { coordinator: str("coordinator") as string }
+        : {}),
+      ...(str("namespace") !== null && COORDINATOR_NAME.test(str("namespace") as string)
+        ? { namespace: str("namespace") as string }
+        : {}),
+      ...(str("broker_url") !== null ? { broker_url: str("broker_url") as string } : {}),
+      ...(str("metrics") !== null ? { metrics: str("metrics") as string } : {}),
     };
   } catch {
     return null;

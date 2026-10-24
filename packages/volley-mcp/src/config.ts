@@ -270,7 +270,9 @@ export function loadConfig(
     throw new Error(`VOLLEY_PARENT_ID "${parentId}" does not match the agent id grammar`);
   }
 
-  const auth = identity?.auth ?? authFromEnv(env);
+  // A coordinator's MCP registration names the auth dir, never a password (`volley setup`): the
+  // login is its coordinator.json. A supervised agent uses only the login minted for it.
+  const auth = identity?.auth ?? authFromEnv(env) ?? (identity === null ? authDirLogin(env) : null);
 
   if (env.VOLLEY_HEARTBEAT_S !== undefined) {
     warn(
@@ -291,6 +293,21 @@ export function loadConfig(
     ...(identity === null && env.VOLLEY_COORDINATOR ? { coordinator: env.VOLLEY_COORDINATOR } : {}),
     ...(surface !== undefined ? { surface } : {}),
   };
+}
+
+/**
+ * The login in `$VOLLEY_AUTH_DIR/coordinator.json` when VOLLEY_AUTH_DIR is set; null when it is
+ * not. Set but without the file: an error naming the file (never a silent anonymous connect).
+ */
+export function authDirLogin(env: Record<string, string | undefined>): BrokerAuth | null {
+  if (env.VOLLEY_AUTH_DIR === undefined || env.VOLLEY_AUTH_DIR === "") return null;
+  const login = readCoordinatorAuth(env);
+  if (login === null) {
+    throw new Error(
+      `${coordinatorAuthPath(env)} does not exist: VOLLEY_AUTH_DIR names it as this server's broker login (run \`volley setup\`, or \`volley setup --check\` to see what is missing)`,
+    );
+  }
+  return login;
 }
 
 /** A non-blank single-line value, at most 128 characters; anything else is none. */
