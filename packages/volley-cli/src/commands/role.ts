@@ -103,7 +103,11 @@ export async function role({ argv, env, io }: RoleArgs): Promise<ExitCode> {
       io.stderr(`volley role: ${NO_RECORD}\n`);
       return EXIT.ERROR;
     }
-    const record = envelope.payload as RolesPayload;
+    const record: unknown = envelope.payload;
+    if (!isRolesPayload(record)) {
+      io.stderr("volley role: malformed roles record\n");
+      return EXIT.ERROR;
+    }
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(record, null, 2)}\n`);
       return EXIT.OK;
@@ -123,4 +127,18 @@ export async function role({ argv, env, io }: RoleArgs): Promise<ExitCode> {
   } finally {
     await broker.disconnect();
   }
+}
+
+/** Just enough shape to print the three lines: each role names its machine, the Desk its URL. */
+function isRolesPayload(p: unknown): p is RolesPayload {
+  const machineOf = (r: unknown) =>
+    typeof r === "object" && r !== null && typeof (r as { machine?: unknown }).machine === "string";
+  if (typeof p !== "object" || p === null) return false;
+  const { broker, supervisor, desk } = p as Record<string, unknown>;
+  return (
+    machineOf(broker) &&
+    machineOf(supervisor) &&
+    machineOf(desk) &&
+    typeof (desk as { url?: unknown }).url === "string"
+  );
 }

@@ -21,7 +21,7 @@ const DEFAULTS: RolesDefaults = {
   mqttPort: 1883,
   wsPort: 9001,
   lan: true,
-  deskUrl: "http://192.168.1.20:5199",
+  deskUrl: "http://192.0.2.20:5199",
   now: NOW,
 };
 const KNOWN = { localName: "mac", hosts: ["box-a"] };
@@ -48,7 +48,7 @@ describe("the roles record (SPEC §4.6.24)", () => {
     expect(r).toEqual({
       broker: { machine: "mac", address: { ssh: null, mqtt_port: 1883, ws_port: 9001 }, lan: true },
       supervisor: { machine: "mac" },
-      desk: { machine: "mac", url: "http://192.168.1.20:5199" },
+      desk: { machine: "mac", url: "http://192.0.2.20:5199" },
       version: 1,
       updated_at: NOW,
       updated_by: DEFAULTS_BY,

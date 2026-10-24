@@ -552,7 +552,7 @@ not an answer from volleyd.
 volley role status
 #   broker      on mac
 #   supervisor  on mac
-#   desk        on mac (http://192.168.1.20:5199)
+#   desk        on mac (http://192.0.2.20:5199)
 volley role status --json       # the whole record: the broker's address, lan, version, …
 ```
 

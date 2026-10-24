@@ -11,7 +11,7 @@ const RECORD = {
     lan: true,
   },
   supervisor: { machine: "mac" },
-  desk: { machine: "mac", url: "http://192.168.1.20:5199" },
+  desk: { machine: "mac", url: "http://192.0.2.20:5199" },
   version: 2,
   updated_at: "2026-10-24T09:00:00.000Z",
   updated_by: "admin-1",
@@ -20,7 +20,7 @@ const RECORD = {
 describe("volley role status", () => {
   let tb: TestBroker;
   let pub: VolleyBroker;
-  const publishRoles = (agentId = "volleyd") =>
+  const publishRoles = (agentId = "volleyd", payload: unknown = RECORD) =>
     pub.publish(
       "volley/_system/roles",
       JSON.stringify(
@@ -29,7 +29,7 @@ describe("volley role status", () => {
           parentId: null,
           channel: "_system/roles",
           type: "roles",
-          payload: RECORD,
+          payload,
         }),
       ),
       { qos: 1, retain: true },
@@ -56,7 +56,7 @@ describe("volley role status", () => {
       [
         "broker      on box-a",
         "supervisor  on mac",
-        "desk        on mac (http://192.168.1.20:5199)",
+        "desk        on mac (http://192.0.2.20:5199)",
         "",
       ].join("\n"),
     );
@@ -80,6 +80,13 @@ describe("volley role status", () => {
     const r = await run();
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toBe("volley role: no roles record: is volleyd running?\n");
+  });
+
+  it("a malformed record is reported as such", async () => {
+    await publishRoles("volleyd", { broker: { machine: "box-a" } });
+    const r = await run();
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toBe("volley role: malformed roles record\n");
   });
 
   it("an unknown verb is a usage error", async () => {

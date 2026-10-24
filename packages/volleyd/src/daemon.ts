@@ -4217,7 +4217,7 @@ export class Daemon {
         mqttPort: brokerAddress(this.opts.brokerUrl).port,
         wsPort: DAEMON_DEFAULTS.ws_default_port,
         lan: setup?.lan ?? false,
-        deskUrl: `http://${deskHost.includes(":") ? `[${deskHost}]` : deskHost}:${setup?.desk_port ?? DESK_PORT}`,
+        deskUrl: `http://${deskHost.includes(":") && !deskHost.startsWith("[") ? `[${deskHost}]` : deskHost}:${setup?.desk_port ?? DESK_PORT}`,
         now: dateOf(this.time).toISOString(),
       },
     );

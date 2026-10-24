@@ -67,7 +67,7 @@ describe("volleyd publishes the machine roles record (SPEC §4.6.24)", () => {
         config: "/path/to/mosquitto.conf",
         state_file: "/path/to/dynamic-security.json",
         auth_dir: "/path/to/auth",
-        desk_host: "192.168.1.20",
+        desk_host: "192.0.2.20",
         desk_port: 5200,
         lan: true,
       }),
@@ -75,7 +75,25 @@ describe("volleyd publishes the machine roles record (SPEC §4.6.24)", () => {
     await start();
     const r = (await retainedRoles())?.payload as RolesRecord;
     expect(r.broker.lan).toBe(true);
-    expect(r.desk.url).toBe("http://192.168.1.20:5200");
+    expect(r.desk.url).toBe("http://192.0.2.20:5200");
+  });
+
+  it("an already-bracketed IPv6 desk_host is not bracketed again", async () => {
+    writeFileSync(
+      join(env.home, "setup.json"),
+      JSON.stringify({
+        layout: "snap",
+        config: "/path/to/mosquitto.conf",
+        state_file: "/path/to/dynamic-security.json",
+        auth_dir: "/path/to/auth",
+        desk_host: "[2001:db8::20]",
+        desk_port: 5200,
+        lan: true,
+      }),
+    );
+    await start();
+    const r = (await retainedRoles())?.payload as RolesRecord;
+    expect(r.desk.url).toBe("http://[2001:db8::20]:5200");
   });
 
   it("a restart republishes the same record and journals nothing new", async () => {

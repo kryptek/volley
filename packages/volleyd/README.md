@@ -1685,7 +1685,8 @@ and publishes it retained on `volley/_system/roles` at start (`volley role statu
   `broker.address` `{ ssh: null, mqtt_port: <the broker URL's port>, ws_port: 9001 }`,
   `broker.lan` and `desk.url` from `setup.json` (what `volley setup` recorded; without it `false`
   and `http://localhost:5199`), `version: 1`, `updated_by: "volleyd-defaults"`. Every later start
-  reads the file. A write is a temp file renamed over `roles.json`.
+  reads the file, so a hand edit of `roles.json` takes effect at the next start. A write is a
+  temp file renamed over `roles.json`.
 - **`roles_changed { by, roles }`** is journaled in `_system` when the record differs from the
   last one journaled (where each role runs, not its `version` or author): once on the first
   start, then after a change. A restart with the same record republishes it and journals nothing.

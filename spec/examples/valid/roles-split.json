@@ -13,7 +13,7 @@
       "lan": true
     },
     "supervisor": { "machine": "box-a" },
-    "desk": { "machine": "mac", "url": "http://192.168.1.20:5199" },
+    "desk": { "machine": "mac", "url": "http://192.0.2.20:5199" },
     "version": 3,
     "updated_at": "2026-10-24T10:12:44.000Z",
     "updated_by": "admin"
