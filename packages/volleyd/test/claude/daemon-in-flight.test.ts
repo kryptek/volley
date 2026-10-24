@@ -6,14 +6,14 @@ import { buildTopic } from "volley-mcp/topics";
 import { ControlClient, type ControlOp, type ControlResponse } from "../../src/control";
 import { NS } from "../helpers/daemon-env";
 import { fakeClock } from "../helpers/fake-clock";
-import { type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
+import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
 import { tempDir } from "../helpers/tmp";
 import { stubEnv } from "../helpers/with-env";
 
 /**
  * The balance's reservations through a real daemon (#557): a pick counts against its account
- * before its agent reports usage, so the next pick sees it; the agent's first sample, or a
- * failed spawn, releases it.
+ * before its agent reports usage, so the next pick sees it; the agent's first sample, its
+ * retirement or a failed spawn releases it.
  */
 
 let s: SupervisedEnv;
@@ -111,7 +111,7 @@ const usage = (agent: string, payload: unknown | null) =>
   );
 
 describe("the balance's reservations (daemon)", () => {
-  it("a pick counts against its account until its agent's first sample; a failed spawn reserves nothing", async () => {
+  it("a pick counts against its account until its agent's first sample or retirement; a failed spawn reserves nothing", async () => {
     await env();
     expect(await inFlight()).toEqual({ primary: 1, team: 0 });
 
@@ -147,5 +147,11 @@ describe("the balance's reservations (daemon)", () => {
     await s.event((e) => e.type === "spawn_failed" && e.task === "T4");
     await s.settled();
     expect(await inFlight()).toEqual({ primary: 1, team: 1 });
+
+    // T1's agent (on primary, never sampled) is retired: its reservation goes with it
+    await s.status("failed", { reason: "gave up" });
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    await s.settled();
+    expect(await inFlight()).toEqual({ primary: 0, team: 1 });
   }, 30_000);
 });

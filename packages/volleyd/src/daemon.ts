@@ -4569,6 +4569,8 @@ export class Daemon {
           },
           (e: unknown) => {
             this.launching.delete(res.agentId);
+            // Never supervised, so never retired or sampled: its reservation goes here.
+            this.reserved.release(res.agentId);
             this.log(`verify ${key}: ${e instanceof Error ? e.message : String(e)}`);
             this.settleLaunch(res.agentId);
           },
@@ -7335,6 +7337,7 @@ export class Daemon {
     status: string,
     credentials: AgentCredentials | undefined = this.credentials,
   ): Promise<void> {
+    this.reserved.release(agentId);
     if (this.supervised.has(agentId)) return this.retire(agentId, status, credentials);
     const log = this.waves.get(wave);
     if (log === undefined) return;
@@ -10646,6 +10649,8 @@ export class Daemon {
           : sampleAccount(p, spawn?.host ?? "local", (dir) => this.claude.accountForDir(dir));
       if (p === null || account === null) return;
       const before = bookState(this.usage);
+      // Supervised agents only: ones still launching spend too, so the learned rate runs a
+      // little high while launches verify (the EMA and the rate cap bound it).
       const agents = this.agentsOnAccount(account).length;
       const s = { agent, wave: spawn?.wave ?? null, account, payload: p };
       this.usage = foldUsage(this.usage, s, agents);
