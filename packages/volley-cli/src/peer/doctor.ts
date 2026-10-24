@@ -46,6 +46,7 @@ import {
   PROBE_FAMILIES,
   type UsageFetch,
   type UsageWindow,
+  findLogins,
   probeLogins,
 } from "./usage-probe";
 
@@ -344,6 +345,11 @@ export interface DoctorOptions {
    * every volley MCP entry must run it as well as this checkout.
    */
   volleyDir?: string;
+  /**
+   * Only the usage probe of this one login (`default`, or a profile id): a supervisor priming a
+   * login it just signed in. The report is `{ claude_logins, doctor_at }`; no check runs.
+   */
+  probeLogin?: string;
 }
 
 /** The record's check: no fix text (the doctor that reads a record supplies its own). */
@@ -1029,6 +1035,7 @@ export function planFixes(checks: Check[], opts: DoctorOptions): FixPlan {
  * `--yes`), run the safe fixes, and check again. Exit 1 while a `block` check fails.
  */
 export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Promise<ExitCode> {
+  if (opts.probeLogin !== undefined) return probeOnly(io, deps, opts.probeLogin, opts);
   let { report, checks } = await runDoctor(deps, opts);
   if (opts.fix === true) {
     // Under --json the plan goes to stderr: stdout is the report alone.
@@ -1125,4 +1132,43 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
       : `${renderHuman(report.checks)}${renderUsage(report.claude_logins ?? [], deps.now())}`,
   );
   return blocking(report).length > 0 ? EXIT.ERROR : EXIT.OK;
+}
+
+/** `--probe-login <profile>`: that login's usage probe alone, reported as the doctor reports it. */
+async function probeOnly(
+  io: IO,
+  deps: DoctorDeps,
+  profile: string,
+  opts: DoctorOptions,
+): Promise<ExitCode> {
+  const fetch = deps.fetch;
+  const held = findLogins(deps.home, deps.env ?? {}).some((l) => l.profile === profile);
+  if (fetch === undefined || !held) {
+    io.stderr(`volley peer doctor: no Claude login '${profile}' on this machine\n`);
+    return EXIT.ERROR;
+  }
+  // The installed Claude Code's version is the probe's User-Agent, as in a full run.
+  const v = await deps
+    .exec(["claude", "--version"], { timeoutMs: DOCTOR_DEFAULTS.exec_timeout_ms })
+    .catch(() => null);
+  const now = deps.now();
+  const logins = await probeLogins(
+    {
+      exec: deps.exec,
+      fetch,
+      platform: deps.platform,
+      home: deps.home,
+      env: deps.env ?? {},
+      claudeVersion: v?.code === 0 ? versionOf(v.stdout) : null,
+    },
+    now,
+    { only: profile },
+  );
+  const report = scrub({ claude_logins: logins, doctor_at: now.toISOString() });
+  io.stdout(
+    opts.json === true
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : renderUsage(report.claude_logins, deps.now()),
+  );
+  return EXIT.OK;
 }

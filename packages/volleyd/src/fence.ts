@@ -115,6 +115,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
  *     §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
  *     an absolute path with no `.`/`..` segment and no control character
+ *   volley peer doctor --json --probe-login PROFILE   (a prime: one login's usage reading;
+ *     PROFILE `default` or a profile id)
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -224,6 +226,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
  *     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+ *   volley peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
  *   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
  *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
@@ -1698,6 +1701,14 @@ function isRepoPath(p: string | undefined): boolean {
   );
 }
 
+/**
+ * A prime's probe (`peer doctor --json --probe-login <profile>`, here or on a box): one Claude
+ * login's usage reading, `default` or a profile id.
+ */
+const PROBE_LOGIN = "--probe-login";
+const isLoginName = (p: string | undefined) =>
+  p !== undefined && /^[a-z0-9][a-z0-9_-]{0,62}$/.test(p);
+
 /** `volley auth <account verb>`: the account ops volleyd runs for an admin (accounts.ts). */
 function volley(args: string[]): Verdict {
   const [group, verb] = args;
@@ -1707,8 +1718,14 @@ function volley(args: string[]): Verdict {
     const rest = args.slice(2);
     const ok =
       rest[0] === "--json" &&
-      (rest.length === 1 || (rest.length === 3 && rest[1] === "--repo" && isRepoPath(rest[2])));
-    return ok ? ALLOW : deny(`volley peer doctor ${rest.join(" ")} (only --json [--repo <abs>])`);
+      (rest.length === 1 ||
+        (rest.length === 3 && rest[1] === "--repo" && isRepoPath(rest[2])) ||
+        (rest.length === 3 && rest[1] === PROBE_LOGIN && isLoginName(rest[2])));
+    return ok
+      ? ALLOW
+      : deny(
+          `volley peer doctor ${rest.join(" ")} (only --json [--repo <abs> | --probe-login <profile>])`,
+        );
   }
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
@@ -1883,6 +1900,13 @@ export const isRepoAdd = (v: string): boolean => {
  */
 function isRemoteDoctor(rest: readonly string[]): boolean {
   if (REMOTE_DOCTOR.some((shape) => sameArgv(rest, shape))) return true;
+  if (
+    rest.length === 5 &&
+    sameArgv(rest.slice(0, 3), REMOTE_DOCTOR[0] as readonly string[]) &&
+    rest[3] === PROBE_LOGIN &&
+    isLoginName(rest[4])
+  )
+    return true;
   if (
     rest.length === REMOTE_DOCTOR_CLONE.length + 1 &&
     sameArgv(rest.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
@@ -2349,7 +2373,7 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest)
         ? ALLOW
         : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>])`,
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>], or peer doctor --json --probe-login <profile>)`,
           );
     }
     default: {

@@ -191,6 +191,7 @@ import {
   type AgentLimitSeen,
   type AgentOnAccount,
   type LimitSeen,
+  type ProbeLogin,
   USAGE_FILTER,
   type UsageBook,
   accountRecords,
@@ -338,6 +339,7 @@ import {
   machineTopic,
   parseDoctorReport,
   parseMachineFrom,
+  parseProbeReport,
   withDoctor,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
@@ -685,6 +687,11 @@ export interface DaemonOptions {
   fleet?: {
     /** Ends its run (its child process) once `signal` aborts: a stop waits for that. */
     localDoctor?: (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null>;
+    /**
+     * The own machine's usage probe of one Claude login (a prime: `realLocalProbe`); null when
+     * it printed no report. Absent: a prime runs the whole own doctor instead.
+     */
+    localProbe?: (profile: string) => Promise<ProbeLogin[] | null>;
     localPath?: () => PathProbe;
     version?: string;
     /**
@@ -976,6 +983,18 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
  * the fence. The supervisor is no peer (it has no `peer.json`), so the running wave's repo is the
  * clone it checks; with none, the report's `repo.*` checks only say that no repo was given.
  */
+/** `volley peer doctor --json --probe-login <profile>` here, through the fence: a prime's probe. */
+export function realLocalProbe(
+  exec: ExecFn = realExec,
+): (profile: string) => Promise<ProbeLogin[] | null> {
+  return async (profile) => {
+    const r = await exec(["volley", "peer", "doctor", "--json", "--probe-login", profile], {
+      timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
+    }).catch(() => null);
+    return r === null ? null : parseProbeReport(r.stdout);
+  };
+}
+
 export function realLocalDoctor(
   exec: ExecFn = realExec,
 ): (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null> {
@@ -1678,6 +1697,8 @@ export class Daemon {
       defaultAccount: () => this.config.effective().claude.default_account,
       // Every change: prune the usage book, raise the retained signal, republish the records.
       onChanged: () => this.enqueue(() => this.registryChanged()),
+      // A prime's last step: that machine's usage probe of the one login, folded at once.
+      probe: (machine, profile) => this.primeProbe(machine, profile),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -5497,16 +5518,64 @@ export class Daemon {
    */
   private foldLogins(record: MachineRecord, machine: string): boolean {
     if (record.claude_logins === undefined) return false;
+    return this.foldProbeLogins(record.name, record.claude_logins, machine);
+  }
+
+  private foldProbeLogins(name: string, logins: ProbeLogin[], machine: string): boolean {
     const before = bookState(this.usage);
-    for (const login of record.claude_logins) {
+    for (const login of logins) {
       const account = this.claude.accountForLogin(machine, login.profile);
       if (account === null) continue;
-      this.usage = foldProbe(this.usage, { account, machine: record.name, login });
+      this.usage = foldProbe(this.usage, { account, machine: name, login });
     }
     const after = bookState(this.usage);
     if (after === before) return false;
     writeFileAtomic(this.usageFile, after);
     return true;
+  }
+
+  /**
+   * A prime's probe (claude/service.ts prime): `machine`'s usage probe of one login (`default`
+   * or a profile id), folded into its account and published at once. Here the own machine's
+   * one-login probe; on a paired machine its host's. Where that printed no report (a volley
+   * older than `--probe-login`), the machine's whole doctor runs instead, as Repair runs it.
+   */
+  private async primeProbe(machine: string, profile: string): Promise<void> {
+    if (machine === LOCAL_MACHINE) {
+      const probe = this.opts.fleet?.localProbe;
+      const logins = probe !== undefined ? await probe(profile) : null;
+      if (logins !== null) {
+        await this.enqueue(async () => {
+          if (this.foldProbeLogins(this.config.localName(), logins, LOCAL_MACHINE))
+            await this.usagePass();
+        });
+        return;
+      }
+      if (this.opts.fleet?.localDoctor !== undefined && !this.localDoctorRunning) {
+        this.localDoctorRun = this.runLocalDoctor();
+        await this.localDoctorRun;
+      }
+      return;
+    }
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") throw new Error(host);
+    const logins = host.probeLogin !== undefined ? await host.probeLogin(profile) : null;
+    if (logins !== null) {
+      await this.enqueue(async () => {
+        if (this.foldProbeLogins(machine, logins, machine)) await this.usagePass();
+      });
+      return;
+    }
+    if (this.doctoring.has(machine)) return;
+    this.doctoring.add(machine);
+    let r: Awaited<ReturnType<PeerService["runDoctor"]>>;
+    try {
+      r = await this.peers.runDoctor({ name: machine, fix: false, clone: false, host });
+    } finally {
+      this.doctorDone(machine);
+    }
+    const report = r.report;
+    if (report !== undefined) await this.enqueue(() => this.foldDoctor(machine, report));
   }
 
   /** Live supervised agents on machine `name` (the `local` token is the own machine). */
@@ -11172,6 +11241,9 @@ export class Daemon {
         return { ok: true, defer: this.claude.remove(p, by) };
       case "claude_signin":
         return { ok: true, defer: this.claude.signin(p, by) };
+      // Identity, plan and a usage reading of one login (as after its sign-in); 5 min apart.
+      case "claude_prime":
+        return { ok: true, defer: this.claude.prime(p, by) };
       case "claude_sync":
         return this.claude.sync(p, by);
       case "agent_move_account":

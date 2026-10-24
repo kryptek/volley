@@ -52,6 +52,7 @@ import {
   parseAuthStatus,
   profileEnv,
   runSignin,
+  statusIdentity,
 } from "./signin";
 import { MODEL_FAMILIES, type Ranked } from "./usage";
 
@@ -65,7 +66,8 @@ const unranked = (account: string): Ranked => ({
 
 /**
  * The daemon's Claude account profiles: the control ops (`claude_accounts`,
- * `claude_account_add`, `claude_signin`, `claude_sync`), the background sign-ins, and the
+ * `claude_account_add`, `claude_signin`, `claude_prime`, `claude_sync`), the background
+ * sign-ins and the prime that follows each, and the
  * profile preparation and account selection a spawn uses. The `_system` journal records the
  * registry changes and each sign-in's start and end — never its URL, which is published only on
  * the non-retained `volley/_system/claude/<acct>/signin` topic and kept in memory while the
@@ -128,6 +130,11 @@ export interface ClaudeServiceDeps {
    * revision. Rename and remove wait for it, so their answer comes after its effects.
    */
   onChanged?: (rev: number) => Promise<unknown> | unknown;
+  /**
+   * Run `machine`'s usage probe for one login (`default`, or a profile's id) and fold what it
+   * read into the login's account: a prime's last step.
+   */
+  probe?: (machine: string, profile: string) => Promise<void>;
 }
 
 /** What a sign-in run gets from the service: its stop signal, timers and publisher. */
@@ -162,6 +169,8 @@ export class ClaudeService {
   private readonly homes = new Map<string, string>();
   private versionAsk: Promise<string | undefined> | undefined;
   private revision = 0;
+  /** When each login (a sign-in key: `<id>`, `<id>@<name>`, `primary@<name>`) was last primed. */
+  private readonly primed = new Map<string, number>();
   constructor(private readonly d: ClaudeServiceDeps) {
     // real clock: the default when the daemon injects no clock
     this.clock = d.clock ?? systemClock;
@@ -293,9 +302,9 @@ export class ClaudeService {
   }
 
   /**
-   * A registry account's identity: its profile's `.claude.json` when readable (the file wins: it
-   * is what Claude Code says now), else what the registry recorded at sign-in (always, for a
-   * profile on a paired machine). A profile not signed in has none.
+   * A registry account's identity: its profile's `.claude.json` when it records one (the file
+   * wins: it is what Claude Code says now), else what the registry recorded at sign-in or prime
+   * (always, for a profile on a paired machine). A profile not signed in has none.
    */
   private identityOf(a: ClaudeAccount): LoginIdentity {
     if (a.signed_in_at === undefined) return {};
@@ -303,7 +312,9 @@ export class ClaudeService {
       a.machine === LOCAL_MACHINE
         ? readClaudeJson(join(profileDir(this.d.root, a.id), ".claude.json"))
         : null;
-    if (json !== null) return loginIdentity(json);
+    // A fresh profile's file has no `oauthAccount` until a session ran in it.
+    const file = loginIdentity(json);
+    if (file.email !== undefined) return file;
     return {
       ...(a.email !== undefined ? { email: a.email } : {}),
       ...(a.org !== undefined ? { org: a.org } : {}),
@@ -742,9 +753,136 @@ export class ClaudeService {
         if (type !== "claude_signin_url") await this.d.journal({ type, data });
         if (type === "claude_signin_done") void this.changed();
         this.d.log(`claude sign-in ${acct}: ${type}`);
+        // Adding ends primed: identity, plan and the login's usage reading at once.
+        if (type === "claude_signin_done") void this.prime({ acct }, "volleyd", { signedIn: true });
         return e;
       });
     return pending;
+  }
+
+  /**
+   * `claude_prime { acct, by }` (and every `claude_signin_done`): read the login's identity and
+   * plan (`claude auth status` under the profile's config dir on its machine; its `.claude.json`
+   * when the status has no e-mail) into the registry, then run that machine's usage probe for the
+   * login (`probe`). The machine's own login (`primary`, `primary@<name>`) has only the probe.
+   * At most once per login per `claude_prime_interval_ms`; a finished sign-in always is. The
+   * e-mail goes to the registry only, never the journal.
+   */
+  async prime(
+    p: Record<string, unknown>,
+    by: string,
+    o: { signedIn?: boolean } = {},
+  ): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    if (acct === "") return { ok: false, error: "claude_prime needs an acct" };
+    const remote = remoteAccountHost(acct);
+    const own = acct === PRIMARY_ACCOUNT || remote?.acct === PRIMARY_ACCOUNT;
+    let a: ClaudeAccount | undefined;
+    if (!own) {
+      try {
+        a = readRegistry(this.d.root).accounts.find((x) => signinKey(x) === acct);
+      } catch (e) {
+        if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+        throw e;
+      }
+      if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
+    }
+    const now = this.d.now ?? this.clock.now;
+    const at = now();
+    const last = this.primed.get(acct);
+    const every = DAEMON_DEFAULTS.claude_prime_interval_ms;
+    if (o.signedIn !== true && last !== undefined && at - last < every) {
+      const ago = Math.floor((at - last) / 60_000);
+      const next = Math.max(1, Math.ceil((every - (at - last)) / 60_000));
+      return {
+        ok: false,
+        error: `primed ${ago === 0 ? "just now" : `${ago} min ago`}; next in ${next} min`,
+      };
+    }
+    this.primed.set(acct, at);
+    const machine = remote?.name ?? LOCAL_MACHINE;
+    let plan: string | undefined;
+    if (a !== undefined) {
+      const facts = await this.readLogin(a).catch((e: unknown) => {
+        this.d.log(`prime ${acct}: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+      if (facts !== null) {
+        plan = facts.plan;
+        const next = markSignedIn(
+          this.d.root,
+          a.id,
+          facts,
+          a.signed_in_at ?? new Date(at).toISOString(),
+        );
+        // A sign-in that recorded all of it already: no change to signal.
+        if (JSON.stringify(next) !== JSON.stringify(a)) void this.changed();
+      }
+    } else if (remote === null) {
+      await this.askPrimary();
+    }
+    try {
+      await this.d.probe?.(machine, a?.id ?? "default");
+    } catch (e) {
+      this.d.log(`prime ${acct}: usage probe: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.d.log(`claude account ${acct}: primed (by ${by})`);
+    return { ok: true, result: { acct, machine, ...(plan !== undefined ? { plan } : {}) } };
+  }
+
+  /**
+   * A profile's login as its machine reports it now: `{ plan, email, org }`, or null when it is
+   * not signed in. Here through the fenced exec, on a paired machine through its host.
+   */
+  private async readLogin(
+    a: ClaudeAccount,
+  ): Promise<({ plan?: string; dir?: string } & LoginIdentity) | null> {
+    const timeoutMs = DAEMON_DEFAULTS.claude_auth_status_timeout_ms;
+    if (a.machine === LOCAL_MACHINE) {
+      const dir = profileDir(this.d.root, a.id);
+      const r = await this.d.exec(["claude", "auth", "status"], {
+        env: profileEnv(process.env, dir),
+        timeoutMs,
+      });
+      const s = parseAuthStatus(r.stdout);
+      if (s?.loggedIn !== true) return null;
+      return {
+        ...(s.plan !== undefined ? { plan: s.plan } : {}),
+        ...(await statusIdentity(s, () => readLoginIdentity(join(dir, ".claude.json")))),
+      };
+    }
+    const host = this.d.remote?.(a.machine) ?? `no paired machine '${a.machine}'`;
+    if (typeof host === "string") throw new Error(host);
+    const home =
+      this.homes.get(a.machine) ??
+      (await host
+        .run([{ argv: ["printenv", "HOME"] }], { timeoutMs })
+        .then((r) => (r.code === 0 ? r.stdout.trim() : ""))
+        .catch(() => ""));
+    if (!home.startsWith("/") || home.includes("\n"))
+      throw new Error(`the home directory on ${a.machine} is not known`);
+    this.homes.set(a.machine, home);
+    const dir = remoteProfileDir(home, a.id);
+    const r = await host.run(
+      [{ argv: ["claude", "auth", "status"], env: { CLAUDE_CONFIG_DIR: dir } }],
+      { timeoutMs },
+    );
+    const s = parseAuthStatus(r.stdout);
+    if (s?.loggedIn !== true) return null;
+    const file = async (): Promise<LoginIdentity> => {
+      const f = await host.run([{ argv: ["cat", ".claude.json"], cwd: dir }], { timeoutMs });
+      if (f.code !== 0) return {};
+      try {
+        return loginIdentity(JSON.parse(f.stdout) as Record<string, unknown>);
+      } catch {
+        return {};
+      }
+    };
+    return {
+      ...(s.plan !== undefined ? { plan: s.plan } : {}),
+      ...(await statusIdentity(s, file)),
+      dir,
+    };
   }
 
   /** `claude_sync { acct?, by }`: re-apply sharing and re-sync the MCP servers (all accounts). */

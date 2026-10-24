@@ -304,6 +304,28 @@ export function parseDoctorReport(stdout: string): DoctorReport | null {
 }
 
 /**
+ * A prime's probe report (`peer doctor --json --probe-login <profile>`): its `claude_logins`, or
+ * null when it printed none (a volley older than the flag).
+ */
+export function parseProbeReport(stdout: string): ProbeLogin[] | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!isObject(v) || !Array.isArray(v.claude_logins)) return null;
+  const logins = v.claude_logins.filter(
+    (l): l is ProbeLogin =>
+      isObject(l) &&
+      typeof l.profile === "string" &&
+      typeof l.state === "string" &&
+      typeof l.attempted_at === "string",
+  );
+  return logins.slice(0, 16);
+}
+
+/**
  * At most `MAX_CHECKS`, in the report's order. Over the cap, the machine-level checks are kept
  * first, then failing per-repository ones: many repositories never push out a failing `gh.*` or
  * `claude.*` check, which readiness reads.

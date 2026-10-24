@@ -47,12 +47,23 @@ describe("parsing claude auth login's output", () => {
     expect(parseSigninUrl("visit: https://evil.example.com/oauth/authorize?x=1")).toBeNull();
   });
 
-  it("claude auth status: loggedIn and the plan label, never anything else", () => {
+  it("claude auth status: loggedIn, the plan label and the login's identity, never anything else", () => {
     expect(
       parseAuthStatus(
-        JSON.stringify({ loggedIn: true, email: "a@example.com", subscriptionType: "max" }),
+        JSON.stringify({
+          loggedIn: true,
+          authMethod: "claude.ai",
+          email: "A@Example.com",
+          orgId: "0000",
+          orgName: "Example Org",
+          subscriptionType: "max",
+        }),
       ),
-    ).toEqual({ loggedIn: true, plan: "max" });
+    ).toEqual({ loggedIn: true, plan: "max", email: "a@example.com", org: "Example Org" });
+    // an e-mail that is not well-formed is left out
+    expect(parseAuthStatus(JSON.stringify({ loggedIn: true, email: "not an address" }))).toEqual({
+      loggedIn: true,
+    });
     expect(parseAuthStatus('{"loggedIn":false,"authMethod":"none"}')).toEqual({ loggedIn: false });
     expect(parseAuthStatus("not json")).toBeNull();
   });

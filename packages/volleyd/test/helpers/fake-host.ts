@@ -475,6 +475,8 @@ export interface SigninBoxOptions {
   onAuthStatus?: (box: { session: boolean }) => void;
   /** Files already on the box, by absolute path (a profile's `.claude.json`). */
   files?: Record<string, string>;
+  /** What a signed-in `claude auth status` prints (default `{ loggedIn, subscriptionType: max }`). */
+  status?: Record<string, unknown>;
 }
 
 /**
@@ -535,7 +537,7 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
         box.polls++;
         o.onAuthStatus?.(box);
         return o.signInAfter !== undefined && box.polls >= o.signInAfter
-          ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+          ? { stdout: JSON.stringify(o.status ?? { loggedIn: true, subscriptionType: "max" }) }
           : { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
       }
     }
