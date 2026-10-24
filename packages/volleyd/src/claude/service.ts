@@ -1,8 +1,10 @@
+import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Clock, dateOf, sleep, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
+import { mintProfileRemoveToken } from "../fence";
 import type { RemoteHost } from "../hosts/ssh-tmux";
 import type { MachineRecord } from "../machines";
 import { sessionsRunningIn } from "../procs";
@@ -15,11 +17,15 @@ import {
   LOCAL_MACHINE,
   PRIMARY_ACCOUNT,
   type SelectedAccount,
+  accountKey,
   addAccount,
+  canonicalRoot,
   machineCandidates,
   markSignedIn,
   profileDir,
   readRegistry,
+  removeAccount,
+  renameAccount,
   selectAccount,
 } from "./profiles";
 import {
@@ -39,7 +45,14 @@ import {
   seedProfile,
   syncMcp,
 } from "./sharing";
-import { SUPERSEDED, type SigninEvent, parseAuthStatus, profileEnv, runSignin } from "./signin";
+import {
+  REMOVED,
+  SUPERSEDED,
+  type SigninEvent,
+  parseAuthStatus,
+  profileEnv,
+  runSignin,
+} from "./signin";
 import { MODEL_FAMILIES, type Ranked } from "./usage";
 
 const unranked = (account: string): Ranked => ({
@@ -63,6 +76,8 @@ const unranked = (account: string): Ranked => ({
 
 export const signinTopic = (acct: string) => `volley/_system/claude/${acct}/signin`;
 export const SIGNIN_CHANNEL = "_system/claude";
+/** The retained registry-changed signal (`claude_registry_changed { rev, at }`, SPEC §4.6.11). */
+export const REGISTRY_TOPIC = "volley/_system/claude/registry";
 
 export interface ClaudeServiceDeps {
   /** The profiles root (`claudeRoot()`). */
@@ -102,6 +117,17 @@ export interface ClaudeServiceDeps {
   machineIdentity?: (name: string) => LoginIdentity;
   /** Every machine record (the supervisor's own and each paired machine's): `claude_accounts`. */
   machines?: () => MachineRecord[];
+  /** The supervised agents running under an account (a usage-record key: `<id>`, `<id>@<name>`). */
+  agentsOn?: (key: string) => string[];
+  /** The running waves whose wave file pins a profile id (the wave's or a task's `account:`). */
+  wavesOn?: (id: string) => string[];
+  /** `claude.default_account` as in force. */
+  defaultAccount?: () => string | null;
+  /**
+   * The registry changed (add, rename, remove, a sign-in done, a sync): `rev` is the new
+   * revision. Rename and remove wait for it, so their answer comes after its effects.
+   */
+  onChanged?: (rev: number) => Promise<unknown> | unknown;
 }
 
 /** What a sign-in run gets from the service: its stop signal, timers and publisher. */
@@ -135,9 +161,29 @@ export class ClaudeService {
   /** Each paired machine's HOME, once a sign-in there learned it: where its profiles are. */
   private readonly homes = new Map<string, string>();
   private versionAsk: Promise<string | undefined> | undefined;
+  private revision = 0;
   constructor(private readonly d: ClaudeServiceDeps) {
     // real clock: the default when the daemon injects no clock
     this.clock = d.clock ?? systemClock;
+  }
+
+  /** The registry's revision: 0 at start, one more at each change (`onChanged`). */
+  get rev(): number {
+    return this.revision;
+  }
+
+  private changed(): Promise<unknown> {
+    this.revision++;
+    return Promise.resolve(this.d.onChanged?.(this.revision));
+  }
+
+  /** Every profile's usage-record key (`<id>`, `<id>@<name>`); null when the registry is unreadable. */
+  knownAccounts(): Set<string> | null {
+    try {
+      return new Set(readRegistry(this.d.root).accounts.map((a) => accountKey(a.id, a.machine)));
+    } catch {
+      return null;
+    }
   }
 
   private get primaryDir(): string {
@@ -493,6 +539,7 @@ export class ClaudeService {
       type: "claude_account_added",
       data: { acct: acct.id, label: acct.label, machine: acct.machine, by },
     });
+    void this.changed();
     if (host !== null) return this.remoteProfileSignin(acct, host, by, { account: acct });
     return this.answerSignin(acct.id, by, { account: acct }, this.localSignin(acct.id));
   }
@@ -693,6 +740,7 @@ export class ClaudeService {
         // The login's identity stays out of the journal: the registry and the records carry it.
         const { type, ...data } = e.type === "claude_signin_done" ? withoutIdentity(e) : e;
         if (type !== "claude_signin_url") await this.d.journal({ type, data });
+        if (type === "claude_signin_done") void this.changed();
         this.d.log(`claude sign-in ${acct}: ${type}`);
         return e;
       });
@@ -726,7 +774,173 @@ export class ClaudeService {
         ...(r.mcp_servers !== undefined ? { mcp_servers: r.mcp_servers } : {}),
       });
     }
+    if (out.length > 0) void this.changed();
     return { ok: true, result: { synced: out } };
+  }
+
+  /**
+   * The registry entry `acct` names: `<id>` wherever it lives, or `<id>@<name>` on that machine.
+   * The primary is never one.
+   */
+  private entry(acct: string): ClaudeAccount | undefined {
+    const remote = remoteAccountHost(acct);
+    const id = remote?.acct ?? acct;
+    return readRegistry(this.d.root).accounts.find(
+      (a) => a.id === id && (remote === null || a.machine === remote.name),
+    );
+  }
+
+  /**
+   * `claude_account_rename { acct, label, by }`: every profile of the account's login (one
+   * e-mail) on every machine takes the new name; the usage records follow at the next pass.
+   */
+  async rename(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    const label = typeof p.label === "string" ? p.label : "";
+    if (acct === "") return { ok: false, error: "claude_account_rename needs an acct" };
+    if (acct.split("@")[0] === PRIMARY_ACCOUNT)
+      return { ok: false, error: `'${acct}' is the machine's own login; it cannot be renamed` };
+    let renamed: ClaudeAccount[];
+    let a: ClaudeAccount | undefined;
+    try {
+      a = this.entry(acct);
+      if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
+      renamed = renameAccount(this.d.root, a.id, label);
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    const to = label.trim();
+    await this.d.journal({
+      type: "claude_account_renamed",
+      data: { acct: a.id, from: a.label, to, by },
+    });
+    await this.changed();
+    return { ok: true, result: { acct, label: to, renamed: renamed.map(signinKey) } };
+  }
+
+  /** Why `a` cannot be removed now: an agent runs under it, a running wave pins it, the default. */
+  private inUse(a: ClaudeAccount, acct: string): string | null {
+    const agents = this.d.agentsOn?.(accountKey(a.id, a.machine)) ?? [];
+    if (agents.length > 0)
+      return `Claude account '${acct}' is in use by ${agents.join(", ")}; stop ${agents.length === 1 ? "it" : "them"} or move ${agents.length === 1 ? "it" : "them"} to another account first`;
+    const waves = this.d.wavesOn?.(a.id) ?? [];
+    if (waves.length > 0)
+      return `running wave ${waves.join(", ")} pins Claude account '${a.id}' (account: ${a.id}); stop the wave or change its account first`;
+    if (this.d.defaultAccount?.() === a.id)
+      return `claude.default_account names '${a.id}'; change Defaults first`;
+    return null;
+  }
+
+  /**
+   * `claude_account_remove { acct, by }`: refused while the profile is in use; else its pending
+   * sign-in is aborted, its registry entry dropped, and its profile directory removed on its
+   * machine (here only under the root; on a paired machine only `<home>/.volley/claude/<acct>`,
+   * over the fence). `dir_left` says why a directory was left in place.
+   */
+  async remove(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    if (acct === "") return { ok: false, error: "claude_account_remove needs an acct" };
+    if (acct.split("@")[0] === PRIMARY_ACCOUNT)
+      return { ok: false, error: `'${acct}' is the machine's own login; it cannot be removed` };
+    let a: ClaudeAccount | undefined;
+    try {
+      a = this.entry(acct);
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
+    const busy = this.inUse(a, acct);
+    if (busy !== null) return { ok: false, error: busy };
+    const pending = this.signins.get(signinKey(a));
+    if (pending !== undefined) {
+      pending.abort.abort(REMOVED);
+      await pending.done;
+    }
+    // This answer is deferred (off the serial queue): an agent may have been spawned under the
+    // profile while the sign-in stopped. Check again, then drop the entry before the directory
+    // goes, so nothing can pick the profile while its directory is being removed.
+    const late = this.inUse(a, acct);
+    if (late !== null) return { ok: false, error: late };
+    try {
+      removeAccount(this.d.root, a.id);
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    const left = await (a.machine === LOCAL_MACHINE
+      ? this.removeLocalDir(a)
+      : this.removeRemoteDir(a));
+    if (a.machine !== LOCAL_MACHINE && left !== null) this.d.log(`profile ${acct}: ${left}`);
+    const dirRemoved = left === null;
+    await this.d.journal({
+      type: "claude_account_removed",
+      data: { acct: a.id, machine: a.machine, by, dir_removed: dirRemoved },
+    });
+    await this.changed();
+    return {
+      ok: true,
+      result: {
+        acct: signinKey(a),
+        machine: a.machine,
+        dir_removed: dirRemoved,
+        ...(left !== null ? { dir_left: left } : {}),
+      },
+    };
+  }
+
+  /** Remove a local profile dir, only when it really is under the root; null, or why not. */
+  private removeLocalDir(a: ClaudeAccount): string | null {
+    const root = canonicalRoot(this.d.root);
+    const dir = profileDir(root, a.id);
+    if (isLink(dir)) return `${dir} is a symbolic link; only a directory under ${root} is removed`;
+    if (!existsSync(dir)) return null;
+    try {
+      const real = realpathSync(dir);
+      if (!real.startsWith(`${realpathSync(root)}/`)) return `${dir} leads outside ${root}`;
+      rmSync(dir, { recursive: true, force: true });
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Remove a paired machine's profile dir: the one the registry recorded, only when it is
+   * `<home>/.volley/claude/<id>` on that machine; null, or why it was left in place.
+   */
+  private async removeRemoteDir(a: ClaudeAccount): Promise<string | null> {
+    const dir = a.dir;
+    if (dir === undefined) return `no profile directory is recorded for it on ${a.machine}`;
+    const host = this.d.remote?.(a.machine) ?? `no paired machine '${a.machine}'`;
+    if (typeof host === "string") return host;
+    const home =
+      this.homes.get(a.machine) ??
+      (await host
+        .run([{ argv: ["printenv", "HOME"] }], {
+          timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+        })
+        .then((r) => (r.code === 0 ? r.stdout.trim() : ""))
+        .catch(() => ""));
+    if (!home.startsWith("/") || home.includes("\n"))
+      return `the home directory on ${a.machine} is not known`;
+    this.homes.set(a.machine, home);
+    const under = `${remoteProfileDir(home, "")}/`;
+    if (!dir.startsWith(under)) return `${dir} is not under ${under}`;
+    // Only its own: never another profile's directory a bad record names.
+    if (dir !== remoteProfileDir(home, a.id))
+      return `${dir} is not this profile's directory (${remoteProfileDir(home, a.id)})`;
+    try {
+      const r = await host.run([{ argv: ["rm", "-rf", dir] }], {
+        profileRemove: mintProfileRemoveToken(dir),
+      });
+      return r.code === 0
+        ? null
+        : `rm -rf ${dir} failed on ${a.machine}: ${r.stderr.trim() || `exit ${r.code}`}`;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
   }
 
   /** Stop every running sign-in (the daemon stopping); waits for them to end. */
@@ -738,6 +952,14 @@ export class ClaudeService {
 }
 
 type UrlEvent = Extract<SigninEvent, { type: "claude_signin_url" }>;
+
+const isLink = (path: string) => {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
 
 /** The account a registry profile's sign-in runs as: its id here, `<id>@<machine>` there. */
 const signinKey = (a: ClaudeAccount) =>

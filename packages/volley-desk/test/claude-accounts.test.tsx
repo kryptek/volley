@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import axe from "axe-core";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../src/App";
+import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import {
   ClaudeAccounts,
   type ClaudeAccountsProps,
@@ -10,6 +12,7 @@ import {
 } from "../src/settings/ClaudeAccounts";
 import { SettingsModal } from "../src/settings/SettingsModal";
 import { type AccountGroup, accountList } from "../src/store/claude";
+import { DeskStoreProvider } from "../src/store/context";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type {
   ClaudeAccountPayload,
@@ -18,6 +21,30 @@ import type {
   DeskMessage,
   WaveView,
 } from "../src/store/types";
+
+// The demo client, passed through: a test can feed the demo store (`demoFeed.apply`) and count
+// what the Desk asks volleyd's registry (`demoFeed.asks`).
+const demoFeed = vi.hoisted(() => ({
+  apply: null as ((msgs: DeskMessage[]) => void) | null,
+  asks: [] as string[],
+}));
+vi.mock("../src/steer/demoClient", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/steer/demoClient")>();
+  return {
+    ...real,
+    createDemoSteerClient: (apply: (msgs: DeskMessage[]) => void, ...rest: unknown[]) => {
+      demoFeed.apply = apply;
+      return (real.createDemoSteerClient as (...a: unknown[]) => unknown)(apply, ...rest);
+    },
+    demoReadControl: (control: Parameters<typeof real.demoReadControl>[0]) => {
+      const read = real.demoReadControl(control);
+      return ((op, ...rest) => {
+        demoFeed.asks.push(op);
+        return read(op, ...rest);
+      }) as typeof read;
+    },
+  };
+});
 
 const NOW = Date.parse("2026-10-18T14:06:00.000Z");
 /** When a registry profile finished its sign-in. */
@@ -1453,10 +1480,8 @@ describe("ClaudeAccounts › one clean card per account (#496)", () => {
     expect(rows[1]).toHaveTextContent("not on box-a");
     expect(card().querySelector(".cc-machines")?.textContent).not.toContain("%");
     expect(c.getByRole("button", { name: "Add to another machine…" })).toBeEnabled();
-    const rename = c.getByRole("button", { name: "Rename Work" });
-    expect(rename).toBeDisabled();
-    expect(rename).toHaveAttribute("title", "renaming lands with volley claude rename");
-    expect(c.getByRole("button", { name: "Remove Work" })).toBeInTheDocument();
+    expect(c.getByRole("button", { name: "Rename Work" })).toBeEnabled();
+    expect(c.getByRole("button", { name: "Remove Work…" })).toBeEnabled();
     expect(c.getByText("Last updated: 4 min ago")).toHaveClass("cc-updated");
     for (const gone of [
       /waves/,
@@ -1504,7 +1529,7 @@ describe("ClaudeAccounts › one clean card per account (#496)", () => {
       await screen.findByRole("region", { name: "Profiles waiting for sign-in" }),
     );
     expect(section.getByText("Work (box-a)")).toBeInTheDocument();
-    expect(section.getByRole("button", { name: "Cancel Work (box-a)" })).toBeDisabled();
+    expect(section.getByRole("button", { name: "Cancel Work (box-a)" })).toBeEnabled();
     expect(screen.queryByRole("article", { name: "Work (box-a)" })).toBeNull();
     expect(screen.getAllByRole("article").map((a) => a.getAttribute("aria-label"))).toEqual([
       "This machine's Claude login",
@@ -1542,5 +1567,325 @@ describe("ClaudeAccounts › one clean card per account (#496)", () => {
     await screen.findByRole("region", { name: "Profiles waiting for sign-in" });
     const v = await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } });
     expect(v.violations.map((x) => x.id)).toEqual([]);
+  });
+});
+
+describe("ClaudeAccounts › rename, remove and the live registry (#497)", () => {
+  const EMAIL = "owner@example.com";
+  const own: ClaudeAccountPayload = { ...work, email: EMAIL };
+  const row = (id: string, machine: string, label = "Work") => ({
+    id,
+    label,
+    machine,
+    email: EMAIL,
+    plan: "max",
+    signed_in_at: SIGNED,
+    signin: { state: "signed_in" },
+  });
+  const machines = {
+    "box-a": { name: "box-a", kind: "peer", tunnel: "up", auth: { claude: "signed_out" } },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  /** A volleyd whose registry the test edits; rename and remove answer as `answers` says. */
+  function volleyd(
+    rows: ReturnType<typeof row>[],
+    answers: Record<string, { ok: boolean; error?: string; result?: unknown }> = {},
+  ) {
+    const reg = { rows };
+    const control = vi.fn(async (op: string, _f?: Record<string, unknown>) =>
+      op === "claude_accounts"
+        ? { ok: true, result: { accounts: reg.rows, primary: {} } }
+        : (answers[op] ?? ({ ok: true } as { ok: boolean; error?: string; result?: unknown })),
+    );
+    return { reg, control, fn: control as unknown as ControlFn };
+  }
+  const view = (
+    records: Record<string, ClaudeAccountPayload>,
+    control: ControlFn | null,
+    rev: number | undefined = 0,
+  ) => (
+    <main>
+      <ClaudeAccounts
+        accounts={records}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={control}
+        configTransport={null}
+        machines={machines}
+        localName="hub"
+        hosts={["box-a"]}
+        registryRev={rev}
+        group="accounts"
+        now={NOW}
+      />
+    </main>
+  );
+  const fetches = (control: ReturnType<typeof vi.fn>) =>
+    control.mock.calls.filter(([op]) => op === "claude_accounts").length;
+  const card = (name = "Work") => screen.getByRole("article", { name });
+
+  it("a raised rev fetches the registry again; a row it no longer has leaves, with no remount", async () => {
+    const v = volleyd([row("work", "local")]);
+    const r = render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    expect(card()).toBeInTheDocument();
+    // volleyd removed it: its record cleared, the registry without it, the signal raised.
+    v.reg.rows = [];
+    r.rerender(view({}, v.fn, 0));
+    // the stale registry still shows it until the signal moves
+    expect(card()).toBeInTheDocument();
+    r.rerender(view({}, v.fn, 1));
+    await waitFor(() => expect(screen.queryByRole("article", { name: "Work" })).toBeNull());
+    expect(fetches(v.control)).toBe(2);
+  });
+
+  it("Rename: ✎ opens a field holding the name; Enter sends claude_account_rename; the new name shows after the rev", async () => {
+    const v = volleyd([row("work", "local"), row("work-box-a", "box-a")]);
+    const r = render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    const field = within(card()).getByRole("textbox", { name: "New name for Work" });
+    expect(field).toHaveValue("Work");
+    fireEvent.change(field, { target: { value: "Team account" } });
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "Enter" });
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_rename",
+      { acct: "work", label: "Team account" },
+      expect.any(String),
+    );
+    expect(within(card()).queryByRole("textbox")).toBeNull();
+    v.reg.rows = [row("work", "local", "Team account"), row("work-box-a", "box-a", "Team account")];
+    r.rerender(view({ work: { ...own, label: "Team account" } }, v.fn, 1));
+    expect(await screen.findByRole("article", { name: "Team account" })).toBeInTheDocument();
+  });
+
+  it("Rename: Escape restores the name and sends nothing; a refusal shows under the field", async () => {
+    const v = volleyd([row("work", "local")], {
+      claude_account_rename: { ok: false, error: "'primary' is reserved; pick another name" },
+    });
+    render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    const field = within(card()).getByRole("textbox", { name: "New name for Work" });
+    fireEvent.change(field, { target: { value: "Something" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(within(card()).queryByRole("textbox")).toBeNull();
+    expect(within(card()).getByText("Work", { selector: "b" })).toBeInTheDocument();
+    expect(v.control).not.toHaveBeenCalledWith(
+      "claude_account_rename",
+      expect.anything(),
+      expect.anything(),
+    );
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    const again = within(card()).getByRole("textbox", { name: "New name for Work" });
+    fireEvent.change(again, { target: { value: "Primary" } });
+    await act(async () => {
+      fireEvent.keyDown(again, { key: "Enter" });
+    });
+    expect(within(card()).getByRole("alert")).toHaveTextContent("'primary' is reserved");
+    expect(within(card()).getByRole("textbox")).toHaveValue("Primary");
+  });
+
+  it("Remove…: the sheet names the machine and the masked e-mail; Confirm sends the op", async () => {
+    const v = volleyd([row("work", "local")]);
+    render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
+    const sheet = within(screen.getByRole("dialog", { name: "Remove Work" }));
+    expect(sheet.queryByRole("radio")).toBeNull();
+    expect(sheet.getByText("this machine", { selector: "b" })).toBeInTheDocument();
+    expect(sheet.getByText("o•••@example.com")).toBeInTheDocument();
+    expect(screen.getByRole("dialog").textContent).not.toContain(EMAIL);
+    await act(async () => {
+      fireEvent.click(sheet.getByRole("button", { name: "Remove from this machine" }));
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_remove",
+      { acct: "work" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Work removed from this machine.");
+  });
+
+  it("Remove… on an account on several machines picks the machine; a refusal stays in the sheet", async () => {
+    const v = volleyd([row("work", "local"), row("work-box-a", "box-a")], {
+      claude_account_remove: {
+        ok: false,
+        error: "Claude account 'work-box-a@box-a' is in use by w1-t1-implementer-1",
+      },
+    });
+    render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
+    const sheet = within(screen.getByRole("dialog", { name: "Remove Work" }));
+    const radios = sheet.getAllByRole("radio");
+    expect(radios.map((r) => r.closest("label")?.querySelector("span")?.textContent)).toEqual([
+      "this machine",
+      "box-a",
+    ]);
+    expect(radios[0]).toBeChecked();
+    fireEvent.click(sheet.getByRole("radio", { name: /box-a/ }));
+    await act(async () => {
+      fireEvent.click(sheet.getByRole("button", { name: "Remove from box-a" }));
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_remove",
+      { acct: "work-box-a@box-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(sheet.getByRole("alert")).toHaveTextContent("in use by w1-t1-implementer-1");
+    expect(screen.getByRole("dialog", { name: "Remove Work" })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("this machine's own login has no Rename and no Remove", async () => {
+    const v = volleyd([row("work", "local")]);
+    render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    const primary = within(screen.getByRole("article", { name: "This machine's Claude login" }));
+    expect(primary.queryByRole("button", { name: /^Rename/ })).toBeNull();
+    expect(primary.queryByRole("button", { name: /^Remove/ })).toBeNull();
+  });
+
+  it("read-only: neither Rename nor Remove", () => {
+    render(view({ work: own }, null));
+    expect(within(card()).queryByRole("button", { name: /^Rename/ })).toBeNull();
+    expect(within(card()).queryByRole("button", { name: /^Remove/ })).toBeNull();
+  });
+
+  it("a waiting profile's Cancel sends claude_account_remove for it", async () => {
+    const pending = {
+      id: "pending-work",
+      label: "Work (box-a)",
+      machine: "box-a",
+      signin: { state: "pending" },
+    };
+    const v = volleyd([row("work", "local"), pending as unknown as ReturnType<typeof row>]);
+    render(view({ work: own }, v.fn));
+    const section = within(
+      await screen.findByRole("region", { name: "Profiles waiting for sign-in" }),
+    );
+    await act(async () => {
+      fireEvent.click(section.getByRole("button", { name: "Cancel Work (box-a)" }));
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_remove",
+      { acct: "pending-work@box-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+  });
+
+  it("passes axe with the remove sheet open, and with the rename field open", async () => {
+    const v = volleyd([row("work", "local"), row("work-box-a", "box-a")]);
+    render(view({ work: own }, v.fn));
+    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
+    const rules = { rules: { "color-contrast": { enabled: false } } };
+    expect((await axe.run(document.body, rules)).violations.map((x) => x.id)).toEqual([]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    expect((await axe.run(document.body, rules)).violations.map((x) => x.id)).toEqual([]);
+  });
+});
+
+describe("the demo Desk: remove a profile, and every Settings section follows (#497)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none", autoArrange: false }));
+  });
+
+  it("Remove… on Team (box-a) leaves its card's box-a row and Settings › Machines' box-a list", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: () => {},
+      configurable: true,
+    });
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const dock = within(screen.getByRole("toolbar", { name: "Dock" }));
+      fireEvent.click(dock.getByRole("button", { name: "Machines" }));
+      fireEvent.click(screen.getByRole("button", { name: "box-a: open in Settings › Machines" }));
+      const onBoxA = () => screen.getByRole("list", { name: "Claude accounts on box-a" });
+      const teamOnBoxA = () =>
+        within(onBoxA())
+          .getAllByRole("listitem")
+          .find((li) => li.textContent?.includes("Team account"));
+      await waitFor(() => expect(teamOnBoxA()).not.toHaveClass("gap"));
+
+      const settings = within(screen.getByRole("dialog", { name: "Settings" }));
+      fireEvent.click(settings.getByRole("button", { name: /Claude accounts & usage/ }));
+      fireEvent.click(await settings.findByRole("button", { name: /^Accounts/ }));
+      const team = await screen.findByRole("article", { name: "Team account" });
+      fireEvent.click(within(team).getByRole("button", { name: "Remove Team account…" }));
+      const sheet = within(screen.getByRole("dialog", { name: "Remove Team account" }));
+      fireEvent.click(sheet.getByRole("radio", { name: /box-a/ }));
+      fireEvent.click(sheet.getByRole("button", { name: "Remove from box-a" }));
+      // the demo answers, clears the record, raises its signal; the card is fetched again
+      await waitFor(
+        () => {
+          const rows = within(screen.getByRole("article", { name: "Team account" })).getByRole(
+            "list",
+            { name: "Machines" },
+          );
+          expect(within(rows).getByText("not on box-a")).toBeInTheDocument();
+        },
+        { timeout: 3000 },
+      );
+
+      fireEvent.click(settings.getByRole("button", { name: /^Machines/ }));
+      await waitFor(() => expect(teamOnBoxA()).toHaveClass("gap"));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("Settings › Machines, left open, asks volleyd's registry again when the rev rises", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: () => {},
+      configurable: true,
+    });
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const dock = within(screen.getByRole("toolbar", { name: "Dock" }));
+      fireEvent.click(dock.getByRole("button", { name: "Machines" }));
+      fireEvent.click(screen.getByRole("button", { name: "box-a: open in Settings › Machines" }));
+      screen.getByRole("list", { name: "Claude accounts on box-a" });
+      const asked = () => demoFeed.asks.filter((op) => op === "claude_accounts").length;
+      await waitFor(() => expect(asked()).toBeGreaterThan(0));
+      const before = asked();
+      const signal = (rev: number): DeskMessage => ({
+        topic: "volley/_system/claude/registry",
+        envelope: {
+          schema_version: "0.1",
+          agent_id: "volleyd",
+          channel: "_system/claude",
+          type: "claude_registry_changed",
+          wall_time: new Date().toISOString(),
+          namespace: "default",
+          payload: { rev, at: new Date().toISOString() },
+        },
+        receivedAt: Date.now(),
+      });
+      act(() => demoFeed.apply?.([signal(41)]));
+      await waitFor(() => expect(asked()).toBe(before + 1));
+      // Settings › Machines stayed open throughout: no remount asked it
+      expect(screen.getByRole("list", { name: "Claude accounts on box-a" })).toBeInTheDocument();
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
   });
 });

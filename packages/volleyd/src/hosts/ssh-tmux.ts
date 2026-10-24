@@ -237,7 +237,15 @@ export type RepoRemoteHost = RemoteHost & { readonly spec: RepoHostSpec };
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
   ExecOptions,
-  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff" | "wake"
+  | "consent"
+  | "timeoutMs"
+  | "launch"
+  | "modelSwitch"
+  | "signin"
+  | "picker"
+  | "handoff"
+  | "wake"
+  | "profileRemove"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -323,6 +331,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
         ...(opts.wake !== undefined ? { wake: opts.wake } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
+        ...(opts.profileRemove !== undefined ? { profileRemove: opts.profileRemove } : {}),
       },
     );
   }

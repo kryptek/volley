@@ -38,6 +38,7 @@ import {
   reduceAll,
   routeTopic,
 } from "../src/store/reducer";
+import type { DeskMessage } from "../src/store/types";
 
 const NOW = Date.parse("2026-10-18T15:00:00.000Z");
 
@@ -385,8 +386,52 @@ describe("demo steering: volleyd's Claude answers", () => {
   });
 });
 
+describe("demo steering: rename and remove act on the demo's registry", () => {
+  it("answers ok, changes the next claude_accounts, clears the record and raises the rev", async () => {
+    vi.useFakeTimers();
+    try {
+      const applied: DeskMessage[] = [];
+      const client = createDemoSteerClient(
+        (msgs) => applied.push(...msgs),
+        () => false,
+      );
+      const acks: Record<string, { ok?: boolean; result?: unknown }> = {};
+      client.onMessage((m) => {
+        if (m.envelope?.type === "ack")
+          acks[m.envelope.correlation_id ?? ""] = m.envelope.payload as { ok?: boolean };
+      });
+      const ask = async (id: string, payload: Record<string, unknown>) => {
+        await client.publish(
+          "volley/default/volleyd/mailbox",
+          JSON.stringify({ agent_id: "desk", type: "query", correlation_id: id, payload }),
+        );
+        await vi.runAllTimersAsync();
+      };
+      await ask("r", { op: "claude_account_rename", acct: "team", label: "Team" });
+      await ask("x", { op: "claude_account_remove", acct: "team@box-a" });
+      await ask("l", { op: "claude_accounts" });
+      expect(acks.r).toMatchObject({ ok: true, result: { renamed: ["team", "team@box-a"] } });
+      expect(acks.x).toMatchObject({ ok: true, result: { dir_removed: true } });
+      const rows = (
+        acks.l?.result as { accounts: { id: string; machine: string; label: string }[] }
+      ).accounts;
+      expect(rows.filter((r) => r.id === "team").map((r) => [r.machine, r.label])).toEqual([
+        ["local", "Team"],
+      ]);
+      const signals = applied.filter((m) => m.topic === "volley/_system/claude/registry");
+      expect(signals.map((m) => (m.envelope?.payload as { rev: number }).rev)).toEqual([1, 2]);
+      const cleared = applied.find((m) => m.topic === "volley/_system/claude-accounts/team@box-a");
+      expect(cleared?.envelope).toBeNull();
+      // the fixture itself is untouched
+      expect(demoClaudeAccounts().accounts.filter((r) => r.id === "team")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("demo mode's read-only control", () => {
-  it("passes claude_accounts and claude_balance on, refuses every other op", async () => {
+  it("passes the registry's ops on, refuses every other op", async () => {
     const control = vi.fn(async () => ({ ok: true, result: "answered" }));
     const reads = demoReadControl(control);
     expect(await reads("claude_accounts", {}, "volley claude list")).toEqual({
@@ -394,8 +439,10 @@ describe("demo mode's read-only control", () => {
       result: "answered",
     });
     expect((await reads("claude_balance", {})).ok).toBe(true);
+    expect((await reads("claude_account_rename", {})).ok).toBe(true);
+    expect((await reads("claude_account_remove", {})).ok).toBe(true);
     for (const op of ["claude_account_add", "claude_signin", "resolve"])
       expect((await reads(op, {})).ok).toBe(false);
-    expect(control).toHaveBeenCalledTimes(2);
+    expect(control).toHaveBeenCalledTimes(4);
   });
 });

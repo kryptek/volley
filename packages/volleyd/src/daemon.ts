@@ -185,7 +185,7 @@ import {
   readRegistry,
 } from "./claude/profiles";
 import { remoteAccountHost } from "./claude/remote-signin";
-import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
+import { ClaudeService, REGISTRY_TOPIC, SIGNIN_CHANNEL } from "./claude/service";
 import { type Sharing, readSharing } from "./claude/sharing";
 import {
   type AgentLimitSeen,
@@ -200,10 +200,12 @@ import {
   foldProbe,
   foldUsage,
   forgetAgent,
+  isMachineLogin,
   limitDecisions,
   parseAgentMoveAnswer,
   parseMoveAnswer,
   parseUsage,
+  pruneBook,
   rankAccounts,
   restoreBook,
   sampleAccount,
@@ -1670,6 +1672,12 @@ export class Daemon {
         };
       },
       machines: () => this.machines.all(),
+      // A remove is refused while the profile is in use.
+      agentsOn: (key) => this.agentsOnAccount(key),
+      wavesOn: (id) => this.wavesPinning(id),
+      defaultAccount: () => this.config.effective().claude.default_account,
+      // Every change: prune the usage book, raise the retained signal, republish the records.
+      onChanged: () => this.enqueue(() => this.registryChanged()),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -1899,8 +1907,17 @@ export class Daemon {
         void this.enqueue(() => this.onUsage(m.topic, m.payload));
       }),
     );
-    // The records restored from disk, also those no agent reports any more.
-    void this.enqueue(() => this.usagePass());
+    // A retained account record the registry and the book do not have (a profile removed while
+    // the daemon was down, by hand) is cleared.
+    this.unsubscribers.push(
+      await this.broker.subscribeStream(usageAccountTopic("+"), (m) => {
+        if (m.payload === "") return;
+        void this.enqueue(() => this.clearStrayRecord(m.topic.split("/")[3] ?? ""));
+      }),
+    );
+    // The book pruned to the registry, the signal at the current rev, then the records restored
+    // from disk, also those no agent reports any more.
+    void this.enqueue(() => this.registryChanged());
     // Paired machines' retained health records (SPEC §4.6.14).
     this.unsubscribers.push(
       await this.broker.subscribeStream(MACHINES_FILTER, (m) => {
@@ -10060,6 +10077,78 @@ export class Daemon {
     await this.usagePass();
   }
 
+  /**
+   * The registry changed (or the daemon started): prune the usage book, publish the retained
+   * `claude_registry_changed { rev, at }` signal, and republish the records (a rename's label).
+   */
+  private async registryChanged(): Promise<void> {
+    await this.pruneUsage();
+    await this.publish(
+      REGISTRY_TOPIC,
+      this.envelope(SIGNIN_CHANNEL, "claude_registry_changed", {
+        rev: this.claude.rev,
+        at: dateOf(this.time).toISOString(),
+      }),
+      true,
+    );
+    await this.usagePass();
+  }
+
+  /**
+   * Drop the book's accounts the registry no longer has (never `primary[@<name>]`) and clear
+   * their retained records. An unreadable registry prunes nothing.
+   */
+  private async pruneUsage(): Promise<void> {
+    const known = this.claude.knownAccounts();
+    if (known === null) return;
+    const next = pruneBook(this.usage, known);
+    if (next === this.usage) return;
+    const gone = Object.keys(this.usage.accounts).filter((a) => next.accounts[a] === undefined);
+    this.usage = next;
+    writeFileAtomic(this.usageFile, bookState(next));
+    for (const a of gone) {
+      this.publishedUsage.delete(a);
+      await this.clearRetained(usageAccountTopic(a));
+    }
+  }
+
+  /** A retained record of an account neither the registry nor the book has: cleared. */
+  private async clearStrayRecord(acct: string): Promise<void> {
+    if (acct === "" || isMachineLogin(acct) || this.usage.accounts[acct] !== undefined) return;
+    const known = this.claude.knownAccounts();
+    if (known === null || known.has(acct)) return;
+    this.publishedUsage.delete(acct);
+    await this.clearRetained(usageAccountTopic(acct));
+  }
+
+  /** The supervised agents running under `key` (a usage-record key), as sampled or spawned. */
+  private agentsOnAccount(key: string): string[] {
+    const out: string[] = [];
+    for (const [id, a] of this.supervised) {
+      const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
+      const spawned = this.spawnedRecord((e) => e.data.agent_id === id, a.wave);
+      const own =
+        typeof spawned?.claude_account === "string"
+          ? accountKey(spawned.claude_account, machine)
+          : null;
+      if (this.usage.agents[id]?.account === key || own === key) out.push(id);
+    }
+    return out.sort();
+  }
+
+  /** The waves still running whose wave file pins profile `id` (the wave's or a task's account). */
+  private wavesPinning(id: string): string[] {
+    return [...this.waves]
+      .filter(([, log]) => {
+        const status = log.record.state?.status;
+        const w = log.record.wave;
+        if (status === undefined || status === "complete" || status === "stopped") return false;
+        return w?.account === id || Object.values(w?.tasks ?? {}).some((t) => t.account === id);
+      })
+      .map(([wave]) => wave)
+      .sort();
+  }
+
   /** Re-publish the account records that changed, then open the `account_limit`s they call for. */
   private async usagePass(): Promise<void> {
     const records = accountRecords(this.usage);
@@ -11076,6 +11165,11 @@ export class Daemon {
         return this.claude.balance(p, Object.keys(this.config.effective().hosts));
       case "claude_account_add":
         return { ok: true, defer: this.claude.add(p, by) };
+      // Answered once the usage book, the records and the signal follow (onChanged).
+      case "claude_account_rename":
+        return { ok: true, defer: this.claude.rename(p, by) };
+      case "claude_account_remove":
+        return { ok: true, defer: this.claude.remove(p, by) };
       case "claude_signin":
         return { ok: true, defer: this.claude.signin(p, by) };
       case "claude_sync":

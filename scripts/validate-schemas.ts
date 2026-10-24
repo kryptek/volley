@@ -29,6 +29,7 @@
  *   - `authreq-*.json` -> auth-request.schema.json
  *   - `usage-*.json` -> usage.schema.json
  *   - `claudeaccount-*.json` -> claude-account.schema.json
+ *   - `clauderegistry-*.json` -> claude-registry.schema.json
  *   - `machine-*.json` -> machine.schema.json
  *   - `readiness-*.json` -> readiness.schema.json
  *   - `archive-*.json` -> archive.schema.json
@@ -72,6 +73,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   authreq: "auth-request.schema.json",
   usage: "usage.schema.json",
   claudeaccount: "claude-account.schema.json",
+  clauderegistry: "claude-registry.schema.json",
   machine: "machine.schema.json",
   readiness: "readiness.schema.json",
   archive: "archive.schema.json",
