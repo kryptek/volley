@@ -63,7 +63,15 @@ describe("the light tone (#368)", () => {
   it("the near-duplicate text tints are gone (unified onto the *-ink tokens)", () => {
     for (const f of readdirSync(STYLES).filter((f) => f.endsWith(".css"))) {
       const css = read(f);
-      for (const tint of ["#7ee2a0", "#ff9d85", "#8be9fd", "#ffd27a", "#ffd60a", "#1a1204"]) {
+      for (const tint of [
+        "#7ee2a0",
+        "#ff9d85",
+        "#ff8f7a",
+        "#8be9fd",
+        "#ffd27a",
+        "#ffd60a",
+        "#1a1204",
+      ]) {
         if (f === "desk.css" && tint === "#1a1204") continue;
         expect(css.toLowerCase().includes(tint), `${tint} in ${f}`).toBe(false);
       }
@@ -71,9 +79,28 @@ describe("the light tone (#368)", () => {
     }
   });
 
+  it("the graph's task ids are filled with --acc-ink from CSS, not a presentation attribute", () => {
+    expect(read("wave.css")).toMatch(/\.dag-id\s*\{[^}]*fill:\s*var\(--acc-ink\)/);
+  });
+
+  it("on a light theme the graph's node outlines and edges are drawn from --mute", () => {
+    const css = read("wave.css");
+    expect(css).toMatch(/html\[data-tone="light"\] \.dag-edge\s*\{[^}]*stroke:[^;]*var\(--mute\)/);
+    expect(css).toMatch(
+      /:where\(html\[data-tone="light"\]\) \.dag-node rect\s*\{[^}]*stroke:[^;]*var\(--mute\)/,
+    );
+  });
+
+  it("the stale-terminal pill and the sign-in backdrop sit on themed surfaces", () => {
+    expect(read("agent.css")).toMatch(/\.term-stale\s*\{[^}]*background:[^;]*var\(--panel-solid\)/);
+    expect(read("signin.css")).toMatch(
+      /\.signin-backdrop\s*\{[^}]*background:\s*var\(--signin-ground\)/,
+    );
+  });
+
   it("no accent is text without going through --acc-ink", () => {
     for (const f of readdirSync(STYLES).filter((f) => f.endsWith(".css"))) {
-      expect(read(f), f).not.toMatch(/(^|[\s;{])color:\s*var\(--acc[,)]/);
+      expect(read(f), f).not.toMatch(/(^|[\s;{])(color|fill):\s*var\(--acc[,)]/);
     }
   });
 });
@@ -88,9 +115,9 @@ describe("colour literals in the Desk's stylesheets", () => {
           (readFileSync(join(STYLES, f), "utf8").match(/#[0-9a-f]{3,8}\b|rgba?\(/gi) ?? []).length,
         0,
       );
-    // 409 before the token layer (#365), 297 after it, 276 after the light tone (#368). This
+    // 409 before the token layer (#365), 297 after it, 271 after the light tone (#368). This
     // ceiling only ever goes down: re-point a literal to a token (or the themed block) rather
     // than raising it.
-    expect(count).toBeLessThanOrEqual(276);
+    expect(count).toBeLessThanOrEqual(271);
   });
 });

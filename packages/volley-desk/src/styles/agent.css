@@ -136,7 +136,7 @@ html[data-tone="light"] .narr-enc {
   color: var(--ok-text);
 }
 .tl-bad {
-  color: #ff8f7a;
+  color: var(--bad-ink);
 }
 .caret {
   color: var(--acc-ink);
@@ -212,7 +212,7 @@ html[data-tone="light"] .narr-enc {
   border-radius: 999px;
   color: var(--amber-text);
   border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
-  background: rgba(15, 17, 27, 0.9);
+  background: color-mix(in srgb, var(--panel-solid) 90%, transparent);
 }
 .term--stale .tl {
   opacity: 0.6;

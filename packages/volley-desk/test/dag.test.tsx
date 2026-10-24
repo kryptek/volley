@@ -61,7 +61,7 @@ describe("Dag", () => {
 
   it("colours task ids in the wave accent and centres the single-task columns", () => {
     const { container } = render(<Dag tasks={EXAMPLE} accent="#fbbf24" />);
-    expect(container.querySelector(".dag-id")?.getAttribute("fill")).toBe("var(--acc-ink)");
+    expect(container.querySelector(".dag-id")?.hasAttribute("fill")).toBe(false);
     expect(container.querySelector("svg.dag")?.getAttribute("style")).toContain("--acc: #fbbf24");
     const [t0, t1, t2, t3] = layoutDag(EXAMPLE).nodes.map((n) => n.y);
     expect(t0).toBe(((t1 ?? 0) + (t2 ?? 0)) / 2);

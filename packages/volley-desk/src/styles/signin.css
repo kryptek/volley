@@ -8,7 +8,7 @@
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: #05060c;
+  background: var(--signin-ground);
   overflow: hidden;
 }
 .signin-bg {
@@ -165,7 +165,10 @@ html[data-tone="light"] .signin-broker {
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
 .f3d input::placeholder {
-  color: rgba(163, 171, 192, 0.4);
+  color: color-mix(in srgb, var(--mute) 40%, transparent);
+}
+html[data-tone="light"] .f3d input {
+  border-color: color-mix(in srgb, var(--mute) 45%, transparent);
 }
 .f3d input:focus {
   border-color: color-mix(in srgb, var(--t-acc) 55%, transparent);

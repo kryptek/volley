@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import App from "../src/App";
 import { SignInGate } from "../src/auth/SignInGate";
 import { DeskDock } from "../src/look/DeskDock";
@@ -25,6 +25,8 @@ const renderApp = () =>
 const dock = () => within(screen.getByRole("toolbar", { name: "Dock" }));
 
 describe("the dock", () => {
+  afterEach(() => applyTheme("volley"));
+
   it("has exactly eight items, in order", () => {
     renderApp();
     expect(
@@ -95,7 +97,6 @@ describe("the dock", () => {
       (
         screen.getByRole("toolbar", { name: "Dock" }).closest("[style]") as HTMLElement | null
       )?.getAttribute("style") ?? "";
-    applyTheme("volley");
     expect(style).toContain("--dock-panel: rgba(240, 240, 243, 0.8)");
   });
 

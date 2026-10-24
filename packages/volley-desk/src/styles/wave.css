@@ -45,6 +45,7 @@
 }
 .dag-id {
   font: 600 13px var(--f-mono);
+  fill: var(--acc-ink);
 }
 .dag-stage {
   font: 11.5px var(--f-ui);
@@ -419,6 +420,14 @@ html[data-tone="light"] .cluster-id[style] {
    over the cluster hull. */
 html[data-tone="light"] .dag-node rect:not(.dag-hull) {
   fill: var(--win1);
+}
+/* Outlines a node state doesn't colour, drawn from --mute so they show on white (:where keeps
+   the specificity of the base rule, so the state strokes still win). */
+:where(html[data-tone="light"]) .dag-node rect {
+  stroke: color-mix(in srgb, var(--mute) 45%, transparent);
+}
+html[data-tone="light"] .dag-edge {
+  stroke: color-mix(in srgb, var(--mute) 60%, transparent);
 }
 html[data-tone="light"] .dag-node.st-merged rect:not(.dag-hull) {
   fill: color-mix(in srgb, var(--ok) 10%, var(--win1));

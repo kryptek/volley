@@ -101,7 +101,7 @@
   color: var(--ok-text);
 }
 .cfg-ack--bad {
-  color: #ff8f7a;
+  color: var(--bad-ink);
 }
 .cfg-copy {
   display: flex;

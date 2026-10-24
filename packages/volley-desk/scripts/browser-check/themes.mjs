@@ -21,7 +21,8 @@ import { canvasTextContrast, textContrast } from "./text-contrast.mjs";
 
 const out = outDir();
 const tag = process.argv[3] ?? "after";
-const themes = process.argv.length > 4 ? process.argv.slice(4) : ["volley"];
+// Volley always runs: it is the baseline the other themes' offenders are compared with.
+const themes = [...new Set(["volley", ...process.argv.slice(4)])];
 const b = await launch();
 const report = {};
 
@@ -174,7 +175,8 @@ const added = {};
 for (const [run, r] of Object.entries(report)) {
   const device = run.slice(run.lastIndexOf("-") + 1);
   const base = report[`volley-${device}`];
-  if (!base || run.startsWith("volley-")) continue;
+  if (run.startsWith("volley-")) continue;
+  if (!base) throw new Error(`${run}: no volley-${device} baseline to compare with`);
   for (const [what, c] of Object.entries(r.contrast)) {
     const known = new Set((base.contrast[what]?.measured ?? []).map(key));
     const extra = c.measured.filter((b) => !known.has(key(b)));

@@ -261,7 +261,7 @@ export function Dag({
             {nodeTip(t) && <title>{nodeTip(t)}</title>}
             {t.cluster && <ClusterHull hue={t.cluster.hue} />}
             <rect width={W} height={H} rx="9" />
-            <text x="10" y="18" className="dag-id" fill="var(--acc-ink)">
+            <text x="10" y="18" className="dag-id">
               {fitId(t.id, idFit(t))}
             </text>
             {t.cluster && (
