@@ -121,7 +121,9 @@ a.dag-issue-link {
   outline-offset: 0;
   border-radius: 2px;
 }
-/* A running node's text is the effect's ink; its id stays the wave accent. */
+/* A running node's text is the effect's ink; its id stays the wave accent. This also
+   holds for a hovered or focused issue link (--ink would sit on the accent gradient):
+   its underline and outline are the cue there. */
 .dag-node.fx-cur > :is(.dag-stage, .dag-issue, .dag-fixer) {
   color: inherit;
 }

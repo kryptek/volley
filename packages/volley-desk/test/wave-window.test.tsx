@@ -455,7 +455,8 @@ describe("rail depth (#367)", () => {
     const cls = (id: string) => container.querySelector(`.dag-node[data-id="${id}"]`);
     expect(cls("T0")).toHaveClass("fx-done");
     expect(cls("T1")).toHaveClass("fx-cur");
-    expect(cls("T3")).not.toHaveClass("fx-cur", "fx-done", "fx-future");
+    expect(cls("T3")).not.toBeNull();
+    expect(cls("T3")?.className).not.toMatch(/\bfx-/);
   });
 
   it("an ended wave's rail and graph are flat", () => {

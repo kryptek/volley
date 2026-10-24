@@ -55,8 +55,8 @@
 }
 
 /* glossy bars: the agent footer bar and the rail's segments, with a slow glint on the bar.
-   The rail's segments get fx-done / fx-cur from the wave window in T2; until then these
-   .rail-seg rules match nothing. */
+   The wave window gives a running wave's rail segments fx-done / fx-cur (an ended wave's
+   rail stays flat). */
 .bar > span,
 .rail-seg > span.fx-cur {
   background: linear-gradient(180deg, var(--t-acc-hi), var(--t-acc));
