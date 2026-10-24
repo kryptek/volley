@@ -220,7 +220,7 @@ describe("daemon spawn loop", () => {
         ...(local === undefined
           ? { host }
           : {
-              localHost: (terminal: "cmux" | "tmux") => {
+              localHostFor: (terminal: "cmux" | "tmux") => {
                 built.push(terminal);
                 return Object.assign(host, { screenSource: terminal });
               },
@@ -532,7 +532,7 @@ describe("daemon spawn loop", () => {
     });
 
     it("cmux: the local host is the cmux one", async () => {
-      await setup({ local: { terminal: "cmux", platform: "linux", cmux: false } });
+      await setup({ local: { terminal: "cmux", platform: "darwin", cmux: false } });
       const spawned = await event("agent_spawned");
       expect(built).toEqual(["cmux"]);
       expect(spawned?.data.terminal).toBe("cmux");

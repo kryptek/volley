@@ -145,14 +145,16 @@ function overrideErrors(value: unknown): PathError[] {
 
 /**
  * `fleet.local_terminal`, resolved: null is `cmux` on macOS when cmux is installed
- * (`cmuxFound`), else `tmux` (every Linux supervisor; a Mac without cmux).
+ * (`cmuxFound`), else `tmux` (every Linux supervisor; a Mac without cmux). cmux is a Mac app, so
+ * a `cmux` set off macOS (a hand-edited config.yaml) is `tmux` too.
  */
 export function resolveLocalTerminal(
   set: LocalTerminal | null | undefined,
   platform: NodeJS.Platform,
   cmuxFound: () => boolean,
 ): LocalTerminal {
-  if (set === "cmux" || set === "tmux") return set;
+  if (set === "tmux" || (set === "cmux" && platform === "darwin")) return set;
+  if (set === "cmux") return "tmux";
   return platform === "darwin" && cmuxFound() ? "cmux" : "tmux";
 }
 

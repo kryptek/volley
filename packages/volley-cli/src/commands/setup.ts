@@ -55,8 +55,7 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *   6. Phone     a one-time steer sign-in link as a QR code
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
- * $VOLLEYD_HOME/setup.log (summaries only, never a secret). `--check` plans every step and
- * prints one row each, changing nothing.
+ * $VOLLEYD_HOME/setup.log (summaries only, never a secret).
  */
 
 const STEPS: [StepName, Planner][] = [
@@ -169,7 +168,6 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       options: {
         yes: { type: "boolean", short: "y" },
         repair: { type: "boolean" },
-        check: { type: "boolean" },
         lan: { type: "boolean" },
         "no-lan": { type: "boolean" },
         step: { type: "string", multiple: true },
@@ -281,9 +279,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
-    `volley setup${values.check === true ? " --check" : ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
+    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
-  if (values.check === true) return check(ctx, only, io);
   const yes = ctx.yes;
   // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
   // the runs where its mode matters most) still records the mode it found, and replaces an
@@ -378,49 +375,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   return EXIT.OK;
 }
 
-/**
- * `volley setup --check`: plan every step (or the `--step` ones) and print one row each: in
- * place, the changes a run would make, skipped, blocked, or what could not be checked. Changes
- * nothing, journals nothing, asks nothing. Exit 0 when every row is in place (or skipped).
- */
-async function check(ctx: SetupContext, only: string[], io: IO): Promise<ExitCode> {
-  // Ask nothing: the LAN question takes its --yes answer (off, unless the config or a flag says).
-  ctx.yes = true;
-  const steps = STEPS.filter(([name]) => only.length === 0 || only.includes(name));
-  const rows: [string, string][] = [];
-  let ok = true;
-  for (const [name, planner] of steps) {
-    let plan: StepPlan;
-    try {
-      plan = await planner(ctx);
-    } catch (e) {
-      ok = false;
-      rows.push([name, `✗ cannot check: ${e instanceof Error ? e.message : String(e)}`]);
-      continue;
-    }
-    const n = plan.changes.length;
-    const status =
-      plan.blocked !== undefined
-        ? `✗ ${plan.row ?? `blocked: ${plan.blocked.split("\n")[0]}`}`
-        : plan.skipped !== undefined
-          ? `– skipped: ${plan.skipped}`
-          : n > 0
-            ? `→ ${plan.row !== undefined ? `${plan.row}; ` : ""}${n === 1 ? "1 change" : `${n} changes`} to make: ${plan.changes.map((c) => c.summary).join("; ")}`
-            : `✓ ${plan.row ?? "in place"}`;
-    if (plan.blocked !== undefined || n > 0) ok = false;
-    rows.push([plan.title, status]);
-  }
-  const width = Math.max(...rows.map(([t]) => t.length));
-  io.stdout(`${rows.map(([t, s]) => `  ${t.padEnd(width)}  ${s}`).join("\n")}\n`);
-  io.stdout(
-    ok
-      ? "Everything is in place.\n"
-      : "Run `volley setup` (or `volley setup --repair`) to make the changes above.\n",
-  );
-  return ok ? EXIT.OK : EXIT.ERROR;
-}
-
-export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [--check] [options]
+export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
 
 First-run (and repair) wizard: six steps, each showing what it found and what it will change
 before changing anything.
@@ -455,8 +410,6 @@ issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log.
 Options:
   -y, --yes            Apply every step without asking
   --repair             Check and fix only: no new admin token, no phone link
-  --check              Show one row per step (in place, or what a run would change) and
-                       change nothing; exit 1 unless everything is in place
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
   --step <name>        Only this step (repeatable): detect, security, accounts, terminal,

@@ -858,7 +858,9 @@ describe("resolveLocalTerminal (fleet.local_terminal)", () => {
       throw new Error("not asked");
     };
     expect(resolveLocalTerminal("tmux", "darwin", never)).toBe("tmux");
-    expect(resolveLocalTerminal("cmux", "linux", never)).toBe("cmux");
+    // cmux is a Mac app: a hand-edited `cmux` on Linux still runs agents in tmux.
+    expect(resolveLocalTerminal("cmux", "linux", never)).toBe("tmux");
+    expect(resolveLocalTerminal("cmux", "darwin", never)).toBe("cmux");
     expect(resolveLocalTerminal(null, "darwin", () => true)).toBe("cmux");
     expect(resolveLocalTerminal(null, "darwin", () => false)).toBe("tmux");
     expect(resolveLocalTerminal(null, "linux", never)).toBe("tmux");

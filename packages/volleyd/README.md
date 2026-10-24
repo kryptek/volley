@@ -1944,10 +1944,10 @@ spawn` retries at once. While the kill switch is engaged nothing is spawned.
 
 `fleet.local_terminal` (`cmux` | `tmux`, SPEC §4.6.4) picks the terminal agents run in on the
 supervisor's own machine. Unset (`null`, the default) it is `cmux` on macOS when cmux is installed
-and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. `volley setup`'s Terminal
-step records its choice there (and in `setup.json`). volleyd reads it when it starts; a change
-applies at the next start, since a running agent's workspace belongs to the terminal it started
-in.
+and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. A `cmux` set anywhere but
+macOS is `tmux` too. `volley setup`'s Terminal step records its choice there (and in
+`setup.json`). volleyd reads it when it starts; a change applies at the next start, since a
+running agent's workspace belongs to the terminal it started in.
 
 | | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) |
 |---|---|---|

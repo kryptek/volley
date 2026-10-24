@@ -484,38 +484,6 @@ describe("volley setup", () => {
     expect(existsSync(join(m.ctx.volleydHome, "config.yaml"))).toBe(false);
   });
 
-  it("--check shows a row per step, the Terminal's included, and changes nothing", async () => {
-    const before = await run(["--check"]);
-    expect(before.code).toBe(1);
-    expect(before.stdout).toContain("volley setup --check: broker");
-    expect(before.stdout).toMatch(
-      /^ {2}Terminal {2}→ tmux \(\/usr\/bin\/tmux\); 1 change to make: Record the local terminal in .*config\.yaml \(fleet\.local_terminal: tmux\)$/m,
-    );
-    expect(before.stdout).toContain("Run `volley setup`");
-    expect(m.questions).toEqual([]);
-    expect(m.execCalls.every(READ_ONLY)).toBe(true);
-    expect(existsSync(join(m.ctx.volleydHome, "setup.log"))).toBe(false);
-    expect(existsSync(join(m.ctx.volleydHome, "config.yaml"))).toBe(false);
-    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
-
-    expect((await run(["--yes", "--lan"])).code).toBe(0);
-    const log = readFileSync(join(m.ctx.volleydHome, "setup.log"), "utf-8");
-    const after = await run(["--check"]);
-    expect(after.stdout).toMatch(/^ {2}Terminal {2}✓ tmux \(\/usr\/bin\/tmux\)$/m);
-    expect(after.stdout).toMatch(/^ {2}Services {2}✓ in place$/m);
-    expect(after.stdout).toContain("Everything is in place.");
-    expect(after.code).toBe(0);
-    expect(readFileSync(join(m.ctx.volleydHome, "setup.log"), "utf-8")).toBe(log);
-
-    // tmux gone: the row says what is missing and how to install it.
-    m.present.delete("/usr/bin/tmux");
-    const missing = await run(["--check", "--step", "terminal"]);
-    expect(missing.code).toBe(1);
-    expect(missing.stdout).toMatch(
-      /^ {2}Terminal {2}✗ missing: cmux or tmux \(brew install tmux\)$/m,
-    );
-  });
-
   it("under sudo, skips the user services and still ends with the phone's link", async () => {
     m.auth.invokingUser = () => ({ uid: 501, gid: 20, home: m.ctx.home });
     const r = await run(["--yes", "--lan"]);

@@ -593,6 +593,11 @@ describe("setup: the terminal (cmux, tmux)", () => {
     expect(withLocalTerminal("fleet:\n  local_terminal: cmux\n", "tmux")).toBe(
       "fleet:\n  local_terminal: tmux\n",
     );
+    // An empty `fleet:` (or `fleet: ~`) is a null fleet volleyd accepts: it becomes the mapping.
+    expect(withLocalTerminal("fleet:\n", "tmux")).toBe("fleet:\n  local_terminal: tmux\n");
+    expect(withLocalTerminal("# mine\nfleet: ~\nx: 1\n", "cmux")).toBe(
+      "# mine\nfleet:\n  local_terminal: cmux\nx: 1\n",
+    );
     expect(() => withLocalTerminal("- a\n- b\n", "tmux")).toThrow(/not a YAML mapping/);
     expect(() => withLocalTerminal("fleet: 3\n", "tmux")).toThrow(/fleet/);
   });

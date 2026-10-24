@@ -502,7 +502,11 @@ export function withLocalTerminal(text: string, terminal: LocalTerminal): string
   if (fleet !== undefined && fleet !== null && !isMap(fleet)) {
     throw new Error("its `fleet` is not a mapping");
   }
-  doc.setIn(["fleet", "local_terminal"], terminal);
+  // No `fleet`, or an empty one (`fleet:`, `fleet: ~`, which `get` reads as undefined): set the
+  // whole mapping (`setIn` cannot step through a null).
+  if (fleet === undefined || fleet === null)
+    doc.set("fleet", doc.createNode({ local_terminal: terminal }));
+  else doc.setIn(["fleet", "local_terminal"], terminal);
   return doc.toString();
 }
 

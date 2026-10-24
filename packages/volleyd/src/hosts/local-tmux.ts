@@ -19,11 +19,9 @@ import { DEFAULT_SIZE, pane, sessionName, sizeArgs, tmuxSize } from "./ssh-tmux"
 /** `<wave> <task> <role>` → `volley-<wave>-<task>-<role>`: the only local sessions the fence lets volleyd run agents in. */
 export const localSessionName = (title: string) => `volley-${sessionName(title)}`;
 
-/** Exit 127: the shell found no `tmux` to run. */
-const NOT_FOUND = 127;
 /** What `volley setup` and the owner do about a missing tmux (setup's `tmuxInstallLine` lines). */
 const INSTALL_TMUX =
-  "Install tmux (macOS: `brew install tmux`; Debian, Ubuntu: `sudo apt-get install -y tmux`; Fedora: `sudo dnf install -y tmux`), then run `volley setup --check`.";
+  "Install tmux (macOS: `brew install tmux`; Debian, Ubuntu: `sudo apt-get install -y tmux`; Fedora: `sudo dnf install -y tmux`), then run `volley setup --step terminal`.";
 const NOT_INSTALLED = `tmux is not installed. ${INSTALL_TMUX}`;
 
 /** exec spawns without a shell, so a missing tmux rejects with ENOENT rather than exiting 127. */
@@ -110,17 +108,12 @@ export class LocalTmuxHost implements Host {
       });
     });
     if (r.code !== 0 || r.timedOut) {
-      throw fail(
-        r.code === NOT_FOUND
-          ? `volleyd cannot open a tmux session: ${NOT_INSTALLED}`
-          : `tmux new-session failed: ${r.timedOut ? "timed out" : r.stderr.trim()}`,
-        {
-          exit: r.code,
-          tmux: r.stderr.trim(),
-          candidate: session,
-          outcome: r.timedOut ? "unknown" : "refused",
-        },
-      );
+      throw fail(`tmux new-session failed: ${r.timedOut ? "timed out" : r.stderr.trim()}`, {
+        exit: r.code,
+        tmux: r.stderr.trim(),
+        candidate: session,
+        outcome: r.timedOut ? "unknown" : "refused",
+      });
     }
     this.launchSizes.set(session, size);
     return { workspace: session };
@@ -198,6 +191,8 @@ export class LocalTmuxHost implements Host {
     const r = await this.exec(["tmux", "kill-session", "-t", `=${workspace}`], {
       consent,
       timeoutMs: DAEMON_DEFAULTS.workspace_close_timeout_ms,
+    }).catch((e: unknown) => {
+      throw isNotFound(e) ? new Error(NOT_INSTALLED) : e;
     });
     if (r.timedOut) throw new Error(`tmux kill-session ${workspace} timed out`);
     if (r.code !== 0 && !GONE.test(r.stderr))
@@ -232,7 +227,6 @@ export class LocalTmuxHost implements Host {
 }
 
 function tmuxFailed(what: string, r: ExecResult): Error {
-  if (r.code === NOT_FOUND) return new Error(NOT_INSTALLED);
   return new Error(
     `tmux ${what} failed: ${r.timedOut ? "timed out" : r.stderr.trim() || `exit ${r.code}`}`,
   );

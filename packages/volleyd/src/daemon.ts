@@ -736,12 +736,12 @@ export interface DaemonOptions {
 /** How the daemon spawns agents. Every field has a production default. */
 export interface SpawnerOptions {
   /**
-   * The `local` host (default: `localHost` for the resolved `fleet.local_terminal`: cmux or tmux
+   * The `local` host (default: the host for the resolved `fleet.local_terminal`: cmux or tmux
    * on this machine, through the fenced exec).
    */
   host?: Host;
   /** Builds the `local` host for a terminal (tests; default: LocalCmuxHost or LocalTmuxHost). */
-  localHost?: (terminal: LocalTerminal) => Host;
+  localHostFor?: (terminal: LocalTerminal) => Host;
   /** Whether cmux is installed here, for an unset `fleet.local_terminal` (default: `cmuxInstalled`). */
   cmuxFound?: () => boolean;
   /** Claude Code's folder-trust file (default `~/.claude.json`). */
@@ -4751,7 +4751,7 @@ export class Daemon {
       this.opts.fleet?.os?.platform?.() ?? process.platform,
       s?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
     );
-    if (s?.localHost !== undefined) return s.localHost(terminal);
+    if (s?.localHostFor !== undefined) return s.localHostFor(terminal);
     return terminal === "tmux" ? new LocalTmuxHost(realExec) : new LocalCmuxHost(realExec);
   }
   private localHost: Host | undefined;

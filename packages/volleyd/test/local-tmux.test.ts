@@ -129,16 +129,6 @@ describe("LocalTmuxHost", () => {
     expect(await outcome({ code: 127, stderr: "tmux: command not found" })).toBe("refused");
   });
 
-  it("a missing tmux says what to install", async () => {
-    const fake = fakeExec().on(["tmux"], { code: 127, stderr: "tmux: command not found" });
-    const err = (await new LocalTmuxHost(fake.exec)
-      .launch(spec())
-      .catch((e: unknown) => e)) as SpawnError;
-    expect(err.code).toBe("LAUNCH_FAILED");
-    expect(err.message).toContain("tmux");
-    expect(err.message).toContain("volley setup");
-  });
-
   it("a tmux the exec cannot spawn (ENOENT) says what to install", async () => {
     const enoent = () => {
       throw Object.assign(new Error("spawn tmux ENOENT"), { code: "ENOENT" });
@@ -286,6 +276,11 @@ describe("LocalTmuxHost", () => {
     await expect(host.close(S, consent)).rejects.toThrow(/timed out/);
     fake.on(["tmux", "kill-session"], { code: 1, stderr: "permission denied" });
     await expect(host.close(S, consent)).rejects.toThrow(/permission denied/);
+    // No tmux to run: the owner reads what to install, not `spawn tmux ENOENT`.
+    fake.on(["tmux", "kill-session"], () => {
+      throw Object.assign(new Error("spawn tmux ENOENT"), { code: "ENOENT" });
+    });
+    await expect(host.close(S, consent)).rejects.toThrow("tmux is not installed");
   });
 
   it("endSession kills the session, then stops what still runs under the worktree (fenced ps)", async () => {

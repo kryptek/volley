@@ -154,7 +154,7 @@ export interface StepPlan {
   blocked?: string;
   /** Why this step is left out of this run (the later ones still run). */
   skipped?: string;
-  /** What `volley setup --check` shows on the step's row (default: from the plan's state). */
+  /** A one-line status for the step's row in a per-step summary (default: from the plan's state). */
   row?: string;
   /** Checks after the changes; returns the problems left. */
   verify?: () => Promise<string[]>;
