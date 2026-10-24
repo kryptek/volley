@@ -4,7 +4,7 @@ import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it, vi } from "vitest";
 import { coordinatorFor, waveAttention } from "../src/attention";
-import { createDemoSteerClient, demoReadControl } from "../src/steer/demoClient";
+import { createDemoSteerClient, demoReadControl, withWaveAccount } from "../src/steer/demoClient";
 import {
   configuredMachines,
   deskAccountGroups,
@@ -38,7 +38,7 @@ import {
   reduceAll,
   routeTopic,
 } from "../src/store/reducer";
-import type { DeskMessage } from "../src/store/types";
+import type { DeskMessage, WaveStatePayload } from "../src/store/types";
 
 const NOW = Date.parse("2026-10-18T15:00:00.000Z");
 
@@ -386,6 +386,55 @@ describe("demo steering: volleyd's Claude answers", () => {
   });
 });
 
+describe("demo: the wave's Claude account (#499)", () => {
+  it("the status-chip wave is pinned to the Team account; the others balance", () => {
+    const st = reduceAll(initialState(), demoMessages(Date.now()));
+    expect(st.waves["status-chip"]?.account).toEqual({ pinned: "team", source: "wave" });
+    expect(st.waves["ci-speed"]?.account).toEqual({ pinned: null, source: "balanced" });
+  });
+
+  it("wave_account_set answers ok and re-publishes the wave state with its new account", async () => {
+    vi.useFakeTimers();
+    try {
+      let st = reduceAll(initialState(), demoMessages(Date.now()));
+      const client = createDemoSteerClient(
+        (msgs) => {
+          st = reduceAll(st, msgs);
+        },
+        () => false,
+        Date.now,
+        (w) => st.waves[w]?.state ?? null,
+      );
+      let ok: unknown;
+      client.onMessage((m) => {
+        if (m.envelope?.type === "ack" && m.envelope.correlation_id === "set")
+          ok = (m.envelope.payload as { ok?: unknown }).ok;
+      });
+      await client.publish(
+        "volley/default/volleyd/mailbox",
+        JSON.stringify({
+          agent_id: "desk",
+          type: "query",
+          correlation_id: "set",
+          payload: { op: "wave_account_set", wave: "status-chip", acct: null },
+        }),
+      );
+      await vi.runAllTimersAsync();
+      expect(ok).toBe(true);
+      expect(st.waves["status-chip"]?.account).toEqual({
+        pinned: null,
+        source: "balanced",
+        moved_from: "team",
+      });
+      expect(
+        withWaveAccount(st.waves["status-chip"]?.state as WaveStatePayload, "personal").account,
+      ).toEqual({ pinned: "personal", source: "wave" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("demo steering: rename and remove act on the demo's registry", () => {
   it("answers ok, changes the next claude_accounts, clears the record and raises the rev", async () => {
     vi.useFakeTimers();
@@ -439,12 +488,14 @@ describe("demo mode's read-only control", () => {
       result: "answered",
     });
     expect((await reads("claude_balance", {})).ok).toBe(true);
+    // The wave's account is the demo's to answer too (it changes only the demo's wave state).
+    expect((await reads("wave_account_set", { wave: "status-chip", acct: null })).ok).toBe(true);
     expect((await reads("claude_account_rename", {})).ok).toBe(true);
     expect((await reads("claude_account_remove", {})).ok).toBe(true);
     // a card missing data asks volleyd to read it: the demo answers ok
     expect((await reads("claude_prime", { acct: "team" })).ok).toBe(true);
     for (const op of ["claude_account_add", "claude_signin", "resolve"])
       expect((await reads(op, {})).ok).toBe(false);
-    expect(control).toHaveBeenCalledTimes(5);
+    expect(control).toHaveBeenCalledTimes(6);
   });
 });

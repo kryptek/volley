@@ -771,11 +771,17 @@ export function agentLimitDecisions(o: {
   return out;
 }
 
-/** A wave's account moves (`wave_account_moved`), in journal order. */
+/** A wave's account_limit answers (`wave_account_moved` with a `decision_id`), in journal order. */
 export function waveAccountMoves(events: readonly JournalEvent[]): { from: string; to: string }[] {
   return events.flatMap((e) => {
     if (e.type !== "wave_account_moved") return [];
-    const { from, to } = e.data as { from?: unknown; to?: unknown };
+    const { from, to, decision_id } = e.data as {
+      from?: unknown;
+      to?: unknown;
+      decision_id?: unknown;
+    };
+    // Only an account_limit answer moves a task naming `from`; a `wave_account_set` leaves it.
+    if (typeof decision_id !== "string") return [];
     return typeof from === "string" && typeof to === "string" ? [{ from, to }] : [];
   });
 }

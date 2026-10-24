@@ -130,7 +130,8 @@ tasks:
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
-# account: work              # the Claude account its agents run under (see Claude accounts)
+# account: work              # the Claude account its agents run under (see Claude accounts);
+#                            # the Desk's wave window switches it (wave_account_set)
 # placement: auto            # place every task without a host: across machines, or local to keep
 #                            # them here; default: placement.default (auto once a machine is paired)
 # placement_prefer: [box-a]  # machines placement ranks first
@@ -786,6 +787,17 @@ and running agents finish where they are. A balanced wave gets no `move wave` de
 when every candidate on a machine it uses is at or over the level in its 5-hour window does it
 get one `account_limit` with no suggestion (`not now`: new agents take the one with the most
 room until the window resets).
+
+**Switching a wave's account.** `wave_account_set { wave, acct }` (the Desk's wave window: its
+`Account:` chip) sets the account the wave's agents not yet spawned start under, ahead of its
+`account:` and `claude.default_account`; `acct: null` makes it balance. Running agents finish
+where they are, and a task naming its own `account:` keeps it. An unknown or not signed-in
+account is refused, as a `move wave` answer is. It journals `wave_account_moved { from, to, by }`
+(`null`: balanced); when an open `account_limit` offers `move wave <w> to <acct>`, the request
+answers it instead (`decision_id` on the event). Any other pick (`null`, or an account the
+decision does not offer) leaves that `account_limit` open: answer it `not now` from its banner. The wave state's `account: { pinned, source,
+moved_from? }` says where the wave's new agents start (`source`: `wave`, `config` or
+`balanced`).
 
 **The usage probe.** The statusLine reports the 5-hour and weekly windows only, and only while
 an agent runs on the account; the per-model weekly windows (Fable's among them) come only from
