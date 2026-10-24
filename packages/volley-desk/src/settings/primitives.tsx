@@ -12,9 +12,13 @@ import GooeyNav from "../rb/GooeyNav/GooeyNav";
 
 /**
  * The theme accent: the Settings window has no wave accent of its own. A `var()` works because
- * `Seg` draws Gooey Nav without WebGL (`gl={false}`): the pill colour only reaches CSS (`--gn-pill`).
+ * `Seg` draws Gooey Nav without WebGL (`gl={false}`), so the pill is CSS (`--gn-pill`). Gooey Nav
+ * cannot parse a `var()` for its contrast pick of the active label's ink, so `Seg` passes the ink
+ * too: `--on-seg`, falling back to the ink it picks for Volley's `#6ee7f9`. A theme whose accent is
+ * dark sets `--on-seg`.
  */
 const SEG_ACCENT = "var(--t-acc)";
+const SEG_ACTIVE_INK = "var(--on-seg, #18161d)";
 
 export function Group({
   title,
@@ -97,6 +101,7 @@ export function Seg<K extends string>({
         role="presentation"
         size="sm"
         color={SEG_ACCENT}
+        activeTextColor={SEG_ACTIVE_INK}
         gl={false}
         items={options.map(([, name]) => ({ label: name }))}
         activeIndex={index}

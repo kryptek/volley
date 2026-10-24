@@ -440,6 +440,11 @@ describe("SettingsWindow", () => {
     render(<Harness initial="appearance" />);
     const group = screen.getByRole("radiogroup", { name: "Window style" });
     expect(group.querySelector(".gooey-nav.gooey-seg")).not.toBeNull();
+    // The active label's ink is a CSS token (today's ink as the fallback), not Gooey Nav's
+    // contrast pick from the pill, which cannot parse `var(--t-acc)` (#365).
+    const nav = group.querySelector<HTMLElement>(".gooey-nav.gooey-seg");
+    expect(nav?.style.getPropertyValue("--gn-pill")).toBe("var(--t-acc)");
+    expect(nav?.style.getPropertyValue("--gn-active-ink")).toBe("var(--on-seg, #18161d)");
     const radio = (name: string) => within(group).getByRole("radio", { name });
     expect(radio("Frosted glass")).toHaveAttribute("aria-checked", "true");
     expect(radio("Frosted glass")).toHaveAttribute("tabindex", "0");
