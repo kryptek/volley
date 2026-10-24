@@ -106,18 +106,22 @@ describe("the light tone (#368)", () => {
 });
 
 describe("colour literals in the Desk's stylesheets", () => {
+  const literals = (f: string) =>
+    (readFileSync(join(STYLES, f), "utf8").match(/#[0-9a-f]{3,8}\b|rgba?\(/gi) ?? []).length;
+
   it("only go down (the ratchet)", () => {
     const count = readdirSync(STYLES)
-      .filter((f) => f.endsWith(".css"))
-      .reduce(
-        (n, f) =>
-          n +
-          (readFileSync(join(STYLES, f), "utf8").match(/#[0-9a-f]{3,8}\b|rgba?\(/gi) ?? []).length,
-        0,
-      );
+      .filter((f) => f.endsWith(".css") && f !== "stepfx.css")
+      .reduce((n, f) => n + literals(f), 0);
     // 409 before the token layer (#365), 297 after it, 271 after the light tone (#368). This
     // ceiling only ever goes down: re-point a literal to a token (or the themed block) rather
     // than raising it.
     expect(count).toBeLessThanOrEqual(271);
+  });
+
+  it("the current-step effects keep their fixed palette (stepfx.css, #366)", () => {
+    // Ember's coals, Prism's hues and the white gloss and shadows are the same on every theme by
+    // design (the approved mockup), so the file has its own ceiling instead of the ratchet's.
+    expect(literals("stepfx.css")).toBeLessThanOrEqual(29);
   });
 });

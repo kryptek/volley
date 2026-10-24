@@ -591,6 +591,13 @@ input.recessed:focus {
   border: 1px solid var(--line);
   color: var(--mute);
   white-space: nowrap;
+  /* The Volley feed / Terminal toggle's bevel: depth, kept under every current-step effect. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--ink) 10%, transparent),
+    color-mix(in srgb, var(--ink) 3%, transparent)
+  );
+  box-shadow: inset 0 1px 0 var(--hl), 0 2px 4px -2px var(--shade);
 }
 .chip i {
   width: 7px;
@@ -605,7 +612,11 @@ input.recessed:focus {
 .chip--wave {
   color: var(--ink);
   border-color: color-mix(in srgb, var(--acc) 45%, transparent);
-  background: color-mix(in srgb, var(--acc) 10%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--acc) 24%, transparent),
+    color-mix(in srgb, var(--acc) 7%, transparent)
+  );
 }
 .chip--repo {
   gap: 4px;

@@ -206,6 +206,61 @@
 .wave-ci-stuck {
   color: var(--amber-text);
 }
+/* The CI panel (#488): a task held for CI with no agent running, in its own window. */
+.ci-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink);
+  min-width: 0;
+}
+.ci-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--hl);
+  overflow: hidden;
+}
+.ci-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--acc);
+}
+.ci-jobs,
+.ci-why {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ci-label {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mute);
+}
+.ci-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font: 12px var(--f-mono);
+}
+.ci-list li {
+  overflow-wrap: anywhere;
+}
+.ci-running {
+  color: var(--amber-text);
+}
+.ci-failed {
+  color: var(--bad-text);
+}
+.ci-link {
+  margin-top: 4px;
+  color: var(--link);
+  overflow-wrap: anywhere;
+}
 
 /* Autopilot (SPEC §4.6.16–19): its chip, the merge queue, the release train and fixer tasks. */
 .chip--autopilot {

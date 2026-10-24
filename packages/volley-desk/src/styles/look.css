@@ -81,18 +81,6 @@
   stroke-width: 0.9;
   opacity: 0.75;
 }
-/* A held task with no agent (#451): a short cable ending in a static `CI` pill; hover for its title. */
-.tether-stub {
-  pointer-events: auto;
-}
-.tether-stub rect {
-  fill: color-mix(in srgb, var(--amber) 14%, transparent);
-  stroke: color-mix(in srgb, var(--amber) 60%, transparent);
-}
-.tether-stub text {
-  font: 600 9px var(--f-mono);
-  fill: var(--amber-text);
-}
 /* An energy pulse: a short bright dash running wave → agent (pathLength = 100). */
 .tether-pulse {
   stroke-width: 3.2;
@@ -318,6 +306,53 @@
 }
 .theme-tone {
   color: var(--dim);
+}
+/* Settings › Appearance › Current step: a card per effect, its live preview on top (#366). */
+.fx-grid {
+  display: grid;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+  gap: 6px;
+}
+.fx-opt {
+  all: unset;
+  box-sizing: border-box;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--pill-fill);
+  cursor: pointer;
+  color: var(--mute);
+}
+.fx-opt:hover {
+  color: var(--ink);
+}
+.fx-opt:focus-visible {
+  outline: 2px solid var(--t-acc);
+  outline-offset: 2px;
+}
+.fx-opt[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--t-acc);
+  background: color-mix(in srgb, var(--t-acc) 12%, transparent);
+}
+.fx-opt .fx-demo {
+  display: block;
+}
+.fx-opt .fx-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.fx-opt .fx-desc {
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.35;
 }
 .bg-none {
   grid-column: 1 / -1;

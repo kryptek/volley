@@ -12,25 +12,14 @@
   margin: 0;
   padding: 0;
 }
+/* The step's box; its colours are the depth states of stepfx.css (fx-done / fx-cur / fx-future). */
 .pipe li {
   flex: 1;
   text-align: center;
   font-size: 11px;
   padding: 4px 0;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--dim);
   border: 1px solid transparent;
-}
-.pipe li.done {
-  color: var(--mute);
-  background: color-mix(in srgb, var(--acc) 8%, transparent);
-}
-.pipe li.cur {
-  color: var(--ink);
-  border-color: color-mix(in srgb, var(--acc) 60%, transparent);
-  background: color-mix(in srgb, var(--acc) 16%, transparent);
-  font-weight: 600;
 }
 .narr {
   min-height: 40px;
@@ -154,17 +143,18 @@ html[data-tone="light"] .narr-enc {
   font-size: 12px;
   color: var(--mute);
 }
+/* A recessed track; the fill is glossy with a slow glint (stepfx.css; Classic: flat --acc). */
 .bar {
   flex: 1;
   height: 5px;
   border-radius: 3px;
-  background: var(--hl);
+  background: var(--well);
+  box-shadow: inset 0 1px 3px var(--shade);
   overflow: hidden;
 }
 .bar > span {
   display: block;
   height: 100%;
-  background: var(--acc);
   transition: width 0.8s ease;
 }
 .hb {
@@ -187,6 +177,7 @@ html[data-tone="light"] .narr-enc {
 }
 
 /* ------------------------------------------------------- D2 additions */
+/* Held wins over the current step's effect: amber border and tint (higher specificity than stepfx.css). */
 .pipe li.held {
   border-color: color-mix(in srgb, var(--amber) 50%, transparent);
   background: color-mix(in srgb, var(--amber) 10%, transparent);
