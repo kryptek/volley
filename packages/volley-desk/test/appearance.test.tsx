@@ -170,6 +170,21 @@ describe("Settings › Appearance and General", () => {
     expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-checked", "false");
   });
 
+  it("agent icons: a Windows-group segment, Clawd characters by default", () => {
+    render(<Harness />);
+    const icons = screen.getByRole("radiogroup", { name: "Agent icons" });
+    const windows = icons.closest(".s-group");
+    expect(windows?.querySelector("h3")).toHaveTextContent("Windows");
+    expect(windows).toContainElement(screen.getByRole("radiogroup", { name: "Window style" }));
+    const seg = (name: string) => within(icons).getByRole("radio", { name });
+    expect(seg("Clawd characters")).toHaveAttribute("aria-checked", "true");
+    expect(seg("Classic spinner")).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(seg("Classic spinner"));
+    expect(latest.icons).toBe("classic");
+    expect(stored().icons).toBe("classic");
+    expect(seg("Classic spinner")).toHaveAttribute("aria-checked", "true");
+  });
+
   it("toggles auto-arrange and arranges on demand", () => {
     const onArrange = vi.fn();
     render(<Harness onArrange={onArrange} />);

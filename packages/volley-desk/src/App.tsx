@@ -1397,6 +1397,8 @@ export default function App() {
                   accent={accentOf(id)}
                   frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
                   narrationFx={look.narr}
+                  icons={look.icons}
+                  attentionTier={agentAttn[a.id]?.tier ?? "none"}
                   attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
                   noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
                   stale={staleProgressFor(a, state.waves[a.wave], ctx)?.label ?? null}

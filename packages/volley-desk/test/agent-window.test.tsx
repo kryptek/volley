@@ -47,7 +47,10 @@ function status(id: string, type: string, at: number, payload: unknown = {}): De
 function renderAgent(
   state: DeskState,
   id: string,
-  opts: { now?: number; onChat?: () => void } = {},
+  opts: { now?: number; onChat?: () => void } & Pick<
+    AgentWindowProps,
+    "icons" | "attentionTier"
+  > = {},
 ) {
   const agent = state.agents[id];
   if (!agent) throw new Error(`no agent ${id}`);
@@ -59,6 +62,8 @@ function renderAgent(
       frame={frame}
       now={opts.now ?? NOW}
       {...(opts.onChat ? { onChat: opts.onChat } : {})}
+      {...(opts.icons ? { icons: opts.icons } : {})}
+      {...(opts.attentionTier ? { attentionTier: opts.attentionTier } : {})}
     />,
   );
 }
@@ -72,7 +77,7 @@ describe("AgentWindow", () => {
     expect(chip).toHaveClass("chip--wave");
     expect(chip.querySelector("i")).toHaveStyle({ background: ACCENT });
     expect(within(bar).getByText("fixup")).toHaveClass("chip--role");
-    expect(within(bar).getByRole("img", { name: "In progress, 62%" })).toBeInTheDocument();
+    expect(within(bar).getByRole("img", { name: "fixing up" })).toBeInTheDocument();
     expect(container.querySelector(".win")).toHaveStyle({ width: "460px" });
   });
 
@@ -213,25 +218,58 @@ describe("AgentWindow", () => {
   });
 });
 
+describe("AgentWindow icon", () => {
+  it("defaults to the Clawd character, with no status ring", () => {
+    const { container } = renderAgent(stateWith(), FIXUP);
+    const bar = container.querySelector(".win-bar") as HTMLElement;
+    const img = within(bar).getByRole("img", { name: "fixing up" });
+    expect(img).toHaveClass("clawd-sprite");
+    expect(container.querySelector(".status-mark")).toBeNull();
+  });
+
+  it('icons="classic" keeps the status ring and draws no Clawd', () => {
+    const { container } = renderAgent(stateWith(), FIXUP, { icons: "classic" });
+    expect(container.querySelector(".status-mark")).not.toBeNull();
+    expect(container.querySelector(".clawd-sprite")).toBeNull();
+    expect(screen.getByRole("img", { name: "In progress, 62%" })).toBeInTheDocument();
+  });
+
+  it("the merge-ready task's done implementer is merge-ready, with the glow", () => {
+    renderAgent(stateWith(), "status-chip-t2-implementer-1");
+    expect(screen.getByRole("img", { name: "merge-ready" })).toHaveClass("clawd-sprite--glow");
+  });
+
+  it("a blocked agent asks for you only when it is you it waits on", () => {
+    const state = stateWith();
+    const { unmount } = renderAgent(state, "leaderboard-t1-implementer-1", {
+      attentionTier: "you",
+    });
+    expect(screen.getByRole("img", { name: "needs you" })).toBeInTheDocument();
+    unmount();
+    renderAgent(state, "leaderboard-t1-implementer-1", { attentionTier: "coordinator" });
+    expect(screen.getByRole("img", { name: "waiting" })).toBeInTheDocument();
+  });
+});
+
 describe("AgentWindow status mark", () => {
   it("a done agent that is then reaped keeps its Completed mark", () => {
     const state = stateWith(
       status(FIXUP, "done", NOW + 1000, { msg: "merged" }),
       status(FIXUP, "reaped", NOW + 2000, { reason: "disconnect" }),
     );
-    renderAgent(state, FIXUP, { now: NOW + 3000 });
+    renderAgent(state, FIXUP, { now: NOW + 3000, icons: "classic" });
     expect(screen.getByRole("img", { name: "Completed" })).toBeInTheDocument();
   });
 
   it("an agent reaped while working shows the crash (failed) mark", () => {
     const state = stateWith(status(FIXUP, "reaped", NOW + 1000, { reason: "disconnect" }));
-    renderAgent(state, FIXUP, { now: NOW + 2000 });
+    renderAgent(state, FIXUP, { now: NOW + 2000, icons: "classic" });
     expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
   });
 
   it("a blocked agent does not look like one that has not started", () => {
     const state = stateWith(status(FIXUP, "blocked", NOW + 1000, { reason: "needs a decision" }));
-    renderAgent(state, FIXUP, { now: NOW + 2000 });
+    renderAgent(state, FIXUP, { now: NOW + 2000, icons: "classic" });
     expect(screen.queryByRole("img", { name: "Pending" })).toBeNull();
     expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
   });

@@ -516,3 +516,23 @@ a.a-link:hover {
   gap: 6px;
   margin-left: auto;
 }
+
+/* ------------------------------------------------- the Clawd character (#350) */
+/* 24 × 21 px in the title: the negative margin keeps the 18 px mark's row height. */
+.clawd-sprite {
+  flex: none;
+  image-rendering: pixelated;
+  margin: -2px 0;
+}
+/* Merge-ready. A filter re-rasterises on every frame change: free on a desktop GPU, a phone's
+   whole frame budget (#295), so touch screens and reduced transparency go without. */
+.clawd-sprite--glow {
+  filter: drop-shadow(0 0 3px rgba(255, 214, 120, 0.55))
+    drop-shadow(0 0 8px rgba(255, 190, 90, 0.35));
+}
+/* biome-ignore lint/correctness/noUnknownMediaFeatureName: prefers-reduced-transparency (Media Queries 5) is newer than Biome's list */
+@media (hover: none) and (pointer: coarse), (prefers-reduced-transparency: reduce) {
+  .clawd-sprite--glow {
+    filter: none;
+  }
+}

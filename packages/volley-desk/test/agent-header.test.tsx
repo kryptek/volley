@@ -91,7 +91,7 @@ describe("agent window header: two rows", () => {
   it("row 1 holds the mark and the chips; row 2 the headline, its link and the account picker", () => {
     const { container } = renderHeader(demo({ host: "box-a", placement: placement() }));
     const row1 = container.querySelector(".win-bar > .win-title") as HTMLElement;
-    expect(within(row1).getByRole("img", { name: /In progress/ })).toBeInTheDocument();
+    expect(within(row1).getByRole("img", { name: "fixing up" })).toHaveClass("clawd-sprite");
     expect(within(row1).getByText("status-chip")).toHaveClass("chip--wave");
     expect(within(row1).getByText("fixup")).toHaveClass("chip--role");
     expect(within(row1).getByRole("button", { name: "Runs on box-a: why here" })).toBeTruthy();
