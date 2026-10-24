@@ -110,7 +110,7 @@ function env(box: Box, home: string, tmp: string): MachineAddEnv {
     version: "0.5.0",
     installer: () => "#!/bin/sh\necho install.sh\n",
     hostKeys: () => [],
-    hub: "hub@10.0.0.2",
+    hub: "hub@192.0.2.2",
     tmp,
   };
 }
@@ -234,6 +234,28 @@ describe("runMachineAdd (the step list without a terminal)", () => {
     expect(r.ok ? "" : r.error).toMatch(/^step 2 \(Volley\): .*lacks tmux.*give its sudo password/);
     expect(s.rows.at(-1)).toMatchObject({ step: 2, state: "failed" });
     expect(s.box.install).toBeUndefined();
+  });
+
+  it("a Mac hub with Remote Login off: fails step 4, naming the fix, the row failed", async () => {
+    const s = setup();
+    const exec = s.e.exec;
+    const e: MachineAddEnv = {
+      ...s.e,
+      platform: "darwin",
+      exec: async (argv, o) =>
+        argv[0] === "launchctl"
+          ? { code: 113, stdout: "", stderr: "Could not find service", timedOut: false }
+          : exec(argv, o),
+    };
+    const r = await runMachineAdd(
+      { address: ADDRESS, name: "box-a", password: PASSWORD },
+      e,
+      s.hub,
+      (row) => s.rows.push(row),
+    );
+    expect(r).toMatchObject({ ok: false, step: 4 });
+    expect(r.ok ? "" : r.error).toMatch(/^step 4 \(ssh back\): Remote Login is off.*Turn it on/);
+    expect(s.rows.at(-1)).toMatchObject({ step: 4, state: "failed" });
   });
 
   it("a wrong password fails step 1, naming the fix; the helper directory is still removed", async () => {
@@ -467,6 +489,21 @@ describe("machine_add (the admin op, its rows on the reply topic)", () => {
     expect(text).not.toMatch(/[A-Z0-9]{4}-[A-Z0-9]{4}/);
   });
 
+  it("a refusal before anything runs is answered, not journaled", async () => {
+    const r = await op("admin-1", {
+      ...REQ,
+      auth: { key: join(tempDir("volleyd-machine-add-nokey-"), "id_missing") },
+    });
+    expect(await r.reply).toMatchObject({ ok: false, op: "machine_add" });
+    expect(s.box.calls).toEqual([]);
+    const journal = readdirSync(vhome, { recursive: true })
+      .map((f) => join(vhome, String(f)))
+      .filter((f) => existsSync(f) && statSync(f).isFile())
+      .map((f) => readFileSync(f, "utf-8"))
+      .join("\n");
+    expect(journal).not.toContain("machine_added");
+  });
+
   it("from a non-admin: refused up front, nothing runs", async () => {
     const { reply } = await op("steer-1", REQ);
     const r = await reply;
@@ -488,5 +525,9 @@ describe("machine_add (the admin op, its rows on the reply topic)", () => {
     expect(r.error).toMatch(/already being added/);
     release();
     expect(await first.reply).toMatchObject({ ok: true });
+    // The run is over: the name is free again.
+    release = undefined;
+    const third = await op("admin-1", REQ);
+    expect(await third.reply).toMatchObject({ ok: true });
   });
 });

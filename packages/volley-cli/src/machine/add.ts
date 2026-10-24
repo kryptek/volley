@@ -413,9 +413,10 @@ export async function machineAdd(
   if (deps.platform === "darwin") {
     const rl = await run([...REMOTE_LOGIN_ARGV]);
     if (rl.code !== 0) {
-      out(
-        `  ✗ Blocked: Remote Login is off on this Mac, and ${name} reaches it over ssh. Turn it on (System Settings → General → Sharing → Remote Login, or \`sudo systemsetup -setremotelogin on\`), then run this again.\n`,
-      );
+      const blocked = `Remote Login is off on this Mac, and ${name} reaches it over ssh. Turn it on (System Settings → General → Sharing → Remote Login, or \`sudo systemsetup -setremotelogin on\`), then run this again.`;
+      // Headless (volleyd's machine_add): through fail(), so the answer and the row carry the fix.
+      if (headless !== undefined) return fail(blocked);
+      out(`  ✗ Blocked: ${blocked}\n`);
       return EXIT.ERROR;
     }
     out("  ✓ Remote Login is on\n");

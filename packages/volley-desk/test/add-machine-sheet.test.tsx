@@ -56,7 +56,7 @@ const stepItems = () => [
 
 describe("isBoxAddress", () => {
   it("takes user@host and nothing an ssh option or a shell could read", () => {
-    for (const ok of ["dev@box-a", "dev@box-a.lan", "ubuntu@10.0.0.7"])
+    for (const ok of ["dev@box-a", "dev@box-a.lan", "ubuntu@192.0.2.7"])
       expect(isBoxAddress(ok), ok).toBe(true);
     for (const no of ["", "box-a", "-oProxyCommand=x@h", "dev@box a", "dev@", "@box", "dev@b;x"])
       expect(isBoxAddress(no), no).toBe(false);

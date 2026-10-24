@@ -6235,7 +6235,7 @@ export class Daemon {
    * `machine_add` (admin, machine-add.ts, SPEC §4.6.14): checked inside the queue, its run (every
    * step of `volley machine add` over ssh, minutes) awaited outside it, each row published on the
    * reply topic as it happens. One run per name at a time. `machine_added` is journaled with how
-   * it signed in, never a password.
+   * it signed in, never a password, once a step has run (a refusal before that is not).
    */
   private machineAddOp(
     p: Record<string, unknown>,
@@ -6268,8 +6268,11 @@ export class Daemon {
         } finally {
           this.adding.delete(req.name);
         }
+        const reply = authReply("machine_add", r.ok ? r : { ok: false, error: r.error });
+        // A refusal before anything ran (no step) is answered, never journaled, as a parse refusal is.
+        if (!r.ok && r.step === undefined) return { reply };
         return {
-          reply: authReply("machine_add", r.ok ? r : { ok: false, error: r.error }),
+          reply,
           journal: {
             type: "machine_added",
             data: {
