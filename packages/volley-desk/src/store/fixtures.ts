@@ -1182,6 +1182,9 @@ export function demoReviewer(now = Date.now()): DeskMessage[] {
   ];
 }
 
+/** How long ago the demo's `lead` owner went offline (its away and gone waves). */
+const OWNER_AWAY_MS = 2 * 3_600_000;
+
 /**
  * Autopilot's surfaces (SPEC §4.6.16–19), as two more waves a supervisor would publish: one whose
  * coordinator (`relay`) is reconnecting (its session's MCP restarted), and one autopilot runs that
@@ -1189,9 +1192,6 @@ export function demoReviewer(now = Date.now()): DeskMessage[] {
  * events. Its owner (`lead`) is offline, and the release's owner-only `publish` item waits on it,
  * so it is `gone` (its other wave, `demoPlanned`'s, waits on nothing: `away`).
  */
-/** How long ago the demo's `lead` owner went offline (its away and gone waves). */
-const OWNER_AWAY_MS = 2 * 3_600_000;
-
 export function demoAutopilot(now = Date.now()): DeskMessage[] {
   const base = (wave: string, over: Partial<WaveStatePayload>): WaveStatePayload => ({
     wave,

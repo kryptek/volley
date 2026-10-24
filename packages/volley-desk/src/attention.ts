@@ -202,9 +202,12 @@ const claimedHere = (w: WaveView | undefined, ctx: AttentionCtx): boolean =>
 
 /**
  * The wave's coordinator. `reconnecting`, `away` and `gone` are the wave's own
- * `coordinator.state` (volleyd's call, from the owner's presence), never the
- * owner-level view, which another wave of the same owner may have set, and
- * never silence: the Desk keeps no timer. Otherwise the live attention comes
+ * `coordinator.state` (volleyd's call, from the owner's presence), never
+ * silence: the Desk keeps no timer. When the wave state carries a
+ * `coordinator`, a presence state in the owner-level view (which another wave
+ * of the same owner may have set) is ignored; a wave state without one (an
+ * older supervisor) has only the owner view to go on, so it reads whatever
+ * that view says. Otherwise the live attention comes
  * from the store's view (the owner's topics, else the supervisor's). One
  * waiting on the wave's events (a live background wait, or the generic idle
  * prompt with nothing pending for the owner) is `working`.
@@ -230,8 +233,9 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     };
   }
   const owned = ctx.coordinators?.[id];
-  // A presence state in the owner view came from another wave (or a terminal status, which only
-  // counts while this wave's state carries no `coordinator`).
+  // With a `coordinator` here, a presence state in the owner view came from another wave (or a
+  // terminal status, which only counts while this wave's state carries no `coordinator`). Without
+  // one, the owner view is all there is, whichever wave set it.
   const view = owned && sup && PRESENCE_STATES.has(owned.state) ? undefined : owned;
   // The bound agent first (a coordinator name has no agent of its own), then the owner id.
   const a = (sup !== undefined ? ctx.agents?.[sup.agent_id] : undefined) ?? ctx.agents?.[id];
