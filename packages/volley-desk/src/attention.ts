@@ -11,10 +11,10 @@
  *   person here coordinates it, so its decisions, gates and stuck agents are
  *   theirs.
  * - **coordinator** — an open decision or a merge-ready gate on a wave with a
- *   live coordinator, or a stuck agent with one. Items left unresolved for
+ *   live or `away` coordinator, or a stuck agent with one. Items left unresolved for
  *   `escalate_after_min` are promoted to **you**.
  * - **info** — notable but nobody's job yet: an owner `away` (offline, nothing
- *   waits on it: `Owner away · autopilot runs this wave`), a coordinator
+ *   waits on it only: `Owner away · autopilot runs this wave`, when no item is open), a coordinator
  *   `reconnecting`, an open PR, a lease wait, an
  *   agent with no signal (below). A no-signal implementer in stage
  *   `implement` under a live coordinator is that coordinator's: **coordinator**.
@@ -65,7 +65,13 @@
  * Agents' silence (quiet, stale progress) is measured only over time this
  * browser was connected and settled (`AttentionCtx.offline`).
  */
-import { UNASSIGNED, isEndedWave, isSession, waitsOnPerson } from "./store/reducer";
+import {
+  PRESENCE_STATES,
+  UNASSIGNED,
+  isEndedWave,
+  isSession,
+  waitsOnPerson,
+} from "./store/reducer";
 import type {
   AgentView,
   ConfigPayload,
@@ -193,9 +199,6 @@ const mins = (ms: number) => Math.max(0, Math.round(ms / 60_000));
 /** The Desk claimed this wave: the person at this Desk is its coordinator. */
 const claimedHere = (w: WaveView | undefined, ctx: AttentionCtx): boolean =>
   !!ctx.identity && w?.state?.owner === ctx.identity;
-
-/** States only the supervisor decides, from the owner's presence (SPEC §4.6.1). */
-const PRESENCE_STATES = new Set<CoordinatorState>(["reconnecting", "away", "gone"]);
 
 /**
  * The wave's coordinator. `reconnecting`, `away` and `gone` are the wave's own
@@ -375,8 +378,6 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   }
   // Neutral: the session is coming back; nothing to claim, decisions wait or autopilot answers.
   if (c.state === "reconnecting") return { tier: "info", reason: reconnectingLabel(c, ctx.now) };
-  // Neutral too: nothing in the wave waits on the owner (else volleyd would say gone).
-  if (c.state === "away") return { tier: "info", reason: awayReason(w) };
   const items = [
     ...decisions.map((d) => ({ reason: `Decision: ${d.question}`, since: parseTime(d.opened_at) })),
     ...s.gates.map((t) => ({ reason: gateReason(t), since: ctx.gateSince?.[`${w.id}/${t}`] })),
@@ -395,6 +396,9 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
     if (stale) return { tier: "info", reason: `${a.task ?? a.id}: ${stale.label}` };
   }
   if (c.waitingOnEvents) return { tier: "info", reason: IDLE_WAIT_REASON };
+  // Neutral: nothing in the wave waits on the owner only (else volleyd would say gone); its
+  // decisions and gates above are handled and escalate as under a live coordinator.
+  if (c.state === "away") return { tier: "info", reason: awayReason(w) };
   return infoFor(s.tasks, agentIds, ctx);
 }
 

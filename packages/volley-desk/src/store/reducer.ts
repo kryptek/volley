@@ -86,7 +86,11 @@ type AgentChannel = (typeof AGENT_CHANNELS)[number];
 
 const TERMINAL_STATUS = new Set(["done", "failed", "reaped"]);
 /** Coordinator states only the supervisor decides, from the owner's presence (SPEC §4.6.1). */
-const PRESENCE_STATES = new Set<CoordinatorState>(["reconnecting", "away", "gone"]);
+export const PRESENCE_STATES: ReadonlySet<CoordinatorState> = new Set<CoordinatorState>([
+  "reconnecting",
+  "away",
+  "gone",
+]);
 
 /** volleyd's agent id, and the ids of its control clients (`volleyd-cli-<suffix>`). */
 const SUPERVISOR_ID = /^volleyd(-|$)/;

@@ -271,7 +271,13 @@ describe("fixtures — owner presence", () => {
     const w = away[0] as NonNullable<(typeof away)[0]>;
     expect(w.state?.autopilot?.enabled).toBe(true);
     expect(NOW - Date.parse(w.state?.coordinator?.last_seen ?? "")).toBe(2 * 3_600_000);
+    // Its merge-ready gates are handled as under a live coordinator (they escalate in time).
     expect(waveAttention(w, ctx)).toEqual({
+      tier: "coordinator",
+      reason: "Merge-ready gate: i301 is waiting on the coordinator",
+    });
+    const idle = { ...w, state: { ...(w.state as NonNullable<typeof w.state>), gates: [] } };
+    expect(waveAttention(idle, ctx)).toEqual({
       tier: "info",
       reason: "Owner away · autopilot runs this wave",
     });

@@ -620,6 +620,21 @@ describe("away / gone / reconnecting come from the wave's own coordinator, not f
     });
     expect(agentAttention(stuck, w, ctx(live)).tier).toBe("coordinator");
   });
+
+  it("an away wave's decision is handled like a live coordinator's and escalates", () => {
+    const fresh = presenced("a", "away", { autopilot }, [decision({ wave: "a" })]);
+    expect(waveAttention(fresh, ctx(live))).toEqual({
+      tier: "coordinator",
+      reason: "Decision: Shared or dense ranking?",
+    });
+    const late = presenced("a", "away", { autopilot }, [
+      decision({ wave: "a", opened_at: iso(NOW - 20 * MIN) }),
+    ]);
+    expect(waveAttention(late, ctx(live))).toEqual({
+      tier: "you",
+      reason: "Decision: Shared or dense ranking? · unresolved for 20 min",
+    });
+  });
 });
 
 function waveEnvelope(w: WaveView) {
