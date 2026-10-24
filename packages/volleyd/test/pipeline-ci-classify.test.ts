@@ -106,6 +106,31 @@ describe("a red head is classified before anyone is asked", () => {
     expect(events("remediation_requested")).toEqual([]);
   });
 
+  it("a PR's own new bun test, file read from the group header → own_change by its file", async () => {
+    h = pipelineHarness();
+    h.world.prFiles[7] = JSON.stringify({
+      files: [{ path: "scripts/packaging/formula.test.ts" }],
+    });
+    h.world.releaseRuns = fx("gh-run-list-release-red.json");
+    h.world.runLogs[812] = fx("gh-run-log-failed-flake.txt");
+    await redHead({
+      log: [
+        "job\tstep\t2026-10-24T01:02:03Z ##[group]scripts/packaging/formula.test.ts:",
+        "job\tstep\t2026-10-24T01:02:04Z (fail) formula > renders the brew formula [2ms]",
+        "job\tstep\t2026-10-24T01:02:04Z ##[endgroup]",
+        "",
+      ].join("\n"),
+    });
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("own_change");
+    expect(d?.options?.[0]).toBe("fixup");
+    expect(facts(d).evidence).toMatchObject({
+      failing_tests: ["scripts/packaging/formula.test.ts > formula > renders the brew formula"],
+      test_files: ["scripts/packaging/formula.test.ts"],
+    });
+    expect(events("remediation_requested")).toEqual([]);
+  });
+
   it("flake answered `fix flake`: the request stands, the task stays parked with the reason, nothing re-verifies", async () => {
     h = pipelineHarness();
     await redHead();
