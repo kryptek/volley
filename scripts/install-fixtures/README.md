@@ -9,7 +9,9 @@ and a few real file utilities. Every stub appends `<name> <args>` to `$STUB_LOG`
   `dpkg`, `systemctl` (`snapd` is active when `$STUB_SNAPD=active`), `snap`, `launchctl`, `id` (`-u` answers `$STUB_UID`, default 1000).
 - `tools/`: `curl` (serves the GitHub tags API, the Homebrew / bun / Claude Code installers and the
   gh keyring; a URL containing `$STUB_CURL_FAIL` fails with exit 22), `git` (a clone is a directory
-  remembering its tag; the subcommand `$STUB_GIT_FAIL` fails with exit 128), `bun`, `brew`, and `tool`, the
+  remembering its tag; the subcommand `$STUB_GIT_FAIL` fails with exit 128), `bun`, `brew` (`brew info`
+  knows Volley's tap formula when `$STUB_BREW_TAP` is set; installing it puts `volley` and `volleyd`
+  into `$STUB_STATE/brew/bin`, its `--prefix`), `volley` (brew's command), and `tool`, the
   generic stub every other installed tool is (`mosquitto -h` prints `$STUB_MOSQUITTO_VERSION`).
 - `provide <name> <dir>`: what an installer does, putting tool `<name>` into `<dir>`.
 - `os-release.*`: `/etc/os-release` of the supported Linux distributions, and one unsupported.

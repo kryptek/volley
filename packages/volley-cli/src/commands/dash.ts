@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { EXIT, type ExitCode } from "../exit-codes";
@@ -202,9 +202,21 @@ export function findRepoRoot(): string | null {
   }
   for (const start of candidates) {
     const root = walkUpToBunLock(start);
-    if (root !== null) return root;
+    if (root !== null) return brewStableRoot(root);
   }
   return null;
+}
+
+/**
+ * Homebrew's wrappers run Volley from `<prefix>/opt/volley/libexec`, but bun resolves the entry's
+ * real path, `<prefix>/Cellar/volley/<version>/libexec`, which `brew upgrade` deletes. Maps that
+ * back to the opt path, so the commands and services `volley setup` writes survive an upgrade.
+ */
+export function brewStableRoot(root: string): string {
+  const m = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/libexec$/.exec(root);
+  if (m === null) return root;
+  const opt = join(m[1] as string, "opt", m[2] as string, "libexec");
+  return existsSync(join(opt, "bun.lock")) ? opt : root;
 }
 
 function walkUpToBunLock(start: string): string | null {

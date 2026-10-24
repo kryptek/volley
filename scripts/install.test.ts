@@ -209,6 +209,107 @@ describe("macOS prerequisites", () => {
   });
 });
 
+describe("macOS: the Homebrew tap", () => {
+  const TAP = "kryptek/volley/volley";
+  const prefix = (w: World) => join(w.dir, "state", "brew");
+
+  test("a brew that knows the tap: brew install it, no clone, no shims; setup runs brew's volley", () => {
+    const w = world("macos-arm64", ["brew", "curl", "claude"], {
+      STUB_BREW_TAP: "1",
+      VOLLEY_INSTALL_TTY: "/dev/null",
+    });
+    const r = run(w);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain(`brew info ${TAP}`);
+    expect(has(r, "brew install")).toEqual([`brew install ${TAP}`]);
+    expect(has(r, "git")).toEqual([]);
+    expect(has(r, "bun install")).toEqual([]);
+    expect(has(r, "curl")).toEqual([]);
+    expect(existsSync(src(w))).toBe(false);
+    expect(existsSync(join(w.home, ".volley", "bin"))).toBe(false);
+    expect(existsSync(join(w.home, ".zshrc"))).toBe(false);
+    expect(r.calls.at(-1)).toBe("volley setup");
+    expect(r.out).toContain(`Running ${join(prefix(w), "bin", "volley")} setup`);
+  });
+
+  test("a rerun leaves brew's install alone", () => {
+    const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1" });
+    expect(has(run(w, ["--no-setup"]), "brew install")).toEqual([`brew install ${TAP}`]);
+    const again = run(w, ["--no-setup"]);
+    expect(again.code).toBe(0);
+    expect(has(again, "brew install")).toEqual([]);
+    expect(again.out).toContain(`Next: ${join(prefix(w), "bin", "volley")} setup`);
+  });
+
+  test("a failed brew install of the tap stops the install: no setup, nothing reported done", () => {
+    const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1", STUB_BREW_TAP_FAIL: "1" });
+    for (const args of [[], ["--no-setup"]]) {
+      const r = run(w, args);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(`brew install ${TAP} failed`);
+      expect(r.out).not.toContain("Volley is installed");
+      expect(r.calls).not.toContain("volley setup");
+      expect(existsSync(join(prefix(w), "bin", "volley"))).toBe(false);
+    }
+  });
+
+  test("a Mac with a curl-path install keeps it: no brew install, no second Volley", () => {
+    const w = world("macos-arm64", MAC_ALL);
+    run(w, ["--no-setup"]);
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
+    const r = run(w, ["--no-setup"], { STUB_BREW_TAP: "1" });
+    expect(r.code).toBe(0);
+    expect(has(r, "brew info")).toEqual([]);
+    expect(has(r, "brew install")).toEqual([]);
+    expect(existsSync(join(prefix(w), "bin", "volley"))).toBe(false);
+    expect(r.out).toContain("Next: ~/.volley/bin/volley setup");
+  });
+
+  test("a brew that does not know the tap: the curl path (clone, shims)", () => {
+    const w = world("macos-arm64", MAC_ALL);
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain(`brew info ${TAP}`);
+    expect(has(r, "brew install")).toEqual([]);
+    expect(has(r, "git clone")).toHaveLength(1);
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
+  });
+
+  test("--version and --source take the curl path without asking brew", () => {
+    for (const args of [
+      ["--version", "v0.9.0"],
+      ["--source", "."],
+    ]) {
+      const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1" });
+      const r = run(w, ["--no-setup", ...args]);
+      expect(r.code).toBe(0);
+      expect(has(r, "brew info")).toEqual([]);
+      expect(has(r, "brew install")).toEqual([]);
+      expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
+    }
+  });
+
+  test("--check reports a brew install", () => {
+    const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1" });
+    run(w, ["--no-setup"]);
+    const r = run(w, ["--check"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`Volley: ${join(prefix(w), "bin", "volley")} (brew ${TAP})`);
+  });
+
+  test("--uninstall removes the services with brew's volley, then brew uninstall", () => {
+    const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1", STUB_SETUP_UNINSTALL: "1" });
+    run(w, ["--no-setup"]);
+    const r = run(w, ["--uninstall"]);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("volley setup --uninstall");
+    expect(r.calls).toContain(`brew uninstall ${TAP}`);
+    expect(r.calls.indexOf("volley setup --uninstall")).toBeLessThan(
+      r.calls.indexOf(`brew uninstall ${TAP}`),
+    );
+  });
+});
+
 describe("Linux prerequisites", () => {
   test("a fresh Ubuntu: one sudo -v after the reason, apt, bun, gh, snap mosquitto, Claude Code", () => {
     const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active" });
