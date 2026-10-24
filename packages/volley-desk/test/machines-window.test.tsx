@@ -121,7 +121,8 @@ describe("the Machines window", () => {
     expect(desc).toBeTruthy();
     const text = document.getElementById(desc as string)?.textContent ?? "";
     expect(text).toBe(
-      "box-a: load 3.8 of 4 cores, 95 %, critical — memory 75 %, high — 2 of 6 agents",
+      // The demo's box-a runs the Desk (SPEC §4.6.24).
+      "box-a: load 3.8 of 4 cores, 95 %, critical — memory 75 %, high — 2 of 6 agents — runs the Desk",
     );
     expect(r.querySelector(".mrow-load")?.className).toContain("lvl--bad");
     expect(r.querySelector(".mrow-mem")?.className).toContain("lvl--warn");

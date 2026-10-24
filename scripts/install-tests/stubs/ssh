@@ -1,0 +1,66 @@
+#!/bin/bash
+# ssh in vm.test.ts (scripts/install-tests/README.md): the fake VM. It finds the VM by the
+# destination's address (the multipass and tart stand-ins hand them out), appends
+# `ssh <vm>: <command>` to $STUB_STATE/calls.log and answers from $STUB_STATE/ssh-rules: one rule a
+# line, `<extended regex>\t<exit>\t<file or ->`, the first that matches the command wins, its
+# file on stdout; no match is exit 0 with nothing printed. Built in, as a VM behaves: a VM that is
+# gone or down refuses the connection (255); `sudo reboot` (or `sudo shutdown -r`) moves the boot
+# time on and takes the VM down for the next two connections; `uptime -s` / `kern.boottime` print
+# the boot time (epoch seconds), `random/boot_id` an id made of it (exit 1 with $STUB_NO_BOOT_ID).
+# The last `-i` key is kept in $STUB_STATE/ssh-key.
+set -u
+S=${STUB_STATE:?STUB_STATE is not set}
+while [ $# -gt 0 ]; do
+  case $1 in
+    -i) echo "$2" >"$S/ssh-key" && shift 2 ;;
+    -[opFlEJLRDW]) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+dest=${1:?no destination}
+shift
+cmd="$*"
+addr=${dest#*@}
+name=$(cat "$S/addr/$addr" 2>/dev/null) || name=''
+vm=$S/vms/$name
+stdin=$(cat | wc -c | tr -d ' ')
+printf 'ssh %s: %s%s\n' "${name:-$addr}" "$cmd" "$([ "$stdin" -gt 0 ] && printf ' (stdin %s bytes)' "$stdin")" >>"$S/calls.log"
+if [ -z "$name" ] || [ ! -d "$vm" ]; then
+  echo "ssh: connect to host $addr port 22: No route to host" >&2
+  exit 255
+fi
+down=$(cat "$vm/down" 2>/dev/null || echo 0)
+if [ "$down" -gt 0 ]; then
+  echo $((down - 1)) >"$vm/down"
+  echo "ssh: connect to host $addr port 22: Connection refused" >&2
+  exit 255
+fi
+case $cmd in
+  *"sudo reboot"* | *"sudo shutdown -r"*)
+    echo $(($(cat "$vm/boot") + 60)) >"$vm/boot"
+    echo 2 >"$vm/down"
+    echo "Connection to $addr closed by remote host." >&2
+    exit 255
+    ;;
+  *random/boot_id*)
+    [ -z "${STUB_NO_BOOT_ID:-}" ] || exit 1
+    echo "boot-$(cat "$vm/boot")"
+    exit 0
+    ;;
+  *"uptime -s"* | *kern.boottime*)
+    cat "$vm/boot"
+    exit 0
+    ;;
+esac
+if [ -f "$S/ssh-rules" ]; then
+  tab=$(printf '\t')
+  while IFS="$tab" read -r re code file; do
+    [ -n "$re" ] || continue
+    if printf '%s' "$cmd" | grep -Eq -- "$re"; then
+      [ "$file" = - ] || cat "$file"
+      exit "$code"
+    fi
+  done <"$S/ssh-rules"
+fi
+exit 0

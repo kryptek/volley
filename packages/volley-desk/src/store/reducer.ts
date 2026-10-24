@@ -30,7 +30,9 @@
  * into `machines` by name, taken only from the machine itself or volleyd and
  * only when it names its topic's machine. Which of them are machines at all
  * (configured hosts) is the section's call, at render time. volleyd's
- * readiness verdict on each (§4.6.15) goes into `readiness` by name.
+ * readiness verdict on each (§4.6.15) goes into `readiness` by name. The
+ * machine roles record (§4.6.24) goes into `roles` and each move's progress
+ * into `roleMoves` by move id, both only from volleyd.
  *
  * Autopilot (SPEC §4.6.16): of each wave's live `events` mirror only volleyd's
  * `decision_auto_resolved` / `decision_escalated` and the overlap plan's events (`wave_planned`,
@@ -65,6 +67,8 @@ import {
   type Receipts,
   type RegistryPayload,
   type Role,
+  type RoleMovePayload,
+  type RolesPayload,
   type ScreenPayload,
   type SteeringReceipts,
   type SupervisorView,
@@ -126,6 +130,8 @@ export type Route =
   | { kind: "usage"; agentId: string }
   | { kind: "machine"; name: string }
   | { kind: "readiness"; name: string }
+  | { kind: "roles" }
+  | { kind: "roleMove"; moveId: string }
   | { kind: "inbox"; id: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
@@ -145,6 +151,9 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 5 && b === "machines" && c && d === "readiness") {
       return { kind: "readiness", name: c };
     }
+    if (p.length === 3 && b === "roles") return { kind: "roles" };
+    if (p.length === 5 && b === "roles" && c === "moves" && d)
+      return { kind: "roleMove", moveId: d };
     return null;
   }
   if (a === "_waves") {
@@ -255,6 +264,10 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceMachine(state, route.name, m);
     case "readiness":
       return reduceReadiness(state, route.name, m);
+    case "roles":
+      return reduceRoles(state, m);
+    case "roleMove":
+      return reduceRoleMove(state, route.moveId, m);
     case "inbox":
       return reduceInbox(state, route.id, m);
   }
@@ -296,6 +309,32 @@ function reduceReadiness(state: DeskState, name: string, m: DeskMessage): DeskSt
   const p = env.payload as Partial<ReadinessPayload> | undefined;
   if (env.agent_id !== "volleyd" || p?.name !== name) return state;
   return { ...state, readiness: keyed(state.readiness, name, p as ReadinessPayload) };
+}
+
+/**
+ * volleyd's machine roles record (SPEC §4.6.24): taken only from volleyd; a cleared topic forgets
+ * it.
+ */
+function reduceRoles(state: DeskState, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) {
+    const { roles: _, ...rest } = state;
+    return rest;
+  }
+  if (env.agent_id !== "volleyd" || env.type !== "roles") return state;
+  return { ...state, roles: env.payload as RolesPayload };
+}
+
+/**
+ * A role move's progress (SPEC §4.6.24): taken only from volleyd and only when it names its
+ * topic's move; a cleared topic (past the retention) forgets it.
+ */
+function reduceRoleMove(state: DeskState, moveId: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, roleMoves: keyed(state.roleMoves, moveId, undefined) };
+  const p = env.payload as Partial<RoleMovePayload> | undefined;
+  if (env.agent_id !== "volleyd" || p?.move_id !== moveId) return state;
+  return { ...state, roleMoves: keyed(state.roleMoves, moveId, p as RoleMovePayload) };
 }
 
 /**
@@ -421,8 +460,10 @@ export function resync(state: DeskState): DeskState {
     if (sv.registry) unconfirmed.add(sv.id);
     supervisors[sv.id] = { ...sv, registry: null, status: null };
   }
+  // The roles record is retained: the replay brings it back.
+  const { roles: _roles, ...kept } = state;
   return {
-    ...state,
+    ...kept,
     waves: {},
     agents,
     coordinators: {},
@@ -435,6 +476,7 @@ export function resync(state: DeskState): DeskState {
     usage: {},
     machines: {},
     readiness: {},
+    roleMoves: {},
     inbox: {},
     digests: {},
     unconfirmed: [...unconfirmed],

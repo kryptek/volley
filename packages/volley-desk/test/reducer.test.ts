@@ -665,3 +665,56 @@ describe("reducer — the Claude registry-changed signal", () => {
     expect(initialState().claudeRegistryRev).toBeUndefined();
   });
 });
+
+describe("reducer — machine roles (SPEC §4.6.24)", () => {
+  const roles = (agentId = "volleyd") => ({ ...example("roles-split"), agent_id: agentId });
+  const ROLES_TOPIC = "volley/_system/roles";
+  const move = example("rolemove-running");
+  const MOVE_ID = "mv-20261024-desk-1a2b";
+  const MOVE_TOPIC = `volley/_system/roles/moves/${MOVE_ID}`;
+
+  it("routes the record and each move's topic", () => {
+    expect(routeTopic(ROLES_TOPIC)).toEqual({ kind: "roles" });
+    expect(routeTopic(MOVE_TOPIC)).toEqual({ kind: "roleMove", moveId: MOVE_ID });
+    expect(routeTopic("volley/_system/roles/moves")).toBeNull();
+    expect(routeTopic("volley/_system/roles/other/x")).toBeNull();
+  });
+
+  it("a roles envelope from volleyd sets state.roles; one from another agent id is ignored", () => {
+    const s = reduce(initialState(), msg(ROLES_TOPIC, roles()));
+    expect(s.roles?.broker.machine).toBe("box-a");
+    expect(s.roles?.desk).toEqual({ machine: "mac", url: "http://192.0.2.20:5199" });
+    const forged = {
+      ...roles("intruder"),
+      payload: { ...(roles().payload as object), version: 99 },
+    };
+    expect(reduce(s, msg(ROLES_TOPIC, forged)).roles?.version).toBe(3);
+    expect(reduce(initialState(), msg(ROLES_TOPIC, roles("intruder"))).roles).toBeUndefined();
+  });
+
+  it("a moves envelope sets state.roleMoves[id]; a cleared topic deletes it", () => {
+    const s = reduce(initialState(), msg(MOVE_TOPIC, move));
+    expect(s.roleMoves?.[MOVE_ID]?.status).toBe("running");
+    expect(s.roleMoves?.[MOVE_ID]?.steps.map((x) => x.status)).toEqual([
+      "ok",
+      "running",
+      "pending",
+    ]);
+    expect(reduce(s, msg(MOVE_TOPIC, null)).roleMoves?.[MOVE_ID]).toBeUndefined();
+  });
+
+  it("a move from anyone but volleyd, or naming another move, is ignored", () => {
+    const other = msg(MOVE_TOPIC, { ...move, agent_id: "intruder" });
+    expect(reduce(initialState(), other).roleMoves?.[MOVE_ID]).toBeUndefined();
+    const elsewhere = msg("volley/_system/roles/moves/mv-other", move);
+    expect(reduce(initialState(), elsewhere).roleMoves?.["mv-other"]).toBeUndefined();
+  });
+
+  it("a cleared record forgets the roles; a resync drops both until they are replayed", () => {
+    const s = apply(msg(ROLES_TOPIC, roles()), msg(MOVE_TOPIC, move));
+    expect(reduce(s, msg(ROLES_TOPIC, null)).roles).toBeUndefined();
+    const r = resync(s);
+    expect(r.roles).toBeUndefined();
+    expect(r.roleMoves).toEqual({});
+  });
+});

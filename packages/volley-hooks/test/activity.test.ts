@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -52,10 +52,16 @@ function ageWindow(ms: number): void {
   file.sessions[SESSION].last_published_at -= ms;
   writeFileSync(join(dir, ".volley", "work-log.json"), JSON.stringify(file));
 }
-/** Hold `<stateDir>/<name>` as a live hook would (fresh mtime), so `withLock` times out. */
+/**
+ * Hold `<stateDir>/<name>` as a live hook would, so `withLock` times out: its mtime is a minute
+ * ahead, so it never turns stale (and is broken) during the wait.
+ */
 function holdLock(name: string): void {
   mkdirSync(join(dir, ".volley"), { recursive: true });
-  writeFileSync(join(dir, ".volley", name), "4242.held-by-a-dead-hook");
+  const path = join(dir, ".volley", name);
+  writeFileSync(path, "4242.held-by-a-live-hook");
+  const ahead = new Date(Date.now() + 60_000);
+  utimesSync(path, ahead, ahead);
 }
 
 describe("pre-tool-use activity ticks", () => {

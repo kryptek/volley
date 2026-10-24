@@ -491,6 +491,11 @@
               "default": null,
               "description": "How the supervisor's own machine takes auto-placed tasks (spec section 4.6.15). always: a candidate like any peer. fallback: only while no paired machine is eligible, under fleet.fallback. never: not a candidate (a task pinned to local still runs there). null: fallback when any hosts.<name> is configured, else always; the retained effective config carries the resolved value. A value chosen in the Desk is set explicitly; volleyd config set fleet.local_agents null derives it again."
             },
+            "local_terminal": {
+              "oneOf": [{ "enum": ["cmux", "tmux"] }, { "type": "null" }],
+              "default": null,
+              "description": "The terminal agents on the supervisor's own machine run in (spec section 4.6.15): cmux workspaces or detached tmux sessions named volley-<wave>-<task>-<role>. null: cmux on macOS when cmux is installed, else tmux. volley setup's Terminal step records its choice here. Read when the supervisor starts: a change applies at its next start."
+            },
             "fallback": {
               "type": "object",
               "additionalProperties": false,

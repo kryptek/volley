@@ -1,7 +1,9 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateAgentId, loadConfig, resolveBrokerAuth } from "../src/config";
+import { shutdownLifecycle, startLifecycle } from "../src/lifecycle";
+import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { tempDir } from "./helpers/tmp";
 
 describe("generateAgentId", () => {
@@ -321,5 +323,65 @@ describe("CMUX_SURFACE_ID", () => {
     expect(loadConfig({}, "/x")).not.toHaveProperty("surface");
     expect(loadConfig({ CMUX_SURFACE_ID: "" }, "/x")).not.toHaveProperty("surface");
     expect(loadConfig({ CMUX_SURFACE_ID: "a\nb" }, "/x")).not.toHaveProperty("surface");
+  });
+});
+
+describe("the coordinator's login from the auth dir (a registration without a secret)", () => {
+  const LOGIN = { username: "coordinator", password: "pw-auth-dir-0123" };
+  let broker: TestBroker;
+  let authDir: string;
+  let cwd: string;
+  beforeEach(async () => {
+    broker = await startTestBroker({ credentials: LOGIN });
+    authDir = tempDir("volley-authdir-");
+    cwd = tempDir("volley-authdir-cwd-");
+  });
+  afterEach(async () => {
+    await broker.close();
+  });
+  /** The env `volley setup` registers the MCP server with: no password anywhere. */
+  const env = () => ({
+    VOLLEY_AGENT_ID: "coordinator",
+    VOLLEY_COORDINATOR: "coord-main",
+    VOLLEY_NAMESPACE: "default",
+    VOLLEY_BROKER_URL: broker.url,
+    VOLLEY_AUTH_DIR: authDir,
+  });
+
+  it("connects to a broker that requires the login, with coordinator.json in VOLLEY_AUTH_DIR", async () => {
+    writeFileSync(join(authDir, "coordinator.json"), JSON.stringify(LOGIN));
+    const config = loadConfig(env(), cwd);
+    expect(config.auth).toEqual(LOGIN);
+    expect(config.coordinator).toBe("coord-main");
+    const state = await startLifecycle(config);
+    try {
+      expect(state.config.agentId).toMatch(/^coordinator-[a-z0-9]{4}$/);
+      expect(state.broker.connected).toBe(true);
+    } finally {
+      await shutdownLifecycle(state, "done");
+    }
+  });
+
+  it("without the file it fails naming the file, never printing a password", () => {
+    let message = "";
+    try {
+      loadConfig(env(), cwd);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain(join(authDir, "coordinator.json"));
+    expect(message).toContain("volley setup");
+    expect(message).not.toContain(LOGIN.password);
+  });
+
+  it("VOLLEY_AUTH_* still wins, and an agent's identity file never reads the auth dir", () => {
+    const withEnv = { ...env(), VOLLEY_AUTH_USERNAME: "desk", VOLLEY_AUTH_PASSWORD: "x" };
+    expect(loadConfig(withEnv, cwd).auth).toEqual({ username: "desk", password: "x" });
+    mkdirSync(join(cwd, ".volley"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".volley", "agent.json"),
+      JSON.stringify({ agent_id: "worker-1", namespace: "default", broker_url: broker.url }),
+    );
+    expect(() => loadConfig(env(), cwd)).not.toThrow();
   });
 });

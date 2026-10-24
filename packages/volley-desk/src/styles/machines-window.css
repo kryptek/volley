@@ -77,6 +77,14 @@
 .mrow-down {
   color: var(--mute);
 }
+/* The machine roles it runs (SPEC §4.6.24): B S D. */
+.mrow-roles {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--mute);
+  white-space: nowrap;
+}
 .mrow-agents {
   margin-left: auto;
 }

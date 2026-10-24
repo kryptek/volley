@@ -16,7 +16,9 @@
  * waiting until a record for a host that was not there before arrives
  * (joined); then step 3 its checks and verdict (with Repair…), step 4 Claude
  * on it (Check again runs a dry doctor), step 5 its readiness and max_agents,
- * then Done. **Remove…** asks first, then sends `peer_remove`,
+ * then Done. **Add a bare machine…** does it all from here for a box with
+ * only ssh (`machine_add`, `AddMachineSheet`): volleyd installs Volley there,
+ * pairs and checks it, its rows streaming into the sheet. **Remove…** asks first, then sends `peer_remove`,
  * which revokes the machine's account and clears its record. Any other
  * session (not signed in, not an admin, demo, a browser that cannot make a
  * reply key at all) is read-only and is shown the terminal commands instead.
@@ -30,6 +32,11 @@
  * sign-in started here fills its row once the registry is re-fetched, and one that finished
  * on another e-mail is said on the dialog's Done step, not on the card (Settings › Claude
  * accounts tracks both on its own cards).
+ *
+ * Machine roles (SPEC §4.6.24): under the intro, the summary line names where each role runs
+ * (`broker · studio — supervisor · studio — desk · box-a`), from volleyd's record, and each card
+ * chips its own; an admin moves a role to a machine from its card (`RoleMoveSheet`), and a
+ * finished move leaves its notice here.
  */
 import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -39,13 +46,18 @@ import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
 import { type AccountGroup, LOCAL_MACHINE, configuredMachines, machineRows } from "../store/claude";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
-import type {
-  ClaudeSignin,
-  ConfigPayload,
-  MachinePayload,
-  ReadinessPayload,
-  WaveStatePayload,
+import type { RoleOps } from "../store/roleOps";
+import {
+  type ClaudeSignin,
+  type ConfigPayload,
+  MACHINE_ROLES,
+  type MachinePayload,
+  type ReadinessPayload,
+  type RoleMovePayload,
+  type RolesPayload,
+  type WaveStatePayload,
 } from "../store/types";
+import { AddMachineSheet } from "./AddMachineSheet";
 import { type ControlFn, SignInOnDialog, type SignInPreset, signInPreset } from "./ClaudeAccounts";
 import {
   DEFAULT_MAX_AGENTS,
@@ -102,6 +114,12 @@ export interface MachinesProps {
   onOpenRepos?: (() => void) | undefined;
   /** volleyd's config (`_waves/_config`): the repositories it assigns to each machine. */
   waveConfig?: ConfigPayload | null | undefined;
+  /** volleyd's machine roles record (`volley/_system/roles`); absent until it arrives. */
+  roles?: RolesPayload | undefined;
+  /** The role moves' retained records, by move id. */
+  roleMoves?: Record<string, RoleMovePayload> | undefined;
+  /** The role ops (admin): Move a role here… on the cards; `null` = none. */
+  roleOps?: RoleOps | null | undefined;
   /** The Claude account groups (App's `deskAccountGroups`), the sign-ins and volleyd's control. */
   claude?: {
     groups: AccountGroup[];
@@ -189,6 +207,32 @@ export function sshHost(brokerUrl: string | null): string {
     return LOOPBACK.has(host) ? "" : host;
   } catch {
     return "";
+  }
+}
+
+/** `broker · studio — supervisor · studio — desk · box-a`: where each machine role runs. */
+export const rolesSummary = (roles: RolesPayload) =>
+  MACHINE_ROLES.map((r) => `${r} · ${roles[r].machine}`).join(" — ");
+
+/**
+ * The Desk's new address when this page is the old one: a Desk move to the record's machine is
+ * done and the record's address is on another origin (the old Desk keeps serving until its unit
+ * is unloaded, last). `null` otherwise, and for an address that is not a URL.
+ */
+export function deskMovedTo(
+  roles: RolesPayload | undefined,
+  moves: Record<string, RoleMovePayload> | undefined,
+  origin: string,
+): string | null {
+  if (!roles) return null;
+  const moved = Object.values(moves ?? {}).some(
+    (m) => m.role === "desk" && m.status === "done" && m.to === roles.desk.machine,
+  );
+  if (!moved) return null;
+  try {
+    return new URL(roles.desk.url).origin === origin ? null : roles.desk.url;
+  } catch {
+    return null;
   }
 }
 
@@ -559,6 +603,8 @@ function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
 
 export function Machines(p: MachinesProps) {
   const [adding, setAdding] = useState(false);
+  /** Add a bare machine… (`machine_add`): its sheet is open. */
+  const [addingBare, setAddingBare] = useState(false);
   /** Re-pairing codes counting down on cards. */
   const [counting, setCounting] = useState(0);
   const onCountdown = useCallback((on: boolean) => setCounting((n) => n + (on ? 1 : -1)), []);
@@ -639,6 +685,10 @@ export function Machines(p: MachinesProps) {
       }
       onOpenRepos={p.onOpenRepos}
       waveConfig={p.waveConfig}
+      roles={p.roles}
+      roleMoves={p.roleMoves}
+      roleOps={p.roleOps}
+      onMoved={setNotice}
     />
   );
 
@@ -648,6 +698,7 @@ export function Machines(p: MachinesProps) {
         Machines that can run agents for your waves. Agents on another machine report back through a
         private tunnel.
       </p>
+      {p.roles && <p className="m-roles-summary mono">{rolesSummary(p.roles)}</p>}
       {notice && <output className="s-hint m-notice">{notice}</output>}
       <div className="machines" ref={list}>
         {own ? card(own, true) : <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />}
@@ -662,6 +713,18 @@ export function Machines(p: MachinesProps) {
             }}
           >
             + Add a machine
+          </button>
+        )}
+        {canPair && !adding && (
+          <button
+            type="button"
+            className="machine machine--add"
+            onClick={() => {
+              setNotice(null);
+              setAddingBare(true);
+            }}
+          >
+            Add a bare machine…
           </button>
         )}
       </div>
@@ -682,6 +745,9 @@ export function Machines(p: MachinesProps) {
           hubUp={p.hubUp}
           onClose={() => setAdding(false)}
         />
+      )}
+      {canPair && addingBare && p.ops && (
+        <AddMachineSheet ops={p.ops} signIn={p.signIn} onClose={() => setAddingBare(false)} />
       )}
       {signingIn && p.claude?.control && (
         <SignInOnDialog

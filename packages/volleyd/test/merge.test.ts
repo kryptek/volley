@@ -29,6 +29,11 @@ describe("autopilot merge (the one module that builds gh pr merge)", () => {
       H,
     ]);
     expect(mergeArgv(token, true).at(-1)).toBe("--delete-branch");
+    expect(mergeArgv(token, true, ["--repo", "b/b"]).slice(-3)).toEqual([
+      "--delete-branch",
+      "--repo",
+      "b/b",
+    ]);
   });
 
   it("merges with the token, then reads the merge commit back", async () => {
@@ -240,6 +245,7 @@ describe("autopilot merge: the merge train's merge commit", () => {
       "--match-head-commit",
       T,
     ]);
+    expect(trainMergeArgv(train, ["--repo", "b/b"]).slice(-2)).toEqual(["--repo", "b/b"]);
   });
 
   it("merges with the train token, then reads the merge commit back", async () => {

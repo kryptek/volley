@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, defaultsFor } from "../src/config-defaults";
-import { ConfigError, ConfigStore, volleydHome } from "../src/config-store";
+import { ConfigError, ConfigStore, resolveLocalTerminal, volleydHome } from "../src/config-store";
 import { Journal, readJournalFile } from "../src/journal";
 import { SYSTEM_WAVE } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -849,5 +849,37 @@ describe("ConfigStore.migrateLegacyRepo: hosts.<name>.repo → repos (D10)", () 
     expect(c.migrateLegacyRepo("nobody", "github.com/o/r", "volleyd").applied).toBe(false);
     expect(readFileSync(join(home, "config.yaml"), "utf-8")).toBe(LEGACY);
     expect(journaled()).toHaveLength(0);
+  });
+});
+
+describe("resolveLocalTerminal (fleet.local_terminal)", () => {
+  it("keeps a set terminal; null is cmux on a Mac with cmux, else tmux", () => {
+    const never = () => {
+      throw new Error("not asked");
+    };
+    expect(resolveLocalTerminal("tmux", "darwin", never)).toBe("tmux");
+    // cmux is a Mac app: a hand-edited `cmux` on Linux still runs agents in tmux.
+    expect(resolveLocalTerminal("cmux", "linux", never)).toBe("tmux");
+    expect(resolveLocalTerminal("cmux", "darwin", never)).toBe("cmux");
+    expect(resolveLocalTerminal(null, "darwin", () => true)).toBe("cmux");
+    expect(resolveLocalTerminal(null, "darwin", () => false)).toBe("tmux");
+    expect(resolveLocalTerminal(null, "linux", never)).toBe("tmux");
+    expect(resolveLocalTerminal(undefined, "linux", never)).toBe("tmux");
+  });
+
+  it("is a config key: config.yaml and config_set take cmux, tmux or null, nothing else", () => {
+    writeFileSync(join(home, "config.yaml"), "fleet:\n  local_terminal: tmux\n");
+    const c = open();
+    expect(c.effective().fleet.local_terminal).toBe("tmux");
+    expect(c.retainedPayload().fleet.local_terminal).toBe("tmux");
+    expect(c.applyPatch({ fleet: { local_terminal: "cmux" } }, "admin-1").applied).toBe(true);
+    expect(c.effective().fleet.local_terminal).toBe("cmux");
+    expect(c.applyPatch({ fleet: { local_terminal: null } }, "admin-1").applied).toBe(true);
+    expect(c.effective().fleet.local_terminal).toBeNull();
+    const bad = c.applyPatch(
+      { fleet: { local_terminal: "kitty" } } as unknown as Parameters<typeof c.applyPatch>[0],
+      "admin-1",
+    );
+    expect(bad.applied).toBe(false);
   });
 });

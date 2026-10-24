@@ -9,8 +9,11 @@ import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machin
 import { SYSTEM_WAVE } from "../src/types";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { fakeClock } from "./helpers/fake-clock";
 import { memoryCredentials } from "./helpers/fake-dynsec";
+import { fakeExec } from "./helpers/fake-exec";
 import { fakeHost } from "./helpers/fake-host";
+import { runCli } from "./helpers/run-cli";
 import { tempDir } from "./helpers/tmp";
 
 const yaml = (wave: string, repo: string) => `wave: ${wave}
@@ -55,11 +58,90 @@ describe("a wave file's repo: as an owner/name slug (D9)", () => {
     expect(s.payload.repo).toBe(join(root, "Example-Org/Widgets"));
   });
 
+  it("volleyd run prints the repo: line naming the clone", async () => {
+    const file = join(env.home, "w-cli.yaml");
+    writeFileSync(file, yaml("w-cli", "example-org/widgets"));
+    const r = await runCli(["run", file], env.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      `repo: example-org/widgets → ${join(root, "Example-Org/Widgets")} (this machine's clone)\n`,
+    );
+  });
+
   it("refuses an unknown slug, naming volley repo add", async () => {
     const r = await client.request("run", { wave_yaml: yaml("w-unknown", "someone/else") });
     expect(r.ok).toBe(false);
     expect(r.error).toContain(
-      "repo: no clone of someone/else on control: add it (Settings → Repositories, or volley repo add someone/else --machine control)",
+      "repo: no clone of someone/else on any machine: add it to one (Settings → Repositories, or volley repo add someone/else --machine control)",
+    );
+  });
+});
+
+/** A paired box, the only machine config gives b/b. */
+const BOX_ONLY =
+  "fleet:\n  local_name: control\nhosts:\n  box:\n    target: dev@box\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\nrepos:\n  b/b: { machines: [box] }\n";
+
+describe("a wave file's repo: naming a repository only paired machines hold (#448)", () => {
+  let env: DaemonEnv;
+  let client: ControlClient;
+
+  beforeEach(async () => {
+    env = await makeDaemonEnv();
+    writeFileSync(join(env.home, "config.yaml"), BOX_ONLY);
+    await env.start();
+    client = await ControlClient.connect(env.broker.url, NS);
+  });
+  afterEach(async () => {
+    await client.close();
+    await env.cleanup();
+  });
+
+  const autoYaml = (wave: string, repo: string, task = "{ issue: 1 }") =>
+    yaml(wave, repo).replace(
+      "tasks:\n  A: { issue: 1 }\n",
+      `placement: auto\ntasks:\n  A: ${task}\n`,
+    );
+
+  it("accepts it, keeping repo as the owner/name", async () => {
+    const r = await client.request("run", { wave_yaml: autoYaml("w-box", "b/b") });
+    expect(r.error).toBeUndefined();
+    expect(r.ok).toBe(true);
+    await eventually(async () => {
+      const s = (await env.retained("volley/_waves/w-box/state")) as {
+        payload?: { repo?: string };
+      } | null;
+      return s?.payload?.repo !== undefined;
+    });
+    const s = (await env.retained("volley/_waves/w-box/state")) as { payload: { repo: string } };
+    expect(s.payload.repo).toBe("b/b");
+  });
+
+  it("volleyd run prints the repo: line", async () => {
+    const file = join(env.home, "w-cli.yaml");
+    writeFileSync(file, autoYaml("w-cli", "b/b"));
+    const r = await runCli(["run", file], env.env);
+    expect(r.stderr).not.toContain("volleyd run:");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "repo: b/b (no clone on this machine; its tasks run on the machines that hold it)\n",
+    );
+  });
+
+  it("refuses a slug no machine holds, naming the paired machine", async () => {
+    const r = await client.request("run", { wave_yaml: autoYaml("w-else", "someone/else") });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain(
+      "repo: no clone of someone/else on any machine: add it to one (Settings → Repositories, or volley repo add someone/else --machine box)",
+    );
+  });
+
+  it("refuses a task pinned to the supervisor's machine, with placement: auto first", async () => {
+    const r = await client.request("run", {
+      wave_yaml: autoYaml("w-pinned", "b/b", "{ issue: 1, host: local }"),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain(
+      "tasks.A.host: no clone of b/b on control: drop its host: local (or set host: auto) so it runs on box, or add the clone (volley repo add b/b --machine control)",
     );
   });
 });
@@ -146,5 +228,87 @@ describe("the legacy hosts.<name>.repo migrates when its record reports the orig
     });
     expect(changes()).toHaveLength(0);
     expect(configYaml()).toBe(CONFIG);
+  });
+});
+
+describe("a wave the supervisor holds no clone of runs its gh work with --repo (#448)", () => {
+  let env: DaemonEnv;
+  let client: ControlClient;
+  afterEach(async () => {
+    await client.close();
+    await env.cleanup();
+  });
+
+  it("the issue lifecycle's reads and writes name the repository; none runs in a checkout", async () => {
+    env = await makeDaemonEnv();
+    writeFileSync(join(env.home, "config.yaml"), BOX_ONLY);
+    const labels: string[] = [];
+    const fake = fakeExec()
+      .on(["gh", "repo", "view", "b/b"], {
+        stdout: JSON.stringify({
+          nameWithOwner: "b/b",
+          url: "https://github.com/b/b",
+          visibility: "PRIVATE",
+        }),
+      })
+      .on(["gh", "issue", "view"], {
+        stdout: JSON.stringify({ state: "OPEN", labels: [], comments: [] }),
+      })
+      .on(["gh", "label", "list"], () => ({
+        stdout: JSON.stringify(labels.map((name) => ({ name }))),
+      }))
+      .on(["gh", "label", "create"], (argv) => {
+        labels.push(argv[3] as string);
+        return {};
+      })
+      .on(["gh", "issue", "edit"], {})
+      .on(["gh", "issue", "comment"], {});
+    const daemon = await env.start({
+      clock: fakeClock(Date.parse("2026-10-24T09:00:00.000Z")),
+      spawner: { host: fakeHost(fake) },
+    });
+    client = await ControlClient.connect(env.broker.url, NS);
+    const wave = yaml("w-gh", "b/b").replace("tasks:", "placement: auto\ntasks:");
+    expect((await client.request("run", { wave_yaml: wave, owner: "coord-a" })).error).toBe(
+      undefined,
+    );
+    expect((await client.request("pause", { wave: "w-gh", by: "coord-a" })).error).toBeUndefined();
+    await daemon.recordEvent("w-gh", {
+      type: "artifact_verified",
+      task: "A",
+      data: {
+        role: "merged",
+        pr: { number: 7, url: "https://github.com/b/b/pull/7" },
+        head_sha: "a".repeat(40),
+      },
+    });
+    await daemon.recordEvent("w-gh", {
+      type: "stage_entered",
+      task: "A",
+      data: { stage: "done", merged: true },
+    });
+    await daemon.tick();
+    await daemon.settled();
+
+    const ghCalls = fake.calls.filter((c) => c.argv[0] === "gh");
+    for (const verb of [
+      ["gh", "issue", "view", "1"],
+      ["gh", "label", "list"],
+      ["gh", "label", "create"],
+      ["gh", "issue", "edit", "1"],
+      ["gh", "issue", "comment", "1"],
+    ]) {
+      const c = ghCalls.find((x) => verb.every((v, i) => x.argv[i] === v));
+      expect(c?.argv.slice(-2), verb.join(" ")).toEqual(["--repo", "b/b"]);
+      expect(c?.opts?.cwd, verb.join(" ")).toBeUndefined();
+    }
+    // Its visibility was read by name: the state names the repository, no alarm.
+    expect(fake.argvs(["gh", "repo", "view", "--json"])).toEqual([]);
+    const events = readJournalFile(join(env.home, "waves", "w-gh", "journal.jsonl"));
+    expect(events.some((e) => e.data?.alarm === "repo_visibility_unknown")).toBe(false);
+    expect(events.find((e) => e.type === "repo_visibility_detected")?.data).toMatchObject({
+      visibility: "private",
+      github: { slug: "b/b" },
+    });
   });
 });

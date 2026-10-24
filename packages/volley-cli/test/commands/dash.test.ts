@@ -1,11 +1,15 @@
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   type DashChildProcess,
   type DashSpawnFn,
   type DashSpawnOptions,
+  brewStableRoot,
   dash,
 } from "../../src/commands/dash";
 import { makeBufferIO } from "../../src/io";
+import { tempDir } from "../helpers/tmp";
 
 /**
  * Returns a fake child that fires `close` with `closeCode` on the next microtask —
@@ -223,5 +227,43 @@ describe("volley dash", () => {
     expect(exitCode).toBe(2);
     expect(io.readStderr()).toMatch(/mutually exclusive|--open.*--no-open/i);
     expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe("brewStableRoot", () => {
+  /** A Homebrew prefix with Volley's formula installed at `version`, `opt/volley` linked to it. */
+  function brewPrefix(version: string, linked = true): string {
+    const prefix = tempDir("volley-brew-");
+    const libexec = join(prefix, "Cellar", "volley", version, "libexec");
+    mkdirSync(libexec, { recursive: true });
+    writeFileSync(join(libexec, "bun.lock"), "");
+    if (linked) {
+      mkdirSync(join(prefix, "opt"));
+      symlinkSync(join("..", "Cellar", "volley", version), join(prefix, "opt", "volley"));
+    }
+    return prefix;
+  }
+
+  it("maps a Cellar checkout to the opt path, which survives brew upgrade", () => {
+    const prefix = brewPrefix("0.11.0");
+    const cellar = join(prefix, "Cellar", "volley", "0.11.0", "libexec");
+    expect(brewStableRoot(cellar)).toBe(join(prefix, "opt", "volley", "libexec"));
+  });
+
+  it("after an upgrade the opt path still resolves (to the new version)", () => {
+    const prefix = brewPrefix("0.12.0");
+    const cellar = join(prefix, "Cellar", "volley", "0.11.0", "libexec");
+    expect(brewStableRoot(cellar)).toBe(join(prefix, "opt", "volley", "libexec"));
+  });
+
+  it("leaves a Cellar path alone when there is no opt link", () => {
+    const prefix = brewPrefix("0.11.0", false);
+    const cellar = join(prefix, "Cellar", "volley", "0.11.0", "libexec");
+    expect(brewStableRoot(cellar)).toBe(cellar);
+  });
+
+  it("leaves any other checkout alone", () => {
+    expect(brewStableRoot("/path/to/repo")).toBe("/path/to/repo");
+    expect(brewStableRoot("/path/to/Cellar/volley/0.11.0")).toBe("/path/to/Cellar/volley/0.11.0");
   });
 });

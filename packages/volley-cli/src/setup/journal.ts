@@ -2,8 +2,15 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
-import { type CmuxSocketMode, isCmuxSocketMode } from "./cmux";
+import { withoutLogin } from "../peer/profile-checks";
+import { parseBrokerHost } from "./desk-build";
 import type { SetupContext, StepName } from "./step";
+import {
+  type CmuxSocketMode,
+  type LocalTerminal,
+  isCmuxSocketMode,
+  isLocalTerminal,
+} from "./terminal";
 
 /**
  * `$VOLLEYD_HOME/setup.log`: one JSON line per step event of `volley setup`, whoever ran it (the
@@ -80,19 +87,47 @@ export interface SetupInstall {
   desk_port?: number;
   /** Whether the WebSocket listener is open to the LAN (`--lan`); `volley auth init` keeps it. */
   lan?: boolean;
-  /** cmux's socket control mode, as the Services step last found it (macOS). */
+  /** cmux's socket control mode, as the cmux check last found it (macOS). */
   cmux_socket_mode?: CmuxSocketMode;
+  /** The terminal volleyd starts local agents in, as the Terminal step chose it (config.yaml's `fleet.local_terminal`). */
+  terminal?: LocalTerminal;
+  /**
+   * The coordinator name chosen once (the Claude Code step): `VOLLEY_COORDINATOR` for `volleyd`'s
+   * commands when the env sets none, and `volleyd run`'s default `--owner`.
+   */
+  coordinator?: string;
+  /** The namespace the coordinator's MCP server registers in. */
+  namespace?: string;
+  /** The broker the run used (never with a login): a later run's default. */
+  broker_url?: string;
+  /** The run's setup-metrics.json. */
+  metrics?: string;
+  /**
+   * The broker's host when it is not the Desk's machine: the Desk's service runs
+   * `volley desk serve --broker-host <it>` (set by `volley desk install --broker-host`).
+   */
+  broker_host?: string;
 }
+
+/** The namespace the coordinator's MCP server registers in. */
+export const SETUP_NAMESPACE = "default";
+
+/** The agent-id grammar a coordinator name follows (SPEC §2.2). */
+export const COORDINATOR_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
 
 /** Record the install `ctx` runs against. A record, not a gate, like the journal. */
-export function writeSetupInstall(ctx: SetupContext): void {
+export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
   // A run that skipped the security step (`--step services`) keeps the LAN choice on record.
   const prior = readSetupInstall(ctx.volleydHome);
   const lan = ctx.lan ?? prior?.lan;
   // A run whose Services step did not check cmux keeps the mode on record too.
   const cmux = ctx.cmuxSocketMode ?? prior?.cmux_socket_mode;
+  // And a run that skipped the Terminal step keeps its choice; and the coordinator's name.
+  const terminal = ctx.terminal ?? prior?.terminal;
+  const coordinator = ctx.coordinator ?? prior?.coordinator;
+  const brokerHost = deskBrokerHost(ctx);
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -102,12 +137,24 @@ export function writeSetupInstall(ctx: SetupContext): void {
     desk_port: ctx.deskPort,
     ...(lan !== undefined ? { lan } : {}),
     ...(cmux !== undefined ? { cmux_socket_mode: cmux } : {}),
+    ...(terminal !== undefined ? { terminal } : {}),
+    ...(coordinator !== undefined
+      ? { coordinator, namespace: prior?.namespace ?? SETUP_NAMESPACE }
+      : {}),
+    // Never with a login.
+    broker_url: withoutLogin(ctx.tcpUrl).url,
+    ...(metrics !== undefined
+      ? { metrics }
+      : prior?.metrics !== undefined
+        ? { metrics: prior.metrics }
+        : {}),
+    ...(brokerHost !== null ? { broker_host: brokerHost } : {}),
   };
   saveInstall(ctx, install);
 }
 
 /**
- * Record the cmux socket mode the Services step found in an existing setup.json (the Desk's
+ * Record the cmux socket mode the cmux check found in an existing setup.json (the Desk's
  * Services runs; a terminal run that stops at cmux writes the whole record instead). No-op
  * without a record or a checked mode.
  */
@@ -118,7 +165,67 @@ export function recordCmuxSocketMode(ctx: SetupContext): void {
   saveInstall(ctx, { ...prior, cmux_socket_mode: ctx.cmuxSocketMode });
 }
 
-function saveInstall(ctx: SetupContext, install: SetupInstall): void {
+/**
+ * setup.json's `broker_host`, read on its own: `volley desk install` records it on a machine no
+ * `volley setup` has finished on, in a record without the rest. Null when there is none (or it is
+ * not a bare host).
+ */
+export function readBrokerHost(volleydHome: string): string | null {
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as {
+      broker_host?: unknown;
+    };
+    return typeof v.broker_host === "string" ? parseBrokerHost(v.broker_host) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * setup.json's `desk_port`, read on its own like `broker_host`: a record `volley desk install`
+ * wrote on a machine no `volley setup` has finished on. Null when there is none.
+ */
+export function readDeskPort(volleydHome: string): number | null {
+  try {
+    const port = (
+      JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as { desk_port?: unknown }
+    ).desk_port;
+    return typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65_536
+      ? port
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The Desk's broker host for `ctx`: its own (null: none), else the record's. */
+export const deskBrokerHost = (ctx: SetupContext): string | null =>
+  ctx.brokerHost !== undefined ? ctx.brokerHost : readBrokerHost(ctx.volleydHome);
+
+/**
+ * Record what `volley desk install` installed (its port, and its broker host or none) in
+ * setup.json, keeping every other key; a machine without a record gets one with these alone.
+ */
+export function recordDeskInstall(
+  ctx: SetupContext,
+  desk: { port: number; brokerHost: string | null },
+): void {
+  let prior: Record<string, unknown> = {};
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(ctx.volleydHome), "utf-8")) as unknown;
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) prior = v as typeof prior;
+  } catch {
+    // none yet, or unreadable: start a record
+  }
+  const { broker_host: _old, ...rest } = prior;
+  saveInstall(ctx, {
+    ...rest,
+    desk_port: desk.port,
+    ...(desk.brokerHost !== null ? { broker_host: desk.brokerHost } : {}),
+  });
+}
+
+function saveInstall(ctx: SetupContext, install: SetupInstall | Record<string, unknown>): void {
   const file = setupInstallFile(ctx.volleydHome);
   try {
     const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
@@ -158,6 +265,18 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
         : {}),
       ...(typeof v.lan === "boolean" ? { lan: v.lan } : {}),
       ...(isCmuxSocketMode(v.cmux_socket_mode) ? { cmux_socket_mode: v.cmux_socket_mode } : {}),
+      ...(isLocalTerminal(v.terminal) ? { terminal: v.terminal } : {}),
+      ...(str("coordinator") !== null && COORDINATOR_NAME.test(str("coordinator") as string)
+        ? { coordinator: str("coordinator") as string }
+        : {}),
+      ...(str("namespace") !== null && COORDINATOR_NAME.test(str("namespace") as string)
+        ? { namespace: str("namespace") as string }
+        : {}),
+      ...(str("broker_url") !== null ? { broker_url: str("broker_url") as string } : {}),
+      ...(str("metrics") !== null ? { metrics: str("metrics") as string } : {}),
+      ...(str("broker_host") !== null && parseBrokerHost(str("broker_host") as string) !== null
+        ? { broker_host: parseBrokerHost(str("broker_host") as string) as string }
+        : {}),
     };
   } catch {
     return null;

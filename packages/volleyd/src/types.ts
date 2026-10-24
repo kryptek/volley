@@ -245,11 +245,16 @@ export interface AutopilotConfig {
 /** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
 export type LocalAgentsMode = "always" | "fallback" | "never";
 
+/** The terminal agents on the supervisor's own machine run in (config `fleet.local_terminal`). */
+export type LocalTerminal = "cmux" | "tmux";
+
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
 export interface FleetConfig {
   local_name: string | null;
   /** null: `fallback` when any `hosts.<name>` is configured, else `always` (`effective()` resolves it). */
   local_agents: LocalAgentsMode | null;
+  /** null: `cmux` on macOS when cmux is installed, else `tmux` (`resolveLocalTerminal`). */
+  local_terminal: LocalTerminal | null;
   /** The own machine's profile while it is the fallback (no paired machine eligible). */
   fallback: FallbackProfile;
   /** Where managed clones live on each machine (`<repo_root>/<owner>/<name>`; `~` is its home). */
@@ -894,6 +899,18 @@ export const WAVE_EVENT_TYPES = [
   "train_started",
   "train_merged",
   "train_failed",
+  // Machine roles (SPEC §4.6.24): the roles record changed, and a role move's progress, in the
+  // `_system` journal.
+  "roles_changed",
+  "role_move_started",
+  "role_move_step",
+  "role_move_completed",
+  "role_move_failed",
+  "role_rolled_back",
+  // Machine roles (SPEC §4.6.14): `peer_retarget` re-pointed a paired machine's tunnel.
+  "peer_retargeted",
+  // Fleet (SPEC §4.6.14): an admin's `machine_add` made a bare box a paired machine (or failed).
+  "machine_added",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

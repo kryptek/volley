@@ -1,8 +1,19 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { LAYOUTS, type Layout } from "../../src/auth/config";
 import type { AuthContext } from "../../src/auth/context";
 import { type BufferIO, makeBufferIO } from "../../src/io";
+import type { WaveView } from "../../src/setup/first-wave";
 import type {
   AnonymousProbe,
   ExecResult,
@@ -18,12 +29,30 @@ export const ANONYMOUS_CONFIG = "listener 1883\nallow_anonymous true\n";
 
 export const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
-/** The merged settings the fake hooks installer reports and writes. */
-export const HOOKED_SETTINGS = `${JSON.stringify(
-  { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "volley-hooks" }] }] } },
-  null,
-  2,
-)}\n`;
+/** The hooks the fake hooks installer merges into settings.json. */
+const HOOK = "bun /path/to/volley/packages/volley-hooks/src/hooks/session-start.ts";
+const VOLLEY_HOOKS = { SessionStart: [{ hooks: [{ type: "command", command: HOOK }] }] };
+
+/** The merged settings the fake hooks installer reports and writes over no settings. */
+export const HOOKED_SETTINGS = `${JSON.stringify({ hooks: VOLLEY_HOOKS }, null, 2)}\n`;
+
+/** settings.json with the fake hooks merged in (every other key kept, like install.sh). */
+const hooked = (current: string | null, brokerUrl: string | undefined) => {
+  let j: Record<string, unknown> = {};
+  try {
+    j = current !== null ? (JSON.parse(current) as Record<string, unknown>) : {};
+  } catch {}
+  const command = `${brokerUrl !== undefined ? `VOLLEY_BROKER_URL=${brokerUrl} ` : ""}${HOOK}`;
+  return `${JSON.stringify(
+    { ...j, hooks: { SessionStart: [{ hooks: [{ type: "command", command }] }] } },
+    null,
+    2,
+  )}\n`;
+};
+
+/** gh's credential helper in ~/.gitconfig (what `gh auth setup-git` writes). */
+export const GH_GITCONFIG =
+  '[credential "https://github.com"]\n\thelper =\n\thelper = !/usr/bin/gh auth git-credential\n';
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 
@@ -66,7 +95,49 @@ export interface FakeMachine {
   present: Set<string>;
   /** Replace the context's IO (a fresh buffer per run). */
   freshIO: () => BufferIO;
+  /** Claude Code: installed, signed in (and with what plan); `claude auth login` signs it in. */
+  claude: { installed: boolean; signedIn: boolean; plan: string };
+  /** gh: installed, signed in as `login`; `gh auth login` signs it in. */
+  gh: { installed: boolean; signedIn: boolean; login: string };
+  /** The answers `ask` gives, in order (then null); and the prompts it showed. */
+  typed: (string | null)[];
+  asked: string[];
+  /** The user's ~/.claude.json. */
+  claudeJson: string;
+  /** The test wave's world: GitHub's answers, the clone's origin, the wave states read in turn. */
+  firstWave: FirstWaveWorld;
+  /** The fake clock (`deps.now`): `sleep` advances it. */
+  clock: number;
 }
+
+export interface FirstWaveWorld {
+  /** The GitHub owner `gh repo view` reports. */
+  owner: string;
+  /** `git remote get-url origin` of any clone (null: it has none). */
+  origin: string | null;
+  /** The number `gh issue create` gives the next issue. */
+  nextIssue: number;
+  /** The states `waveState` returns, in turn (the last one then repeats). */
+  states: WaveView[];
+  /** Where `volley repo add` clones it (`fleet.repo_root`). */
+  repoRoot: string;
+  /** An exit code for the command whose argv starts with this (a failure to inject). */
+  fail?: { prefix: string; code: number; stderr: string };
+  /** The wave ids `volleyd run` accepted: a second submit of one is refused, as the daemon does. */
+  submitted: Set<string>;
+}
+
+export const HELLO_PR = "https://github.com/octo-volley/volley-hello-aaaa/pull/1";
+
+/** A wave that runs one state, then completes with its PR merged. */
+export const MERGING: WaveView[] = [
+  { status: "running", tasks: [{ id: "T1", stage: "implement" }], open_decisions: [] },
+  {
+    status: "complete",
+    tasks: [{ id: "T1", stage: "done", pr: { url: HELLO_PR, number: 1 } }],
+    open_decisions: [],
+  },
+];
 
 export function fakeMachine(
   fake: FakeDynsec,
@@ -99,7 +170,22 @@ export function fakeMachine(
     secrets: [],
     secretPrompts: [],
     keychain: new Map(),
-    present: new Set(),
+    // tmux in /usr/bin: the Terminal step finds a terminal (a test deletes it to see it block).
+    present: new Set(["/usr/bin/tmux"]),
+    claude: { installed: true, signedIn: true, plan: "max" },
+    gh: { installed: true, signedIn: true, login: "octo-volley" },
+    typed: [],
+    asked: [],
+    claudeJson: join(home, ".claude.json"),
+    firstWave: {
+      owner: "octo-volley",
+      origin: "https://github.com/octo-volley/existing.git",
+      nextIssue: 7,
+      states: [...MERGING],
+      repoRoot: join(home, ".volley", "repos"),
+      submitted: new Set(),
+    },
+    clock: NOW,
     loaded: new Set(),
     active: new Set(),
     settingsFile,
@@ -110,6 +196,7 @@ export function fakeMachine(
   } as unknown as FakeMachine;
 
   const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
+  const volleyCli = join(repo, "packages", "volley-cli", "src", "cli.ts");
   const volleydPlist = join(home, "Library", "LaunchAgents", "systems.volley.volleyd.plist");
   const hooksInstall = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
 
@@ -119,6 +206,58 @@ export function fakeMachine(
     m.execInputs.push(o?.input);
     m.execEnvs.push(o?.env);
     const line = a.join(" ");
+    const fw = m.firstWave;
+    if (fw.fail !== undefined && line.startsWith(fw.fail.prefix)) {
+      return { code: fw.fail.code, stdout: "", stderr: fw.fail.stderr };
+    }
+    // The test wave: gh's repository and issue, git in the clone, volley repo, volleyd.
+    if (a[0] === "gh" && a[1] === "repo" && a[2] === "create" && o?.cwd !== undefined) {
+      mkdirSync(join(o.cwd, a[3] as string), { recursive: true });
+      return ok(`https://github.com/${fw.owner}/${a[3]}\n`);
+    }
+    if (a[0] === "gh" && a[1] === "repo" && a[2] === "view" && o?.cwd !== undefined) {
+      return ok(`${fw.owner}/${basename(o.cwd)}\n`);
+    }
+    if (a[0] === "gh" && a[1] === "issue" && a[2] === "create") {
+      return ok(`https://github.com/${a[4]}/issues/${fw.nextIssue++}\n`);
+    }
+    if (a[0] === "git" && a[1] === "-C") {
+      if (a[3] === "remote") {
+        return fw.origin === null
+          ? { code: 2, stdout: "", stderr: "error: No such remote 'origin'" }
+          : ok(`${fw.origin}\n`);
+      }
+      return ok();
+    }
+    if (a[0] === "bun" && a[1] === volleyCli && a[2] === "repo") {
+      const clone = join(fw.repoRoot, a[4] as string);
+      if (a[3] === "add") {
+        mkdirSync(join(clone, ".git"), { recursive: true });
+        return ok(`Added ${a[4]} (private) to studio.\n  studio: ready (${clone})\n`);
+      }
+      return ok(
+        JSON.stringify({
+          repos: [
+            { slug: a[4], machines: { studio: { state: "ready", path: clone, reasons: [] } } },
+          ],
+        }),
+      );
+    }
+    if (a[0] === "bun" && a[1] === volleydCli && a[2] === "validate") return ok();
+    if (a[0] === "bun" && a[1] === volleydCli && a[2] === "run") {
+      // The daemon takes a second submit of a wave id as a new version of that wave, which an
+      // ended wave refuses: the step must give every run its own id.
+      const id = /^wave: (\S+)$/m.exec(readText(a[3] as string) ?? "")?.[1] ?? "";
+      if (fw.submitted.has(id)) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: `wave '${id}' is complete; a new version applies only to a live wave`,
+        };
+      }
+      fw.submitted.add(id);
+      return ok();
+    }
     if (line === layout.restart) {
       auth.adminUp = true;
       m.anonymous = { tcp: "refused", ws: "refused" };
@@ -159,10 +298,69 @@ export function fakeMachine(
       return ok();
     }
     if (a[0] === "bash" && a[1] === hooksInstall) {
-      if (a[2] === "--dry-run") return ok(HOOKED_SETTINGS);
+      const at = a.indexOf("--broker-url");
+      const merged = hooked(readText(settingsFile), at >= 0 ? a[at + 1] : undefined);
+      if (a.includes("--dry-run")) return ok(merged);
       mkdirSync(join(home, ".claude"), { recursive: true });
-      writeFileSync(settingsFile, HOOKED_SETTINGS);
+      writeFileSync(settingsFile, merged);
       return ok(`installed volley-hooks into ${settingsFile}\n`);
+    }
+    const skill = SKILL_PKGS.find(
+      (p) => a[0] === "bash" && a[1] === join(repo, "packages", p, "scripts", "install.sh"),
+    );
+    if (skill !== undefined) {
+      // The skill installers: a link to the package; a folder of its own is backed up first.
+      const target = join(home, ".claude", "skills", skill === "volley-skill" ? "volley" : skill);
+      const pkg = join(repo, "packages", skill);
+      mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+      let st: ReturnType<typeof lstatSync> | null = null;
+      try {
+        st = lstatSync(target);
+      } catch {}
+      if (st?.isSymbolicLink() === true && readlinkSync(target) === pkg) return ok("already\n");
+      if (st?.isSymbolicLink() === true) rmSync(target);
+      else if (st !== null) renameSync(target, `${target}.backup.20261018-120000`);
+      symlinkSync(pkg, target);
+      return ok(`installed ${target}\n`);
+    }
+    if (a[0] === "claude" && a[1] === "auth") {
+      if (!m.claude.installed) return { code: 127, stdout: "", stderr: "not found" };
+      if (a[2] === "status") {
+        return m.claude.signedIn
+          ? ok(`{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"${m.claude.plan}"}\n`)
+          : { code: 1, stdout: '{"loggedIn":false}\n', stderr: "" };
+      }
+      if (a[2] === "login") {
+        m.claude.signedIn = true;
+        return ok();
+      }
+    }
+    if (a[0] === "claude" && a[1] === "mcp") {
+      const j = JSON.parse(readText(m.claudeJson) ?? "{}") as {
+        mcpServers?: Record<string, unknown>;
+      };
+      if (a[2] === "add-json") {
+        j.mcpServers = { ...(j.mcpServers ?? {}), [a[5] as string]: JSON.parse(a[6] as string) };
+      } else if (a[2] === "remove") {
+        delete j.mcpServers?.[a[5] as string];
+      } else return ok();
+      writeFileSync(m.claudeJson, `${JSON.stringify(j, null, 2)}\n`);
+      return ok();
+    }
+    if (a[0] === "gh") {
+      if (!m.gh.installed) return { code: 127, stdout: "", stderr: "not found" };
+      if (a[1] === "auth" && a[2] === "status")
+        return m.gh.signedIn ? ok() : { code: 1, stdout: "", stderr: "" };
+      if (a[1] === "auth" && a[2] === "login") {
+        m.gh.signedIn = true;
+        return ok();
+      }
+      if (a[1] === "auth" && a[2] === "setup-git") {
+        writeFileSync(join(home, ".gitconfig"), GH_GITCONFIG);
+        return ok();
+      }
+      if (a[1] === "api" && a[2] === "user")
+        return m.gh.signedIn ? ok(`${m.gh.login}\n`) : { code: 1, stdout: "", stderr: "" };
     }
     if (a[0] === "bun" && a[1] === "run" && a[2] === "build" && o?.cwd !== undefined) {
       mkdirSync(join(o.cwd, "dist"), { recursive: true });
@@ -210,11 +408,26 @@ export function fakeMachine(
       return m.answers.shift() ?? false;
     },
     interactive: true,
+    ask: async (prompt) => {
+      m.asked.push(prompt);
+      return m.typed.shift() ?? null;
+    },
+    hostname: () => "Studio.local",
     askSecret: async (prompt) => {
       m.secretPrompts.push(prompt);
       return m.secrets.shift() ?? null;
     },
-    sleep: async () => {},
+    sleep: async (ms) => {
+      m.clock += ms;
+    },
+    now: () => m.clock,
+    random: () => 0,
+    // A wave volleyd was never given has no state.
+    waveState: async (wave: string) =>
+      !m.firstWave.submitted.has(wave)
+        ? null
+        : ((m.firstWave.states.length > 1 ? m.firstWave.states.shift() : m.firstWave.states[0]) ??
+          null),
     platform: opts.platform ?? "darwin",
     uid: 501,
     lanHost: () => "desk.example",
@@ -254,7 +467,12 @@ export function fakeMachine(
     return io;
   };
   writeFileSync(layout.config, ANONYMOUS_CONFIG);
+  // Signed in to GitHub with git using that login: the sign-in step has nothing to sign in.
+  writeFileSync(join(home, ".gitconfig"), GH_GITCONFIG);
+  for (const p of SKILL_PKGS) mkdirSync(join(repo, "packages", p, "scripts"), { recursive: true });
   return m;
 }
+
+const SKILL_PKGS = ["volley-skill", "volley-issues", "volley-wait"];
 
 export const readText = (p: string) => (existsSync(p) ? readFileSync(p, "utf-8") : null);

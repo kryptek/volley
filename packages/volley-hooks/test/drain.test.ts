@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
@@ -310,8 +310,11 @@ describe("mailbox drain (post-tool-use)", () => {
   });
 
   it("user-prompt-submit: a stuck work-log lock never loses drained steering", async () => {
-    // A dead hook's lock, fresh enough that withLock times out on it.
-    writeFileSync(join(dir, ".volley", "work-log.lock"), "4242.held-by-a-dead-hook");
+    // A held lock, its mtime a minute ahead so it never turns stale: withLock times out on it.
+    const lock = join(dir, ".volley", "work-log.lock");
+    writeFileSync(lock, "4242.held-by-a-live-hook");
+    const ahead = new Date(Date.now() + 60_000);
+    utimesSync(lock, ahead, ahead);
     const id = await send("coord-a", "stop and rebase first", { seq: 1 });
     await tick(50);
     const run = await runHook("user-prompt-submit", fixture("user-prompt-submit.json", dir), {

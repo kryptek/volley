@@ -1,0 +1,4 @@
+#!/bin/sh
+printf '%s\n' "snap $*" >>"$STUB_LOG"
+if [ "${1:-}" = install ]; then "$STUB_FIXTURES/provide" "$2" "$STUB_BIN"; fi
+exit 0

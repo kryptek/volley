@@ -4,10 +4,9 @@ These steps verify the skill against a real mosquitto + two Claude Code windows.
 
 ## Setup (once)
 
-- [ ] `brew services start mosquitto` (or any MQTT broker on localhost:1883).
-- [ ] Confirm `which volley` resolves. If not, see [`packages/volley-cli/README.md`](../volley-cli/README.md) for install.
-- [ ] Symlink the skill: `bash packages/volley-wait/scripts/install.sh`.
-- [ ] Quit Claude Code (Cmd-Q) and reopen so the new skill is discovered at startup. In a fresh Claude Code session, confirm `/wait --help` prints the usage block.
+- [ ] Volley installed with the one command (the root README's Quickstart), or `volley setup` run on this machine: `volley setup --check` reports every row `done` (the broker, `volley` in `~/.volley/bin` and this skill are in place).
+- [ ] Confirm `which volley` resolves (open a new terminal after the install for `PATH`).
+- [ ] Restart Claude Code (exit the session and start `claude` again) so the skill is discovered at startup. In a fresh Claude Code session, confirm `/wait --help` prints the usage block.
 
 ## agent_id form (two-window check)
 
@@ -29,9 +28,9 @@ These steps verify the skill against a real mosquitto + two Claude Code windows.
 
 ## Broker-down behavior
 
-- [ ] `brew services stop mosquitto`.
-- [ ] Run `/wait coordinator-xxx`. Confirm the skill prints `❌ broker error: …` with the `→ brew services start mosquitto` hint, and stops without retrying.
-- [ ] `brew services start mosquitto` (cleanup).
+- [ ] Stop the broker: `brew services stop mosquitto` (Linux snap: `sudo snap stop mosquitto`).
+- [ ] Run `/wait coordinator-xxx`. Confirm the skill prints `❌ broker error: …` with the `→ volley setup --check` hint, and stops without retrying.
+- [ ] Start it again (cleanup): `brew services restart mosquitto` (Linux snap: `sudo snap start mosquitto`).
 
 ## GitHub Actions bridge pairing
 

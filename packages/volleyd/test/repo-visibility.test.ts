@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readJournalFile } from "../src/journal";
-import { asGitHubRepo } from "../src/repo-visibility";
+import { asGitHubRepo, viewFromSlug } from "../src/repo-visibility";
 import { HYGIENE_CHECK, hygieneText } from "../src/reviews";
 import type { JournalEvent, WaveState } from "../src/types";
 import { type DaemonEnv, makeDaemonEnv } from "./helpers/daemon-env";
@@ -215,5 +215,14 @@ describe("asGitHubRepo", () => {
     const url = "HTTPS://github.com/example-org/example-repo";
     expect(asGitHubRepo({ slug: GITHUB.slug, url })).toEqual({ slug: GITHUB.slug, url });
     expect(asGitHubRepo({ slug: GITHUB.slug, url: "ftp://github.com/x/y" })).toBeUndefined();
+  });
+});
+
+describe("viewFromSlug: a wave named by its owner/name reads its view by slug (#448)", () => {
+  it("maps a SlugView to its visibility and github, gh's words to unknown", () => {
+    expect(
+      viewFromSlug({ slug: "b/b", url: "https://github.com/b/b", visibility: "private" }),
+    ).toEqual({ visibility: "private", github: { slug: "b/b", url: "https://github.com/b/b" } });
+    expect(viewFromSlug("gh repo view b/b: not found")).toEqual({ visibility: "unknown" });
   });
 });

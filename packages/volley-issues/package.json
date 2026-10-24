@@ -1,6 +1,6 @@
 {
   "name": "volley-issues",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Volley dispatch-issues skill — autonomous GH-issue agents coordinating via Volley instead of claude-peers",
   "license": "Apache-2.0",

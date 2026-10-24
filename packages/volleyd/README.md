@@ -83,7 +83,7 @@ coordinator session.
 
 ## Quick start
 
-On a machine set up with `volley setup` (root README, quickstart step 2), volleyd is already
+On a machine set up with the one command (the root README's [Quickstart](../../README.md#quickstart), or `volley setup`), volleyd is already
 running as a service, logged in to the broker with `$VOLLEYD_HOME/broker.json`, and `volleyd` is
 installed in `~/.volley/bin`. To run it by hand instead, from the repo root, after `bun install`:
 
@@ -91,7 +91,8 @@ installed in `~/.volley/bin`. To run it by hand instead, from the repo root, aft
 # Validate a wave file (no daemon needed)
 bun packages/volleyd/src/cli.ts validate wave.yaml
 
-# Run the daemon in the foreground (or `volleyd install` for launchd)
+# Run the daemon in the foreground (`volley setup --step services` installs it as a service:
+# launchd on macOS, systemd --user on Linux)
 bun packages/volleyd/src/cli.ts daemon
 
 # In another terminal: submit (owned by your stable coordinator name) and watch
@@ -110,7 +111,7 @@ State lives in `$VOLLEYD_HOME` (default `~/.volley/volleyd`). The broker and nam
 wave: 2026-10-20-example            # wave id, [a-z0-9][a-z0-9_-]{0,62}
 repo: ~/repos/example
 release_branch: release/2026-10-20-example
-model: claude-opus-5-5
+model: <model>                      # Volley's default: DEFAULT_MODEL in src/config-defaults.ts
 pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]   # nested = parallel
 tasks:
   T0: { issue: 101 }
@@ -560,7 +561,7 @@ volley claude rename work "Work account"  # rename the account (every profile of
 volley claude remove work           # remove a profile: its dir, usage record and registry entry
 volley claude remove work@peer-a    # … one kept on a paired machine
 volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
-volley claude balance --model claude-opus-5-5 --machine peer-a  # … for one model on one machine
+volley claude balance --model <model> --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
 ```
 
@@ -1096,8 +1097,8 @@ injected `fetch`; an unreachable page is unknown and never holds a wave):
 | Classification | When | What volleyd does |
 |---|---|---|
 | `infra_incident` | the run is infra-shaped (never started; runner, checkout or network steps; cancelled with nothing replacing it), or the status page reports an Actions / API incident and no failing test is in the PR | holds the task in CI (`why_waiting: CI infra incident: <what>; re-checking`, `ci_pending { reason: infra_incident }`), re-verifies every CI poll, and after `autopilot.incident_wait_max_s` (default 14400) opens `ci_failed`, escalated `budget_exhausted` |
-| `own_change` | a failing test's file is in the PR (this wins over a status-page incident), or the ids name no file and the release branch is not red, or no failing test can be named at all | `ci_failed`, `fixup` first: autopilot answers it within `ci_fixup_max` |
-| `flake` | no failing test's file is in the PR (and, for ids that name no file, the release branch is red) | journals `remediation_requested { kind: fix_flake, test, test_file, head, run_urls, for }` and opens `ci_failed` offering `fix flake` first; autopilot answers it and the task waits for the flake's fixer (`tasks[].remediation`, `why_waiting: CI flake in <test>: fixer pending`) |
+| `own_change` | a failing test's file is in the PR (this wins over a status-page incident), or an id names no file and the release branch's latest CI does not fail that same id, or no failing test can be named at all | `ci_failed`, `fixup` first: autopilot answers it within `ci_fixup_max` |
+| `flake` | no failing test's file is in the PR (and, for ids that name no file, the release branch's failing tests include them) | journals `remediation_requested { kind: fix_flake, test, test_file, head, run_urls, for }` and opens `ci_failed` offering `fix flake` first; autopilot answers it and the task waits for the flake's fixer (`tasks[].remediation`, `why_waiting: CI flake in <test>: fixer pending`) |
 
 Every `ci_failed` carries `classification` and `evidence: { failing_tests, test_files, pr_files,
 release_ci, status_page }`. An agent that publishes `blocked` with a reason about a failing test
@@ -1675,6 +1676,199 @@ journaled, so a client that sends its own mailbox message (the Desk) asks for th
 and then publishes, and the agent gets exactly one message. When there is nothing to interrupt with
 (no hook, no workspace) or it fails, the request still answers `ok` with `interrupted: false`.
 
+## Machine roles
+
+The broker, the supervisor and the Desk are *machine roles* (SPEC §4.6.24): each may run on any
+machine of the pool. volleyd keeps the record of where each runs in `$VOLLEYD_HOME/roles.json`
+and publishes it retained on `volley/_system/roles` at start (`volley role status` prints it).
+
+- **The first start** writes the default: all three on this machine (`fleet.local_name`),
+  `broker.address` `{ ssh: null, mqtt_port: <the broker URL's port>, ws_port: 9001 }`,
+  `broker.lan` and `desk.url` from `setup.json` (what `volley setup` recorded; without it `false`
+  and `http://localhost:5199`), `version: 1`, `updated_by: "volleyd-defaults"`. Every later start
+  reads the file, so a hand edit of `roles.json` takes effect at the next start. A write is a
+  temp file renamed over `roles.json`.
+- **`roles_changed { by, roles }`** is journaled in `_system` when the record differs from the
+  last one journaled (where each role runs, not its `version` or author): once on the first
+  start, then after a change. A restart with the same record republishes it and journals nothing.
+- **A bad file** (not JSON, refused by `roles.schema.json`, or naming a machine that is neither
+  `fleet.local_name` nor a `hosts.<name>`) is logged with its path
+  (`roles: roles.json: supervisor.machine: "box-z" is neither this machine …`) and left as it
+  is; volleyd publishes the last record it journaled instead.
+
+### Moving a role
+
+`role_plan`, `role_move` and `role_rollback` are admin ops on the account-op topic (the mailbox
+refuses them). volleyd moves the **Desk**, the **supervisor** and the **broker**.
+
+- **`role_plan { role, to, port?, terminal?, address?, lan? }`** plans fresh and changes nothing: the steps, each
+  with the machine it runs on, what blocks the move (`blocked: [{ why, fix? }]`), `warnings`,
+  `after` (what changes for you) and a `plan_id`, a digest of every step's machine and exact
+  command.
+- **`role_move { …, plan_id, drain?, reply_key }`** plans again and runs only when the fresh
+  `plan_id` is the one you saw (else `plan changed: …`), never while the plan is blocked, never
+  beside another move (`a role move is in progress: <move_id>`).
+- **Progress** is the retained `volley/_system/roles/moves/<move_id>`, republished at every
+  change (`running` → `health_check` → `done`, or `failed`); the `_system` journal has
+  `role_move_started`, a `role_move_step` per step change, `role_move_completed` or
+  `role_move_failed { step, error, rolled_back }`. Each move's log is
+  `$VOLLEYD_HOME/roles/<move_id>/log.jsonl`, beside its record (`move.json`).
+- **A failing step** undoes every step done so far, in reverse, and the move ends `failed`.
+- **Retention.** A finished move's directory (its record, log and what it replaced) is kept 7
+  days; the first start after that removes it and clears its retained topic. There is no tunable.
+- **`role_rollback { move_id }`** undoes a `done` move within those 7 days ([Rolling a move
+  back](#rolling-a-move-back), after the three moves).
+
+The sections below go in the order the owner's smoke moves them (`docs/SMOKE-v0.11.md` part B):
+the Desk, the supervisor, the broker, then each one rolled back. The same sequence runs in CI on
+fakes, through real daemons and two brokers (`test/roles-e2e.test.ts`).
+
+#### Moving the Desk
+
+`role_plan { role: "desk", to: "box-a", port?: 5199 }`. Blocked while `box-a` is not paired, is
+down, runs a volley older than the supervisor's (its record's doctor `versions.volley`), has no
+`bun` on its ssh PATH, or something listens on the port there (`nc -z 127.0.0.1 <port>` over
+ssh). The steps:
+
+| Step | Where | What |
+|---|---|---|
+| `install` | box-a | `volley desk install --port <p> --broker-host <broker's host>`; undone by `volley desk uninstall` |
+| `check` | box-a | `volley desk check --url http://127.0.0.1:<p> --version <supervisor's>`, tried 6 times, 5 s apart (the move is `health_check`) |
+| `record` | here | the roles record: `desk: { machine: box-a, url: http://box-a:<p> }`, `version` + 1, `updated_by` you |
+| `signin` | here | a sign-in link (role steer) for the new address |
+| `unload` | the Desk's old machine | its service stopped (`launchctl bootout gui/<uid>/systems.volley.desk` or `systemctl --user stop volley-desk.service`), kept for a rollback — last, so a browser still on the old address keeps the Desk until then |
+
+`role_move` answers once the move is done or failed: `result: { move_id, status }`, and the
+sign-in link for the new address sealed to your `reply_key` (`sealed: { link }`; an address too
+long for one sealed block gives `sealed: { token }` and `result.link_base`). Every device signs in
+again at the new address: a browser keeps its sign-in per address. A failing check uninstalls
+the new Desk and answers `ok: false` with `result.rolled_back: true`; the old one never stopped.
+
+#### Moving the supervisor
+
+`role_plan { role: "supervisor", to: "box-a", terminal?: "tmux" }` moves volleyd and its home to a
+paired machine; the old machine becomes one of the new supervisor's paired machines. What blocks
+it:
+
+- **A fleet that is not quiet**: a wave running, paused or releasing (`stop it: volleyd stop
+  <wave>`), an agent live anywhere. `role_move { drain: true }` waits instead: the move is
+  `planning`, nothing new is admitted, and it starts at the first tick that finds the fleet
+  quiet. These blockers are not part of the `plan_id`, so the plan you saw moves once it is quiet.
+- **The target**: not paired, down, behind the supervisor's version, a failing `block` check, a
+  `gh` login without write access, its Claude default profile not signed in (its record's
+  `auth`), or no ssh from it to another paired machine (`ssh -n -o BatchMode=yes <target> true`
+  on box-a, once per machine).
+- **Its terminal**: cmux, else tmux (its record's `versions.tmux`); with neither, the plan warns
+  *agents will not run on box-a* and the receive sets `fleet.local_agents: never` there.
+
+The old supervisor runs `bundle` (here: `roles/<move_id>/handover.json`, then the bundle),
+`copy` (the bundle as base64 on the script's stdin to `~/.volley/roles/<move_id>/bundle.tgz` on
+box-a), `receive` (`volley role receive supervisor <bundle> --from <here> [--local-terminal
+cmux|tmux | --local-agents never] --broker-url mqtt://127.0.0.1:<box-a's tunnel port>` there),
+then `handover`: it unloads its own service (`launchctl bootout gui/<uid>/systems.volley.volleyd`
+or `systemctl --user stop volleyd.service`). `role_move` answers at once with
+`{ move_id, status: "running", handing_over: true }`: the receive rotates volleyd's login, so this
+process can never answer after it (a lost broker connection during the hand-over waits for the
+receive to return). The **new** supervisor finds `handover.json` at its start and continues the
+same move on the same topic: `working` (its own retained status), `repair` (the old machine
+re-paired with a code it mints, `volley peer join <code> --to <box-a> --name <old> --target <old>
+--tunnel none` over ssh there: the broker stays on the old machine, so its tunnel is none; its
+agents run in tmux over ssh until ssh-to-cmux lands), `record` (`supervisor: box-a`), `done`. A
+failing re-pair ends `done` with a `warning:` step line saying how to re-pair by hand.
+
+**What travels** (roles/bundle.ts): `waves/**` (journals and snapshots, no logs), `config.yaml`,
+`peers.json`, `peer-codes.json`, `claude-usage.json`, `roles.json`, the move's `handover.json`; the
+auth dir's `accounts.json`, `tokens.json`, `admin.json`, `coordinator.json`; the Claude
+profiles root's `accounts.json`. **What does not**: worktrees, `cmux.json`, logs, `setup.json`,
+`broker.json` / `dynsec-admin.json` (the receive mints volleyd's login afresh), Claude sign-ins,
+the keychain, profile directories. Waves stopped for the move replay as `stopped` on the new
+supervisor: `volleyd resume <wave>` continues each.
+
+**A failed receive** changes nothing on box-a (`volley role receive` restores what it replaced)
+and the move ends `failed` here. One that failed after rotating volleyd's login (exit 3) has this
+supervisor rotate it again (`volley auth rotate volleyd --json`, written to `broker.json` 0600);
+the broker connection it lost is fatal then, so the service manager starts it again with the new
+login and the failed move republished.
+
+#### Moving the broker
+
+`role_plan { role: "broker", to: "box-a", address?: "owner@box-a.lan", lan?: true }` moves the
+MQTT broker from this machine to a paired one, with every login it holds; every machine is then
+re-pointed at it. `address` is the ssh destination every tunnel reaches box-a at (default its
+`hosts.box-a.target`); `lan` whether its WebSocket listener (9001) is open to the LAN there
+(default the record's). What blocks it:
+
+- **A fleet that is not quiet** (as for the supervisor; `drain: true` waits for it).
+- **Here**: the broker not on this machine (a broker already moved comes back with
+  `role_rollback` first), no install recorded by `volley setup` (`setup.json`), a container's
+  broker, a state file or admin login volleyd cannot read, or a port other than 1883. On macOS,
+  volleyd's launchd service must name `mqtt://127.0.0.1:1883` already (`volleyd install
+  --broker-url mqtt://127.0.0.1:1883`): its plist is read only when it is loaded.
+- **The target**: not paired, down, behind the supervisor's version, or no mosquitto 2.1 there
+  (one probe, `volley broker probe`, prints its layout and version).
+- **ssh to `address`** from this machine and from every other paired machine (one `ssh -n -o
+  BatchMode=yes <address> true` each; a paired machine that is down blocks, since its tunnel
+  could not be re-pointed), and with `lan`, box-a's port 9001 reachable from here (anonymous
+  refused or accepted, never unreachable).
+
+On a target whose mosquitto is root's (`snap`, `etc`), the plan's `terminal` names the command
+you run there while the move waits (up to 30 minutes): `sudo volley broker receive
+~/.volley/roles/broker/bundle.tgz --lan`. The plan warns that the broker leaves the supervisor's
+machine (moving the supervisor too is a second move). The steps:
+
+| Step | Where | What |
+|---|---|---|
+| `stop` | here | the broker stopped through its layout: `brew services stop mosquitto`, `sudo -n snap stop mosquitto` or `sudo -n systemctl stop mosquitto` (a sudo rule without a password); undone by the same `start` |
+| `bundle` | here | the Dynamic Security state file, its admin login and `lan`, tarred into the move's directory; mosquitto's persistence never travels, so the new broker starts with no retained message |
+| `copy` | box-a | the bundle as base64 on the script's stdin to `~/.volley/roles/broker/bundle.tgz` |
+| `receive` | box-a | `volley broker receive <bundle> --lan\|--no-lan` (or the owner's sudo step, waited for with `--check`): `mosquitto 2.1.x: N logins` |
+| `tunnel` | here | `volley broker tunnel --to <address> --port 1883 --name <here> --broker-port 1883`: this machine's own `ssh -L` to box-a at the old broker's port (a tunnel-only `peer.json`, `heartbeat: false`); volleyd's systemd unit pointed at `mqtt://127.0.0.1:1883` if it named another URL; undone by `volley broker tunnel --off` |
+| `health` | here | volleyd logs in through the tunnel, reads the broker's version (its dynsec admin login), and both listeners refuse anonymous clients (the WebSocket one checked from here with `lan`); 6 tries, 5 s apart |
+| `retarget-N` | each paired machine | `volley broker tunnel --show` (the tunnel it had, kept for a rollback), then `peer_retarget` at `address` (box-a itself: `tunnel: none`, port 1883); each must come `up` through the new broker within 120 s |
+| `desk` | the Desk's machine | `volley desk install --port <p> --broker-host <box-a>` (idempotent) |
+| `record` | here | `broker: { machine: box-a, address: { ssh: <address>, mqtt_port: 1883, ws_port: 9001 }, lan }` |
+
+`role_move` answers as the move starts, `{ move_id, status: "running", handing_over: true }`, a
+second before `stop`: stopping the broker ends every connection, volleyd's and yours. volleyd
+runs the move without one (its own lost connection waits for the move), then exits so its
+service manager starts it again through the tunnel: it republishes every retained topic it owns,
+the move's record included, so `volley role status` and the moves topic show the outcome once you
+reconnect. A failing step undoes the ones done, in reverse: every machine back on the tunnel it
+had, the Desk told the old host, the tunnel down, the old broker started; the move ends `failed`
+with `rolled_back: true`.
+
+**Your sessions afterwards.** Every machine, the Desk and volleyd are re-pointed; your own Claude
+Code sessions on this machine are not (their MCP server and hooks name the broker URL they were
+set up with). Re-register them through this machine's tunnel, the one line the plan's `after`
+prints:
+
+```sh
+volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883
+```
+
+#### Rolling a move back
+
+`role_rollback { move_id }` undoes a `done` move within 7 days, as a new move the other way under
+a new id (`result: { move_id, rolls_back }`), on the supervisor that holds the move's record.
+Once it is done the original is `rolled_back` (journaled `role_rolled_back { by, move_id, role,
+to }`) and the record names the old machine again; a rollback that fails leaves the original
+`done`. Only a `done` move rolls back: not a failed one (it undid itself), not a rollback (move
+the role again instead), not one whose role has moved since (`the Desk runs on <machine> now, not
+box-a: not rolled back`).
+
+- **The Desk**: the kept service started here again (`systemctl --user start
+  volley-desk.service` or `launchctl bootstrap …`), checked, the record written back, the Desk on
+  box-a uninstalled. Answered once done, as the move was.
+- **The supervisor**: sent to the supervisor on box-a, which moves itself back as a supervisor
+  move does (a fresh bundle of its home, so what changed since travels back; box-a re-paired as
+  the old machine was). It answers `handing_over: true` at once; the original is marked
+  `rolled_back` at the hand-over and journaled by the supervisor back here once it is done.
+- **The broker**: from the move's record (`kept`): this machine's tunnel down (`volley broker
+  tunnel --off`, volleyd's unit back on its old URL), the old broker started (its state file was
+  never removed), its health, every paired machine back on the tunnel it had, the Desk told the
+  old host, the record. Answered as it starts, like the move; volleyd restarts on the old broker
+  once it is done. The broker on box-a keeps running: stop it there.
+
 ## Footprints and the overlap plan
 
 Tasks of one wave that touch the same files collide when they merge. A task's footprint (its
@@ -1872,6 +2066,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
+| `fleet.local_terminal` | the next volleyd start ([local hosts](#local-hosts-cmux-or-tmux)) | agents already running keep their terminal |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
@@ -1897,8 +2092,8 @@ lists every key with its default and example pools, commented out.
 
 `volleyd daemon` spawns an implementer for every admitted task (`--no-spawn` turns that off;
 `volleyd spawn` starts one by hand). One spawn (`src/spawn.ts`) runs these steps through a
-`Host` (`src/hosts/host.ts`; `local-cmux` is the local one, `ssh-tmux` a
-[remote one](#remote-hosts-ssh--tmux)), every command through the fence:
+`Host` (`src/hosts/host.ts`; `local-cmux` or `local-tmux` is the local one ([below](#local-hosts-cmux-or-tmux)),
+`ssh-tmux` a [remote one](#remote-hosts-ssh--tmux)), every command through the fence:
 
 | # | Step | Module | Refusal (journaled as `alarm_raised { code }`) |
 |---|---|---|---|
@@ -1915,6 +2110,36 @@ A refusal releases the lock, revokes credentials minted for the attempt and neve
 The gate runs before credentials are minted, so a rejected brief costs nothing to undo. A
 refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
 spawn` retries at once. While the kill switch is engaged nothing is spawned.
+
+### Local hosts: cmux or tmux
+
+`fleet.local_terminal` (`cmux` | `tmux`, SPEC §4.6.4) picks the terminal agents run in on the
+supervisor's own machine. Unset (`null`, the default) it is `cmux` on macOS when cmux is installed
+and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. A `cmux` set anywhere but
+macOS is `tmux` too. `volley setup`'s Terminal step records its choice there (and in
+`setup.json`). volleyd reads it when it starts; a change applies to agents spawned after the
+next start, since a running agent's workspace belongs to the terminal it started in: a volleyd
+restarted under another value keeps reaching each running agent (its screen, keys, retire)
+through the terminal its `agent_spawned` recorded. An explicit `cmux` copied to a Mac without
+cmux stays until the Terminal step runs there (`volley setup --step terminal` replaces it).
+
+| | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) |
+|---|---|---|
+| Launch | `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `tmux new-session -d -x <cols> -y <rows> -s volley-<wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (a taken name gets `-2`, `-3`, …) |
+| Find | `cmux list-workspaces`, by title | `tmux has-session -t =<session>` |
+| Screen | `cmux read-screen --workspace <ref> --lines <n>` (`source: cmux`) | `tmux capture-pane -p -t =<session>: -S-<n>` (`source: tmux`) |
+| Keys, text | `cmux send-key` / `cmux send` | `tmux send-keys -t =<session>: <key>` / `send-keys … -l -- <text>` |
+| Resize | not possible (`resized: false`) | `tmux resize-window -t =<session>: -x <cols> -y <rows>` |
+| Close | `cmux close-workspace` (consent) | `tmux kill-session -t =<session>` (consent; a session already gone is closed) |
+
+The tmux sessions live on your default tmux server, so `tmux ls` lists them and `tmux attach -t
+volley-w1-T1-implementer` shows an agent. The fence admits local tmux only for those session
+names (`volley-<wave>-<task>-<role>[-<n>]`, never a `volley-signin-*` sign-in session's, so a
+wave named `signin` cannot run in local tmux) and only in the shapes above; the launch needs the
+worktree's sealed `launch.sh` like cmux's. A retire kills the session, then stops whatever still
+runs under the worktree, as with cmux. `agent_spawned` carries `terminal: cmux | tmux`. On Linux
+the volleyd unit `volley setup` writes has `KillMode=process`, so restarting volleyd (`volley
+deploy`) leaves a tmux server it started, and the agents in it, running.
 
 ### Bundles
 
@@ -2152,8 +2377,8 @@ Claude Code reports it only after the first response: a `[1m]` suffix, the nativ
 (`fable`, `opus`, `sonnet`, `haiku`) are 1M; anything else, including an id it cannot read (an
 ARN, a gateway name), is 200K. Provider-qualified ids are matched on their
 `claude-<family>-<major>[-<minor>]` part. A wrong row only moves the compaction point (Claude
-Code caps the window at the model's own). So at 85, `claude-opus-5-5` compacts at 850000 tokens
-and `claude-opus-4-6` at 170000: where the Desk's context meter turns red, after its 70% pulse
+Code caps the window at the model's own). So at 85, a model with a 1M window compacts at 850000 tokens
+and one with 200K at 170000: where the Desk's context meter turns red, after its 70% pulse
 has warned. `0` exports nothing and Claude Code's own default applies. The line sits right after
 the profile block; the fence accepts it there only, as an integer in range, and
 `agent_spawned` records `auto_compact_window`. The Desk meter keeps measuring the full window
@@ -2244,8 +2469,8 @@ decision). The SessionStart hook publishes `working` when it finds no retained s
 a hook-only registration never shows as `unknown`.
 
 - `model_source: "harness-hook"`: the model id is compared exactly with the task's. Only an
-  8-digit date suffix or a `[1m]` context suffix is ignored, so `claude-opus-5` is a mismatch for
-  `claude-opus-5-5`. A mismatch opens decision `model_switch` and leaves the agent running.
+  8-digit date suffix or a `[1m]` context suffix is ignored, so `claude-<family>-5` is a mismatch for
+  `claude-<family>-5-5`. A mismatch opens decision `model_switch` and leaves the agent running.
 - `model_source: "unknown"` (the hook input had no model): the terminal's status line is read
   once as the model source; unreadable → `model_verified: false`.
 
@@ -2628,21 +2853,40 @@ Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (b
 `repo:` key of a host is deprecated (one path per host, from before repositories) and migrates by
 itself.
 
-A wave file's `repo:` may be an `owner/name` too: at submit it becomes the supervisor's own clone
-of it (its `hosts.<fleet.local_name>.repos` entry, else the managed path), and a name with none is
-refused. A relative path shaped like `owner/name` is written `./owner/name`.
+A wave file's `repo:` may be an `owner/name` too. At submit it becomes the supervisor's own clone
+of it when its machine holds one (its `hosts.<fleet.local_name>.repos` entry, else the managed
+path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
+holds is refused at `repo` (`no clone of <owner/name> on any machine: add it to one (…)`). A
+relative path shaped like `owner/name` is written `./owner/name`. `volleyd validate` gives the
+same verdict offline from `config.yaml`, and it and `volleyd run` print a `repo:` line saying
+which it became.
 
-**The supervisor's own machine runs a repository's agents only when it is assigned there.** The
-supervisor always needs its own checkout of a wave's repository (the wave's `repo:`; volleyd
-fetches, merges and cuts its local worktrees there). For a repository config names (`repos`, or
-an adopted clone on a host) without assigning it to the supervisor's machine, that checkout is
-the supervisor's alone: its readiness says `blocked (<owner/name> is not assigned to <machine>:
-add it (Settings → Repositories, or volley repo add <owner/name> --machine <machine>))`, and
-placement keeps the wave's tasks on the machines it is assigned to (a task that names
-`host: local` still runs there). Such a wave names that checkout by path in its `repo:`, since
-an `owner/name` resolves only to a clone the supervisor's machine is assigned. A repository config
-does not name (a single-repository setup from before repositories) runs on the supervisor's
-machine as before.
+**The supervisor's own machine runs a repository's agents only when it is assigned there.** For a
+repository config names (`repos`, or an adopted clone on a host) without assigning it to the
+supervisor's machine, the supervisor's readiness says `blocked (<owner/name> is not assigned to
+<machine>: add it (Settings → Repositories, or volley repo add <owner/name> --machine
+<machine>))`, and placement keeps the wave's tasks on the machines it is assigned to. Such a wave
+names the repository by `owner/name`: the wave keeps it (its state's `repo` is the `owner/name`),
+the supervisor needs no checkout of it, and its tasks are placed on the machines that hold one and
+spawn in worktrees of their clones. A task of it that would spawn on the supervisor's machine
+(`host: local`, or no `host:` under `placement: local`) is refused at submit at
+`tasks.<id>.host`, each such task once: `no clone of <owner/name> on <machine>: drop its host:
+local (or set host: auto) so it runs on <machines>, or add the clone (volley repo add
+<owner/name> --machine <machine>)` under `placement: auto`, `set placement: auto (and drop any
+host: local) so it runs on <machines>, …` under `placement: local`. A release `playbook:` other
+than `none` is refused at `playbook` (the release train runs in the supervisor's clone), and the
+default `.volley/release.yaml` is not looked for. For such a wave the supervisor runs its `gh`
+work (the issue lifecycle, the release PR lookup, held decisions, a red head's PR, the
+repository's visibility, and the pipeline's PR, CI and merge reads and writes, the merge under
+`merge: auto` included) with `--repo <owner/name>` and no working directory, and skips what needs
+a checkout of its own: the fetch and release-branch check, the tree footprints are resolved
+against (Files lists stay as written), its own doctor, the CI-queue admission sample (the wave
+runs without that signal), restart reconciliation's branch probe, a red head's CI re-read, the
+pipeline's git checks once a task's worktree is gone, the merge train (its PRs merge one by one),
+and a repo-relative `brief_preface` (an absolute one is still read; the skip is logged). A wave may instead name a checkout
+of such a repository on the supervisor by path, as before; that checkout is the supervisor's
+alone and a task that names `host: local` runs there. A repository config does not name (a
+single-repository setup from before repositories) runs on the supervisor's machine as before.
 
 **The legacy `hosts.<name>.repo` migrates by itself.** The first time a machine's record reports
 the origin of the clone at that path (a GitHub one), volleyd moves it to
@@ -2773,6 +3017,23 @@ The wave state labels remote tasks with `host` (the host's name), so the Desk ca
 agent runs.
 
 ### Paired machines (`volley peer`)
+
+**One command.** From the daemon's machine, as an admin account, a bare box reachable over ssh
+becomes a ready paired machine:
+
+```sh
+VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
+  volley machine add dev@box-a       # install, pair, sign in, doctor; prints the readiness row
+```
+
+It installs this machine's key on the box (one interactive ssh: the prompt is ssh's), installs
+Volley there in peer mode at this machine's release tag (`install.sh --peer`: no broker, no Desk),
+runs `volley setup --peer` (the sign-ins, the Claude profile, the terminal, `volley peer run` as
+the service), authorizes the box's key here, pairs it with a code bound to its name (`peer_invite
+{ for }`, redeemed by `volley peer join` there), signs it in to GitHub and Claude (the remote
+sign-in below), and prints `volley peer doctor`'s verdict; exit 1 when it is not ready. A rerun
+changes nothing and prints the row. The volley-cli README's "`volley machine add`" has each step.
+The rest of this section is what it does, by hand.
 
 Pairing does the remote-host recipe above (account, tunnel, trust, host entry) with one code
 (SPEC §4.6.14). On the daemon's machine, as an admin account (`invite` and `remove` are admin
@@ -2908,6 +3169,25 @@ instead of refusing the configured name, and journals `peer_joined { ..., replac
 machine rewrites `~/.volley/peer.json` and restarts its service. An ordinary code for a configured
 name is still refused, `replace` or not; a `--for` code joins under its own name only; neither
 refusal uses the code up. A name whose account is not a `peer` is never replaced.
+
+**Every machine through its own tunnel** (SPEC §4.6.14, §4.6.24). `peer_join` answers the
+broker's address from the machine roles record (`broker.address.mqtt_port`), so a machine paired
+after a role move reaches the broker where it runs now. A machine the broker itself runs on
+joins with `--tunnel none` (`peer_join { tunnel: "none" }`): its `peer.json` has
+`tunnel: "none"`, its service starts no ssh, and `hosts.<name>.tunnel.remote_port` is the
+broker's own port, so its agents' `launch.sh` names `VOLLEY_BROKER_URL=mqtt://127.0.0.1:<broker
+port>` (the fence holds a box's launch env to exactly its `remote_port`). `peer.json`'s
+`heartbeat: false` (the supervisor's own machine, which publishes its own record) keeps the
+tunnel and publishes no record.
+
+`peer_retarget { name, address, port?, tunnel? }` (an admin op, a step of a broker move)
+re-points a paired machine's tunnel: volleyd runs `volley peer retarget --to <address> [--port
+<n>] [--tunnel ssh|none]` there over ssh (the machine rewrites `peer.json`, restarts its service
+and exits 0 only once its tunnel answers), writes a new port to `hosts.<name>.tunnel.remote_port`,
+and answers `{ name, address, port?, tunnel?, up: true }` once the machine's record comes `up`
+through the new tunnel (120 s grace, `peer_retarget_grace_ms`; else `ok: false`), journaling
+`peer_retargeted`. An unknown host or an address starting with `-` is refused before anything
+runs.
 
 ## Fleet
 
@@ -4169,6 +4449,8 @@ MERGE (only with a token, checked by identity like consent tokens; either unlock
       gh pr merge <n> --merge --match-head-commit <sha40>
     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
     heads it contains, read as merged. Never --squash.
+  Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+  supervisor holds no clone of (#448).
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):
@@ -4193,6 +4475,7 @@ ALLOW (program by bare name only — never a path):
     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
     gh label list --search merged-to-release --json name ·
     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+    each of these may end in exactly `--repo <owner/name>`;
     never on a paired machine
   cmux — exact argv shapes only, because cmux types into an agent's shell:
     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
@@ -4208,6 +4491,14 @@ ALLOW (program by bare name only — never a path):
     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
     version a seeded profile records as its `lastOnboardingVersion`)
+  tmux (local agents, hosts/local-tmux.ts, under `fleet.local_terminal: tmux`) — sessions
+    named `volley-<wave>-<task>-<role>[-<n>]` only (AGENT_SESSION; never `volley-signin-*`),
+    targeted exactly (`=<it>`, its pane `=<it>:`):
+    new-session -d [-x <n> -y <n>] -s <it> -c <dir> 'bash .volley/launch.sh' (that order, with
+      the LaunchToken sealed for <dir>; n in 20..500) · capture-pane -p [-J] -t =<it>: -S-<n> ·
+      has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
+      send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
+      send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -4242,6 +4533,28 @@ ALLOW (program by bare name only — never a path):
   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
     memory_pressure (no arguments: report only) · docker info --format {{json .}}
 
+MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
+  launchctl bootout gui/<uid>/systems.volley.desk · launchctl bootstrap gui/<uid>
+    $HOME/Library/LaunchAgents/systems.volley.desk.plist · systemctl --user stop | start
+    volley-desk.service | volleyd.service (a Desk move unloads the old Desk; the old supervisor
+    unloads itself after a hand-over)
+  tar -czf <abs>.tgz -C <abs> --files-from <abs>   (a supervisor move's bundle; never -x)
+  volley desk install --port <n> --broker-host <host> · volley desk uninstall ·
+    volley desk check --url http://127.0.0.1:<n> --version <v>   (a Desk move to this machine)
+  and as REMOTE steps on a paired machine (below): the same three `volley desk` verbs;
+  volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
+  volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
+  supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
+  --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
+  mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
+  ssh-back probe); base64 -d to that bundle path (the copy).
+  A broker move's, here: brew services stop|start mosquitto · sudo -n snap|systemctl
+  stop|start mosquitto (the old broker, through its layout) · volley broker tunnel --to <dest>
+  --port <n> --name <name> --broker-port <n> | --off (the own tunnel) · systemctl --user
+  daemon-reload (volleyd's unit rewritten) · the ssh probe above, to the new address; and as
+  REMOTE steps: volley broker probe · volley broker receive <abs>/.volley/roles/broker/bundle.tgz
+  --lan|--no-lan|--check · volley broker tunnel --show.
+
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
 
@@ -4262,6 +4575,25 @@ SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the
       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
   sudo, or the keychain (the logged-in session's): those stay terminal-only.
+
+MACHINE ADD (only with a MachineAddToken, `mintMachineAddToken`, and with one nothing else): the
+  steps `machine_add` (machine-add.ts, SPEC §4.6.14) runs to make a bare box a paired machine,
+  volley-cli's `volley machine add` step list without a terminal (no `ssh -t`):
+    ssh -T -o BatchMode=yes -o ConnectTimeout=<s> -o ServerAliveInterval=<s>
+      -o ServerAliveCountMax=<n> -o StrictHostKeyChecking=accept-new <target> bash -s
+    ssh -T -i <key> -o IdentitiesOnly=yes …the same… <target> bash -s   (the person's key)
+    ssh -T -o ConnectTimeout=<s> -o StrictHostKeyChecking=accept-new -o NumberOfPasswordPrompts=1
+      -o PreferredAuthentications=password,keyboard-interactive <target> bash -s   (a password:
+      env SSH_ASKPASS=<the token's helper>, SSH_ASKPASS_REQUIRE=force)
+  each to the token's target only (and its key only), its stdin exactly a script the run's
+  registry (volley-cli's `Scripts`) rendered; this machine's key creation (`ssh-keygen -t
+  ed25519 -N '' -q -f <home>/.ssh/id_ed25519`); a Mac's Remote Login check (`launchctl print
+  system/com.openssh.sshd`). A host key is trusted on first contact (nobody is at a terminal
+  to answer ssh's question).
+
+ASKPASS (the env rule): a command whose env sets SSH_ASKPASS, SSH_ASKPASS_REQUIRE or
+  SUDO_ASKPASS is refused, except MACHINE ADD's password form with exactly the token's helper
+  and `SSH_ASKPASS_REQUIRE=force` (no SUDO_ASKPASS: sudo runs on the box, from its own helper).
 
 TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
   with its token, checked by identity like consent tokens:

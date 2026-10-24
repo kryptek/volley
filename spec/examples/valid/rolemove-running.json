@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-24T09:00:00.000Z",
+  "channel": "_system/roles/moves",
+  "type": "role_move",
+  "correlation_id": null,
+  "payload": {
+    "move_id": "mv-20261024-desk-1a2b",
+    "role": "desk",
+    "from": "mac",
+    "to": "box-a",
+    "status": "running",
+    "steps": [
+      { "id": "install", "title": "Build and install the Desk", "where": "box-a", "status": "ok", "line": "built dist/ at v0.11.0" },
+      { "id": "health", "title": "Health-check http://box-a:5199/", "where": "box-a", "status": "running" },
+      { "id": "unload", "title": "Unload the old Desk service", "where": "mac", "status": "pending" }
+    ],
+    "since": "2026-10-24T09:00:00.000Z",
+    "log_path": "/path/to/home/.volley/roles/mv-20261024-desk-1a2b/log.jsonl"
+  }
+}

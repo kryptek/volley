@@ -11,7 +11,7 @@ import {
   readCredentials,
   writeSecret,
 } from "../auth/context";
-import { includedFiles } from "../auth/migrate";
+import { ensureStateDir, includedFiles } from "../auth/migrate";
 import { DYNSEC_ADMIN_USER } from "../auth/roles";
 import { INSTALL_INSTRUCTIONS, checkBrokerVersion, detectBrokerVersion } from "../auth/version";
 import type { AnonymousProbe, Change, SetupContext, StepPlan } from "./step";
@@ -279,6 +279,7 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
       detail: `${layout.ctrl} dynsec init ${ctx.stateFile} ${DYNSEC_ADMIN_USER} <new password>; the login is stored in ${adminPath} (mode 0600)`,
       apply: async () => {
         ensureOwnedDir(deps, dir, null);
+        ensureStateDir(deps, ctx.stateFile);
         const password = deps.generatePassword();
         const r = await deps.ctrlInit(layout.ctrl, ctx.stateFile, DYNSEC_ADMIN_USER, password);
         if (r.code !== 0 || !existsSync(ctx.stateFile)) {

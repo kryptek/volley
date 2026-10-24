@@ -1,6 +1,6 @@
 {
   "name": "volleyd",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "volleyd — durable wave supervisor daemon: wave files, journal, DAG scheduler, authority fence",
   "license": "Apache-2.0",
@@ -15,6 +15,8 @@
     "./paired-hosts": "./src/paired-hosts.ts",
     "./procs": "./src/procs.ts",
     "./repos": "./src/repos.ts",
+    "./roles/sheet": "./src/roles/sheet.ts",
+    "./trust": "./src/trust.ts",
     "./wave-file": "./src/wave-file.ts"
   },
   "scripts": {
@@ -28,6 +30,7 @@
     "ajv-formats": "^3.0.1",
     "volley-cli": "workspace:*",
     "volley-mcp": "workspace:*",
+    "volley-sim": "workspace:*",
     "yaml": "^2.6.0"
   },
   "devDependencies": {

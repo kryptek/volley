@@ -66,9 +66,11 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   // local_agents null: fallback once any hosts.<name> is configured, else always.
+  // local_terminal null: cmux on macOS when cmux is installed, else tmux (read at volleyd start).
   fleet: {
     local_name: null,
     local_agents: null,
+    local_terminal: null,
     fallback: { max_agents: 3, per_machine: {} },
     repo_root: "~/.volley/repos",
   },
@@ -135,6 +137,13 @@ export const REMOTE_HOST_DEFAULTS = {
   /** `hosts.<name>.drain` unset: the host takes placements. */
   drain: false,
 } as const;
+
+/**
+ * The model a wave Volley writes for you runs (`model:`): `volley setup`'s test wave, and the one
+ * the /volley-issues skill and the READMEs cite. Not a runtime tunable: every wave file names its
+ * own model.
+ */
+export const DEFAULT_MODEL = "claude-opus-5-5";
 
 /** Who `updated_by` names before anyone has changed the config. */
 export const DEFAULTS_AUTHOR = "volleyd-defaults";
@@ -320,6 +329,8 @@ export const DAEMON_DEFAULTS = {
   screen_closed_backoff_s: 3600,
   /** The broker port when the broker URL names none (MQTT's registered port). */
   mqtt_default_port: 1883,
+  /** The broker's WebSocket listener (the Desk page's), as `volley setup` configures it. */
+  ws_default_port: 9001,
   /** ssh `ConnectTimeout` for every remote command and tunnel (seconds). */
   ssh_connect_timeout_s: 10,
   /** ssh `ServerAliveInterval` for the reverse tunnel (seconds). */
@@ -396,6 +407,43 @@ export const DAEMON_DEFAULTS = {
   local_doctor_timeout_ms: 120_000,
   /** Bound on a `peer_doctor` run on a box (a `--fix` may check out and install volley there). */
   peer_doctor_timeout_ms: 900_000,
+  /** Bound on `volley peer retarget` on a box (`peer_retarget`): it waits up to 30 s for its tunnel. */
+  peer_retarget_timeout_ms: 90_000,
+  /** How long `peer_retarget` waits for the box's record to come `up` through the new tunnel. */
+  peer_retarget_grace_ms: 120_000,
+  /** ssh's ConnectTimeout for a `machine_add` step (machine-add.ts). */
+  machine_add_connect_timeout_s: 15,
+  /** ssh's ServerAliveInterval / ServerAliveCountMax for a `machine_add` batch step. */
+  machine_add_alive_interval_s: 15,
+  machine_add_alive_count_max: 4,
+  /** Bound on one `machine_add` step on a box (install.sh may apt-get and build for minutes). */
+  machine_add_step_timeout_ms: 1_200_000,
+  // --- Machine roles (roles/, SPEC §4.6.24) ---
+  /**
+   * How long a finished role move (its log, record and what it replaced) is kept for a
+   * `role_rollback`: 7 days, fixed by the SPEC (no tunable). The supervisor's next start after
+   * that removes it.
+   */
+  role_move_retention_ms: 7 * 86_400_000,
+  /** A role move's health check: how many times it is tried, and how long apart. */
+  role_health_attempts: 6,
+  role_health_wait_ms: 5_000,
+  /** Bound on one step of a role move run over ssh (a Desk install builds the Desk). */
+  role_step_timeout_ms: 600_000,
+  /** How long a Desk move's sign-in link for the new address stays valid. */
+  role_signin_ttl_s: 3_600,
+  /** Bound on a supervisor move's ssh-back probe from its target to one other machine. */
+  role_ssh_probe_timeout_s: 10,
+  /**
+   * A broker move to a root-owned install: how long its receive step waits for the owner's
+   * `sudo volley broker receive` on the target (polled every `role_health_wait_ms`).
+   */
+  role_broker_receive_wait_ms: 1_800_000,
+  /**
+   * A broker move (and its rollback) is answered before its first step stops the broker the
+   * answer travels through: the move starts this long after the answer.
+   */
+  role_broker_reply_ms: 1_000,
   // --- Fleet: merge nudge (overlap.ts) ---
   /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
   nudge_files_shown: 5,

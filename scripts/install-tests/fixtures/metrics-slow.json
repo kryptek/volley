@@ -1,0 +1,30 @@
+{
+  "started_at": "2026-10-24T10:00:00.000Z",
+  "finished_at": "2026-10-24T10:03:05.000Z",
+  "wall_ms": 960000,
+  "questions": 0,
+  "sign_ins": 0,
+  "sudo_prompts": 0,
+  "steps": [
+    {
+      "name": "broker",
+      "ms": 1200,
+      "changes": 2
+    },
+    {
+      "name": "services",
+      "ms": 4300,
+      "changes": 3
+    },
+    {
+      "name": "first-wave",
+      "ms": 98000,
+      "changes": 1
+    }
+  ],
+  "first_wave": {
+    "wall_ms": 98000,
+    "pr": "https://github.com/sim/volley-test/pull/1",
+    "merged": true
+  }
+}

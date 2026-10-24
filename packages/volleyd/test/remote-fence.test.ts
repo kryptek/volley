@@ -1489,3 +1489,225 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
       expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);
   });
 });
+
+describe("machine roles (#460, #466, #469): the REMOTE steps of peer_retarget and a role move", () => {
+  const allowed = (s: RemoteStep) => () => assertAllowed(SSH, remote(s));
+  const V = (...a: string[]) => step("volley", ...a);
+
+  it("a box's launch.sh names its own broker port: 1883 on a tunnel: none box, never on an ssh one", () => {
+    const vars = (port: number) => ({
+      hooksDir: "/path/to/home/src/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      worktree: "/wt/x",
+      env: {
+        VOLLEY_BROKER_URL: `mqtt://127.0.0.1:${port}`,
+        VOLLEY_NAMESPACE: "default",
+        VOLLEY_AGENT_ID: "w1-t1-implementer-1",
+      },
+    });
+    const write = (port: number): RemoteStep => ({
+      argv: ["base64", "-d"],
+      stdin: Buffer.from(renderLaunchScript(vars(port))).toString("base64"),
+      stdout: "/wt/x/.volley/launch.sh",
+    });
+    const on = (broker_port: number, s: RemoteStep) => () =>
+      assertAllowed(SSH, {
+        remote: { steps: [s], host: { name: "box", worktree_root: "/wt", broker_port } },
+      });
+    // tunnel: none — the broker runs on the box: hosts.box.tunnel.remote_port is its port.
+    expect(on(1883, write(1883))).not.toThrow();
+    // An ssh box reaches the broker at its tunnel's end, never at a broker port of its own.
+    expect(on(21883, write(1883))).toThrow(FenceError);
+    expect(on(21883, write(21883))).not.toThrow();
+    expect(on(1883, write(21883))).toThrow(FenceError);
+  });
+
+  it("peer_retarget's one step: `volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none]`", () => {
+    for (const extra of [
+      [],
+      ["--port", "21884"],
+      ["--tunnel", "none"],
+      ["--port", "1883", "--tunnel", "ssh"],
+    ])
+      expect(
+        allowed(V("peer", "retarget", "--to", "owner@box-a.lan", ...extra)),
+        extra.join(" "),
+      ).not.toThrow();
+    for (const bad of [
+      ["peer", "retarget"],
+      ["peer", "retarget", "--to", "-oProxyCommand=sh"],
+      ["peer", "retarget", "--to", "box a"],
+      ["peer", "retarget", "--to", "box-a", "--port", "80"],
+      ["peer", "retarget", "--to", "box-a", "--port", "99999"],
+      ["peer", "retarget", "--to", "box-a", "--tunnel", "socks"],
+      ["peer", "retarget", "--to", "box-a", "--tunnel", "none", "--port", "1883"],
+      ["peer", "retarget", "--to", "box-a", "--yes"],
+    ])
+      expect(allowed(V(...bad)), bad.join(" ")).toThrow(FenceError);
+  });
+
+  it("a Desk move's steps on its target: install, uninstall, the check against 127.0.0.1", () => {
+    for (const a of [
+      ["desk", "install", "--port", "5199", "--broker-host", "box-b.lan"],
+      ["desk", "install", "--port", "8080", "--broker-host", "192.0.2.20"],
+      ["desk", "uninstall"],
+      ["desk", "check", "--url", "http://127.0.0.1:5199", "--version", "0.11.0"],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).not.toThrow();
+    for (const a of [
+      ["desk", "install"],
+      ["desk", "install", "--port", "5199", "--broker-host", "http://evil"],
+      ["desk", "install", "--port", "5199", "--broker-host", "box", "--root", "/tmp/evil"],
+      ["desk", "uninstall", "--all"],
+      ["desk", "check", "--url", "http://evil.example:5199", "--version", "0.11.0"],
+      ["desk", "check", "--url", "http://127.0.0.1:5199", "--version", "-x"],
+      ["desk", "serve"],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).toThrow(FenceError);
+  });
+
+  it("a broker move's steps on a paired machine (#470): probe, receive, the tunnel shown", () => {
+    const bundle = "/path/to/home/.volley/roles/broker/bundle.tgz";
+    for (const a of [
+      ["broker", "probe"],
+      ["broker", "receive", bundle, "--lan"],
+      ["broker", "receive", bundle, "--no-lan"],
+      ["broker", "receive", bundle, "--check"],
+      ["broker", "tunnel", "--show"],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).not.toThrow();
+    for (const a of [
+      ["broker", "probe", "--layout", "etc"],
+      ["broker", "receive", bundle],
+      ["broker", "receive", "/tmp/bundle.tgz", "--lan"],
+      ["broker", "receive", "/path/to/home/.volley/roles/m-1/bundle.tgz", "--lan"],
+      ["broker", "receive", bundle, "--layout", "snap"],
+      ["broker", "tunnel", "--off"],
+      [
+        "broker",
+        "tunnel",
+        "--to",
+        "dev@box",
+        "--port",
+        "1883",
+        "--name",
+        "a",
+        "--broker-port",
+        "1883",
+      ],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).toThrow(FenceError);
+    // The bundle's write there goes to the same path.
+    expect(
+      allowed({
+        argv: ["base64", "-d"],
+        stdin: Buffer.from("x").toString("base64"),
+        stdout: bundle,
+      }),
+    ).not.toThrow();
+  });
+
+  it("a supervisor move's receive, the re-pairing join, the ssh-back probe and the bundle write", () => {
+    const bundle = "/path/to/home/.volley/roles/m-1/bundle.tgz";
+    for (const a of [
+      ["role", "receive", "supervisor", bundle, "--from", "studio"],
+      ["role", "receive", "supervisor", bundle, "--from", "studio", "--local-terminal", "tmux"],
+      [
+        "role",
+        "receive",
+        "supervisor",
+        bundle,
+        "--from",
+        "studio",
+        "--local-agents",
+        "never",
+        "--broker-url",
+        "mqtt://127.0.0.1:21883",
+      ],
+      [
+        "peer",
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@box-a",
+        "--name",
+        "studio",
+        "--target",
+        "dev@studio",
+        "--tunnel",
+        "none",
+      ],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).not.toThrow();
+    for (const a of [
+      ["role", "receive", "supervisor", "/tmp/x.tgz", "--from", "studio"],
+      ["role", "receive", "broker", bundle, "--from", "studio"],
+      [
+        "role",
+        "receive",
+        "supervisor",
+        bundle,
+        "--from",
+        "studio",
+        "--broker-url",
+        "mqtt://evil:1883",
+      ],
+      ...["0", "99999"].map((port) => [
+        "role",
+        "receive",
+        "supervisor",
+        bundle,
+        "--from",
+        "studio",
+        "--broker-url",
+        `mqtt://127.0.0.1:${port}`,
+      ]),
+      ["role", "receive", "supervisor", bundle, "--from", "studio", "--local-agents", "always"],
+      [
+        "peer",
+        "join",
+        "abcd-efgh",
+        "--to",
+        "dev@box-a",
+        "--name",
+        "studio",
+        "--target",
+        "dev@studio",
+        "--tunnel",
+        "none",
+      ],
+      [
+        "peer",
+        "join",
+        "ABCD-EFGH",
+        "--to",
+        "dev@box-a",
+        "--name",
+        "studio",
+        "--target",
+        "dev@studio",
+      ],
+      ["role", "rollback", "m-1"],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).toThrow(FenceError);
+    expect(
+      allowed(
+        step("ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "dev@box-b", "true"),
+      ),
+    ).not.toThrow();
+    for (const a of [
+      ["ssh", "dev@box-b", "true"],
+      ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "dev@box-b", "rm"],
+      ["ssh", "-n", "-o", "ProxyCommand=sh", "-o", "ConnectTimeout=10", "dev@box-b", "true"],
+    ])
+      expect(allowed({ argv: a }), a.join(" ")).toThrow(FenceError);
+    const b64 = Buffer.from("tgz bytes").toString("base64");
+    expect(allowed({ argv: ["base64", "-d"], stdin: b64, stdout: bundle })).not.toThrow();
+    for (const out of [
+      "/path/to/home/.volley/roles/../x/bundle.tgz",
+      "/path/to/home/.volley/roles/m-1/other.tgz",
+    ])
+      expect(allowed({ argv: ["base64", "-d"], stdin: b64, stdout: out }), out).toThrow(FenceError);
+  });
+});

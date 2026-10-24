@@ -329,6 +329,19 @@ describe("failingTests (pure)", () => {
       "sleep > resolves on abort",
     ]);
   });
+
+  it("a bun id picks up its file from the log's ##[group]<file>: header", () => {
+    const log = [
+      "job\tstep\t2026-10-24T01:02:03Z ##[group]test/clock.test.ts:",
+      "job\tstep\t2026-10-24T01:02:04Z (fail) sleep > resolves on abort [3.1ms]",
+      "job\tstep\t2026-10-24T01:02:04Z ##[endgroup]",
+      "job\tstep\t2026-10-24T01:02:05Z (fail) orphan > no header [1ms]",
+    ].join("\n");
+    expect(failingTests(log)).toEqual([
+      "test/clock.test.ts > sleep > resolves on abort",
+      "orphan > no header",
+    ]);
+  });
 });
 
 describe("PR head moved: answers that must not go wrong", () => {

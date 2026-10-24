@@ -15,6 +15,7 @@ import {
   statfsSync,
   writeFileSync,
 } from "node:fs";
+import { createConnection } from "node:net";
 import os from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -85,7 +86,8 @@ const HELP = `Usage:
   On the supervisor's machine:
     volley peer invite [--ttl <seconds>] [--for <name>]
                                                A one-time pairing code (XXXX-XXXX, 10 min);
-                                               --for: re-pair the paired machine <name>
+                                               --for: the code joins as <name> only (a
+                                               paired machine: it re-pairs it)
     volley peer list [--json]                  Paired machines and their health
     volley peer remove <name> [--drain | --now]
                                                Unpair: revoke its account, drop hosts.<name>;
@@ -95,8 +97,11 @@ const HELP = `Usage:
   On the machine to pair:
     volley peer join <code> --to <host> [--name <name>] [--target <user@this-machine>]
                      [--repo <owner/name>[=<path>] | --repo <path>]... [--volley-dir <path>]
-                     [--port <port>]
+                     [--port <port>] [--tunnel ssh|none]
                      [--remote-volley <command>] [--no-service] [--replace]
+    volley peer retarget --to <host> [--port <port>] [--tunnel ssh|none]
+                                               Point this machine's tunnel at another host
+                                               and restart the service; exit 0 once it answers
     volley peer doctor [--fix] [--yes] [--json] [--repo <path>] [--clone]
                        [--repo-add <owner/name>[=<path>]]... [--repo-remove <owner/name>]...
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
@@ -118,6 +123,8 @@ join options:
                            <path> (one, written /…, ./… or ~/…) is the legacy single clone
   --volley-dir <path>      This machine's volley checkout (default: the one running this command)
   --port <port>            Port on this machine's 127.0.0.1 that reaches the broker (default 21883)
+  --tunnel ssh|none        ssh (default): the service keeps \`ssh -N -L\` to --to up; none: the
+                           broker runs on this machine, reached at 127.0.0.1:<broker port>, no ssh
   --remote-volley <cmd>    How to run volley on the supervisor's machine (default: volley when
                            it is on that ssh PATH, else ~/.volley/bin/volley, where
                            \`volley setup\` installs it)
@@ -125,6 +132,13 @@ join options:
   --replace                Re-pair: replace this machine's account and hosts entry (a code
                            from \`volley peer invite --for <name>\`, with --name <name>)
   join runs \`volley peer doctor\` first and stops before using the code if a check blocks.
+
+retarget options:
+  --to <host>              The ssh destination the tunnel reaches the broker's machine at now
+  --port <port>            This machine's tunnel port (default: peer.json's; with --tunnel none,
+                           the broker's port)
+  --tunnel ssh|none        Default: peer.json's (ssh)
+  retarget rewrites peer.json, restarts the service, and waits up to 30 s for 127.0.0.1:<port>.
 
 doctor options:
   --fix                    Apply the safe fixes (the volley checkout's install and version, a
@@ -174,6 +188,7 @@ const OPTIONS = {
   "remote-volley": { type: "string" },
   "no-service": { type: "boolean" },
   replace: { type: "boolean" },
+  tunnel: { type: "string" },
   drain: { type: "boolean" },
   now: { type: "boolean" },
   for: { type: "string" },
@@ -209,6 +224,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   "probe-login": ["doctor"],
   for: ["invite"],
   replace: ["join"],
+  tunnel: ["join", "retarget"],
   drain: ["remove"],
   now: ["remove"],
 };
@@ -228,6 +244,9 @@ export const PEER_DEFAULTS = {
   tunnel_restart_ms: 2_000,
   tunnel_restart_max_ms: 60_000,
   remote_exec_timeout_ms: 60_000,
+  /** `retarget`: how long the restarted tunnel has to answer, and how often it is probed. */
+  retarget_wait_ms: 30_000,
+  retarget_probe_ms: 1_000,
   /** `run` re-runs the doctor this often; heartbeats in between repeat its last result. */
   doctor_interval_s: 600,
   /**
@@ -255,6 +274,8 @@ export const PEER_DEFAULTS = {
 } as const;
 
 export const SYSTEMD_UNIT = "volley-peer.service";
+/** The broker's port on its own machine when nothing says otherwise (`join --tunnel none`). */
+const DEFAULT_BROKER_PORT = 1883;
 export const LAUNCHD_LABEL = "systems.volley.peer";
 const LIVE = new Set(["spawning", "registered", "working"]);
 const PROBE_MS = 1_000;
@@ -300,6 +321,11 @@ export interface PeerDeps extends DoctorDeps {
     auth: BrokerAuth | null,
     will?: { topic: string; payload: string; retain: boolean },
   ) => Promise<VolleyBroker>;
+  /**
+   * Whether something listens on this machine's 127.0.0.1:`port` (retarget's tunnel check);
+   * default a TCP connect.
+   */
+  probePort?: (port: number) => Promise<boolean>;
   /** Where `cmd` is on this shell's PATH (for the fix join prints), or null. */
   which?: (cmd: string) => string | null;
 }
@@ -319,7 +345,25 @@ export interface PeerConfig {
   /** The repositories this machine works on: `owner/name` → its clone's absolute path. */
   repos?: Record<string, string>;
   joined_at: string;
+  /**
+   * `ssh` (absent): the service keeps `ssh -N -L` to `host` up. `none`: the broker runs on this
+   * machine; `remote_port` is its port and no ssh runs.
+   */
+  tunnel?: PeerTunnel;
+  /**
+   * false: the service publishes no machine record (the supervisor's own machine, which publishes
+   * its own); absent: true.
+   */
+  heartbeat?: boolean;
 }
+
+export type PeerTunnel = "ssh" | "none";
+const TUNNELS: readonly string[] = ["ssh", "none"];
+
+/** peer.json's tunnel: `ssh` unless it says `none`. */
+export const peerTunnel = (cfg: PeerConfig): PeerTunnel => (cfg.tunnel === "none" ? "none" : "ssh");
+/** Whether the service publishes the machine record: unless peer.json says `heartbeat: false`. */
+export const peerHeartbeat = (cfg: PeerConfig): boolean => cfg.heartbeat !== false;
 
 /** Write peer.json (mode 0600: it holds the peer's password). */
 export function writePeerConfig(home: string, cfg: PeerConfig): void {
@@ -466,7 +510,16 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
     case "join":
       if (pos.length !== 1) return usage("needs exactly one <code>");
       if (v.to === undefined || v.to === "") return usage("needs --to <host>");
+      if (v.tunnel !== undefined && !TUNNELS.includes(v.tunnel))
+        return usage("--tunnel must be ssh or none");
       return join_(pos[0] as string, v, io, deps);
+    case "retarget":
+      if (pos.length !== 0) return usage("takes no arguments");
+      if (v.to === undefined || v.to === "" || v.to.startsWith("-") || /\s/.test(v.to))
+        return usage("needs --to <ssh destination>");
+      if (v.tunnel !== undefined && !TUNNELS.includes(v.tunnel))
+        return usage("--tunnel must be ssh or none");
+      return retarget(v, io, deps);
     case "run":
       if (pos.length !== 0) return usage("takes no arguments");
       return runService(io, deps);
@@ -491,12 +544,12 @@ export interface Answer {
 }
 
 /** A throwaway RSA key the answer's secret is sealed to (volleyd refuses a secret without one). */
-function replyKeyPair(): { jwk: unknown; privateKey: KeyObject } {
+export function replyKeyPair(): { jwk: unknown; privateKey: KeyObject } {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return { jwk: publicKey.export({ format: "jwk" }), privateKey };
 }
 
-function unseal(key: KeyObject, sealed: string | undefined): Record<string, unknown> | null {
+export function unseal(key: KeyObject, sealed: string | undefined): Record<string, unknown> | null {
   if (sealed === undefined) return null;
   try {
     return JSON.parse(
@@ -552,6 +605,7 @@ export async function askVolleyd(
   env: Record<string, string | undefined>,
   io: IO,
   admin = false,
+  adminOnly = ADMIN_ONLY,
 ): Promise<Answer | ExitCode> {
   let timeoutMs: number;
   let namespace: string;
@@ -573,20 +627,9 @@ export async function askVolleyd(
     io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
-  if (admin && auth === null) {
-    io.stderr(
-      `${cmd}: ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
-    );
-    return EXIT.USAGE;
-  }
-  // The broker drops a non-admin's op without a word: refuse at once when this machine's
-  // account registry already says the login is not an admin, instead of waiting out the timeout.
-  const notAdmin = admin && auth !== null ? localNotAdmin(auth.username, env) : null;
-  if (notAdmin !== null) {
-    io.stderr(
-      `${cmd}: ${notAdmin}; ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
-    );
-    return EXIT.USAGE;
+  if (admin) {
+    const refused = adminRefusal(cmd, auth, env, io, adminOnly);
+    if (refused !== null) return refused;
   }
   let broker: VolleyBroker;
   try {
@@ -607,7 +650,7 @@ export async function askVolleyd(
         : await request(broker, namespace, op, fields, timeoutMs);
     if (answer === null) {
       // The broker drops an account-op request from any login but an admin's, silently.
-      const why = admin ? ` (${ADMIN_ONLY}; is ${auth?.username} one?)` : "";
+      const why = admin ? ` (${adminOnly}; is ${auth?.username} one?)` : "";
       io.stderr(`${cmd}: volleyd did not answer within ${timeoutMs / 1000} s${why}\n`);
       return EXIT.TIMEOUT;
     }
@@ -665,6 +708,34 @@ async function request(
 }
 
 const ADMIN_ONLY = "pairing codes and unpairing are admin ops (an admin account's login)";
+
+/**
+ * An admin op's refusal before any connection (exit 2, said on stderr): no login, or one this
+ * machine's records say is not an admin. The broker drops a non-admin's op without a word, so
+ * this refuses at once instead of waiting out the timeout. Null when the op may go ahead.
+ */
+export function adminRefusal(
+  cmd: string,
+  auth: BrokerAuth | null,
+  env: Record<string, string | undefined>,
+  io: IO,
+  adminOnly = ADMIN_ONLY,
+): ExitCode | null {
+  if (auth === null) {
+    io.stderr(
+      `${cmd}: ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
+    );
+    return EXIT.USAGE;
+  }
+  const notAdmin = localNotAdmin(auth.username, env);
+  if (notAdmin !== null) {
+    io.stderr(
+      `${cmd}: ${notAdmin}; ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
+    );
+    return EXIT.USAGE;
+  }
+  return null;
+}
 
 /**
  * Why `username` is not an admin account by this machine's own records (a fixed identity, or an
@@ -846,6 +917,8 @@ interface RedeemRequest {
   memory_total_mb?: number;
   /** Re-pairing with a code from `invite --for <name>`: replace the account and hosts entry. */
   replace?: true;
+  /** The broker runs on this machine: volleyd answers its port as `remote_port`. */
+  tunnel?: "none";
 }
 
 async function redeem(
@@ -921,6 +994,10 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
       return fail(e instanceof Error ? e.message : String(e), EXIT.USAGE);
     }
   }
+  // --tunnel none: the broker is on this machine; without --port its port is the default 1883
+  // until volleyd's answer names it (the doctor below checks the profile against that).
+  const noTunnel = v.tunnel === "none";
+  if (noTunnel && v.port === undefined) port = DEFAULT_BROKER_PORT;
   const volleyDir = resolve(v["volley-dir"] ?? deps.volleyDir);
   // --repo: <owner/name>[=<path>] (repeatable), or one bare path (the legacy single clone).
   let repo: string | undefined;
@@ -1008,6 +1085,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     // Only a size it can read: an unknown one leaves max_agents unset (4).
     ...(totalMem > 0 ? { memory_total_mb: memoryOf(totalMem, 0).total_mb } : {}),
     ...(v.replace === true ? { replace: true as const } : {}),
+    ...(noTunnel ? { tunnel: "none" as const } : {}),
   };
   const remoteVolley = v["remote-volley"] ?? null;
   const redeemed = await remote(deps, host, redeemScript(request, remoteVolley));
@@ -1065,6 +1143,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     ...(repo !== undefined ? { repo } : {}),
     ...(slugs.length > 0 ? { repos } : {}),
     joined_at: deps.now().toISOString(),
+    ...(noTunnel ? { tunnel: "none" as const } : {}),
   };
   const file = peerFile(deps.home);
   writePeerConfig(deps.home, cfg);
@@ -1232,9 +1311,22 @@ function printTrust(io: IO, deps: PeerDeps, repo: string | undefined, name: stri
   );
 }
 
+/** What installing the service touches: `PeerDeps`' part (`volley setup --peer` builds one). */
+export type ServiceDeps = Pick<
+  PeerDeps,
+  "exec" | "home" | "platform" | "user" | "uid" | "sleep" | "envPath" | "volleyArgv"
+>;
+
+/** The service's unit file on this platform (null: no service manager volley knows). */
+export function serviceFile(platform: NodeJS.Platform, home: string): string | null {
+  if (platform === "linux") return join(home, ".config", "systemd", "user", SYSTEMD_UNIT);
+  if (platform === "darwin") return join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  return null;
+}
+
 /** Install and (re)start the service: what was installed, or why it could not be. */
-async function installService(
-  deps: PeerDeps,
+export async function installService(
+  deps: ServiceDeps,
 ): Promise<{ ok: true; what: string; warning?: string } | { ok: false; error: string }> {
   const argv = [...deps.volleyArgv, "peer", "run"];
   if (deps.platform === "linux") {
@@ -1310,6 +1402,84 @@ async function installService(
     ok: false,
     error: `no service manager for ${deps.platform}: pass --no-service and run \`volley peer run\``,
   };
+}
+
+/**
+ * `volley peer retarget --to <host> [--port <n>] [--tunnel ssh|none]`: point this machine's
+ * tunnel at the broker's new machine (a broker move, SPEC §4.6.14): peer.json gets the new host,
+ * port and tunnel (everything else kept), the service is restarted through the same unit writers
+ * `join` uses, and the command exits 0 only once 127.0.0.1:<port> answers (1 after
+ * `retarget_wait_ms`).
+ */
+async function retarget(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> {
+  const fail = (msg: string, exit: ExitCode = EXIT.ERROR) => {
+    io.stderr(`volley peer retarget: ${msg}\n`);
+    return exit;
+  };
+  let cfg: PeerConfig;
+  try {
+    cfg = readPeerConfig(deps.home);
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+  const tunnel: PeerTunnel = (v.tunnel as PeerTunnel | undefined) ?? peerTunnel(cfg);
+  // From no tunnel to ssh, remote_port was the broker's own port: the tunnel's end takes its own.
+  let port =
+    tunnel === "none"
+      ? cfg.broker.port
+      : peerTunnel(cfg) === "none"
+        ? PEER_DEFAULTS.remote_port
+        : cfg.remote_port;
+  if (v.port !== undefined) {
+    try {
+      port = parsePositiveInt(v.port, "--port");
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e), EXIT.USAGE);
+    }
+  }
+  const next: PeerConfig = { ...cfg, host: v.to as string, remote_port: port, tunnel };
+  writePeerConfig(deps.home, next);
+  io.stdout(`Wrote ${peerFile(deps.home)}: ${tunnelLine(next)}.\n`);
+  const installed = await installService(deps);
+  if (!installed.ok) {
+    writePeerConfig(deps.home, cfg);
+    return fail(
+      `the service was not restarted: ${installed.error}; ${peerFile(deps.home)} is as it was`,
+    );
+  }
+  if (installed.warning !== undefined) io.stderr(`volley peer retarget: ${installed.warning}\n`);
+  const probe = deps.probePort ?? probeLoopbackPort;
+  const start = deps.now().getTime();
+  for (;;) {
+    if (await probe(port)) {
+      io.stdout(`The tunnel answers: ${tunnelLine(next)}.\n`);
+      return EXIT.OK;
+    }
+    if (deps.now().getTime() - start >= PEER_DEFAULTS.retarget_wait_ms) break;
+    await deps.sleep(PEER_DEFAULTS.retarget_probe_ms);
+  }
+  return fail(
+    `127.0.0.1:${port} did not answer within ${PEER_DEFAULTS.retarget_wait_ms / 1000} s after the restart (${tunnelLine(next)}); check \`journalctl --user -u ${SYSTEMD_UNIT}\` or ~/.volley/peer.log`,
+  );
+}
+
+const tunnelLine = (cfg: PeerConfig) =>
+  peerTunnel(cfg) === "none"
+    ? `no tunnel, the broker on this machine at 127.0.0.1:${cfg.remote_port} (host ${cfg.host})`
+    : `127.0.0.1:${cfg.remote_port} through ssh to ${cfg.host}`;
+
+/** A TCP connect to 127.0.0.1:`port`, given up after a second. */
+function probeLoopbackPort(port: number): Promise<boolean> {
+  return new Promise((done) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const end = (ok: boolean) => {
+      socket.destroy();
+      done(ok);
+    };
+    socket.setTimeout(PEER_DEFAULTS.retarget_probe_ms, () => end(false));
+    socket.once("connect", () => end(true));
+    socket.once("error", () => end(false));
+  });
 }
 
 /**
@@ -1628,9 +1798,10 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   const stop = new AbortController();
   const onAbort = () => stop.abort();
   signal?.addEventListener("abort", onAbort);
+  // tunnel: none — the broker is on this machine: no ssh to keep up.
   const tunnel = (async () => {
     let backoff: number = PEER_DEFAULTS.tunnel_restart_ms;
-    while (!stop.signal.aborted) {
+    while (peerTunnel(cfg) === "ssh" && !stop.signal.aborted) {
       const started = deps.now().getTime();
       const r = await deps.exec(tunnelArgv(cfg), { signal: stop.signal }).catch((e: unknown) => ({
         code: -1,
@@ -1691,6 +1862,11 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   };
   try {
     while (!stop.signal.aborted) {
+      // heartbeat: false (the supervisor's own machine publishes its own record): only the tunnel.
+      if (!peerHeartbeat(cfg)) {
+        await deps.sleep(PEER_DEFAULTS.heartbeat_ms, stop.signal);
+        continue;
+      }
       try {
         cfg = await freshRepos(deps, cfg);
         broker ??= await connectPeer(deps, cfg, report);

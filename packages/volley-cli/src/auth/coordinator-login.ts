@@ -156,3 +156,21 @@ export function savedCoordinatorLogin(
   }
   return deps.coordinatorFile(env);
 }
+
+/**
+ * `env` with `VOLLEY_COORDINATOR` set to the coordinator name `volley setup` saved
+ * (`$VOLLEYD_HOME/setup.json`) when it sets none, and that name (`saved`, null when the env set
+ * one or nothing was saved). Off like the saved login (until an entry point opts in), and never
+ * for an agent: a supervised worker is its own session, never the coordinator.
+ */
+export function withSetupCoordinator(
+  env: Record<string, string | undefined>,
+  cwd: string = process.cwd(),
+): { env: Record<string, string | undefined>; saved: string | null } {
+  const none = { env, saved: null };
+  if (source === null) return none;
+  if (env.VOLLEY_COORDINATOR !== undefined && env.VOLLEY_COORDINATOR !== "") return none;
+  if (agentContext(env, cwd) !== null) return none;
+  const saved = readSetupInstall(volleydHome(env))?.coordinator;
+  return saved === undefined ? none : { env: { ...env, VOLLEY_COORDINATOR: saved }, saved };
+}

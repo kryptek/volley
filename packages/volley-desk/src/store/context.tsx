@@ -88,19 +88,90 @@ export function defaultBrokerUrl(
   return `${protocol === "https:" ? "wss" : "ws"}://${host}:9001`;
 }
 
-/** The broker URL the live Desk connects to: the prop, else `VITE_VOLLEY_BROKER_URL`, else the page host's. */
+/** What `volley desk serve --broker-host` serves at `/desk-config.json`. */
+export interface ServedDeskConfig {
+  broker: { host: string; ws_port: number };
+}
+
+/** Where the live Desk's broker URL came from (Settings › About shows it). */
+export type BrokerSource = "prop" | "env" | "served" | "page host";
+
+/** The broker URL and where it came from, for Settings › About (null: demo, tests, previews). */
+export const BrokerOriginContext = createContext<{ url: string; source: BrokerSource } | null>(
+  null,
+);
+
+/**
+ * The broker URL the live Desk connects to: the prop, else `VITE_VOLLEY_BROKER_URL`, else the
+ * broker the server named (`served`: `/desk-config.json`), else the page host's. A served host
+ * is bracketed when it is a bare IPv6 address; `wss` on an https page, as for the page host.
+ */
 export function resolveBrokerUrl(
   urlProp?: string,
   env: Record<string, unknown> = viteEnv(),
   page: Parameters<typeof defaultBrokerUrl>[0] = typeof window === "undefined"
     ? undefined
     : window.location,
+  served?: ServedDeskConfig | null,
 ): string {
   const fromEnv = env.VITE_VOLLEY_BROKER_URL;
   if (urlProp !== undefined) return urlProp;
   if (typeof fromEnv === "string" && fromEnv !== "") return fromEnv;
+  if (served != null) {
+    const { host, ws_port } = served.broker;
+    const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    return `${page?.protocol === "https:" ? "wss" : "ws"}://${h}:${ws_port}`;
+  }
   return defaultBrokerUrl(page);
 }
+
+/** Which of `resolveBrokerUrl`'s sources gave the URL. */
+export function brokerSource(
+  urlProp: string | undefined,
+  env: Record<string, unknown>,
+  served: ServedDeskConfig | null | undefined,
+): BrokerSource {
+  if (urlProp !== undefined) return "prop";
+  if (typeof env.VITE_VOLLEY_BROKER_URL === "string" && env.VITE_VOLLEY_BROKER_URL !== "")
+    return "env";
+  return served != null ? "served" : "page host";
+}
+
+/** Whether the URL is settled without the server's config (the prop or the env names it). */
+export const needsServedConfig = (urlProp: string | undefined, env: Record<string, unknown>) =>
+  brokerSource(urlProp, env, null) === "page host";
+
+/**
+ * `GET /desk-config.json` (never from the HTTP cache), or null: a 404 (the server names no
+ * broker), a network error, or a body that is not `{ broker: { host, ws_port } }` with a bare
+ * host and a port.
+ */
+export async function fetchDeskConfig(
+  fetchFn: typeof fetch = fetch,
+): Promise<ServedDeskConfig | null> {
+  try {
+    const r = await fetchFn("/desk-config.json", { cache: "no-store" });
+    if (!r.ok) return null;
+    const broker = ((await r.json()) as { broker?: { host?: unknown; ws_port?: unknown } })?.broker;
+    const host = broker?.host;
+    const port = broker?.ws_port;
+    if (typeof host !== "string" || !/^[A-Za-z0-9.:-]+$/.test(host)) return null;
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535)
+      return null;
+    return { broker: { host, ws_port: port } };
+  } catch {
+    return null;
+  }
+}
+
+let servedConfig: Promise<ServedDeskConfig | null> | null = null;
+
+/** `fetchDeskConfig`, once per page load: kept in memory, never in localStorage. */
+export function loadDeskConfig(): Promise<ServedDeskConfig | null> {
+  servedConfig ??= fetchDeskConfig();
+  return servedConfig;
+}
+
 const TICK_MS = 2600;
 const REVIEWER_AFTER_MS = 22_000;
 /** When the demo's running wave gets its morning digest. */

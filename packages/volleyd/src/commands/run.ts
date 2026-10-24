@@ -1,11 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { withSetupCoordinator } from "volley-cli/auth/coordinator-login";
 import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
 import { formatDiff } from "../plan-diff";
+import { isSlug } from "../repos";
 import type { Wave, WaveState } from "../types";
 import { formatWave } from "./status";
 import {
@@ -16,6 +18,17 @@ import {
   previewPlacement,
   waveTree,
 } from "./validate";
+
+/**
+ * The `repo:` line for a wave file's `owner/name` as the daemon resolved it (`state.repo`, #448):
+ * its clone here, or kept as the slug when only paired machines hold one. Empty for a path.
+ */
+export function runRepoLine(fileRepo: string, resolved: string): string {
+  if (!isSlug(fileRepo)) return "";
+  return resolved === fileRepo
+    ? `repo: ${fileRepo} (no clone on this machine; its tasks run on the machines that hold it)\n`
+    : `repo: ${fileRepo} → ${resolved} (this machine's clone)\n`;
+}
 
 const HELP = `Usage: volleyd run <wave.yaml> [--owner <name|agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
@@ -86,7 +99,10 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   }
 
   return withClient(target, io, "volleyd run", async (client) => {
-    const owner = await resolveCaller(client, parsed.values.owner, env);
+    // Without --owner (or VOLLEY_COORDINATOR), the coordinator name `volley setup` saved.
+    const named = withSetupCoordinator(env);
+    const owner = await resolveCaller(client, parsed.values.owner, named.env);
+    const fromSetup = owner.auto && named.saved !== null && owner.id === named.saved;
     if (owner.warning !== undefined) io.stderr(`warning: ${owner.warning}\n`);
     if (owner.id === null) io.stderr(`warning: ${noOwnerWarning(wave.wave)}\n`);
     const res = await client.request(
@@ -109,9 +125,14 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     const preview = places(wave) && (res.plan === undefined || placementFromFile);
     const placement =
       parsed.values.json !== true && preview
-        ? await previewPlacement(wave, target, state.github?.slug)
+        ? await previewPlacement(
+            wave,
+            target,
+            state.github?.slug ?? (isSlug(wave.repo) ? wave.repo : undefined),
+          )
         : "";
     // The overlap plan as validate prints it; the tree from the clone the daemon resolved `repo:` to.
+    const repoLine = runRepoLine(wave.repo, state.repo);
     const plan =
       parsed.values.json === true
         ? ""
@@ -123,12 +144,16 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       // A later version without placement: keeps the wave's own (SPEC §4.6.15): no default line.
       const placed = placementFromFile ? placementLine : "";
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${plan}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${repoLine}${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${plan}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
-      const auto = owner.auto ? " (auto)" : "";
+      const auto = fromSetup
+        ? " (auto: the coordinator name `volley setup` saved)"
+        : owner.auto
+          ? " (auto)"
+          : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placementLine}${placement}${plan}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${repoLine}${warnings}${playbookLine}${placementLine}${placement}${plan}${formatWave(state)}`,
       );
     }
     return EXIT.OK;

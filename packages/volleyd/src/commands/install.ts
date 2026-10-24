@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { reloadLaunchd } from "volley-cli/setup/launchd";
 import { stableServicePath } from "volley-cli/setup/service-path";
+import { SIM_BIN, isSimulated, simHome } from "volley-sim/env";
 import { type Clock, systemClock } from "../clock";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
@@ -27,7 +28,9 @@ the plist instead. Restart the service with:
   launchctl kickstart -k gui/$UID/${SERVICE_LABEL}
 uninstall unloads the service (\`launchctl bootout\`) and removes the plist; journals stay.
 The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE and, when set, VOLLEY_AUTH_DIR
-(the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in. Its PATH is
+(the auth dir volleyd's \`volley auth\` calls use) from the environment you run it in. Run under
+volley-sim (VOLLEY_SIMULATED=1, as \`volley setup --simulated\` does) it also keeps
+VOLLEY_SIMULATED and VOLLEY_SIM_HOME and puts the simulator's fakes first on PATH. Its PATH is
 a fixed list, never your shell's: ~/.volley/bin, bun's directory, Homebrew's, /usr/local/bin, the
 cmux app's bin, ~/.local/bin, ~/.bun/bin and the other install dirs that exist on this machine,
 /usr/bin:/bin:/usr/sbin:/sbin. The same from any terminal.
@@ -48,6 +51,8 @@ export interface ServicePaths {
   path: string;
   /** The auth dir volleyd's `volley auth` calls use (`VOLLEY_AUTH_DIR`); unset: theirs to detect. */
   authDir?: string;
+  /** volley-sim's world (`VOLLEY_SIM_HOME`) when installed under the simulator; unset: none. */
+  simHome?: string;
 }
 
 const xml = (s: string) =>
@@ -74,6 +79,10 @@ export function renderPlist(
       p.authDir === undefined
         ? ""
         : `\n    <key>VOLLEY_AUTH_DIR</key>\n    <string>${xml(p.authDir)}</string>`,
+    SIM_ENTRY:
+      p.simHome === undefined
+        ? ""
+        : `\n    <key>VOLLEY_SIMULATED</key>\n    <string>1</string>\n    <key>VOLLEY_SIM_HOME</key>\n    <string>${xml(p.simHome)}</string>`,
   };
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, k: string) => {
     const r = raw[k];
@@ -156,16 +165,21 @@ function servicePaths(
   const target = resolveTarget(values, env);
   const userHome = env.HOME ?? homedir();
   const bun = findBun(env.PATH ?? "", process.execPath);
+  const path = stableServicePath({ home: userHome, bun, tmpdir: env.TMPDIR });
+  // Under the simulator (`volley setup --simulated` runs this with it on) the daemon's gh and
+  // claude must be the fakes: their bin first, the switch and the world kept.
+  const simulated = isSimulated(env);
   return {
     launchAgentsDir: join(userHome, "Library", "LaunchAgents"),
     home: volleydHome(env),
     uid: process.getuid?.() ?? 0,
     bun,
     // Never the shell's whole PATH (per-terminal entries would make every rerun a change).
-    path: stableServicePath({ home: userHome, bun, tmpdir: env.TMPDIR }),
+    path: simulated ? `${SIM_BIN}:${path}` : path,
     ...(env.VOLLEY_AUTH_DIR !== undefined && env.VOLLEY_AUTH_DIR !== ""
       ? { authDir: env.VOLLEY_AUTH_DIR }
       : {}),
+    ...(simulated ? { simHome: simHome(env) } : {}),
     ...target,
   };
 }

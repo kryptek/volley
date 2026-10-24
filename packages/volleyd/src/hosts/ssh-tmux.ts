@@ -296,7 +296,11 @@ export class SshTmuxHost implements RemoteHost {
     return posix.join(this.spec.volley_dir, "packages", "volley-mcp", "src", "index.ts");
   }
 
-  /** The broker as the box sees it: the tunnel's remote end. */
+  /**
+   * The broker as the box sees it: the tunnel's end on its loopback, or, on a box paired with
+   * `tunnel: none` (the broker runs there, SPEC §4.6.14), the broker's own port: either way
+   * `hosts.<name>.tunnel.remote_port`, which the fence's launch-env rule holds launch.sh to.
+   */
   get brokerUrl(): string {
     return `mqtt://127.0.0.1:${this.spec.tunnel.remote_port}`;
   }
@@ -328,7 +332,11 @@ export class SshTmuxHost implements RemoteHost {
         remote: {
           steps,
           // A repo-less spec (doctor, sign-in) has no worktree root: no profile passes the check.
-          host: { name: this.spec.name, worktree_root: this.spec.worktree_root ?? "" },
+          host: {
+            name: this.spec.name,
+            worktree_root: this.spec.worktree_root ?? "",
+            broker_port: this.spec.tunnel.remote_port,
+          },
         },
         timeoutMs: opts.timeoutMs ?? DAEMON_DEFAULTS.remote_exec_timeout_ms,
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
@@ -1051,18 +1059,21 @@ export function sessionName(title: string): string {
 }
 
 /** The session's current pane, matched exactly (`=` stops tmux's prefix matching). */
-const pane = (session: string) => `=${session}:`;
+export const pane = (session: string) => `=${session}:`;
 
 /** A session's size when the spawn names none (the tunables' defaults). */
-const DEFAULT_SIZE: TermSize = { cols: CONFIG_DEFAULTS.tmux_cols, rows: CONFIG_DEFAULTS.tmux_rows };
+export const DEFAULT_SIZE: TermSize = {
+  cols: CONFIG_DEFAULTS.tmux_cols,
+  rows: CONFIG_DEFAULTS.tmux_rows,
+};
 
 /** `size` in whole cells, inside the fence's bounds. */
-function tmuxSize(size: TermSize): TermSize {
+export function tmuxSize(size: TermSize): TermSize {
   const fit = (n: number) => Math.max(TMUX_SIZE.min, Math.min(TMUX_SIZE.max, Math.round(n)));
   return { cols: fit(size.cols), rows: fit(size.rows) };
 }
 
-const sizeArgs = (s: TermSize) => ["-x", String(s.cols), "-y", String(s.rows)];
+export const sizeArgs = (s: TermSize) => ["-x", String(s.cols), "-y", String(s.rows)];
 
 /** A full commit id (what a reviewer or fixup starts from), not a branch name. */
 function isCommitSha(ref: string): boolean {

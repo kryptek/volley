@@ -19,7 +19,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `wave-state.schema.json` | `_waves/<wave>/state` | sections 4.6.1, 4.6.15, 4.6.20 |
 | `decision.schema.json` | `_waves/<wave>/decisions/<id>` | sections 4.6.2, 4.6.15 |
 | `inbox-item.schema.json` | `_inbox/<id>` (the supervisor only) | section 4.6.18 |
-| `wave-event.schema.json` | `_waves/<wave>/events` | sections 4.6.3, 4.6.15, 4.6.20 |
+| `wave-event.schema.json` | `_waves/<wave>/events` | sections 4.6.3, 4.6.15, 4.6.20, 4.6.24 |
 | `archive.schema.json` | `_waves/_archive` (index of archived waves) | section 4.6.20 |
 | `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | sections 4.6.4, 4.6.15, 4.6.20 |
 | `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |
@@ -28,7 +28,9 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `admission.schema.json` | `_system/admission` | section 4.6.7 |
 | `machine.schema.json` | `_system/machines/<name>` (the machine; the supervisor's own as `kind: supervisor`) | sections 4.6.14, 4.6.15 |
 | `readiness.schema.json` | `_system/machines/<name>/readiness` (the supervisor only) | section 4.6.15 |
-| `auth-request.schema.json` | `_system/auth/ops/<username>`, `volley-auth/redeem/<token_id>` | section 4.6.10 |
+| `roles.schema.json` | `_system/roles` (the supervisor only) | section 4.6.24 |
+| `role-move.schema.json` | `_system/roles/moves/<move_id>` (the supervisor only) | section 4.6.24 |
+| `auth-request.schema.json` | `_system/auth/ops/<username>`, `volley-auth/redeem/<token_id>` | sections 4.6.10, 4.6.14, 4.6.21, 4.6.24 |
 | `account.schema.json` | `accounts.json` account registry file (not an envelope) | section 4.6.10 |
 | `setup-result.schema.json` | the `result` of a `setup_plan` (`$defs/plan`) or `setup_apply` (`$defs/applied`) answer on `_system/auth/replies/<correlation_id>` | section 4.6.10 |
 | `agent-identity.schema.json` | `.volley/agent.json` file (not an envelope) | section 6.5 |

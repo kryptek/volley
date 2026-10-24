@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readAccounts } from "../commands/auth-accounts";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { readSetupInstall } from "../setup/journal";
@@ -17,6 +17,7 @@ import {
   ADMIN_FILE,
   type AdminLink,
   type AuthContext,
+  type AuthDeps,
   VOLLEYD_ADMIN_FILE,
   VOLLEYD_BROKER_FILE,
   agentJsonFiles,
@@ -80,6 +81,22 @@ export interface MigrateFlags {
 }
 
 const RESTART_WAIT_MS = 10_000;
+
+/**
+ * The state file's directory, made when missing (a fresh Homebrew mosquitto has no var/mosquitto
+ * until it first runs, and `dynsec init` does not make it): 0755, the broker's when it runs as
+ * another user, since the broker keeps its persistence there.
+ */
+export function ensureStateDir(deps: AuthDeps, stateFile: string): void {
+  const dir = dirname(stateFile);
+  const first = mkdirSync(dir, { recursive: true, mode: 0o755 });
+  const owner = deps.brokerOwner();
+  if (first === undefined || owner === null) return;
+  for (let d = dir; ; d = dirname(d)) {
+    deps.chown(d, owner.uid, owner.gid);
+    if (d === first || d === dirname(d)) break;
+  }
+}
 
 /** The files an `include_dir` line names, as text (mosquitto reads them as part of the config). */
 export function includedFiles(configText: string): string[] {
@@ -204,6 +221,7 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
       );
     }
     ensureOwnedDir(deps, dir, null);
+    ensureStateDir(deps, f.stateFile);
     const password = deps.generatePassword();
     const r = await deps.ctrlInit(layout.ctrl, f.stateFile, DYNSEC_ADMIN_USER, password);
     if (r.code !== 0 || !existsSync(f.stateFile)) {

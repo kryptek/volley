@@ -1,0 +1,7 @@
+#!/bin/sh
+printf '%s\n' "volley $*" >>"$STUB_LOG"
+if [ "$*" = "setup --help" ]; then
+  printf 'Usage: volley setup [options]\n  --yes\n'
+  [ -n "${STUB_SETUP_UNINSTALL:-}" ] && printf '  --uninstall  Remove the services\n'
+fi
+exit 0

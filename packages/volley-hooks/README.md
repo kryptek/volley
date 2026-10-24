@@ -55,7 +55,8 @@ entries: the lease hook (matcher `Bash`), the work-log hook `pre-tool-use.ts` (m
 every tool) and the picker hook `picker-pre.ts` (matcher `AskUserQuestion`); `PostToolUse` runs
 on every tool, and `picker-post.ts` on `AskUserQuestion` besides.
 
-**Coordinator sessions** (your own interactive sessions):
+**Coordinator sessions** (your own interactive sessions): `volley setup` installs these (its
+Claude Code and Services steps; `volley setup --check` shows them). By hand:
 
 ```sh
 packages/volley-hooks/scripts/install.sh              # merge into ~/.claude/settings.json
@@ -373,9 +374,9 @@ coordinator's own mailbox is drained too, so acks for messages it sent land in i
 registry entry for its directory (see [Identity](#identity)), which is the id the session's MCP server
 registered; the server records its `pid` and, inside cmux, its `surface` there, so several
 sessions in one repo each find their own. That server builds it from `VOLLEY_AGENT_ID` (a prefix, plus a fresh `-xxxx`), so
-the user-scope registration must set `"VOLLEY_AGENT_ID": "coordinator"` in its `env` (the full
-`claude mcp add-json` line is in the
-[root README](../../README.md#4-register-the-mcp-server-with-claude-code)).
+the user-scope registration must set `"VOLLEY_AGENT_ID": "coordinator"` in its `env`, as the one
+registered by `volley setup` does ([`docs/INSTALL.md`](../../docs/INSTALL.md); `volley setup
+--check` shows it).
 Without it the id is named after the working directory (`<repo>-xxxx`), and the "needs you"
 items above land on an id that reads as an ordinary agent; the wave `--owner`, the Desk's
 owner chip and `★ yours`, and the v0.2 owner smoke all expect `coordinator-xxxx`. A separate
@@ -496,7 +497,7 @@ Observed with Claude Code 2.1 on 2026-10-18, hooks writing their stdin to files 
 - **Hooks fire in a git worktree of an already-trusted repository**, in both interactive and `-p`
   sessions. The untrusted-repository case (hooks held back until the trust dialog is accepted, trust
   recorded against the repository root) was not re-tested here.
-- **`SessionStart.model` is present in interactive sessions** (`"model": "claude-haiku-5-5"`) and
+- **`SessionStart.model` is present in interactive sessions** (`"model": "<the session's model id>"`) and
   **absent in `-p` sessions**, even with `--model`. Those register with `model_source: "unknown"`.
   `source` was `startup`. Inputs also carry `session_id`, `transcript_path`, `cwd`,
   `scratchpad_dir`, and on later events `prompt_id`, `permission_mode`, `effort`.

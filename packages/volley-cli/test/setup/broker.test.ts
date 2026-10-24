@@ -142,6 +142,14 @@ describe("setup: broker", () => {
       expect(again.found.join("\n")).toContain("1883: refuses anonymous clients");
     });
 
+    it("creates the state file's directory when the broker never ran (a fresh Homebrew install)", async () => {
+      // `brew install mosquitto` makes no var/mosquitto until the broker first starts.
+      const ctx = { ...m.ctx, stateFile: join(dir, "var", "mosquitto", "dynamic-security.json") };
+      await applyAll(await planSecurity(ctx));
+      expect(existsSync(ctx.stateFile)).toBe(true);
+      expect(statSync(join(dir, "var", "mosquitto")).mode & 0o777).toBe(0o755);
+    });
+
     it("a config `volley auth init` wrote is in place: only its header differs, nothing is rewritten", async () => {
       await applyAll(await planSecurity(m.ctx));
       const byInit = generateConfig({ ...m.layout, stateFile: m.layout.stateFile });

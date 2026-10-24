@@ -3,14 +3,29 @@ import path from "node:path";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
-import { Machines, type MachinesProps, agentsOnMachines } from "../src/settings/Machines";
+import {
+  Machines,
+  type MachinesProps,
+  agentsOnMachines,
+  deskMovedTo,
+} from "../src/settings/Machines";
 import { PeerSignin } from "../src/settings/PeerSigninSheet";
 import type { ConfigTransport } from "../src/settings/configTransport";
 import { fixFor } from "../src/settings/machineFixes";
 import { accountGroups, accountList } from "../src/store/claude";
-import type { ClaudeAccountPayload, MachinePayload, ReadinessPayload } from "../src/store/types";
+import type {
+  ClaudeAccountPayload,
+  MachinePayload,
+  ReadinessPayload,
+  RolesPayload,
+} from "../src/store/types";
+import {
+  MachinesWindow,
+  machineRows as machineRowsOf,
+} from "../src/windows/machines/MachinesWindow";
 import { NOW, S, machineRecord, placement, readiness, waveState } from "./helpers/desk-msgs";
 import { fakePeerOps } from "./helpers/peer-ops";
+import { fakeRoleOps } from "./helpers/role-ops";
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -698,5 +713,264 @@ describe("Settings › Machines v2: the machine card's Claude accounts", () => {
       rules: { "color-contrast": { enabled: false } },
     });
     expect(res.violations.map((v) => v.id)).toEqual([]);
+  });
+});
+
+describe("Settings › Machines v2: machine roles (SPEC §4.6.24)", () => {
+  const hub = machineRecord({ name: "hub", kind: "supervisor", tunnel: "local" });
+  const roles = (over: Partial<RolesPayload> = {}): RolesPayload => ({
+    broker: { machine: "hub", address: { ssh: null, mqtt_port: 1883, ws_port: 9001 }, lan: false },
+    supervisor: { machine: "hub" },
+    desk: { machine: "box-a", url: "http://box-a:5199" },
+    version: 2,
+    updated_at: iso(NOW),
+    updated_by: "admin",
+    ...over,
+  });
+  const withRoles = (props: Partial<MachinesProps> = {}) => {
+    const roleOps = fakeRoleOps();
+    const r = setup({
+      machines: { hub, "box-a": machineRecord() },
+      readiness: { hub: readiness({ name: "hub" }), "box-a": readiness() },
+      localName: "hub",
+      roles: roles(),
+      roleOps,
+      ...props,
+    });
+    return { ...r, roleOps };
+  };
+  const chips = (name: string) =>
+    within(card(name).getByRole("list", { name: `Roles on ${name}` }))
+      .getAllByRole("listitem")
+      .map((li) => li.textContent);
+  const moveMenu = (name: string) =>
+    card(name).queryByRole("button", { name: "Move a role here…" });
+
+  it("the own card shows the chips broker and supervisor; a peer holding desk shows one chip", async () => {
+    withRoles();
+    await act(flush);
+    expect(chips("hub")).toEqual(["broker", "supervisor"]);
+    expect(chips("box-a")).toEqual(["desk"]);
+  });
+
+  it("the own card holding all three shows broker, supervisor, desk", async () => {
+    withRoles({ roles: roles({ desk: { machine: "hub", url: "http://localhost:5199" } }) });
+    await act(flush);
+    expect(chips("hub")).toEqual(["broker", "supervisor", "desk"]);
+    expect(card("box-a").getByText(/no roles/)).toBeInTheDocument();
+  });
+
+  it("the section's summary line reads the three", async () => {
+    withRoles();
+    await act(flush);
+    expect(screen.getByText("broker · hub — supervisor · hub — desk · box-a")).toBeInTheDocument();
+  });
+
+  it("no Roles row and no summary before volleyd's record arrives", async () => {
+    withRoles({ roles: undefined });
+    await act(flush);
+    expect(card("hub").queryByRole("list", { name: "Roles on hub" })).toBeNull();
+    expect(moveMenu("box-a")).toBeNull();
+  });
+
+  it("the menu lists only the roles the machine does not hold and opens the sheet", async () => {
+    const { roleOps } = withRoles();
+    await act(flush);
+    fireEvent.click(moveMenu("box-a") as HTMLElement);
+    const items = card("box-a")
+      .getAllByRole("menuitem")
+      .map((b) => b.textContent);
+    expect(items).toEqual(["the broker", "the supervisor"]);
+    fireEvent.click(card("box-a").getByRole("menuitem", { name: "the broker" }));
+    expect(screen.getByRole("dialog", { name: "Move the broker to box-a" })).toBeInTheDocument();
+    await act(flush);
+    expect(roleOps.plan).toHaveBeenCalledWith({ role: "broker", to: "box-a" });
+  });
+
+  it("the own card offers the Desk back", async () => {
+    withRoles();
+    await act(flush);
+    fireEvent.click(moveMenu("hub") as HTMLElement);
+    expect(
+      card("hub")
+        .getAllByRole("menuitem")
+        .map((b) => b.textContent),
+    ).toEqual(["the Desk"]);
+  });
+
+  it("is absent for a machine that holds every role", async () => {
+    withRoles({ roles: roles({ desk: { machine: "hub", url: "http://localhost:5199" } }) });
+    await act(flush);
+    expect(moveMenu("hub")).toBeNull();
+  });
+
+  it("is absent for a watch (non-admin) session and on a down machine", async () => {
+    withRoles({ ops: fakePeerOps({ known: vi.fn(() => "not-admin" as const) }) });
+    await act(flush);
+    expect(moveMenu("box-a")).toBeNull();
+    expect(moveMenu("hub")).toBeNull();
+  });
+
+  it("is absent on a down machine", async () => {
+    withRoles({
+      machines: { hub, "box-a": machineRecord({ tunnel: "down", reason: "heartbeat_timeout" }) },
+    });
+    await act(flush);
+    expect(moveMenu("box-a")).toBeNull();
+  });
+
+  it("a finished move closes the sheet with a notice on the section", async () => {
+    withRoles();
+    await act(flush);
+    fireEvent.click(moveMenu("hub") as HTMLElement);
+    fireEvent.click(card("hub").getByRole("menuitem", { name: "the Desk" }));
+    await act(flush);
+    fireEvent.click(screen.getByRole("button", { name: "Move…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move now" }));
+    await act(flush);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText(/The Desk runs on hub/)).toBeInTheDocument();
+  });
+
+  it.each(["volley", "lighter"])("passes axe in the %s theme", async (theme) => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      withRoles();
+      await act(flush);
+      fireEvent.click(moveMenu("box-a") as HTMLElement);
+      const res = await axe.run(screen.getByRole("article", { name: "box-a" }), {
+        rules: { "color-contrast": { enabled: false } },
+      });
+      expect(res.violations.map((v) => v.id)).toEqual([]);
+    } finally {
+      delete document.documentElement.dataset.theme;
+    }
+  });
+
+  it("the role chips use the theme tokens in machines.css, in dark and light", () => {
+    const css = readFileSync(path.join(__dirname, "../src/styles/machines.css"), "utf8");
+    const rule = css.match(/\.m-role\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(rule).toMatch(/var\(--/);
+    expect(rule).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+  });
+});
+
+describe("the Machines window: role letters", () => {
+  it("a row carries the letters of the roles its machine holds", () => {
+    const state = {
+      config: { fleet: { local_name: "hub" }, hosts: { "box-a": {} } },
+      machines: {
+        hub: machineRecord({ name: "hub", kind: "supervisor", tunnel: "local" }),
+        "box-a": machineRecord(),
+      },
+      roles: {
+        broker: {
+          machine: "hub",
+          address: { ssh: null, mqtt_port: 1883, ws_port: 9001 },
+          lan: false,
+        },
+        supervisor: { machine: "hub" },
+        desk: { machine: "hub", url: "http://localhost:5199" },
+        version: 1,
+        updated_at: iso(NOW),
+        updated_by: "volleyd-defaults",
+      },
+    } as unknown as Parameters<typeof machineRowsOf>[0];
+    render(
+      <MachinesWindow
+        rows={machineRowsOf(state, true)}
+        now={NOW}
+        frame={{
+          pos: { x: 0, y: 0 },
+          z: 1,
+          scale: 1,
+          chrome: "glass",
+          onMove: () => {},
+          onFocus: () => {},
+        }}
+        onOpen={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const hubRow = screen.getByRole("button", {
+      name: "this machine: open in Settings › Machines",
+    });
+    expect(hubRow.querySelector(".mrow-roles")?.textContent).toBe("B S D");
+    const boxRow = screen.getByRole("button", { name: "box-a: open in Settings › Machines" });
+    expect(boxRow.querySelector(".mrow-roles")).toBeNull();
+    expect(
+      screen.getByText(/this machine: .* — runs the broker, the supervisor and the Desk/),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("deskMovedTo: the banner on the Desk's old address", () => {
+  const roles: RolesPayload = {
+    broker: { machine: "hub", address: { ssh: null, mqtt_port: 1883, ws_port: 9001 }, lan: false },
+    supervisor: { machine: "hub" },
+    desk: { machine: "box-a", url: "http://box-a:5199/" },
+    version: 2,
+    updated_at: iso(NOW),
+    updated_by: "admin",
+  };
+  const done = {
+    "mv-1": {
+      move_id: "mv-1",
+      role: "desk" as const,
+      from: "hub",
+      to: "box-a",
+      status: "done" as const,
+      steps: [],
+      since: iso(NOW),
+    },
+  };
+
+  it("names the new address on another origin once a Desk move there is done", () => {
+    expect(deskMovedTo(roles, done, "http://localhost:5199")).toBe("http://box-a:5199/");
+  });
+
+  it("is null at the new address, before the move is done, or without a record", () => {
+    expect(deskMovedTo(roles, done, "http://box-a:5199")).toBeNull();
+    const running = { "mv-1": { ...done["mv-1"], status: "running" as const } };
+    expect(deskMovedTo(roles, running, "http://localhost:5199")).toBeNull();
+    expect(deskMovedTo(roles, {}, "http://localhost:5199")).toBeNull();
+    expect(deskMovedTo(undefined, done, "http://localhost:5199")).toBeNull();
+  });
+});
+
+describe("Add a bare machine… (machine_add)", () => {
+  it("an admin opens the sheet from the section; it sends machine_add and closes on Done", async () => {
+    const { ops } = setup({
+      signIn: (m) => (
+        <button type="button" className="btn btn--blue">
+          Sign in on {m}
+        </button>
+      ),
+    });
+    await act(flush);
+    fireEvent.click(screen.getByRole("button", { name: "Add a bare machine…" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Add a bare machine" }));
+    fireEvent.change(dialog.getByLabelText("Address"), { target: { value: "dev@box-c" } });
+    fireEvent.change(dialog.getByLabelText("Password", { selector: "input[type=password]" }), {
+      target: { value: "hunter2" },
+    });
+    await act(async () => {
+      fireEvent.click(dialog.getByRole("button", { name: "Add dev@box-c" }));
+    });
+    expect(ops.machineAdd).toHaveBeenCalledWith(
+      { address: "dev@box-c", password: "hunter2" },
+      expect.any(Function),
+    );
+    const done = within(screen.getByRole("dialog"));
+    expect(done.getByRole("heading", { name: "box-a is ready for agents" })).toBeInTheDocument();
+    fireEvent.click(done.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("is not offered to a read-only session", async () => {
+    setup({ ops: null });
+    await act(flush);
+    expect(screen.queryByRole("button", { name: "Add a bare machine…" })).toBeNull();
   });
 });

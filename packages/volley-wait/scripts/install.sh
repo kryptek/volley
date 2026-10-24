@@ -30,3 +30,4 @@ echo "/wait skill installed: $TARGET → $SKILL_DIR"
 echo
 echo "Next: quit Claude Code (Cmd-Q) and reopen so the new skill is picked up at startup."
 echo "Then type /wait --help in any new Claude Code conversation to verify."
+echo "The volley MCP server and the broker login it uses are registered by \`volley setup\`; \`volley setup --check\` shows them."

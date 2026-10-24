@@ -4,7 +4,7 @@ This file collects feature-level smoke recipes that span multiple packages — t
 
 **Next release:** deploy the tag to the supervisor's machine with `volley deploy v<X.Y.Z>` (after a `--dry-run`), then confirm the Desk shows the new version in Settings › About, `volley desk serve`'s log has no stale-build warning, and `volleyd status` answers. See [`volley deploy`](#deploying-a-release-volley-deploy) below.
 
-**Presence (#483)** (an owner who leaves has nothing to keep alive: reconnecting, away, gone only when something waits, back online by name) is [Presence](#presence-483) below. **v0.5.0** (Autopilot: an unattended night against a scratch repository, merges by the supervisor, a planted flake fixed, the release train, the digest and the Needs you window on the phone) is [Plan 13](#plan-13--autopilot-v050) below. **v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+**v0.11.0** (install and machine roles: blank machine to first wave with the one command, then the Desk, the supervisor and the broker each moved to a paired machine and back) has its own owner smoke path: [`docs/SMOKE-v0.11.md`](docs/SMOKE-v0.11.md). **Presence (#483)** (an owner who leaves has nothing to keep alive: reconnecting, away, gone only when something waits, back online by name) is [Presence](#presence-483) below. **v0.5.0** (Autopilot: an unattended night against a scratch repository, merges by the supervisor, a planted flake fixed, the release train, the digest and the Needs you window on the phone) is [Plan 13](#plan-13--autopilot-v050) below. **v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
 
 ---
 
@@ -367,7 +367,7 @@ lease_pools:
   wave: <yyyy-mm-dd>-fleet-smoke
   repo: <abs path of the test repo on the Mac>
   release_branch: release/<yyyy-mm-dd>-fleet-smoke
-  model: claude-opus-5-5
+  model: <model>   # Volley's default: DEFAULT_MODEL in packages/volleyd/src/config-defaults.ts
   pipeline: [implement, merge_ready]
   placement: auto
   placement_avoid: [<the Mac's machine name>]   # the "this one" card's name
@@ -690,7 +690,7 @@ key-based ssh both ways with the Mac. A second Claude account you can sign in wi
 on GitHub with one small open issue and a pushed release branch
 `release/<yyyy-mm-dd>-onboarding-smoke`, cloned on the Mac.
 
-0. **Before the clock: the broker.** `brew install mosquitto && brew services start mosquitto`;
+0. **Before the clock: the broker.** `brew install mosquitto` (setup's Security step starts it);
    `mosquitto -h | head -1` says `mosquitto version 2.1.x`.
 1. **Fresh setup. Start the stopwatch now.**
    ```sh
@@ -804,7 +804,7 @@ on GitHub with one small open issue and a pushed release branch
    wave: <yyyy-mm-dd>-onboarding-smoke
    repo: <abs path of the test repo on the Mac>
    release_branch: release/<yyyy-mm-dd>-onboarding-smoke
-   model: claude-opus-5-5
+   model: <model>   # Volley's default: DEFAULT_MODEL in packages/volleyd/src/config-defaults.ts
    pipeline: [implement, merge_ready]
    tasks:
      T1: { issue: <n> }
@@ -900,7 +900,7 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
 
 ### Pre-reqs
 
-- [ ] `brew services start mosquitto`. Both `:1883` (TCP) and `:9001` (WebSocket) listeners up:
+- [ ] The broker running (`volley setup --check`: the Broker row `done`). Both `:1883` (TCP) and `:9001` (WebSocket) listeners up:
    ```sh
    lsof -nP -iTCP:1883 -sTCP:LISTEN
    lsof -nP -iTCP:9001 -sTCP:LISTEN

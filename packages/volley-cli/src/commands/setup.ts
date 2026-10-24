@@ -1,25 +1,34 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
+import { parseEnvelope } from "volley-mcp/envelope";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
-import { type AuthContext, realAuthDeps, volleydHome } from "../auth/context";
+import { type AuthContext, readCredentials, realAuthDeps, volleydHome } from "../auth/context";
 import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { askHidden } from "../hidden-input";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
+import { checkDeps, checkExit, checkReport, checkSteps, renderCheck } from "../setup/check";
+import { planClaudeCode } from "../setup/claude-code";
+import { type FirstWaveOptions, type WaveView, planFirstWave } from "../setup/first-wave";
+import { ghRepoDeleteLine } from "../setup/first-wave-repo";
 import {
   appendSetupLog,
+  readDeskPort,
   readSetupInstall,
   setupLogFile,
   writeSetupInstall,
 } from "../setup/journal";
+import { SetupMeter, completeLine, setupMetricsFile, writeSetupMetrics } from "../setup/metrics";
+import { peerBrokerUrl, planPeerService } from "../setup/peer-service";
 import { planServices } from "../setup/services";
+import { planSignin, simulatedExec } from "../setup/signin";
 import {
   type Planner,
   type SetupContext,
@@ -30,6 +39,7 @@ import {
   listenerUrls,
   setupFence,
 } from "../setup/step";
+import { planTerminal } from "../setup/terminal";
 import { defaultAuthDir } from "./auth";
 import { findRepoRoot } from "./dash";
 import { DESK_PORT } from "./desk-serve";
@@ -37,7 +47,7 @@ import { DESK_PORT } from "./desk-serve";
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
 /**
- * `volley setup`: the first-run (and repair) wizard. Five steps, each planned (what it found,
+ * `volley setup`: the first-run (and repair) wizard. Nine steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
  *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
@@ -46,21 +56,64 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *   4. Sign-ins  Claude Code and GitHub signed in (a browser each), the checkout readable by
+ *                Claude Code (`permissions.additionalDirectories`)
+ *   5. Claude Code  the coordinator name, the volley MCP server registered without a secret,
+ *                the skills, the hooks
+ *   6. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
+ *                socket checked the way the service reaches it) or tmux, put on record in
+ *                config.yaml (`fleet.local_terminal`) and setup.json
+ *   7. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
- *   5. Phone     a one-time steer sign-in link as a QR code
+ *   8. Phone     a one-time steer sign-in link as a QR code
+ *   9. Test wave  a 1-issue wave on a scratch private repository (or `--repo`), followed until
+ *                volleyd merged its PR (first-wave.ts); `--simulated` against volley-sim's fakes
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
- * $VOLLEYD_HOME/setup.log (summaries only, never a secret).
+ * $VOLLEYD_HOME/setup.log (summaries only, never a secret); every run's cost to
+ * setup-metrics.json. `--check` plans every step and reports it, changing and asking nothing.
  */
 
 const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],
   ["accounts", planAccounts],
+  ["signin", planSignin],
+  ["claude-code", planClaudeCode],
+  ["terminal", planTerminal],
   ["services", planServices],
   ["phone", planPhone],
+  ["first-wave", planFirstWave],
 ];
+
+/**
+ * `volley setup --peer`: a machine that joins a supervisor's fleet (`install.sh --peer`, `volley
+ * machine add`). No broker, accounts, Desk or phone of its own: the sign-ins, Claude Code's
+ * profile (the skills, the hooks at the tunnel; no coordinator), the Terminal, and `volley peer
+ * run` as the service in place of volleyd.
+ */
+const PEER_STEPS: [StepName, Planner][] = [
+  ["signin", planSignin],
+  ["claude-code", planClaudeCode],
+  ["terminal", planTerminal],
+  ["peer-service", planPeerService],
+];
+
+/** The flags about this machine's own broker, Desk or phone: not for `--peer`. */
+const HUB_FLAGS = [
+  "lan",
+  "no-lan",
+  "dir",
+  "layout",
+  "config",
+  "state-file",
+  "broker-url",
+  "desk-host",
+  "desk-port",
+] as const;
+
+/** The test wave's flags: not for `--peer` (a peer runs no test wave of its own). */
+const FIRST_WAVE_FLAGS = ["repo", "issue", "simulated", "no-first-wave"] as const;
 
 export interface SetupArgs {
   argv: string[];
@@ -100,32 +153,61 @@ function findBun(path: string): string {
   return process.execPath;
 }
 
+/** A command run for real: argv only, never a shell. */
+const spawnExec: SetupDeps["exec"] = (argv, opts) =>
+  new Promise((resolve) => {
+    const [bin, ...args] = argv;
+    // Without input, stdin stays the terminal's: sudo or a service manager may prompt. A
+    // browser sign-in gets the whole terminal.
+    const child = spawn(bin as string, args, {
+      stdio:
+        opts?.tty === true
+          ? "inherit"
+          : [opts?.input !== undefined ? "pipe" : "inherit", "pipe", "pipe"],
+      ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts?.env !== undefined ? { env: opts.env as NodeJS.ProcessEnv } : {}),
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    child.on("error", (e) => resolve({ code: 127, stdout, stderr: e.message }));
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    if (opts?.input !== undefined) {
+      child.stdin?.on("error", () => {}); // the command exited early: its code says why
+      child.stdin?.end(opts.input);
+    }
+  });
+
+/**
+ * The retained wave state, read with the coordinator's login from the auth dir (setup made it);
+ * null while there is none.
+ */
+const readWaveState =
+  (url: string, authDir: string) =>
+  async (wave: string): Promise<WaveView | null> => {
+    let creds: ReturnType<typeof readCredentials> = null;
+    try {
+      creds = readCredentials(join(authDir, "coordinator.json"));
+    } catch {}
+    const b = await openClient(url, creds);
+    try {
+      const raw = await b.queryRetained(`volley/_waves/${wave}/state`, 2_000);
+      const payload = raw === null ? null : parseEnvelope(raw)?.payload;
+      return typeof payload === "object" && payload !== null ? (payload as WaveView) : null;
+    } finally {
+      await b.disconnect().catch(() => {});
+    }
+  };
+
 export const realSetupDeps = (env: Record<string, string | undefined>): SetupDeps => ({
   auth: realAuthDeps,
-  exec: (argv, opts) =>
-    new Promise((resolve) => {
-      const [bin, ...args] = argv;
-      // Without input, stdin stays the terminal's: sudo or a service manager may prompt.
-      const child = spawn(bin as string, args, {
-        stdio: [opts?.input !== undefined ? "pipe" : "inherit", "pipe", "pipe"],
-        ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-        ...(opts?.env !== undefined ? { env: opts.env as NodeJS.ProcessEnv } : {}),
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.on("data", (d: Buffer) => {
-        stdout += d.toString();
-      });
-      child.stderr?.on("data", (d: Buffer) => {
-        stderr += d.toString();
-      });
-      child.on("error", (e) => resolve({ code: 127, stdout, stderr: e.message }));
-      child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-      if (opts?.input !== undefined) {
-        child.stdin?.on("error", () => {}); // the command exited early: its code says why
-        child.stdin?.end(opts.input);
-      }
-    }),
+  // VOLLEY_SIMULATED=1 (the soak, CI): the sign-ins are answered by fakes and nothing opens.
+  exec: env.VOLLEY_SIMULATED === "1" ? simulatedExec(spawnExec) : spawnExec,
   probeAnonymous: (url) => probeAnonymous(url),
   liveAgents: async (url, creds) => {
     const b = await openClient(url, creds);
@@ -147,6 +229,16 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
   },
   interactive: process.stdin.isTTY === true,
   askSecret: (prompt) => askHidden(prompt),
+  ask: async (prompt) => {
+    if (process.stdin.isTTY !== true) return null;
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return (await rl.question(prompt)).trim();
+    } finally {
+      rl.close();
+    }
+  },
+  hostname: () => hostname(),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   platform: process.platform,
   uid: process.getuid?.() ?? 0,
@@ -163,6 +255,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       options: {
         yes: { type: "boolean", short: "y" },
         repair: { type: "boolean" },
+        check: { type: "boolean" },
+        peer: { type: "boolean" },
+        json: { type: "boolean" },
+        "show-email": { type: "boolean" },
         lan: { type: "boolean" },
         "no-lan": { type: "boolean" },
         step: { type: "string", multiple: true },
@@ -173,6 +269,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         "broker-url": { type: "string" },
         "desk-host": { type: "string" },
         "desk-port": { type: "string" },
+        repo: { type: "string" },
+        issue: { type: "string" },
+        simulated: { type: "boolean" },
+        "no-first-wave": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -187,7 +287,60 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.OK;
   }
   const str = (k: string) => values[k] as string | undefined;
-  const given = injected ?? realSetupDeps(env);
+  const check = values.check === true;
+  const peer = values.peer === true;
+  const hubFlag = HUB_FLAGS.find((f) => values[f] !== undefined);
+  if (peer && hubFlag !== undefined) {
+    io.stderr(
+      `volley setup: --${hubFlag} is about this machine's own broker or Desk; --peer has neither\n`,
+    );
+    return EXIT.USAGE;
+  }
+  const waveFlag = FIRST_WAVE_FLAGS.find((f) => values[f] !== undefined);
+  if (peer && waveFlag !== undefined) {
+    io.stderr(
+      `volley setup: --${waveFlag} is the test wave's, which runs on the supervisor's machine; --peer has none\n`,
+    );
+    return EXIT.USAGE;
+  }
+  if (check && (values.yes === true || values.repair === true)) {
+    io.stderr(
+      `volley setup: --check changes nothing: it does not take ${values.yes === true ? "--yes" : "--repair"}\n`,
+    );
+    return EXIT.USAGE;
+  }
+  if (values.json === true && !check) {
+    io.stderr("volley setup: --json is for --check\n");
+    return EXIT.USAGE;
+  }
+  // The test wave's flags.
+  const firstWave: FirstWaveOptions = {};
+  const issueText = str("issue");
+  if (issueText !== undefined) {
+    if (!/^[1-9]\d*$/.test(issueText)) {
+      io.stderr("volley setup: --issue must be an issue number\n");
+      return EXIT.USAGE;
+    }
+    if (str("repo") === undefined) {
+      io.stderr("volley setup: --issue names an issue of the --repo clone: give --repo too\n");
+      return EXIT.USAGE;
+    }
+    firstWave.issue = Number(issueText);
+  }
+  if (str("repo") !== undefined) firstWave.repo = resolve(str("repo") as string);
+  if (values["no-first-wave"] === true) {
+    if (firstWave.repo !== undefined || values.simulated === true) {
+      io.stderr(
+        `volley setup: --no-first-wave runs no test wave: it does not take ${firstWave.repo !== undefined ? "--repo" : "--simulated"}\n`,
+      );
+      return EXIT.USAGE;
+    }
+    firstWave.skip = true;
+  }
+  if (values.simulated === true) firstWave.simulated = true;
+  // --simulated: the sign-ins are answered by the fakes too, as under VOLLEY_SIMULATED=1.
+  const given =
+    injected ?? realSetupDeps(firstWave.simulated ? { ...env, VOLLEY_SIMULATED: "1" } : env);
   const invoker = given.auth.invokingUser(env);
   const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
   const home = volleydHome(env, sudoHome);
@@ -213,7 +366,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     };
   }
   const only = (values.step as string[] | undefined) ?? [];
-  const names = STEPS.map(([n]) => n as string);
+  const ALL = peer ? PEER_STEPS : STEPS;
+  const names = ALL.map(([n]) => n as string);
   const unknown = only.filter((s) => !names.includes(s));
   if (unknown.length > 0) {
     io.stderr(
@@ -222,7 +376,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.USAGE;
   }
   const portText =
-    str("desk-port") ?? String((fromRecord ? saved.desk_port : undefined) ?? DESK_PORT);
+    str("desk-port") ??
+    String(
+      (fromRecord ? saved.desk_port : saved === null ? readDeskPort(home) : undefined) ?? DESK_PORT,
+    );
   if (!/^\d+$/.test(portText) || Number(portText) < 1 || Number(portText) > 65_535) {
     io.stderr("volley setup: --desk-port must be a port number (1..65535)\n");
     return EXIT.USAGE;
@@ -233,7 +390,17 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.USAGE;
   }
 
-  const url = resolveBrokerUrl(str("broker-url"), env);
+  // The broker: --broker-url, else the env's, else the one the last finished run used.
+  // A peer's: the tunnel `volley peer join` sets up (peer.json's port, else its default).
+  const peerUrl = peer ? peerBrokerUrl(sudoHome ?? env.HOME ?? homedir()) : undefined;
+  const url =
+    peerUrl ??
+    resolveBrokerUrl(
+      str("broker-url"),
+      env.VOLLEY_BROKER_URL === undefined && saved?.broker_url !== undefined
+        ? { ...env, VOLLEY_BROKER_URL: saved.broker_url }
+        : env,
+    );
   const listeners = listenerUrls(url);
   if ("error" in listeners) {
     io.stderr(`volley setup: ${listeners.error}\n`);
@@ -241,7 +408,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
   // Every command goes through the fence: the exact commands the steps run, nothing else.
   const fence = setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun });
-  const deps: SetupDeps = { ...given, exec: fencedExec(given.exec, fence) };
+  // What the run costs the person, counted around what they see (a check asks nothing).
+  const meter = new SetupMeter(() => io.now());
+  const seen = check ? checkDeps(given) : meter.wrap(given);
+  const deps: SetupDeps = { ...seen, exec: fencedExec(seen.exec, fence) };
   const auth: AuthContext = {
     dir:
       str("dir") ??
@@ -254,6 +424,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     env,
     deps: deps.auth,
   };
+  // The test wave follows its wave on the broker with the coordinator's login.
+  deps.waveState ??= readWaveState(url, auth.dir);
   const ctx: SetupContext = {
     auth,
     deps,
@@ -267,26 +439,71 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     ...(values.lan === true ? { lan: true } : values["no-lan"] === true ? { lan: false } : {}),
     deskHost: str("desk-host") ?? deps.lanHost(),
     deskPort: Number(portText),
+    ...(check ? { check: true } : {}),
+    ...(str("broker-url") !== undefined ? { brokerFlag: str("broker-url") as string } : {}),
+    // The hooks of a peer's profile name its tunnel.
+    ...(peerUrl !== undefined ? { brokerFlag: peerUrl, peer: true as const } : {}),
+    ...(values["show-email"] === true ? { showEmail: true } : {}),
+    metrics: {
+      signIn: () => meter.signIn(),
+      firstWave: (m) => {
+        meter.firstWave = m;
+      },
+    },
+    firstWave,
   };
+  const steps = ALL.filter(([n]) => only.length === 0 || only.includes(n));
+
+  if (check) {
+    const rows = await checkSteps(ctx, steps);
+    if (values.json === true) {
+      io.stdout(`${JSON.stringify(checkReport(rows, ctx.volleydHome), null, 2)}\n`);
+    } else {
+      io.stdout(
+        peer
+          ? `volley setup --peer --check: ${PEER_HEADER}\n`
+          : `volley setup --check: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
+      );
+      io.stdout(renderCheck(rows, peer ? "volley setup --peer" : "volley setup"));
+    }
+    return checkExit(rows) === 0 ? EXIT.OK : EXIT.ERROR;
+  }
 
   const logFile = setupLogFile(ctx.volleydHome);
   const journal = (step: StepName, event: string, summary?: string) =>
     appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
-    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
+    peer
+      ? `volley setup --peer: ${PEER_HEADER}\n`
+      : `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
   const yes = ctx.yes;
-  // A run that stops once the Services step has checked cmux (often at the cmux change itself:
+  // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
   // the runs where its mode matters most) still records the mode it found, and replaces an
-  // earlier run's.
+  // earlier run's; and the terminal it put on record.
+  const metricsFile = setupMetricsFile(ctx.volleydHome);
+  let endStep: (changes: number) => void = () => {};
+  // The changes the current step applied before it stopped: what its metrics record.
+  let applied = 0;
   const stopped = () => {
-    if (ctx.cmuxSocketMode !== undefined) writeSetupInstall(ctx);
+    endStep(applied);
+    writeSetupMetrics(ctx, meter.done());
+    if (
+      !peer &&
+      (ctx.cmuxSocketMode !== undefined ||
+        ctx.terminal !== undefined ||
+        ctx.coordinator !== undefined)
+    ) {
+      writeSetupInstall(ctx, metricsFile);
+    }
     return EXIT.ERROR;
   };
   const skipped: string[] = [];
-  for (const [i, [name, planner]] of STEPS.entries()) {
-    if (only.length > 0 && !only.includes(name)) continue;
+  for (const [name, planner] of steps) {
+    const i = ALL.findIndex(([n]) => n === name);
+    endStep = meter.begin(name);
+    applied = 0;
     let plan: StepPlan;
     try {
       plan = await planner(ctx);
@@ -295,7 +512,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stderr(`volley setup: ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
       return stopped();
     }
-    io.stdout(`\n[${i + 1}/${STEPS.length}] ${plan.title}\n`);
+    io.stdout(`\n[${i + 1}/${ALL.length}] ${plan.title}\n`);
     for (const f of plan.found) io.stdout(`  · ${f}\n`);
     if (plan.blocked !== undefined) {
       journal(name, "blocked", plan.blocked.split("\n")[0]);
@@ -306,11 +523,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       journal(name, "skipped", plan.skipped);
       io.stdout(`  – skipped: ${plan.skipped}\n`);
       skipped.push(plan.title);
+      endStep(0);
       continue;
     }
     if (plan.changes.length === 0) {
       journal(name, "done");
       io.stdout("  ✓ already done\n");
+      endStep(0);
       continue;
     }
     journal(name, "planned", plan.changes.map((c) => c.summary).join("; "));
@@ -321,7 +540,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     }
     const n = plan.changes.length;
     const question = `Apply ${n === 1 ? "this change" : `these ${n} changes`} (${plan.title})?`;
-    if (!yes && !(await deps.confirm(question))) {
+    if (!yes && plan.confirmed !== true && !(await deps.confirm(question))) {
       journal(name, "declined");
       io.stdout(
         `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
@@ -332,6 +551,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       try {
         const lines = await c.apply();
         journal(name, "applied", c.summary);
+        applied++;
         io.stdout(`  ✓ ${c.summary}\n`);
         for (const l of lines) if (l !== "") io.stdout(`${indent(l)}\n`);
       } catch (e) {
@@ -351,18 +571,49 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     }
     for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
     journal(name, "verified");
+    endStep(n);
   }
   // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
-  writeSetupInstall(ctx);
+  const metrics = meter.done();
+  writeSetupMetrics(ctx, metrics);
+  const finished =
+    skipped.length === 0
+      ? completeLine(metrics)
+      : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`;
+  if (peer) {
+    // setup.json is the supervisor's install record (volleyd plans the Desk's setup with it).
+    io.stdout(
+      [
+        "",
+        finished,
+        ...(existsSync(join(ctx.home, ".volley", "peer.json"))
+          ? []
+          : [
+              "Next: pair this machine: `volley peer join <code> --to <user@supervisor>` with a code from",
+              "`volley peer invite` there (or run `volley machine add <user@this-machine>` there instead).",
+            ]),
+        `Metrics: ${metricsFile}.`,
+        `Journal: ${logFile}. Rerun \`volley setup --peer\` any time to check and fix.`,
+        "",
+      ].join("\n"),
+    );
+    return EXIT.OK;
+  }
+  writeSetupInstall(ctx, metricsFile);
   io.stdout(
     [
       "",
-      skipped.length === 0
-        ? "Setup complete."
-        : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`,
-      "Coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator with the password in",
-      `${join(auth.dir, "coordinator.json")}, in the MCP server's env. The volley and volleyd`,
-      "commands on this machine use that login on their own (keychain, then coordinator.json).",
+      finished,
+      ...(ctx.firstWaveScratch !== undefined
+        ? [
+            `The test wave's scratch repository is ${ctx.firstWaveScratch}: delete it with \`${ghRepoDeleteLine(ctx.firstWaveScratch)}\`.`,
+          ]
+        : []),
+      "Coordinator sessions log in with coordinator.json from the auth dir",
+      `(${join(auth.dir, "coordinator.json")}): the MCP registration names the dir, never a`,
+      "password. The volley and volleyd commands on this machine use that login on their own",
+      "(keychain, then coordinator.json).",
+      `Metrics: ${metricsFile}.`,
       `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
       "",
     ].join("\n"),
@@ -370,9 +621,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   return EXIT.OK;
 }
 
-export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
+const PEER_HEADER = "this machine joins a supervisor's fleet (paired with `volley peer join`)";
 
-First-run (and repair) wizard: five steps, each showing what it found and what it will change
+export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
+       volley setup --check [--json] [--step <name>]...
+       volley setup --peer [--yes] [--check] [--step <name>]...
+
+First-run (and repair) wizard: nine steps, each showing what it found and what it will change
 before changing anything.
 
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
@@ -386,30 +641,71 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+  4. Sign-ins  Claude Code and GitHub signed in (each opens your browser: \`claude auth
+               login\`, \`gh auth login --web\` then \`gh auth setup-git\`), and Claude Code
+               allowed to read this checkout (permissions.additionalDirectories, the old
+               settings.json backed up); skipped under --yes with nobody at the terminal
+  5. Claude Code  the coordinator name (asked once, saved in setup.json), the volley MCP server
+               registered at user scope with no password in it (its login is coordinator.json
+               in the auth dir it names; an entry with settings of your own is left as is),
+               the volley, volley-issues and volley-wait skills, the Volley hooks
+  6. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
+               way volleyd's service reaches it; the socket password it needs is asked for,
+               hidden), else tmux (stops, printing the install line, when tmux is missing);
+               recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
+  7. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
                PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
-               --user), on macOS the cmux socket password volleyd's service needs (asked for,
-               hidden), the Volley hooks for coordinator sessions (your status line keeps
+               --user), the Volley hooks for coordinator sessions (your status line keeps
                working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
                (stops if another program listens on that port)
-  5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
+  8. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
+  9. Test wave a 1-issue test wave, asked once ("Run a 1-issue test wave now?", Enter: yes):
+               a scratch private repository volley-hello-<4> (gh repo create), a README, one
+               issue, a release branch, \`volley repo add … --wait\`, .volley/waves/hello-<4>.yaml
+               (volleyd validate, volleyd run --owner <coordinator>; every run its own wave),
+               followed until volleyd merged its PR (at most 15 minutes from the submit); the
+               end prints \`gh repo delete …\` to remove it
 
 Rerunning changes nothing that is in place. The one-time admin token and the phone's link
 count as in place while they are pending or once redeemed: a rerun after they expired unused
-issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log.
+issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log, and every run's cost (wall
+time, questions, sign-ins, sudo prompts, each step's time) to $VOLLEYD_HOME/setup-metrics.json.
+
+--peer sets up a machine that joins a supervisor's fleet (\`install.sh --peer\`, \`volley machine
+add\`): no broker, accounts, Desk or phone of its own. Its steps: Sign-ins, Claude Code (the
+profile only: the skills, and the hooks for the tunnel \`volley peer join\` sets up; no coordinator
+name, no MCP registration), Terminal, and Peer service (\`volley peer run\` as the user service in
+place of volleyd; skipped until the machine is paired, since join installs it).
+
+--check plans every step without changing or asking anything and prints each as done, pending
+(with the changes a run would make), blocked (and why) or skipped (and why); it exits 0 only
+when nothing is pending or blocked. --json prints that as { version, steps, setup_at } for CI.
 
 Options:
   -y, --yes            Apply every step without asking
   --repair             Check and fix only: no new admin token, no phone link
+  --check              Report what is missing; change nothing (not with --yes or --repair)
+  --peer               This machine joins a supervisor's fleet (above): not with the broker's,
+                       accounts' or Desk's flags
+  --json               With --check: the report as JSON on stdout
+  --show-email         The Sign-ins step names the Claude login's e-mail
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
-  --step <name>        Only this step (repeatable): detect, security, accounts, services, phone
+  --step <name>        Only this step (repeatable): detect, security, accounts, signin,
+                       claude-code, terminal, services, phone, first-wave (--peer: signin,
+                       claude-code, terminal, peer-service)
+  --no-first-wave      Skip the test wave (run it later: volley setup --step first-wave)
+  --repo <path>        The test wave on this clone (its origin's repository) instead of a
+                       scratch repository
+  --issue <n>          With --repo: the issue the test wave implements (default: a new one)
+  --simulated          The test wave against volley-sim's fake gh and claude (CI): no GitHub
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)
   --state-file <path>  The Dynamic Security state file (default: the layout's)
-  --broker-url <url>   The broker, mqtt:// (env: VOLLEY_BROKER_URL; default mqtt://localhost:1883)
+  --broker-url <url>   The broker, mqtt:// (env: VOLLEY_BROKER_URL; default: the last run's, else
+                       mqtt://localhost:1883); re-points the MCP registration and the hooks
   --desk-host <host>   The address in the phone's link (default: this machine's LAN address)
   --desk-port <n>      The Desk's port (default ${DESK_PORT})
   -h, --help           Show this help and exit

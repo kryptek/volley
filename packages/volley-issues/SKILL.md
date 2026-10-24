@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.10
+version: 0.11
 ---
 
 # /volley-issues
@@ -15,42 +15,21 @@ There are two dispatch paths (see **Choosing a dispatch path**): the **volleyd p
 
 Before invoking `/volley-issues`:
 
-**This skill is current.** This file declares `version: 0.10` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
+**This skill is current.** This file declares `version: 0.11` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
-1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
+1. **Volley installed.** The one command in the root README's Quickstart (it ends with `volley setup`) sets up the broker and everything below. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
-2. **volley-mcp registered in this session.** Claude Code stores MCP servers separately from `settings.json` and manages them via the `claude mcp` CLI (`mcpServers` is NOT a valid top-level `settings.json` field). Register the server at user scope with `env.VOLLEY_AGENT_ID` set to the coordinator's role prefix (e.g. `coordinator`) and `env.VOLLEY_NAMESPACE=example-dispatch`:
+2. **Run `volley setup --check`.** It prints one row per setup step and exits 0 only when nothing is missing. Its Claude Code row covers what this skill needs: the volley MCP server registered at user scope (env `VOLLEY_AGENT_ID=coordinator`, `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE`, `VOLLEY_BROKER_URL`, `VOLLEY_AUTH_DIR`, and no password: the server logs in with `coordinator.json` from that auth dir), the skills linked, the hooks installed, and your **coordinator name**. Anything pending: run `volley setup` (it shows each change before making it), then restart Claude Code (exit the session and start `claude` again). If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
 
-   ```sh
-   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_COORDINATOR":"coord-main","VOLLEY_NAMESPACE":"example-dispatch","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password>"}}'
-   ```
+   The coordinator name is chosen once, during setup (agent-id grammar `[a-z0-9][a-z0-9_-]{0,62}`, e.g. `coord-main`), and saved in `$VOLLEYD_HOME/setup.json`. Waves are owned by the name, not by the per-restart agent id, so this session keeps resolving, steering, pausing and stopping them after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is what lets the autopilot flow's coordinator session end after submitting (Step 5): a later session with the same name picks the wave up. `volleyd run` without `--owner` uses it (and says so), and the other `volleyd` commands identify you by it without `--by`; `VOLLEY_COORDINATOR` in the environment still wins.
 
-   Also set `VOLLEY_COORDINATOR` there (the autopilot flow needs it): a stable **coordinator name** you choose once (agent-id grammar `[a-z0-9][a-z0-9_-]{0,62}`, e.g. `coord-main`). Waves submitted with `--owner "$VOLLEY_COORDINATOR"` are owned by the name, not by the per-restart agent id, so this session keeps resolving, steering, pausing and stopping them after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is what lets the autopilot flow's coordinator session end after submitting (Step 5): a later session with the same name picks the wave up. Export the same value in your shell profile (`export VOLLEY_COORDINATOR=coord-main`, next to the credentials below): `volleyd` commands then identify you by it without `--by`.
+   `VOLLEY_AGENT_ID` is a **prefix**: `vol_register` appends a fresh `-XXXX` (4 characters from `[a-z0-9]`), so this coordinator's agent_id is `coordinator-XXXX` (the suffix changes on each MCP restart) and two sessions sharing the registration get different ids. To discover it, call `vol_register` (its response includes `agent_id`) or `vol_list_agents` and look for the entry whose `capabilities` include `coordinator`.
 
-   Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — expect `volley: ... ✓ Connected`. Run `bash packages/volley-issues/scripts/install.sh` to get a ready-to-paste command with the absolute path baked in. If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
+   **No broker password in the shell.** On the supervisor's machine `volley wait`, `volley sub` and the `volleyd` commands find the coordinator's login on their own (the macOS keychain, then `coordinator.json`), so nothing needs exporting. Elsewhere, or for `mosquitto_pub`, export `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` yourself; without a login every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one).
 
-   The `env` block sets this MCP server's agent_id **prefix**.
-   `vol_register` reads `VOLLEY_AGENT_ID` from env at startup and appends a
-   fresh `-XXXX` (4 lowercase-alphanumeric chars from `[a-z0-9]`) suffix — so this coordinator's agent_id is
-   `coordinator-XXXX` (the suffix changes on each MCP restart). Two Claude Code
-   sessions on this machine sharing one user-scope MCP registration get DIFFERENT
-   agent_ids (each MCP server picks its own suffix), so two coordinators no longer
-   collide. To discover the auto-generated id, call `vol_register` (its response
-   includes `agent_id`) or `vol_list_agents` and look for the entry whose
-   `capabilities` include `coordinator`.
+3. **gh + claude on PATH, and cmux for the legacy path.** Run `command -v gh claude` and confirm both resolve. If either is missing, the one command installs it (setup's Sign-ins step signs both in). The volleyd path starts agents in cmux or tmux, whichever `volley setup` chose; the legacy path launches cmux workspaces itself, so it needs `command -v cmux` too (cmux install instructions live in the `cmux` repo).
 
-   **Broker credentials in the shell.** The reference broker config requires a login (`examples/mosquitto-auth/`). The MCP registration's `env` block reaches only the MCP server, not this session's Bash tool, so export the same identity in your shell profile and restart the session:
-
-   ```sh
-   export VOLLEY_AUTH_USERNAME=coordinator
-   export VOLLEY_AUTH_PASSWORD='<coordinator password from `volley auth init`>'
-   ```
-
-   Without them every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one), and `mosquitto_pub` cleanup is refused.
-
-3. **gh + claude + cmux on PATH.** Run `command -v gh claude cmux` and confirm all three resolve. If any is missing, tell the user how to install (`brew install gh`; the `claude` CLI ships with Claude Code; cmux install instructions live in the `cmux` repo).
-
-4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "claude-opus-4-7", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace, coordinator }` (`coordinator` only when `VOLLEY_COORDINATOR` is set; on the volleyd path check it is there, since it is the name the wave's owner is). The `agent_id` is the
+4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "<the model this session runs>", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace, coordinator }` (`coordinator` only when `VOLLEY_COORDINATOR` is set; on the volleyd path check it is there, since it is the name the wave's owner is). The `agent_id` is the
    auto-suffixed value `coordinator-XXXX` (NOT the literal env prefix);
    this is the value to embed in dispatched children's spawn brief as
    their `parent_id`.
@@ -87,6 +66,7 @@ The `volleyd` supervisor owns everything the legacy path does by hand: worktrees
 
 - Prerequisites 1–4 above (broker, volley-mcp, shell credentials, coordinator registered). The coordinator name (`$VOLLEY_COORDINATOR`, Prerequisites step 2: in the MCP registration's `env` and exported in the shell) becomes the wave's **owner**; without one, the auto-suffixed `agent_id` from Prerequisites step 4 does, and is lost when the MCP server restarts: then the session cannot leave (Step 5), so set the name before submitting.
 - `volleyd status` exits 0 (see Choosing a dispatch path). Use the same `VOLLEY_BROKER_URL` / `--namespace` the daemon uses, and run on the daemon's host with the daemon's `VOLLEYD_HOME`: `volleyd events` and `volleyd ack` read the journal there directly, not over the broker.
+- **The supervisor may not be on this machine.** The supervisor (and the broker) can be moved to another machine of the pool. Run `volley role status`: when its `supervisor` line names another machine, `volleyd status`, `volleyd run` and the other ops still work from here over the broker, but `volleyd events` and `volleyd ack` read the journal on the supervisor's machine: run those there (`ssh <machine>`). A wave's `repo:` path must exist on that machine too, so name the repository by `owner/name`. When its `broker` line names another machine, this machine reaches it through its tunnel: a session set up before the move re-registers with `volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883`.
 - A release branch the wave's PRs target: create or reuse one exactly as in **Batch setup** step 1, after the **Global open-PR check**. A wave always has a release branch, even for one issue.
 - Repo-specific brief extras live in the repo, not in this skill: put the **Migration number reservation** block (or any other per-repo notes) in `<repo>/.volley/brief-extra.md` (kept out of git); volleyd appends it to every brief it renders. Run the migration counter init (**Batch setup** step 2) yourself before submitting if the repo uses it. volleyd's briefs already carry the narration contract. To enforce it anyway (say, against a customised template), install the skill's gate as volleyd's brief gate: `ln -s <skill-dir>/scripts/validate-brief.sh "${VOLLEYD_HOME:-$HOME/.volley/volleyd}/brief-gate"`. volleyd refuses to launch an agent whose brief fails it. The gate accepts volleyd's own briefs: their session hooks register the agent, so the brief's "already registered" line stands in for the legacy `vol_register` step (volleyd briefs must never ask the agent to register). Do not "fix" a refused volleyd brief by appending `brief/NARRATION_BLOCK.txt`: its step 1 is `vol_register`.
 
@@ -150,13 +130,15 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --wave "$WAVE" \
   --repo "$(git rev-parse --show-toplevel)" \
   --release-branch release/$WAVE \
-  --model claude-opus-4-7 \
+  --model <model> \
   --repo-slug "$(gh repo view --json nameWithOwner -q .nameWithOwner)" \
-  [--satisfied 5,6] [--namespace example-dispatch] \
+  [--satisfied 5,6] [--namespace <ns>] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
   --merge auto --autopilot on --branch-update merge \
   --out .volley/waves/$WAVE.yaml
 ```
+
+`<model>` is the model the wave's agents run: Volley's default is `DEFAULT_MODEL` in `packages/volleyd/src/config-defaults.ts` (the model `volley setup`'s test wave runs), unless the user names another.
 
 The three autopilot settings, written into the wave file:
 
@@ -401,7 +383,7 @@ For each issue in the dispatch set:
      --command "claude --dangerously-skip-permissions 'Read ISSUE.md and implement GitHub issue <N>. Use ultrathink for complex decisions. Do NOT commit or push. When done, write a DEPLOY.md listing all deployment steps required but do NOT git add or commit DEPLOY.md.
 
    IMMEDIATELY on startup, in this order:
-     1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"claude-opus-4-7\", title=\"<brief-title>\", links={ repo: \"<owner/name>\", issue: <N> } (the Desk shows the title on your window; your agent id says nothing about the work). The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
+     1. Call vol_register with capabilities=[\"implements-issue\", \"runs-mvn-verify\"], parent_id=\"<COORDINATOR-AGENT-ID>\", cwd=\"/private/tmp/example-issue-<N>\", model=\"<model>\", title=\"<brief-title>\", links={ repo: \"<owner/name>\", issue: <N> } (the Desk shows the title on your window; your agent id says nothing about the work). The response includes your auto-suffixed agent_id (e.g. coordinator-7b9c). Confirm it starts with `coordinator-` — if it starts with anything else, abort: the MCP env block isn't what the dispatch flow expects.
      2. Call vol_publish with channel=\"status\", type=\"working\", payload={ issue: <N>, started_at: <ISO timestamp> }.
 
    AT MEANINGFUL CHECKPOINTS, publish progress via vol_publish. Include a numeric progress field (0-100) in every payload so dashboards / coordinators can render a determinate progress bar instead of an indeterminate sweep. Suggested progression for a coding task — adjust the percentages to match the actual work shape, but always include the field:
@@ -448,7 +430,7 @@ For each issue in the dispatch set:
    seconds for the child to vol_register, then:
 
    ```
-   vol_list_agents({ namespace: "example-dispatch" })
+   vol_list_agents({ namespace: "default" })
    ```
 
    Find the entry whose `parent_id` equals the coordinator's agent_id AND
@@ -515,7 +497,7 @@ Each `volley wait` call blocks until that specific agent publishes a terminal st
 # discovery resolves the child's auto-suffixed agent_id):
 bun run packages/volley-cli/src/cli.ts wait \
   --agent-id <discovered-child-id> \
-  --namespace example-dispatch \
+  --namespace default \
   --terminal-states done,blocked,failed,reaped \
   --timeout 14400 &
 ```
@@ -532,7 +514,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
 
 1. Read the retained terminal status to confirm the type:
    ```
-   vol_query({ topic: "volley/example-dispatch/<agent-id>/status" })
+   vol_query({ topic: "volley/default/<agent-id>/status" })
    ```
    The response's `payload.type` is one of `done | blocked | failed | reaped`.
 
@@ -549,7 +531,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
    - Either send a steering mailbox (`vol_send_mailbox({ to_agent_id: "<id>", type: "steering", payload: { text: "<guidance>" } })`) and re-background `volley wait`, OR abandon (close the workspace, reopen the issue on GitHub with a comment summarizing what was tried).
 
 4. **If `failed`**:
-   - Read the retained `result` topic (`vol_query({ topic: "volley/example-dispatch/<agent-id>/result" })`) for any artifact pointer the agent left behind.
+   - Read the retained `result` topic (`vol_query({ topic: "volley/default/<agent-id>/result" })`) for any artifact pointer the agent left behind.
    - Tell the user what failed and where to look. Do not auto-retry; failure is a coordination signal that needs human review.
 
 5. **If `reaped`** (broker-detected disconnect — LWT fired):
@@ -565,7 +547,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
 
 The coordinator's job stays open until every dispatched agent has reached a terminal state AND been processed. As each agent terminates, its `volley wait` background exits and you wake to handle it. There is no separate polling loop; the broker's retained-message delivery to `volley wait`'s open subscription is the entire signaling fabric.
 
-If the user asks "are they done?" mid-dispatch, call `vol_list_agents({ namespace: "example-dispatch" })` and render an `/volley list`-style table — that's the canonical real-time view.
+If the user asks "are they done?" mid-dispatch, call `vol_list_agents({ namespace: "default" })` and render an `/volley list`-style table — that's the canonical real-time view.
 
 ### Crash detection is free
 

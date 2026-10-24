@@ -79,9 +79,8 @@ Each step says what to run and what you should see. Tick the box only when you s
 
 ## 4. One wave on each repository
 
-- [ ] Clone `smoke-b` anywhere on the Mac (`gh repo clone $B /path/to/smoke-b`): volleyd needs
-  its own checkout of every wave's repository, but `smoke-b` is not assigned to the Mac, so the
-  wave names that checkout by path. Write two wave files:
+- [ ] Write two wave files (`smoke-b` is not assigned to the Mac, and the Mac needs no clone of
+  it: the wave names it by `owner/name` and its tasks run on the box):
   ```yaml
   # wave-a.yaml
   wave: smoke-a-1
@@ -92,12 +91,15 @@ Each step says what to run and what you should see. Tick the box only when you s
     T1: { issue: <n> }
   # wave-b.yaml
   wave: smoke-b-1
-  repo: /path/to/smoke-b
+  repo: <you>/smoke-b                  # an owner/name only the box holds
   release_branch: release/<yyyy-mm-dd>-smoke
   placement: auto
   tasks:
     T1: { issue: <n> }
   ```
+  `volleyd validate wave-b.yaml` prints `repo: <you>/smoke-b (no clone on this machine; held by
+  box-a: its tasks run there)`. With `T1: { issue: <n>, host: local }` instead it fails at
+  `tasks.T1.host` (`drop its host: local (or set host: auto) so it runs on box-a, …`); put it back.
   `volleyd run wave-a.yaml`, then `volleyd run wave-b.yaml`.
 - [ ] `smoke-b-1`'s T1 runs on the box. Its machine chip's tooltip shows the Mac's candidate line,
   `ineligible: no ready clone of <you>/smoke-b (blocked: <you>/smoke-b is not assigned to <mac>:
@@ -136,9 +138,11 @@ Skip if the box has java; or move java off its `PATH` for this step (and restore
   and says it stays on disk. Confirm. The row disappears; `volley repo status` no longer lists
   `smoke-b`; `volley repo list` lists `smoke-a` only; `ssh box-a ls ~/.volley/repos/<you>/smoke-b`
   still lists the clone.
-- [ ] A new `smoke-b` wave (`placement: auto`, from `/path/to/smoke-b`) runs on the Mac: a
-  repository config no longer names is the supervisor's own again, as before repositories, and
-  the box (no `smoke-b` in its `peer.json` any more) is `absent` for it.
+- [ ] `volleyd validate wave-b.yaml` now fails: `repo: no clone of <you>/smoke-b on any machine:
+  add it to one (…)`. Clone it on the Mac (`gh repo clone $B /path/to/smoke-b`): a new `smoke-b`
+  wave (`placement: auto`, `repo: /path/to/smoke-b`) runs on the Mac: a repository config no
+  longer names is the supervisor's own again, as before repositories, and the box (no `smoke-b`
+  in its `peer.json` any more) is `absent` for it.
 
 ## Teardown
 

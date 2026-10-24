@@ -13,6 +13,7 @@ import {
   renderBrowserHelper,
   renderSigninScript,
 } from "./claude/signin-script";
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import { volleydHome } from "./config-store";
 import {
   LAUNCH_COMMAND,
@@ -56,6 +57,8 @@ import { AGENT_BRANCH } from "./worktree";
  *       gh pr merge <n> --merge --match-head-commit <sha40>
  *     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
  *     heads it contains, read as merged. Never --squash.
+ *   Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+ *   supervisor holds no clone of (#448).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -80,6 +83,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
  *     gh label list --search merged-to-release --json name ·
  *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     each of these may end in exactly `--repo <owner/name>`;
  *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
@@ -95,6 +99,14 @@ import { AGENT_BRANCH } from "./worktree";
  *     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
  *     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
  *     version a seeded profile records as its `lastOnboardingVersion`)
+ *   tmux (local agents, hosts/local-tmux.ts, under `fleet.local_terminal: tmux`) — sessions
+ *     named `volley-<wave>-<task>-<role>[-<n>]` only (AGENT_SESSION; never `volley-signin-*`),
+ *     targeted exactly (`=<it>`, its pane `=<it>:`):
+ *     new-session -d [-x <n> -y <n>] -s <it> -c <dir> 'bash .volley/launch.sh' (that order, with
+ *       the LaunchToken sealed for <dir>; n in 20..500) · capture-pane -p [-J] -t =<it>: -S-<n> ·
+ *       has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
+ *       send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
+ *       send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -129,6 +141,28 @@ import { AGENT_BRANCH } from "./worktree";
  *   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
  *     memory_pressure (no arguments: report only) · docker info --format {{json .}}
  *
+ * MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
+ *   launchctl bootout gui/<uid>/systems.volley.desk · launchctl bootstrap gui/<uid>
+ *     $HOME/Library/LaunchAgents/systems.volley.desk.plist · systemctl --user stop | start
+ *     volley-desk.service | volleyd.service (a Desk move unloads the old Desk; the old supervisor
+ *     unloads itself after a hand-over)
+ *   tar -czf <abs>.tgz -C <abs> --files-from <abs>   (a supervisor move's bundle; never -x)
+ *   volley desk install --port <n> --broker-host <host> · volley desk uninstall ·
+ *     volley desk check --url http://127.0.0.1:<n> --version <v>   (a Desk move to this machine)
+ *   and as REMOTE steps on a paired machine (below): the same three `volley desk` verbs;
+ *   volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
+ *   volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
+ *   supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
+ *   --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
+ *   mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
+ *   ssh-back probe); base64 -d to that bundle path (the copy).
+ *   A broker move's, here: brew services stop|start mosquitto · sudo -n snap|systemctl
+ *   stop|start mosquitto (the old broker, through its layout) · volley broker tunnel --to <dest>
+ *   --port <n> --name <name> --broker-port <n> | --off (the own tunnel) · systemctl --user
+ *   daemon-reload (volleyd's unit rewritten) · the ssh probe above, to the new address; and as
+ *   REMOTE steps: volley broker probe · volley broker receive <abs>/.volley/roles/broker/bundle.tgz
+ *   --lan|--no-lan|--check · volley broker tunnel --show.
+ *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
  *
@@ -149,6 +183,25 @@ import { AGENT_BRANCH } from "./worktree";
  *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
  *   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
  *   sudo, or the keychain (the logged-in session's): those stay terminal-only.
+ *
+ * MACHINE ADD (only with a MachineAddToken, `mintMachineAddToken`, and with one nothing else): the
+ *   steps `machine_add` (machine-add.ts, SPEC §4.6.14) runs to make a bare box a paired machine,
+ *   volley-cli's `volley machine add` step list without a terminal (no `ssh -t`):
+ *     ssh -T -o BatchMode=yes -o ConnectTimeout=<s> -o ServerAliveInterval=<s>
+ *       -o ServerAliveCountMax=<n> -o StrictHostKeyChecking=accept-new <target> bash -s
+ *     ssh -T -i <key> -o IdentitiesOnly=yes …the same… <target> bash -s   (the person's key)
+ *     ssh -T -o ConnectTimeout=<s> -o StrictHostKeyChecking=accept-new -o NumberOfPasswordPrompts=1
+ *       -o PreferredAuthentications=password,keyboard-interactive <target> bash -s   (a password:
+ *       env SSH_ASKPASS=<the token's helper>, SSH_ASKPASS_REQUIRE=force)
+ *   each to the token's target only (and its key only), its stdin exactly a script the run's
+ *   registry (volley-cli's `Scripts`) rendered; this machine's key creation (`ssh-keygen -t
+ *   ed25519 -N '' -q -f <home>/.ssh/id_ed25519`); a Mac's Remote Login check (`launchctl print
+ *   system/com.openssh.sshd`). A host key is trusted on first contact (nobody is at a terminal
+ *   to answer ssh's question).
+ *
+ * ASKPASS (the env rule): a command whose env sets SSH_ASKPASS, SSH_ASKPASS_REQUIRE or
+ *   SUDO_ASKPASS is refused, except MACHINE ADD's password form with exactly the token's helper
+ *   and `SSH_ASKPASS_REQUIRE=force` (no SUDO_ASKPASS: sudo runs on the box, from its own helper).
  *
  * TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
  *   with its token, checked by identity like consent tokens:
@@ -393,14 +446,24 @@ export function mintTrainToken(t: TrainToken): TrainToken {
 }
 
 /**
+ * A `--repo` value naming the repository a supervisor holds no clone of (#448): `owner/name`, or
+ * `host/owner/name` off github.com.
+ */
+const isRepoName = (v: string): boolean =>
+  isSlug(v) || (/^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(v) && isSlug(v.slice(v.indexOf("/") + 1)));
+
+/**
  * `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` for a MergeToken's n and
- * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly.
+ * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly; each
+ * may end in exactly `--repo <owner/name>` (a wave the supervisor holds no clone of, #448).
  */
 function mergeVerdict(
-  args: readonly string[],
+  all: readonly string[],
   token: MergeToken | undefined,
   train: TrainToken | undefined,
 ): Verdict {
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isRepoName(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const squash = token !== undefined && merges.has(token);
   const commit = train !== undefined && trains.has(train);
   if (!squash && !commit) return deny("gh pr merge");
@@ -820,6 +883,120 @@ export function mintSetupToken(inputs: SetupFenceInputs): SetupToken {
   return token;
 }
 
+const machineAdds = new WeakSet<object>();
+
+/** Permission to run one `machine_add`'s steps (`mintMachineAddToken`; checked by identity). */
+export interface MachineAddToken {
+  readonly target: string;
+  /** This machine's home: its key creation's path. */
+  readonly home: string;
+  /** The scripts the run rendered (volley-cli's `Scripts`): the only stdin its ssh forms take. */
+  readonly scripts: { has(s: string | undefined): boolean };
+  /** The key the person named (`auth.key`), or null. */
+  readonly key: string | null;
+  /** The askpass helper the password form's env names, or null. */
+  readonly askpass: string | null;
+}
+
+/** Callers: machine-add.ts, once per `machine_add` run. */
+export function mintMachineAddToken(t: MachineAddToken): MachineAddToken {
+  if (!SSH_TARGET.test(t.target)) throw new FenceError(`ssh ${t.target}`, "not an ssh destination");
+  const token = Object.freeze({ ...t });
+  machineAdds.add(token);
+  return token;
+}
+
+/**
+ * The ssh argv of a `machine_add` step: `batch` (this machine's key, every step after the first),
+ * `key` (the person's key file) or `password` (ssh asks the token's askpass helper).
+ */
+export function machineAddArgv(
+  target: string,
+  how: "batch" | "key" | "password",
+  key?: string,
+): string[] {
+  const connect = `ConnectTimeout=${DAEMON_DEFAULTS.machine_add_connect_timeout_s}`;
+  const hostKey = "StrictHostKeyChecking=accept-new";
+  if (how === "password") {
+    return [
+      "ssh",
+      "-T",
+      "-o",
+      connect,
+      "-o",
+      hostKey,
+      "-o",
+      "NumberOfPasswordPrompts=1",
+      "-o",
+      "PreferredAuthentications=password,keyboard-interactive",
+      target,
+      "bash",
+      "-s",
+    ];
+  }
+  return [
+    "ssh",
+    "-T",
+    ...(how === "key" ? ["-i", key ?? "", "-o", "IdentitiesOnly=yes"] : []),
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    connect,
+    "-o",
+    `ServerAliveInterval=${DAEMON_DEFAULTS.machine_add_alive_interval_s}`,
+    "-o",
+    `ServerAliveCountMax=${DAEMON_DEFAULTS.machine_add_alive_count_max}`,
+    "-o",
+    hostKey,
+    target,
+    "bash",
+    "-s",
+  ];
+}
+
+/** This machine's key creation, as volley-cli's `keygenArgv` (no passphrase: BatchMode needs none). */
+const keygenArgv = (home: string): string[] => [
+  "ssh-keygen",
+  "-t",
+  "ed25519",
+  "-N",
+  "",
+  "-q",
+  "-f",
+  join(home, ".ssh", "id_ed25519"),
+];
+/** A Mac's Remote Login as launchd has it, as volley-cli's `REMOTE_LOGIN_ARGV`. */
+const REMOTE_LOGIN_ARGV = ["launchctl", "print", "system/com.openssh.sshd"];
+
+const ASKPASS_ENV = ["SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "SUDO_ASKPASS"] as const;
+
+/** Whether `env` sets an askpass helper (an empty value sets none). */
+const asksPass = (env: FenceOptions["env"]) =>
+  env !== undefined && ASKPASS_ENV.some((k) => (env[k] ?? "") !== "");
+
+/** The MACHINE ADD rows (see the header): the only commands a machine-add token allows. */
+function machineAddVerdict(
+  argv: readonly string[],
+  t: MachineAddToken,
+  opts: FenceOptions,
+): Verdict {
+  const script = t.scripts.has(opts.input);
+  const env = opts.env;
+  const askpassOk =
+    t.askpass !== null &&
+    env?.SSH_ASKPASS === t.askpass &&
+    env.SSH_ASKPASS_REQUIRE === "force" &&
+    (env.SUDO_ASKPASS ?? "") === "";
+  const ok = asksPass(env)
+    ? script && askpassOk && same(argv, machineAddArgv(t.target, "password"))
+    : (script &&
+        (same(argv, machineAddArgv(t.target, "batch")) ||
+          (t.key !== null && same(argv, machineAddArgv(t.target, "key", t.key))))) ||
+      same(argv, keygenArgv(t.home)) ||
+      same(argv, REMOTE_LOGIN_ARGV);
+  return ok ? ALLOW : deny(`${argv.slice(0, 3).join(" ")} (not a machine_add step)`);
+}
+
 const DESK_SERVICE = "systems.volley.desk";
 const DESK_UNIT = "volley-desk.service";
 const VOLLEYD_UNIT = "volleyd.service";
@@ -916,6 +1093,12 @@ export interface RemoteScript {
 export interface ProfileHost {
   name: string;
   worktree_root: string;
+  /**
+   * The port its agents reach the broker at on its loopback (`hosts.<name>.tunnel.remote_port`:
+   * its tunnel's end, or with `tunnel: none` the broker's own port, SPEC §4.6.14): the one
+   * `VOLLEY_BROKER_URL` its launch.sh may name. Absent: any loopback port.
+   */
+  broker_port?: number;
 }
 
 export interface FenceOptions {
@@ -949,6 +1132,12 @@ export interface FenceOptions {
   setup?: SetupToken;
   /** The command's working directory; only the SETUP rows read it (the Desk build). */
   cwd?: string;
+  /** A `machine_add` step (machine-add.ts): only the MACHINE ADD rows, and nothing else. */
+  machineAdd?: MachineAddToken;
+  /** The child's environment; the ASKPASS rule reads it. */
+  env?: Record<string, string | undefined>;
+  /** Written to the child's stdin, which is then closed (not with `remote`, which is the stdin); the MACHINE ADD rows read it. */
+  input?: string;
 }
 
 type Verdict =
@@ -1384,6 +1573,13 @@ function exactly(argv: readonly string[], allowed: readonly (readonly string[])[
 
 /** Throw `FenceError` unless the policy above allows `argv`. */
 export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}): void {
+  // Before every other branch: a sealed script or a setup token gets no askpass env either.
+  if (opts.machineAdd === undefined && asksPass(opts.env)) {
+    throw new FenceError(
+      `${argv.slice(0, 2).join(" ")} with an askpass env`,
+      "only a machine_add password step names an askpass helper",
+    );
+  }
   if (
     opts.script !== undefined &&
     scripts.has(opts.script) &&
@@ -1396,6 +1592,13 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
     const v = setups.has(opts.setup)
       ? setupVerdict(argv, opts.setup.inputs, opts.cwd)
       : deny(`${argv.slice(0, 2).join(" ")} (a setup token volleyd did not mint)`);
+    if (v.kind !== "allow") throw new FenceError(v.verb, "not permitted for volleyd");
+    return;
+  }
+  if (opts.machineAdd !== undefined) {
+    const v = machineAdds.has(opts.machineAdd)
+      ? machineAddVerdict(argv, opts.machineAdd, opts)
+      : deny(`${argv.slice(0, 2).join(" ")} (a machine-add token volleyd did not mint)`);
     if (v.kind !== "allow") throw new FenceError(v.verb, "not permitted for volleyd");
     return;
   }
@@ -1443,6 +1646,14 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
     case "launchctl":
       return launchctl(args);
+    case "systemctl":
+      return systemctl(args);
+    case "tar":
+      return tar(args);
+    case "brew":
+    case "sudo":
+      // A broker move stops (and a rollback starts) the broker here through its layout.
+      return isBrokerService(argv) ? ALLOW : deny(`${prog} ${args[0] ?? ""}`.trim());
     case "ps":
       return exactly(argv, [PS_ARGV]);
     case "sysctl":
@@ -1570,10 +1781,14 @@ const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( 
 
 /**
  * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
- * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
- * of them (the read-only allow-list decides).
+ * or a closing comment that carries volleyd's marker, the label listed or created; each may end
+ * in `--repo <owner/name>`. Null: not one of them (the read-only allow-list decides).
  */
-function issueLifecycle(args: string[]): Verdict | null {
+function issueLifecycle(all: string[]): Verdict | null {
+  // A wave named by its `owner/name` (no clone on the supervisor) ends each form in exactly
+  // `--repo <owner/name>` (#448).
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isSlug(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
   const two = `${verb} ${sub}`;
   if (two === "issue edit" || two === "issue comment" || two === "issue close") {
@@ -1803,6 +2018,12 @@ function volley(args: string[]): Verdict {
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }
+  // A Desk move to (or back to) the supervisor's own machine (SPEC §4.6.24).
+  if (group === "desk")
+    return isDeskVerb(args.slice(1)) ? ALLOW : deny(`${name} (not a Desk move's)`);
+  // A broker move's own tunnel here (SPEC §4.6.24).
+  if (group === "broker")
+    return isOwnBrokerTunnel(args.slice(1)) ? ALLOW : deny(`${name} (not a broker move's)`);
   return deny(name);
 }
 
@@ -1812,6 +2033,7 @@ export const plistPath = (home: string) =>
 const plistFile = () => plistPath(process.env.HOME ?? homedir());
 
 function launchctl(args: string[]): Verdict {
+  if (isDeskLaunchctl(args)) return ALLOW;
   const [sub, ...rest] = args;
   const opts = rest.filter((a) => a.startsWith("-"));
   const target = rest.filter((a) => !a.startsWith("-"));
@@ -1826,6 +2048,221 @@ function launchctl(args: string[]): Verdict {
       target.length === 1 &&
       new RegExp(`^gui/[0-9]+/${SERVICE_LABEL.replace(/\./g, "\\.")}$`).test(target[0] ?? ""));
   return ok ? ALLOW : deny(`launchctl ${sub ?? ""}`.trim());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Machine roles (SPEC §4.6.14 peer_retarget, §4.6.24): the commands a role move runs
+// ---------------------------------------------------------------------------------------------
+
+/** A port in 1..65535, as an argv element. */
+const isPortArg = (p: string | undefined) =>
+  p !== undefined && /^[1-9][0-9]{0,4}$/.test(p) && Number(p) <= 65535;
+/** A bare host `volley desk install --broker-host` takes: a name or an IPv4 address. */
+const BARE_HOST = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/;
+/** A version `volley desk check --version` compares with (the supervisor's own). */
+const VERSION_ARG = /^[0-9][0-9A-Za-z.+-]{0,63}$/;
+/** A pairing code as `peer_invite` makes one (peers.ts ALPHABET). */
+const PAIRING_CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/;
+/** A move's id (role-move.schema.json `$defs/move_id`). */
+const MOVE_ID = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}";
+/** Where a supervisor move copies its bundle on the target: `<abs>/.volley/roles/<move_id>/bundle.tgz`. */
+const BUNDLE_PATH = new RegExp(`^/[^\\n\\r\\0]*/\\.volley/roles/${MOVE_ID}/bundle\\.tgz$`);
+export const isBundlePath = (p: string): boolean => BUNDLE_PATH.test(p) && absPath(p);
+
+/**
+ * `volley desk install --port <n> --broker-host <host>` · `volley desk uninstall` ·
+ * `volley desk check --url http://127.0.0.1:<n> --version <v>` (args after `desk`): a Desk
+ * move's steps, here or on its target.
+ */
+function isDeskVerb(a: readonly string[]): boolean {
+  const [verb, ...rest] = a;
+  if (verb === "uninstall") return rest.length === 0;
+  if (verb === "install")
+    return (
+      rest.length === 4 &&
+      rest[0] === "--port" &&
+      isPortArg(rest[1]) &&
+      rest[2] === "--broker-host" &&
+      BARE_HOST.test(rest[3] ?? "")
+    );
+  if (verb === "check") {
+    const m = /^http:\/\/127\.0\.0\.1:([0-9]{1,5})$/.exec(rest[1] ?? "");
+    return (
+      rest.length === 4 &&
+      rest[0] === "--url" &&
+      m !== null &&
+      isPortArg(m[1]) &&
+      rest[2] === "--version" &&
+      VERSION_ARG.test(rest[3] ?? "")
+    );
+  }
+  return false;
+}
+
+/**
+ * The volley steps a role move runs on a paired machine (args after `volley`), each one exact
+ * shape: `peer retarget --to <dest> [--port <n>] [--tunnel ssh|none]` (`peer_retarget`), `peer join
+ * <code> --to <dest> --name <name> --target <dest> --tunnel none` (a supervisor move re-pairing the
+ * old machine), the Desk's verbs (`isDeskVerb`), and `role receive supervisor <bundle> --from
+ * <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url mqtt://127.0.0.1:<n>]`.
+ */
+export function isRoleRemoteVolley(a: readonly string[]): boolean {
+  const [group, verb, ...rest] = a;
+  if (group === "desk") return isDeskVerb(a.slice(1));
+  if (group === "broker") return isBrokerRemote(a.slice(1));
+  if (group === "peer" && verb === "retarget") {
+    if (rest[0] !== "--to" || !SSH_TARGET.test(rest[1] ?? "")) return false;
+    let i = 2;
+    if (rest[i] === "--port" && isPortArg(rest[i + 1]) && Number(rest[i + 1]) >= 1024) i += 2;
+    if (rest[i] === "--tunnel" && (rest[i + 1] === "ssh" || rest[i + 1] === "none")) i += 2;
+    return i === rest.length;
+  }
+  if (group === "peer" && verb === "join")
+    return (
+      rest.length === 9 &&
+      PAIRING_CODE.test(rest[0] ?? "") &&
+      rest[1] === "--to" &&
+      SSH_TARGET.test(rest[2] ?? "") &&
+      rest[3] === "--name" &&
+      AGENT_ID.test(rest[4] ?? "") &&
+      rest[5] === "--target" &&
+      SSH_TARGET.test(rest[6] ?? "") &&
+      rest[7] === "--tunnel" &&
+      rest[8] === "none"
+    );
+  if (group === "role" && verb === "receive") {
+    if (rest[0] !== "supervisor" || !isBundlePath(rest[1] ?? "")) return false;
+    if (rest[2] !== "--from" || !AGENT_ID.test(rest[3] ?? "")) return false;
+    let i = 4;
+    if (rest[i] === "--local-terminal" && (rest[i + 1] === "cmux" || rest[i + 1] === "tmux"))
+      i += 2;
+    if (rest[i] === "--local-agents" && rest[i + 1] === "never") i += 2;
+    if (rest[i] === "--broker-url" && isTunnelBrokerUrl(rest[i + 1] ?? "")) i += 2;
+    return i === rest.length;
+  }
+  return false;
+}
+
+/**
+ * A broker move's volley steps on a paired machine (args after `broker`): `probe` (the target's
+ * mosquitto), `receive <bundle> --lan | --no-lan | --check` (the bundle at
+ * `<abs>/.volley/roles/broker/bundle.tgz`), `tunnel --show` (the tunnel a peer had).
+ */
+function isBrokerRemote(a: readonly string[]): boolean {
+  const [verb, ...rest] = a;
+  if (verb === "probe") return rest.length === 0;
+  if (verb === "tunnel") return sameArgv(rest, ["--show"]);
+  return (
+    verb === "receive" &&
+    rest.length === 2 &&
+    isBundlePath(rest[0] ?? "") &&
+    (rest[0] ?? "").endsWith("/.volley/roles/broker/bundle.tgz") &&
+    (rest[1] === "--lan" || rest[1] === "--no-lan" || rest[1] === "--check")
+  );
+}
+
+/**
+ * The supervisor's own tunnel to the broker's new machine (args after `broker`): `tunnel --to
+ * <dest> --port <n> --name <name> --broker-port <n>` and `tunnel --off`.
+ */
+function isOwnBrokerTunnel(a: readonly string[]): boolean {
+  if (sameArgv(a, ["tunnel", "--off"])) return true;
+  return (
+    a.length === 9 &&
+    a[0] === "tunnel" &&
+    a[1] === "--to" &&
+    SSH_TARGET.test(a[2] ?? "") &&
+    a[3] === "--port" &&
+    isPortArg(a[4]) &&
+    a[5] === "--name" &&
+    AGENT_ID.test(a[6] ?? "") &&
+    a[7] === "--broker-port" &&
+    isPortArg(a[8])
+  );
+}
+
+/**
+ * The broker here stopped or started through its layout, by a broker move (argv whole):
+ * `brew services stop|start mosquitto`, `sudo -n snap stop|start mosquitto`, `sudo -n systemctl
+ * stop|start mosquitto` (`-n`: never a password prompt; without a sudo rule it fails).
+ */
+function isBrokerService(argv: readonly string[]): boolean {
+  const verbs = ["stop", "start"];
+  return (
+    (argv.length === 4 &&
+      sameArgv(argv.slice(0, 2), ["brew", "services"]) &&
+      verbs.includes(argv[2] ?? "") &&
+      argv[3] === "mosquitto") ||
+    (argv.length === 5 &&
+      sameArgv(argv.slice(0, 2), ["sudo", "-n"]) &&
+      (argv[2] === "snap" || argv[2] === "systemctl") &&
+      verbs.includes(argv[3] ?? "") &&
+      argv[4] === "mosquitto")
+  );
+}
+
+/**
+ * The ssh-back probe a supervisor move's plan runs on its target, once per other paired machine:
+ * `ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true` (args after `ssh`).
+ */
+function isSshBackProbe(a: readonly string[]): boolean {
+  return (
+    a.length === 7 &&
+    a[0] === "-n" &&
+    a[1] === "-o" &&
+    a[2] === "BatchMode=yes" &&
+    a[3] === "-o" &&
+    /^ConnectTimeout=[1-9][0-9]?$/.test(a[4] ?? "") &&
+    SSH_TARGET.test(a[5] ?? "") &&
+    a[6] === "true"
+  );
+}
+
+/** The Desk's launchd service, unloaded and reloaded by a Desk move here (args after launchctl). */
+function isDeskLaunchctl(a: readonly string[]): boolean {
+  const home = process.env.HOME ?? homedir();
+  return (
+    (a.length === 2 &&
+      a[0] === "bootout" &&
+      /^gui\/[0-9]+\/systems\.volley\.desk$/.test(a[1] ?? "")) ||
+    (a.length === 3 &&
+      a[0] === "bootstrap" &&
+      /^gui\/[0-9]+$/.test(a[1] ?? "") &&
+      a[2] === join(home, "Library", "LaunchAgents", `${DESK_SERVICE}.plist`))
+  );
+}
+
+/**
+ * systemd user units a role move stops and starts here: the Desk's (`stop` | `start`
+ * volley-desk.service, a Desk move) and volleyd's own (`stop` | `start` volleyd.service, the
+ * old supervisor unloading itself, or put back after a failed hand-over).
+ */
+function systemctl(args: string[]): Verdict {
+  const ok =
+    (args.length === 3 &&
+      args[0] === "--user" &&
+      (args[1] === "stop" || args[1] === "start") &&
+      (args[2] === DESK_UNIT || args[2] === VOLLEYD_UNIT)) ||
+    // A broker move rewrote volleyd's unit (its VOLLEY_BROKER_URL) for its next start.
+    sameArgv(args, ["--user", "daemon-reload"]);
+  return ok ? ALLOW : deny(`systemctl ${args.slice(0, 2).join(" ")}`.trim());
+}
+
+/**
+ * `tar -czf <out>.tgz -C <dir> --files-from <list>`: a supervisor move's bundle (roles/bundle.ts),
+ * every path absolute and clean. Never extracts (`-x`): the target's `volley role receive` does.
+ */
+function tar(args: string[]): Verdict {
+  const ok =
+    args.length === 6 &&
+    args[0] === "-czf" &&
+    absPath(args[1] ?? "") &&
+    (args[1] ?? "").endsWith(".tgz") &&
+    args[2] === "-C" &&
+    absPath(args[3] ?? "") &&
+    args[4] === "--files-from" &&
+    absPath(args[5] ?? "");
+  return ok ? ALLOW : deny(`tar ${args[0] ?? ""}`.trim());
 }
 
 function isRecursiveForce(args: string[]): boolean {
@@ -1854,6 +2291,8 @@ const SSH_OPTIONS = new Set([
   "ExitOnForwardFailure",
 ]);
 const SSH_TARGET = /^[A-Za-z0-9_][A-Za-z0-9_.-]*(@[A-Za-z0-9_][A-Za-z0-9_.-]*)?$/;
+/** An ssh destination the fence takes: `[user@]host`, never an option. */
+export const isSshTarget = (s: string): boolean => SSH_TARGET.test(s);
 /** `-R <remote port>:<host>:<port>`: no bind address, so the remote end stays on its loopback. */
 const SSH_REVERSE = /^[0-9]{1,5}:[A-Za-z0-9_][A-Za-z0-9_.-]*:[0-9]{1,5}$/;
 /** An absolute remote path: quoted when rendered; no newline (a heredoc delimiter could follow). */
@@ -1875,6 +2314,8 @@ const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
   if (args.includes("-L")) return [forwardVerdict(args, opts)];
+  // A broker move's plan: can this machine reach the broker's new address (the ssh-back shape).
+  if (opts.remote === undefined && isSshBackProbe(args)) return [ALLOW];
   const script = opts.remote;
   let mode: "T" | "N" | undefined;
   let reverse = false;
@@ -2094,6 +2535,7 @@ function volleyPath(path: string, names: ReadonlySet<string>, endings: readonly 
 function writablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON_TMP ||
+    isBundlePath(path) ||
     profileSwapTmp(path) ||
     volleyPath(path, VOLLEY_WRITES, ["/ISSUE.md", "/info/exclude"])
   );
@@ -2130,16 +2572,28 @@ const MCP_ENTRY_SUFFIX = "/packages/volley-mcp/src/index.ts";
 /** A remote host's launch.sh exports, in order: exactly what SshTmuxHost.launchEnv emits. */
 const LAUNCH_ENV_KEYS = ["VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE", "VOLLEY_AGENT_ID"];
 /** The broker as a remote agent sees it: the reverse tunnel's end on the box's loopback. */
-const TUNNEL_BROKER_URL = /^mqtt:\/\/127\.0\.0\.1:[0-9]{1,5}$/;
+function isTunnelBrokerUrl(url: string): boolean {
+  const m = /^mqtt:\/\/127\.0\.0\.1:([0-9]+)$/.exec(url);
+  return m !== null && isPortArg(m[1]);
+}
 
-/** The env block: none (local), or exactly the three keys for this agent through the tunnel. */
-function launchEnvAllowed(env: Record<string, string>, agentId: string): boolean {
+/**
+ * The env block: none (local), or exactly the three keys for this agent through the tunnel; on a
+ * host whose broker port is known, `VOLLEY_BROKER_URL` names exactly that port.
+ */
+function launchEnvAllowed(
+  env: Record<string, string>,
+  agentId: string,
+  host?: ProfileHost,
+): boolean {
   const keys = Object.keys(env);
   if (keys.length === 0) return true;
+  const url = env.VOLLEY_BROKER_URL ?? "";
   return (
     keys.length === LAUNCH_ENV_KEYS.length &&
     keys.every((k, i) => k === LAUNCH_ENV_KEYS[i]) &&
-    TUNNEL_BROKER_URL.test(env.VOLLEY_BROKER_URL ?? "") &&
+    isTunnelBrokerUrl(url) &&
+    (host?.broker_port === undefined || url === `mqtt://127.0.0.1:${host.broker_port}`) &&
     AGENT_ID.test(env.VOLLEY_NAMESPACE ?? "") &&
     env.VOLLEY_AGENT_ID === agentId
   );
@@ -2264,7 +2718,7 @@ function isLaunchScript(content: string, worktree: string, host?: ProfileHost): 
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&
-    launchEnvAllowed(env, vars.agentId) &&
+    launchEnvAllowed(env, vars.agentId, host) &&
     renderLaunchScript(vars) === content
   );
 }
@@ -2441,8 +2895,14 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         args.slice(1).every((n) => (PATH_PROBE_TOOLS as readonly string[]).includes(n))
         ? ALLOW
         : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
+    case "ssh":
+      return isSshBackProbe(args)
+        ? ALLOW
+        : deny("ssh (only -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true)");
     case "volley": {
-      // The one remote volley step: elsewhere volley is a local program (`volley auth`).
+      // A role move's steps (SPEC §4.6.24) and peer_retarget's (§4.6.14).
+      if (isRoleRemoteVolley(args)) return ALLOW;
+      // The doctor: elsewhere volley is a local program (`volley auth`).
       const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
       const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
       return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest)
@@ -2530,11 +2990,25 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
 }
 
 /**
- * Local tmux: Claude account sign-in sessions only (`volley-signin-<acct>`). Agents run in cmux
- * locally; a remote host's tmux is the REMOTE policy (`tmux` above).
+ * A local agent's tmux session (hosts/local-tmux.ts `localSessionName`):
+ * `volley-<wave>-<task>-<role>[-<n>]`, at least three words after `volley-`. A sign-in's
+ * `volley-signin-*` never is one, so a wave named `signin` cannot run in local tmux.
+ */
+const AGENT_SESSION = /^volley-[a-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9_]+-[A-Za-z0-9_]+$/;
+const isAgentSession = (s: string | undefined): s is string =>
+  s !== undefined && s.length <= 200 && AGENT_SESSION.test(s) && !s.startsWith("volley-signin-");
+/** `capture-pane -S-<n>`: the last n lines (hosts/local-tmux.ts readScreen). */
+const CAPTURE_START = /^-S-[1-9][0-9]{0,4}$/;
+
+/**
+ * Local tmux: agents' sessions under `fleet.local_terminal: tmux` (`localAgentTmux`), and Claude
+ * account sign-in sessions (`volley-signin-<acct>`). A remote host's tmux is the REMOTE policy
+ * (`tmux` above).
  */
 function localTmux(args: string[], opts: FenceOptions): Verdict {
   const [sub, ...rest] = args;
+  const agent = localAgentTmux(sub, rest, opts);
+  if (agent !== null) return agent;
   const target = (flag: string, a: readonly string[]) => {
     const i = a.indexOf(flag);
     return i >= 0 ? a[i + 1] : undefined;
@@ -2581,6 +3055,79 @@ function localTmux(args: string[], opts: FenceOptions): Verdict {
     }
     default:
       return deny(verb);
+  }
+}
+
+/**
+ * Local tmux for an agent session (AGENT_SESSION), each in exactly the shape LocalTmuxHost sends;
+ * null when the command does not target one, for the sign-in rules to judge.
+ */
+function localAgentTmux(
+  sub: string | undefined,
+  rest: string[],
+  opts: FenceOptions,
+): Verdict | null {
+  const session = (t: string | undefined) =>
+    t?.startsWith("=") === true && isAgentSession(t.slice(1));
+  const pane = (t: string | undefined) =>
+    t?.startsWith("=") === true && t.endsWith(":") && isAgentSession(t.slice(1, -1));
+  const verb = `tmux ${sub ?? ""}`.trim();
+  switch (sub) {
+    case "new-session": {
+      if (rest.at(-1) !== TMUX_LAUNCH_COMMAND) return null;
+      const sized = rest[1] === "-x";
+      const [d, x, cols, y, rows] = rest;
+      const [s, name, c, cwd, cmd, ...more] = rest.slice(sized ? 5 : 1);
+      if (!isAgentSession(name)) return null;
+      return d === "-d" &&
+        (!sized ||
+          (x === "-x" && isTmuxSize(cols ?? "") && y === "-y" && isTmuxSize(rows ?? ""))) &&
+        s === "-s" &&
+        c === "-c" &&
+        cwd !== undefined &&
+        cmd === TMUX_LAUNCH_COMMAND &&
+        more.length === 0 &&
+        sealedFor(opts, cwd)
+        ? ALLOW
+        : deny("tmux new-session (only in the worktree of a sealed launch script)");
+    }
+    case "has-session":
+    case "kill-session": {
+      if (!session(rest[1])) return null;
+      if (!sameArgv(rest, ["-t", rest[1] ?? ""])) return deny(verb);
+      return sub === "has-session" ? ALLOW : { kind: "consent", verb };
+    }
+    case "capture-pane": {
+      const j = rest[1] === "-J" ? 1 : 0;
+      const [p, t, target, start, ...more] = [rest[0], ...rest.slice(1 + j)];
+      if (!pane(target)) return null;
+      return p === "-p" && t === "-t" && CAPTURE_START.test(start ?? "") && more.length === 0
+        ? ALLOW
+        : deny(verb);
+    }
+    case "resize-window": {
+      const [t, target, x, cols, y, rows, ...more] = rest;
+      if (!pane(target)) return null;
+      return t === "-t" &&
+        x === "-x" &&
+        isTmuxSize(cols ?? "") &&
+        y === "-y" &&
+        isTmuxSize(rows ?? "") &&
+        more.length === 0
+        ? ALLOW
+        : deny(verb);
+    }
+    case "send-keys": {
+      // As on a paired machine: a named (or picker) key, or TYPED_TEXT with its token.
+      const [t, target, ...tail] = rest;
+      if (t !== "-t" || !pane(target)) return null;
+      if (tail.length === 1 && keyAllowed(tail[0] ?? "", opts)) return ALLOW;
+      if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny(verb);
+      const why = typedTextRefusal(tail[2] ?? "", opts);
+      return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
+    }
+    default:
+      return null;
   }
 }
 

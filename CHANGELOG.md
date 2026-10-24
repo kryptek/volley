@@ -2,6 +2,346 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.11.0 — 2026-10-24
+
+### Added
+
+- **volley-cli: `volley setup --check [--json]` reports what is missing, and every run measures
+  itself.** `--check` plans every step without changing or asking anything and prints each as
+  done, pending (with the changes a run would make), blocked or skipped, exiting 0 only when
+  nothing is pending or blocked; `--json` prints `{ version, steps, setup_at }` for CI. Every run
+  writes `$VOLLEYD_HOME/setup-metrics.json` (wall time, the questions the person saw, sign-ins,
+  sudo prompts, each step's time and change count; 0600, never a token) and ends with
+  `Setup complete in <m> m <s> s (<n> questions, <n> sign-ins, <n> sudo)`. (#453)
+- **volleyd: agents on the supervisor's own machine run in tmux when cmux is not there.** The new
+  `fleet.local_terminal` (`cmux` | `tmux`; unset: `cmux` on macOS when cmux is installed, else
+  `tmux`; a `cmux` set off macOS is `tmux`) picks the local host: `local-tmux` starts each agent
+  in a detached session `volley-<wave>-<task>-<role>` on your default tmux server (`tmux attach -t
+  <it>` shows it), with the same screen, keys, typed text, resize (the Desk's Terminal popout
+  resizes it), retire and cleanup as cmux. The fence admits local tmux only for those session
+  names and shapes, the launch only with the worktree's sealed `launch.sh`, and killing a session
+  only with consent. `agent_spawned` carries `terminal`; `volleyd cleanup` closes each workspace
+  in the terminal its agent ran in. A launch (or a cleanup) where tmux is missing fails with the
+  line to install it. Read at start: a change applies to agents spawned after the next start, and
+  a restarted volleyd keeps reaching each running agent in the terminal it started in. (#454)
+- **volley-cli: `volley setup` gains a Terminal step.** Between Accounts and Services, it picks
+  the terminal volleyd starts local agents in: cmux on a Mac that has it (with the socket-mode
+  check that used to run in Services), else tmux, blocking with the install line (`brew install
+  tmux`, `sudo apt-get install -y tmux`, `sudo dnf install -y tmux`) while tmux is missing; Linux
+  never hears of cmux. The choice goes in `config.yaml` (`fleet.local_terminal`) and `setup.json`
+  (`terminal`), keeping `config.yaml`'s file mode. The volleyd systemd unit gets `KillMode=process`, so restarting volleyd leaves
+  its tmux agents running. (#454)
+- **volley-sim: fake `claude` and `gh` for installed-mode runs.** A new package,
+  `packages/volley-sim`, whose `bin/claude` and `bin/gh` stand in for Claude Code and the GitHub
+  CLI under `VOLLEY_SIMULATED=1`, so an installed Volley (real volleyd, tmux or cmux, git and
+  broker) runs a whole wave without an account. The world (PRs, issues, labels, CI runs, sign-ins)
+  is one JSON file under `$VOLLEY_SIM_HOME`, advisory-locked so separate processes share it; git
+  is real: heads come from a local bare origin and a merge writes to it. `gh` answers every argv
+  shape volleyd's fence allows plus `volley setup`'s (`auth`, `api user`, `repo view|create|delete`,
+  `issue`, `label`, `pr create|view|list|merge|ready|checks`, `run list|view|watch`, `api` for the
+  CI runs and queue and the release train's tag refs, CI always green);
+  any other shape exits 1 with `unknown argv` and is logged to `unknown.jsonl`. `claude` keeps
+  sign-ins per profile, `mcp add-json|list|get|remove` in the profile's `.claude.json`, and, launched
+  in a worktree with `.volley/agent.json`, runs a simulated agent that registers with its own
+  login, does its role's work (an implementer commits, pushes and opens the PR; a reviewer
+  publishes an approving `result`) and reports `done`. Outside `VOLLEY_SIMULATED=1` both hand
+  the call to the real program; the services' PATH and the installer never include them. (#455)
+- **volley-cli: `volley sim env | reset`.** `eval "$(volley sim env)"` puts the fakes first on
+  PATH and sets `VOLLEY_SIM_HOME` (default `~/.volley/sim`) and `VOLLEY_SIMULATED=1`;
+  `volley sim reset` clears the simulated world. (#455)
+- **install.sh: one command installs Volley.** `curl -fsSL
+  https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh` installs what is missing
+  of the prerequisites (Homebrew, bun, mosquitto ≥ 2.1, gh, git, tmux and Claude Code on macOS;
+  apt, bun's installer, gh's apt repository and `snap install mosquitto` when none is installed on Ubuntu/Debian, behind
+  one `sudo -v`), clones Volley at the latest release tag (`--version`) into `~/.volley/src`,
+  writes the `volley` and `volleyd` commands into `~/.volley/bin` exactly as `volley setup` does,
+  adds that directory to PATH once and runs `volley setup` on the terminal. Rerunning it changes
+  nothing; `--check` lists what is found and missing, `--uninstall` (`--purge`) removes it again,
+  `--source <dir>` uses a checkout, `--no-setup` stops before setup and `--peer` passes through. (#456)
+- **Machine roles: the record of where the broker, the supervisor and the Desk run.** SPEC
+  §4.6.24 names the three machine roles, the retained record `volley/_system/roles`
+  (`roles.schema.json`), the moves topic `volley/_system/roles/moves/<move_id>`
+  (`role-move.schema.json`), the ops `role_plan`, `role_move` and `role_rollback`, the quiet and
+  7-day retention rules and six `_system` events (`roles_changed`, `role_move_*`,
+  `role_rolled_back`); `auth-request.schema.json` gains those ops plus `peer_invite`,
+  `peer_remove` and the reserved `peer_retarget`. volleyd keeps the record in
+  `$VOLLEYD_HOME/roles.json` (on its first start, all three on this machine), publishes it at
+  start and journals `roles_changed` when it differs. (#457)
+- **volley-cli: `volley role status [--json]`** prints which machine runs each role from the
+  retained record, with no answer needed from volleyd. (#457)
+- **volley-cli: `volley setup` signs you in and sets Claude Code up, with no secret in
+  `~/.claude.json`.** Two new steps after Accounts. Sign-ins: Claude Code (`claude auth login`)
+  and GitHub (`gh auth login --web`, then `gh auth setup-git`) in your browser, read with the
+  doctor's parsers (the e-mail only with `--show-email`, the GitHub login masked), and the
+  checkout added to `permissions.additionalDirectories`. Claude Code: a coordinator name asked
+  once and saved in `setup.json`, the volley MCP server registered with `VOLLEY_AUTH_DIR` in
+  place of a password (an entry with settings of your own is left as is), the `volley`,
+  `volley-issues` and `volley-wait` skills linked, the hooks installed; `--broker-url` re-points
+  the registration and the hooks. (#458)
+- **volley-mcp: a registration that names `VOLLEY_AUTH_DIR` logs in with its
+  `coordinator.json`.** Without the file the server fails naming it, never printing a password.
+  (#458)
+- **volleyd: `volleyd run` without `--owner` uses the coordinator name `volley setup` saved, and
+  says so;** the other commands use it as `VOLLEY_COORDINATOR` when the environment sets none.
+  The skill installers and the `/volley-issues` prerequisites point at `volley setup --check`
+  instead of printing an `add-json` with a password. (#458)
+- **packaging: `brew install kryptek/volley/volley` on macOS.** A Homebrew formula
+  (`packaging/homebrew/volley.rb`) installs the release tarball into `libexec`, writes the `volley`
+  and `volleyd` commands, depends on bun, mosquitto, gh, git and tmux, and says to run
+  `volley setup`. A release workflow on every `v*` tag builds the tarball (the checkout with its
+  `node_modules`, reproducible: `scripts/packaging/tarball.sh`) and its sha256, uploads both to the
+  release, renders the formula, checks it with `brew style` and pushes it to the tap when the
+  `HOMEBREW_TAP_TOKEN` secret is set. `install.sh` on macOS runs `brew install` when Homebrew
+  resolves the tap (and no `--version` or `--source` is given, and no curl-path install is already
+  there), else clones as before; a failed `brew install` stops it; `--check` and `--uninstall`
+  know the brew install. `volley setup` run from brew's install points the commands and services
+  at `$(brew --prefix)/opt/volley/libexec`, so `brew upgrade` does not break them; rerun
+  `volley setup` after an upgrade to rebuild the Desk. A release tag must match `package.json`'s
+  version. How to create the tap: `packaging/README.md`. (#459)
+- **volley-cli: every machine through its own tunnel.** `peer.json` gains `tunnel: ssh | none`
+  (none: the broker runs on this machine, reached at its own port, no ssh) and `heartbeat`
+  (false: the tunnel is kept and no record is published); `volley peer run` honours both, and
+  `volley peer join --tunnel none` pairs a machine the broker runs on. `volley peer retarget
+  --to <host> [--port <n>] [--tunnel ssh|none]` rewrites `peer.json`, restarts the service and
+  exits 0 only once the tunnel answers (1 after 30 s); a service that does not restart leaves
+  `peer.json` as it was. (#460)
+- **volleyd: `peer_join` answers the broker from the roles record, and `peer_retarget`.**
+  `peer_join` answers the broker's port as `roles.broker.address` names it and takes `tunnel:
+  "none"` (`hosts.<name>.tunnel.remote_port` is then the broker's port); the fence holds a paired
+  machine's launch env to exactly its own broker port. The new admin op `peer_retarget { name,
+  address, port?, tunnel? }` runs `volley peer retarget` on that machine over ssh and answers
+  once its record comes up through the new tunnel, journaling `peer_retargeted`; one run per
+  machine at a time. (#460)
+- **volley-cli: `volley setup` ends with a 1-issue test wave.** The new last step, `first-wave`, asks
+  once ("Run a 1-issue test wave now?", Enter: yes; never under `--yes`, `--simulated`,
+  `--no-first-wave` or `--check`), creates a scratch private repository `volley-hello-<4>`, files
+  "Add HELLO.md", pushes `release/<date>-hello-<4>`, adds it to the fleet with `volley repo add …
+  --wait`, writes `.volley/waves/hello-<4>.yaml` (`pipeline: [implement, merge_ready]`, `merge:
+  auto`; every run is a wave of its own, so a rerun after a failure works), submits it with `volleyd
+  run … --owner <coordinator>` and follows the wave until volleyd merged its PR (the URL and the
+  wall time; on a failure the journal's tail and the open decisions; 15 minutes from the submit at
+  most). `--repo <path> [--issue <n>]` runs it on a clone of yours; `--simulated` against
+  volley-sim's fakes. `setup-metrics.json` records `first_wave: { wall_ms, pr, merged }`, the
+  `Setup complete` line reports it, and the end prints `gh repo delete <owner>/<name> --yes` for
+  the scratch repository and any an earlier run left. (#461)
+- volleyd: the default model lives in one place, `DEFAULT_MODEL` in `config-defaults.ts`; the
+  test wave, the `/volley-issues` skill and the README cite it. (#461)
+- **volley-cli: `volley machine add <user@host>` makes a bare box a ready paired machine, from
+  the supervisor's.** One interactive ssh installs this machine's key there (the prompt is ssh's
+  own; every later step is `ssh -T -o BatchMode=yes … bash -s` with its script on stdin); then
+  `install.sh --peer --version <this machine's tag> --no-setup` (over `ssh -t`, announced, only
+  when the box lacks what sudo installs), `volley setup --peer --yes`, the box's key authorized
+  here (on a Mac, Remote Login checked first), a pairing code bound to its name redeemed with
+  `volley peer join` there, `gh auth login --web` over `ssh -t` and Claude through volleyd's
+  remote sign-in (`--no-signin` defers both), and the doctor's readiness row: tools, gh, claude,
+  trust, repositories, ready or not with the fixes (exit 1 when not ready). A rerun on a paired
+  box changes nothing; no line carries the code or a password; a fence allows only its own
+  commands. (#462)
+- **volley-cli: `volley setup --peer`.** The sign-ins, Claude Code for the profile only (the
+  skills, and the hooks at the peer tunnel; no coordinator name or MCP registration), the
+  Terminal, and `volley peer run` as the user service in place of volleyd (skipped until the
+  machine is paired). It never mentions a broker, the Desk or the phone, and refuses their flags. (#462)
+- **install.sh: `--peer` installs no broker.** mosquitto is neither installed nor checked, the
+  Homebrew tap is not used, and `volley setup --peer` runs with `VOLLEY_BROKER=skip`; `--uninstall`
+  removes the peer service too. (#462)
+- **volleyd: `peer_invite { for }` may name a machine not paired yet.** The code then pairs that
+  new machine only (`volley machine add`); a host configured by hand is still refused. (#462)
+- **volley-cli, volley-desk: the Desk learns the broker's host from its server.**
+  `volley desk serve --broker-host <host> [--broker-ws-port <n>]` serves `/desk-config.json`
+  (`{"broker":{"host","ws_port"}}`, never cached; a 404 without the flag), and the page connects
+  there: the prop, then `VITE_VOLLEY_BROKER_URL`, then the served broker, then its own host,
+  fetched once before the sign-in form and kept in memory only. Settings › About names the broker
+  and whether it was *served* or the *page host*. `setup.json` records `broker_host`, and the
+  Services step renders the flag into the Desk's unit; `volley setup --check` names it. (#463)
+- **volley-cli: `volley desk install | uninstall | check`.** The Desk's own install as commands
+  (what volleyd runs over ssh to move it): `install [--port] [--broker-host] [--root]` builds the
+  Desk without the `VITE_VOLLEY_BROKER_*` variables, stamps the build and installs its service for
+  this platform, idempotently, then records its port and broker host in `setup.json` (only once
+  it takes) so a later `volley setup` renders the same unit; `uninstall` removes the service and keeps `dist/`; `check --url
+  --version` exits 0 when `/` answers 200 and `/version.json` matches. (#463)
+- **CI: Layer 1 installs Volley from nothing on every PR.** A new `Install` workflow
+  (`.github/workflows/install.yml`) runs `install.sh` in fresh Ubuntu 24.04 and Debian 13
+  containers (a non-root user, mosquitto 2.1 built from source, a `systemctl` stand-in) and on a
+  GitHub-hosted Mac, then `volley setup --yes --simulated` against volley-sim, and fails when
+  setup's wall time or the install end to end is over 15 minutes, setup asked a question, a
+  `volley setup --check` row is not done, the test wave's PR did not merge, a rerun changes
+  anything, a log holds a password or token, or `install.sh --uninstall` leaves a service running.
+  The metrics table lands in the step summary; the logs are uploaded.
+  `scripts/install-tests/README.md` runs it locally with Docker. (#464)
+- **volley-desk: Settings › Machines › Add a bare machine….** A form (the box's `user@host`, its
+  password or a key file, an optional sudo password, a name) makes a box with only ssh a paired
+  machine from the Desk: each of `volley machine add`'s seven steps streams into the sheet as it
+  happens (the sheet waits as long as rows keep coming), and the run ends with the machine's
+  readiness and its sign-in buttons; a failure names the step and its fix. (#465)
+- **volleyd: `machine_add`, an admin op.** It runs `volley machine add`'s step list over
+  `ssh -T … bash -s` without a terminal, publishing `progress` rows on the op's reply topic before
+  its answer. A password reaches ssh only through an `SSH_ASKPASS` helper reading a 0600 temp file
+  removed after the step, sudo on the box through a `SUDO_ASKPASS` helper, and neither is
+  journaled, logged or answered; the fence gains the machine-add ssh forms and refuses an askpass
+  env anywhere else. A second `machine_add` for a name whose run has not ended is refused. (#465)
+- **volleyd: the role-move engine and moving the Desk.** `role_plan`, `role_move` and
+  `role_rollback` (admin ops, SPEC §4.6.24) move the Desk to a paired machine: blockers (not
+  paired, down, behind the supervisor's version, no `bun` on its ssh PATH, the port taken), then
+  install there, a health check (`volley desk check`), the roles record, a sign-in link for the
+  new address sealed to the requester, and the old Desk unloaded last. A failing step undoes the
+  steps before it; a `plan_id` that no longer matches is refused with `plan changed`; one move at
+  a time. Progress is the retained `volley/_system/roles/moves/<move_id>`, journaled
+  `role_move_*` in `_system` and logged under `$VOLLEYD_HOME/roles/<move_id>/`, kept 7 days for a
+  rollback and removed at the next start after that; a rollback is journaled `role_rolled_back`,
+  and a move a restart finds half-done is ended `failed`. (#466)
+- **CI: Layers 2–4 of the install tests, nightly on self-hosted runners.** `install-nightly.yml`
+  (a schedule and `workflow_dispatch` only, never a PR) installs Volley in fresh Ubuntu 24.04 and
+  Debian 13 VMs through multipass and reboots them (the services come back, `--check` green within
+  2 minutes, volleyd's status from the new boot); in fresh macOS VMs through Tart, on both the curl
+  and the Homebrew path (launchd, the keychain, the Desk, the hooks, a restart); and pairs a peer VM
+  to a hub VM with `volley machine add` (ready within 10 minutes, a task placed on the peer, then
+  `volley peer remove`). Every run deletes its VMs, refuses a name it does not own, writes its
+  metrics to the step summary and, on failure, comments on the one `install-tests` issue. The
+  runners' set-up is in `scripts/install-tests/README.md`; `scripts/install-tests/vm.test.ts` tests
+  the scripts against stand-in `multipass`, `tart`, `ssh` and `gh`. (#467)
+- **volleyd: moving the supervisor.** `role_move { role: "supervisor", to }` bundles the
+  supervisor's home (waves, config, registries, the auth dir's logins; never worktrees, logs or
+  sign-ins), copies it to the target and runs `volley role receive` there, then unloads itself;
+  the new supervisor continues the same move at its start: its own `working` status, the old
+  machine re-paired with `tunnel: none` (its agents run in tmux over ssh), the roles record. The
+  plan requires a quiet fleet (or `drain: true`, which waits for one and admits nothing new), the
+  target up at the supervisor's version with `gh` write access, a signed-in Claude profile and
+  ssh to every other paired machine. A failed receive leaves the old supervisor in charge;
+  `role_rollback` moves it back within 7 days, as a new supervisor move with a fresh bundle.
+  Supersedes #247 and #248. (#469)
+- **volley-cli: `volley role receive supervisor <bundle> --from <old>`.** Restores the bundle
+  (checking its manifest first; what it replaces is kept), rewrites `config.yaml`, stops this
+  machine's own heartbeat (after the rotation, which goes through its tunnel), rotates
+  volleyd's login into `broker.json`, installs and starts
+  volleyd, and prints a pairing code for the old machine last; any failure puts everything back
+  (exit 1, or 3 after the rotation). (#469)
+- **volleyd: moving the broker.** `role_move { role: "broker", to, address?, lan? }` moves the
+  MQTT broker, with every login it holds, from the supervisor's machine to a paired one: the old
+  broker stopped through its layout, its Dynamic Security state file, admin login and `lan`
+  bundled (the persistence DB never travels), copied and received there, the supervisor's own
+  ssh tunnel to it (and volleyd's unit pointed at it), a health check (volleyd's login, the
+  broker's version, both listeners refusing anonymous clients), every paired machine re-pointed
+  with `peer_retarget` (the target with `tunnel: none`) and up through the new broker within the
+  grace, the Desk told the new broker host, then the roles record with `address`. The plan blocks
+  on a fleet that is not quiet (or waits with `drain: true`), no mosquitto 2.1 on the target,
+  a machine that cannot ssh to `address`, and with `lan` port 9001 unreachable; a root-owned
+  install on the target gets its receive as a `sudo` terminal command the move waits for. The
+  move answers as it starts (`handing_over: true`): volleyd runs it without a broker and restarts
+  through the new one when it ends, republishing what it owns. A failing step or a machine that
+  never comes back up undoes everything (`failed`, `rolled_back: true`); `role_rollback` brings
+  the broker back within 7 days. The plan's `after` names the one line for your own sessions:
+  `volley setup --step claude-code --broker-url mqtt://127.0.0.1:<port>`. (#470)
+- **volley-cli: `volley broker receive | probe | tunnel`.** `receive <bundle> [--lan|--no-lan]
+  [--layout <name>]` checks a broker move's bundle (refusing one whose state file is not Dynamic
+  Security JSON before writing anything), places the state file and admin login, then runs
+  `volley setup`'s Security step on them (config, restart, the anonymous check) and prints
+  `mosquitto 2.1.x: N logins`; a root-owned layout without root exits 2 with the `sudo` line.
+  `probe` prints this machine's mosquitto layout and version; `tunnel --to | --off | --show` is
+  the supervisor machine's own tunnel to the moved broker. (#470)
+- **volley-cli: `volley role move broker|supervisor|desk --to <machine>` and
+  `volley role rollback <move_id>`.** The CLI over the machine-role ops: `move` prints the plan
+  sheet volleyd answers `role_plan` with (one renderer, `volleyd/roles/sheet`, the Desk's too),
+  `--dry-run` stops there (exit 1 when blocked), otherwise it asks once (or `--yes`), sends
+  `role_move` with the plan's `plan_id` and streams the move's retained topic as `✓ step` lines
+  until it ends — `the <role> runs on <machine> (undo: volley role rollback <move_id>)`, a Desk
+  move's sealed sign-in link, exit 1 on a failed or changed plan, 124 when volleyd does not
+  answer in time. A supervisor move goes on streaming through the hand-over. Broker flags
+  `--address <ssh destination>` and `--lan|--no-lan`, `--drain` for a quiet-fleet wait, `--port`
+  for the Desk; a non-admin login is refused before connecting. (#471)
+- **volley-desk: machine roles in Settings › Machines, and moving a role from the Desk.** Each
+  machine card gets a **Roles** row (`broker`, `supervisor`, `desk`), the section a summary line
+  (`broker · studio — supervisor · studio — desk · box-a`) and the Machines window's rows the
+  letters `B S D`, from volleyd's `volley/_system/roles`. For an admin, **Move a role here…** opens
+  a sheet that plans the move (`role_plan`): its steps with each machine, the commands to run in a
+  terminal, what blocks it with each fix, and the notes for after. It moves on confirm
+  (`role_move`), or waits for an idle fleet. A broker move queues the supervisor's by default. The
+  sheet follows the move's live steps, then shows the hand-over for a supervisor move and the
+  sign-in link and QR for a Desk move. Done names `volley role rollback <move_id>` (kept 7 days),
+  and the old Desk address shows where the Desk lives now. (#472)
+
+### Changed
+
+- **release: v0.11.0 — install and machine roles.** Every package, the root and the
+  `volley-issues` skill (`version: 0.11`) move to 0.11.0: the one-command install (epic #302) and
+  machine roles (epic #296). The owner smoke is `docs/SMOKE-v0.11.md` (parts A and B). (#474)
+
+### Fixed
+
+- **volleyd: a wave names a repository held only by paired machines by its owner/name.**
+  `repo: owner/name` resolves to the supervisor's clone when its machine holds one, is kept as the
+  owner/name when only paired machines hold it (its tasks are placed there; the supervisor needs no
+  checkout and runs its `gh` work, the pipeline's PR, CI and merge steps included, with `--repo`
+  and no working directory), and is refused only when no machine holds it, naming them. Each task
+  of such a wave pinned to the supervisor's machine is refused at submit with the fix that applies
+  to it, and so is a release `playbook:`; such a wave's PRs merge one by one, never in a merge
+  train. `volleyd validate` gives the same verdict offline (saying so when `config.yaml` does not
+  parse) and both CLIs print a `repo:` line.
+  (#448)
+- **volley-hooks: parallel tool calls no longer lose their count on a busy machine.** A hook
+  waits for `work-log.lock` as long as a live holder can keep it (5 s, when a dead hook's lock
+  turns stale) instead of 2 s, so hooks queued behind each other on a loaded machine still count
+  their tool call. (#455)
+- **volley-cli: `volley setup --yes --simulated` finishes on a fresh machine.** The Sign-ins step
+  no longer asks for `gh auth setup-git` under the simulator (its fake writes no git config, so the
+  step never verified); the test wave's scaffold commits with the simulated world's git identity
+  instead of failing with "Author identity unknown" where git has none; and setup trusts the
+  scratch clone it made for Claude Code (the simulated wave skips `volley repo add`, whose add
+  volleyd takes as consent), so the wave no longer waits on a `repo_untrusted` decision; and the
+  services run with the simulator on (`VOLLEY_SIMULATED=1`, its fakes first on PATH; on macOS
+  `volleyd install` keeps it in the plist when run with it), so volleyd's `gh` and `claude` are the
+  fakes rather than the real ones. (#464)
+- volley-cli: `volley setup` and `volley auth init` create the broker's state-file directory when it
+  is missing (a fresh Homebrew mosquitto has no `var/mosquitto` until it first runs), instead of
+  failing at `mosquitto_ctrl dynsec init`. (#464)
+- **volley-mcp: a publish still unacknowledged when the connection closes fails instead of
+  waiting forever.** mqtt.js keeps a persistent session's QoS 1 publishes for a reconnect that
+  never comes (Volley clients never reconnect), so a broker move hung at its first step: volleyd
+  published the move's progress as the old broker stopped and that publish never settled. It now
+  fails with `BROKER_DOWN` and the move goes on without a broker, as designed. (#473)
+- CI: a `release/**` push that reuses a PR run no longer fails its `CI reused` job (a YAML comment
+  truncated the step's command to `echo "PR`). (#535)
+- volleyd: a PR's own failing test is no longer called a flake because the release branch is red
+  on something else; bun test ids now carry their file from the log's group header, and the flake
+  question names the release branch only when it fails the same test. (#536)
+
+### Docs
+
+- **docs: the README Quickstart is the one command,**
+  `curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh`, with Linux
+  and macOS side by side, the three questions and two sign-ins `volley setup` asks, and the Desk
+  link it prints; the seven manual steps (and their circular order: setup before the clone) are
+  gone. The new
+  `docs/INSTALL.md` says what the installer does on each platform, every flag, `--check`,
+  `--uninstall`, the Linux notes (sudo once, mosquitto 2.1, the snap's root-owned config,
+  `systemd --user` and lingering), the Homebrew path, adding a bare machine
+  (`volley machine add`), updating and setup from a clone. (#468)
+- **docs: `docs/SMOKE-v0.11.md` part A, blank machine to first wave.** The owner's real-Claude
+  canary on a fresh Tart macOS VM and a fresh multipass Ubuntu VM: the one command timed from
+  Enter to the merged PR, reboot survival, a bare machine added, the first-run screens (the
+  browser-extension prompt included) as a checklist line, *Pass* lines, and a results table with
+  the install targets beside each count; the owner's new workstation is a run-history entry, not a
+  gate. (#468)
+- **docs: no stale install instructions.** The package READMEs, skills and their smoke lists point
+  at the one command and `volley setup --check` instead of a hand-pasted `claude mcp add-json`
+  with a password, a `brew services` broker prerequisite, the old example namespace (now
+  `default`), hard-coded model ids (now `DEFAULT_MODEL`) and Cmd-Q-only wording; the skills'
+  broker-down hint is `volley setup --check`. `scripts/check-install-docs.test.ts` fails on any
+  tracked Markdown file that brings one back, and pins the Quickstart to the one command and
+  `docs/INSTALL.md` to every installer flag. (#468)
+- **docs: machine roles end to end.** `docs/SMOKE-v0.11.md` part B is the owner's run on real
+  hardware: the Desk moved to a paired machine with the phone signed in there, the supervisor
+  moved there with the old machine re-paired as a tmux peer and a two-task wave placed on it, the
+  broker moved there with the Desk staying (the phone, and the old machine's sessions after the
+  one-line `volley setup --step claude-code` fix), each rolled back, with *Pass* lines and a
+  results block. The root README's use case 2 adds moving the broker, the supervisor or the Desk
+  to the box from the Desk; `/volley-issues`' prerequisites say what to run where when
+  `volley role status` names another machine for the supervisor; the volleyd and volley-cli
+  READMEs' machine roles sections follow one order (record → Desk → supervisor → broker →
+  rollback), the rollbacks gathered in one closing section. (#473)
+- **volleyd: the three role moves and their rollbacks run end to end in CI**
+  (`test/roles-e2e.test.ts`): real daemons on fake machines, a second in-process supervisor
+  taking each hand-over, the broker move between two Aedes brokers. (#473)
+
 ## 0.10.0 — 2026-10-24
 
 ### Added

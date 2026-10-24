@@ -102,6 +102,42 @@ describe("SignInGate #signin=<token>", () => {
     window.history.replaceState(null, "", "/");
   });
 
+  it("waits for /desk-config.json, then redeems the link at the served broker", async () => {
+    window.history.replaceState(null, "", `/#signin=${SIGNIN}`);
+    let settle: (c: { broker: { host: string; ws_port: number } } | null) => void = () => {};
+    const loadConfig = vi.fn(
+      () =>
+        new Promise<{ broker: { host: string; ws_port: number } } | null>((ok) => {
+          settle = ok;
+        }),
+    );
+    const redeem = vi.fn(async (_r: RedeemRequest) => ({
+      ok: false as const,
+      error: "token already used",
+    }));
+    render(
+      <SignInGate
+        demo={false}
+        env={{}}
+        clientFactory={factory().make}
+        redeem={redeem}
+        loadConfig={loadConfig}
+      >
+        <Probe />
+      </SignInGate>,
+    );
+    await act(async () => {});
+    // The token is single use: never spent at the page host while the server's answer is out.
+    expect(redeem).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe(`#signin=${SIGNIN}`);
+    await act(async () => settle({ broker: { host: "box-a", ws_port: 9001 } }));
+    expect(redeem).toHaveBeenCalledTimes(1);
+    expect(redeem).toHaveBeenCalledWith(
+      expect.objectContaining({ url: "ws://box-a:9001", token: SIGNIN }),
+    );
+    expect(window.location.hash).toBe("");
+  });
+
   it("redeems the link, stores the minted credential and signs in with it", async () => {
     window.history.replaceState(null, "", `/#signin=${SIGNIN}`);
     let ask: { url: string; token: string; label: string } | null = null;

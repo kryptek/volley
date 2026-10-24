@@ -8,23 +8,31 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import {
   availableParallelism,
   freemem,
   homedir,
+  hostname,
   loadavg,
   arch as osArch,
   platform,
   totalmem,
   uptime,
 } from "node:os";
-import { delimiter, dirname, join, posix, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, posix, resolve } from "node:path";
+import { realAuthDeps } from "volley-cli/auth/context";
 import { BrokerVersionError } from "volley-cli/auth/version";
-import { countLiveAgents } from "volley-cli/setup/broker";
+import { defaultAuthDir } from "volley-cli/commands/auth";
+import { DESK_PORT } from "volley-cli/commands/desk-serve";
+import { countLiveAgents, probeAnonymous } from "volley-cli/setup/broker";
+import { readSetupInstall } from "volley-cli/setup/journal";
+import { cmuxInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -216,7 +224,7 @@ import {
   waveAccountMoves,
 } from "./claude/usage";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
-import { ConfigStore } from "./config-store";
+import { ConfigStore, resolveLocalTerminal } from "./config-store";
 import {
   ADMISSION_TOPIC,
   ARCHIVE_TOPIC,
@@ -225,6 +233,7 @@ import {
   type ControlResponse,
   DAEMON_AGENT_ID,
   LEASE_REQUESTS_FILTER,
+  ROLES_TOPIC,
   leasePoolTopic,
   waveDigestTopic,
   waveEventsTopic,
@@ -287,6 +296,7 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import {
+  SERVICE_LABEL,
   TMUX_SIZE,
   isRepoAdd,
   mintConsentToken,
@@ -298,6 +308,7 @@ import { type Tree, footprintOf, readReleaseTree } from "./footprint";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
+import { LocalTmuxHost } from "./hosts/local-tmux";
 import {
   type RemoteHost,
   type RemoteHostSpec,
@@ -327,6 +338,13 @@ import {
   poolPayload,
   replayLeases,
 } from "./leases";
+import {
+  type MachineAddEnv,
+  type MachineAddOutcome,
+  parseMachineAdd,
+  realMachineAddEnv,
+  runMachineAdd,
+} from "./machine-add";
 import {
   type DoctorReport,
   MACHINES_FILTER,
@@ -389,13 +407,14 @@ import {
   readinessTopic,
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
-import { readRepoView, readSlugView } from "./repo-visibility";
+import { readRepoView, readSlugView, viewFromSlug } from "./repo-visibility";
 import {
   type AddStep,
   type RepoMachines,
   addPlan,
   assignedSlugs,
   cloneFor,
+  ghRepoContext,
   homeFromClones,
   isSlug,
   legacyOrigin,
@@ -408,6 +427,14 @@ import {
   withMachines,
   withoutMachines,
 } from "./repos";
+import type { RoleDeps } from "./roles/deps";
+import { hostOf } from "./roles/deps";
+import { type MovePayload, type MoveResult, RoleMoves } from "./roles/engine";
+import { markContinued, pendingHandovers, resumeRecord, resumeSteps } from "./roles/handover";
+import { ROLE_OPS, RoleOps } from "./roles/ops";
+import type { BrokerDeps, ProbeLink } from "./roles/plan-broker";
+import type { SupervisorDeps } from "./roles/plan-supervisor";
+import { type RolesRecord, readRoles, sameRoles, writeRoles } from "./roles/record";
 import {
   type Admission,
   admit,
@@ -428,6 +455,7 @@ import type {
   Footprint,
   GitHubRepo,
   JournalEvent,
+  LocalTerminal,
   MergeMode,
   NewEvent,
   NudgeOnMerge,
@@ -450,6 +478,7 @@ import {
   type PlacementDefaults,
   WaveFileError,
   filePlan,
+  isSlugRepo,
   parseWaveFile,
   resolveWaveRepo,
 } from "./wave-file";
@@ -483,6 +512,7 @@ import {
   type ClockState,
   type PendingReap,
   type TimerHandle,
+  sleep as clockSleep,
   dateOf,
   heartbeatSuppresses,
   holdReap,
@@ -674,6 +704,14 @@ export interface DaemonOptions {
    * env and the broker they log in to. Default: the real machine, volleyd's own broker URL.
    */
   setup?: Partial<Omit<SetupOpsOptions, "exec">>;
+  /** `machine_add`'s hub (machine-add.ts; tests): default the real machine. */
+  machineAdd?: Partial<MachineAddEnv>;
+  /**
+   * A broker move's links (roles/plan-broker.ts; tests): volleyd's login at a URL (the health
+   * check's, and each re-pointed machine's record read through it), the anonymous probe and
+   * volleyd's own unit re-pointed. Default: a real login, setup's probe, the systemd user unit.
+   */
+  roleBroker?: Partial<Pick<BrokerDeps, "connect" | "probeAnonymous" | "unitUrl">>;
   /**
    * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
    * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
@@ -728,8 +766,15 @@ export interface DaemonOptions {
 
 /** How the daemon spawns agents. Every field has a production default. */
 export interface SpawnerOptions {
-  /** The `local` host (default: cmux on this machine, through the fenced exec). */
+  /**
+   * The `local` host (default: the host for the resolved `fleet.local_terminal`: cmux or tmux
+   * on this machine, through the fenced exec).
+   */
   host?: Host;
+  /** Builds the `local` host for a terminal (tests; default: LocalCmuxHost or LocalTmuxHost). */
+  localHostFor?: (terminal: LocalTerminal) => Host;
+  /** Whether cmux is installed here, for an unset `fleet.local_terminal` (default: `cmuxInstalled`). */
+  cmuxFound?: () => boolean;
   /** Claude Code's folder-trust file (default `~/.claude.json`). */
   claudeJsonPath?: string;
   /** `packages/volley-hooks` (default: the one in this checkout). */
@@ -753,6 +798,14 @@ export interface SpawnerOptions {
   remoteHost?: (spec: RemoteHostSpec) => RemoteHost;
   /** The exec remote hosts and their tunnels run with (default: the fenced exec). */
   remoteExec?: ExecFn;
+}
+
+/** Where the supervisor runs a wave's `gh` work (`ghFor`). */
+interface GhIn {
+  exec: ExecFn;
+  cwd: string;
+  /** False for a wave named by an `owner/name` the supervisor holds no clone of (#448). */
+  clone: boolean;
 }
 
 /**
@@ -853,6 +906,9 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "peer_invite",
   "peer_remove",
   "peer_doctor",
+  "peer_retarget",
+  // A bare box made a paired machine (the Desk's Add a bare machine).
+  "machine_add",
   // Repositories (SPEC §4.6.21).
   "repo_add",
   "repo_remove",
@@ -1439,6 +1495,23 @@ export class Daemon {
   private readonly claude: ClaudeService;
   /** Paired machines (peers.ts) and their heartbeats (machines.ts). */
   private readonly peers: PeerService;
+  /** Called with every heard machine record, after it is folded in (`machineUp`). */
+  private readonly recordWaiters = new Set<(name: string, record: MachineRecord) => void>();
+  /** The machine roles record as last published (SPEC §4.6.24); null before the first. */
+  private roles: RolesRecord | null = null;
+  /** Machine role moves (SPEC §4.6.24): one at a time, kept for a rollback. */
+  private readonly moves: RoleMoves;
+  private readonly roleOps: RoleOps;
+  /** A supervisor move this supervisor is handing itself over in: losing the broker is expected. */
+  private handingOver: string | null = null;
+  /** The broker connection lost during a hand-over: fatal once the hand-over ends. */
+  private deferredFail: Error | null = null;
+  /**
+   * A broker move (or its rollback) in progress: its first step stops the broker this connection
+   * runs through, so losing it waits for the move's end, then restarts volleyd (its service
+   * manager) on the broker's new address.
+   */
+  private brokerMoving: string | null = null;
   /** `setup_plan` / `setup_apply` (setup-ops.ts), answered beside the serial queue. */
   private readonly setupOps: SetupOps;
   /** Setup requests being answered (topic/correlation id): a re-delivery waits for the answer. */
@@ -1509,6 +1582,8 @@ export class Daemon {
   private fleetSince: number | null = null;
   /** Hosts a `peer_doctor` runs on now (one at a time per host), and the requests it answers. */
   private readonly doctoring = new Set<string>();
+  /** The names a `machine_add` runs for now: one run per name. */
+  private readonly adding = new Set<string>();
   private readonly authRunning = new Set<string>();
   // --- Repositories (SPEC §4.6.21): repo_add's clone and trust runs ---
   /**
@@ -1727,7 +1802,11 @@ export class Daemon {
       file: join(opts.home, "peer-codes.json"),
       pairedFile: join(opts.home, "peers.json"),
       namespace: opts.namespace,
-      broker: () => brokerAddress(opts.brokerUrl),
+      // The broker's port on its machine as the roles record names it (SPEC §4.6.24).
+      broker: () => ({
+        host: brokerAddress(opts.brokerUrl).host,
+        port: this.roles?.broker.address.mqtt_port ?? brokerAddress(opts.brokerUrl).port,
+      }),
       hosts: () => this.config.effective().hosts,
       setHost: (name, host, by) => this.config.applyPatch({ hosts: { [name]: host } }, by),
       removeHost: (name, by) => this.config.removeHost(name, by),
@@ -1744,6 +1823,28 @@ export class Daemon {
       remote: (name) => this.remoteFor(name),
       machines: () => this.machines.all(),
       journal: (ev) => this.appendSystem(ev),
+    });
+    this.moves = new RoleMoves({
+      home: opts.home,
+      now: () => dateOf(this.time),
+      publish: (m: MovePayload) =>
+        this.publish(
+          moveTopic(m.move_id),
+          this.envelope("_system/roles/moves", "role_move", m),
+          true,
+        ),
+      clear: (id) => this.clearRetained(moveTopic(id)),
+      journal: (ev) => this.appendSystem(ev),
+      log: this.log,
+    });
+    this.roleOps = new RoleOps({
+      deps: () => this.roleDeps(),
+      supervisor: () => this.supervisorDeps(),
+      moves: this.moves,
+      finished: (id, r) => this.moveFinished(id, r),
+      log: this.log,
+      broker: () => this.brokerDeps(),
+      sleep: (ms) => clockSleep(this.time, ms),
     });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
@@ -1819,6 +1920,8 @@ export class Daemon {
     try {
       await assertNotRunning(opts);
       d = new Daemon(opts, release);
+      // fleet.local_terminal is read when the supervisor starts (SPEC §4.6.4), not at first use.
+      void d.host;
       await d.connect();
       return d;
     } catch (e) {
@@ -1968,6 +2071,7 @@ export class Daemon {
           }
           const doctorAt = this.machines.record(name)?.doctor_at;
           const keptNewer = this.machines.observe(record, { heard });
+          if (heard) for (const w of [...this.recordWaiters]) w(name, record);
           this.migrateLegacyRepo(name);
           if (record.tunnel === "up" && heard) this.sampleHost(name, record);
           // The box's beat still carries its service's older doctor run: re-assert the newer one
@@ -2020,6 +2124,11 @@ export class Daemon {
 
     await this.publishConfig();
     await this.publishArchiveIndex();
+    await this.publishRoles();
+    // Role moves kept past the retention window go, with their retained topics (SPEC §4.6.24);
+    // the rest are published again (a failed hand-over's record was written while offline).
+    await this.moves.sweep();
+    await this.moves.republish();
     // An archived wave's retained topics, in case a crash came between journaling wave_archived
     // and clearing them (a clear is not a re-publish, SPEC §4.6.20).
     for (const [wave, log] of this.archived) {
@@ -2084,6 +2193,8 @@ export class Daemon {
       this.envelope("status", "working", { waves: this.waves.size }),
       true,
     );
+    // A supervisor move handed to this machine goes on here, now that this start is done.
+    void this.track(this.continueHandovers());
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
     if (tickMs > 0) {
@@ -2665,6 +2776,15 @@ export class Daemon {
   /** Die on our own: drop the dead connection, free the home lock, resolve `closed`. */
   private fail(reason: Error): void {
     if (!this.running) return;
+    // A hand-over's receive rotates volleyd's login, which drops this connection: the move's
+    // remaining steps here (an ssh round-trip) finish first (moveFinished).
+    if (this.handingOver !== null || this.brokerMoving !== null) {
+      this.log(
+        `broker connection lost during the ${this.handingOver !== null ? "hand-over" : "broker move"} ${this.handingOver ?? this.brokerMoving}: ${reason.message}`,
+      );
+      this.deferredFail ??= reason;
+      return;
+    }
     this.log(`fatal: ${reason.message}`);
     this.halt();
     this.broker.simulateCrash(); // the socket is already gone; this resets the client state
@@ -2757,9 +2877,10 @@ export class Daemon {
     if (this.sampling) return;
     this.sampling = true;
     try {
+      // A wave named by an `owner/name` has no clone here to read its CI queue in (#448).
       const repos = [
         ...new Set(this.runningWaves().map(([, l]) => repoDir(l.record.wave?.repo ?? ""))),
-      ].filter((r) => r !== "");
+      ].filter((r) => r !== "" && !isSlug(r));
       let reading: PressureReading;
       try {
         reading = await this.samplePressure({
@@ -3027,6 +3148,8 @@ export class Daemon {
    * lowering one never un-admits anything.
    */
   private async tickNow(): Promise<void> {
+    // A role move waiting for a quiet fleet (SPEC §4.6.24): planned and started beside the queue.
+    if (this.roleOps.draining()) void this.roleOps.tick();
     await this.sweepInbox();
     await this.sweepMachines();
     await this.machineDownPass();
@@ -3066,13 +3189,17 @@ export class Daemon {
         continue;
       }
       // --- end Fleet (F3) ---
-      const verdict = admit(candidates, admissionFor(rec, this.killSwitch, this.pressure(wave)), {
-        live,
-        hardCeiling: eff.hard_ceiling,
-        spawnsUsed: spawnsUsed(rec),
-        spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
-        clusters: clusterRooms(rec),
-      });
+      const verdict = admit(
+        candidates,
+        admissionFor(rec, this.closedToNew(), this.pressure(wave)),
+        {
+          live,
+          hardCeiling: eff.hard_ceiling,
+          spawnsUsed: spawnsUsed(rec),
+          spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+          clusters: clusterRooms(rec),
+        },
+      );
       live += verdict.admit.length;
       const before = JSON.stringify(this.heldBack.get(wave) ?? []);
       this.heldBack.set(wave, verdict.reasons);
@@ -3138,7 +3265,7 @@ export class Daemon {
     eff: Tunables,
   ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
     const w = rec.wave as Wave;
-    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const gate = admissionFor(rec, this.closedToNew(), this.pressure(wave));
     const r = admitPlacing(
       candidates,
       w,
@@ -3422,7 +3549,7 @@ export class Daemon {
     const def = w?.tasks[task];
     if (rec === undefined || w == null || def === undefined) return null;
     const eff = this.config.effective(wave);
-    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const gate = admissionFor(rec, this.closedToNew(), this.pressure(wave));
     return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
       ...this.placeOptions(eff, wave),
       exclude,
@@ -3610,7 +3737,7 @@ export class Daemon {
     for (const id of ids) {
       if (!waiting.has(id)) continue;
       snap ??= this.placementSnapshot(
-        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        admissionFor(rec, this.closedToNew(), this.pressure(wave)),
         this.config.effective(wave),
       );
       const p = this.placeAway(wave, id, [name], snap);
@@ -3656,7 +3783,7 @@ export class Daemon {
     if (answer === MACHINE_DOWN_REPLACE) {
       const eff = this.config.effective(wave);
       let snap = this.placementSnapshot(
-        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        admissionFor(rec, this.closedToNew(), this.pressure(wave)),
         eff,
       );
       const moved = new Set<string>();
@@ -4190,6 +4317,44 @@ export class Daemon {
     return state;
   }
 
+  /**
+   * The machine roles record (SPEC §4.6.24): `$VOLLEYD_HOME/roles.json` (on the first start, all
+   * three roles on this machine), journaled `roles_changed` in `_system` when it differs from the
+   * last one journaled, and published retained. An invalid file is logged and left as it is; the
+   * last journaled record is published instead.
+   */
+  private async publishRoles(): Promise<void> {
+    const last = this.system
+      .readAll()
+      .filter((e) => e.type === "roles_changed")
+      .at(-1)?.data.roles as RolesRecord | undefined;
+    const localName = this.config.localName();
+    const setup = readSetupInstall(this.opts.home);
+    const deskHost = setup?.desk_host ?? "localhost";
+    const read = readRoles(
+      this.opts.home,
+      { localName, hosts: Object.keys(this.config.effective().hosts) },
+      {
+        machine: localName,
+        mqttPort: brokerAddress(this.opts.brokerUrl).port,
+        wsPort: DAEMON_DEFAULTS.ws_default_port,
+        lan: setup?.lan ?? false,
+        deskUrl: `http://${deskHost.includes(":") && !deskHost.startsWith("[") ? `[${deskHost}]` : deskHost}:${setup?.desk_port ?? DESK_PORT}`,
+        now: dateOf(this.time).toISOString(),
+      },
+    );
+    if (!read.ok) this.log(`roles: ${read.error}; the record stays as last journaled`);
+    const record = read.ok ? read.record : last;
+    if (record === undefined) return;
+    this.roles = record;
+    if (last === undefined || !sameRoles(last, record))
+      await this.appendSystem({
+        type: "roles_changed",
+        data: { by: record.updated_by, roles: record },
+      });
+    await this.publish(ROLES_TOPIC, this.envelope("_system/roles", "roles", record), true);
+  }
+
   /** The retained `volley/_waves/_archive` index, newest first (archive_index_max entries). */
   private async publishArchiveIndex(): Promise<void> {
     const entries = [...this.archived.values()].flatMap((log) => indexEntry(log.record) ?? []);
@@ -4680,12 +4845,55 @@ export class Daemon {
     return { pinned: null, source: "balanced" };
   }
 
-  /** The `local` host agents run on. */
+  /**
+   * The `local` host agents run on: cmux or tmux by `fleet.local_terminal`, resolved once (a
+   * change applies at the next start: running agents' workspaces belong to the terminal they
+   * started in).
+   */
   private get host(): Host {
-    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
+    this.localHost ??=
+      this.opts.spawner?.host ??
+      this.localHostFor(
+        resolveLocalTerminal(
+          this.config.effective().fleet.local_terminal,
+          this.opts.fleet?.os?.platform?.() ?? process.platform,
+          this.opts.spawner?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
+        ),
+      );
     return this.localHost;
   }
   private localHost: Host | undefined;
+
+  /** The `local` host for one terminal, built once (an agent restored from another terminal). */
+  private localHostFor(terminal: LocalTerminal): Host {
+    let h = this.localHosts.get(terminal);
+    if (h === undefined) {
+      const build = this.opts.spawner?.localHostFor;
+      h =
+        build !== undefined
+          ? build(terminal)
+          : terminal === "tmux"
+            ? new LocalTmuxHost(realExec)
+            : new LocalCmuxHost(realExec);
+      this.localHosts.set(terminal, h);
+    }
+    return h;
+  }
+  private readonly localHosts = new Map<LocalTerminal, Host>();
+
+  /**
+   * The `local` host a task's agent runs on: the terminal its `agent_spawned` recorded, whatever
+   * `fleet.local_terminal` says now (SPEC §4.6.4: a workspace belongs to the terminal it started
+   * in); this start's local host when nothing was recorded.
+   */
+  private localHostOfTask(wave: WaveId, task: TaskId): Host {
+    if (this.opts.spawner?.host !== undefined) return this.host;
+    const spawned = this.spawnedRecord((e) => e.task === task, wave);
+    const terminal = spawned?.host === "local" ? spawned.terminal : undefined;
+    if ((terminal !== "cmux" && terminal !== "tmux") || terminal === this.host.screenSource)
+      return this.host;
+    return this.localHostFor(terminal);
+  }
 
   private get claudeJsonPath(): string {
     return this.opts.spawner?.claudeJsonPath ?? join(homedir(), ".claude.json");
@@ -5166,12 +5374,14 @@ export class Daemon {
 
   /**
    * The wave's repository slug (`waveSlug`): its state's `github`, else the supervisor clone's
-   * origin as its own doctor last read it (only when that run checked this wave's clone).
+   * origin as its own doctor last read it (only when that run checked this wave's clone), else
+   * the wave's `repo:` itself when it is an `owner/name` the supervisor holds no clone of (#448).
    */
   private slugOf(wave: WaveId): string | undefined {
     const rec = this.waves.get(wave)?.record;
     if (rec === undefined) return undefined;
     const repo = rec.wave?.repo;
+    if (typeof repo === "string" && isSlug(repo)) return waveSlug(rec) ?? repo;
     const checked =
       typeof repo === "string" && repo !== ""
         ? this.localOrigins.get(resolve(repoDir(repo)))
@@ -5433,7 +5643,7 @@ export class Daemon {
         continue;
       }
       if (!local) continue;
-      const gate = admissionFor(log.record, this.killSwitch, this.pressure(wave));
+      const gate = admissionFor(log.record, this.closedToNew(), this.pressure(wave));
       const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), { placement });
       if (idle !== null) {
         this.peerIdleWarned.set(wave, "raised");
@@ -5843,13 +6053,13 @@ export class Daemon {
 
   /**
    * The supervisor's own clones of the running waves' repositories, as absolute paths, by wave id
-   * (each once): what its own doctor checks.
+   * (each once): what its own doctor checks. A wave named by an `owner/name` has none (#448).
    */
   private waveRepos(): string[] {
     const dirs = this.runningWaves()
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([, l]) => l.record.wave?.repo ?? "")
-      .filter((r) => r !== "")
+      .filter((r) => r !== "" && !isSlug(r))
       .map((r) => resolve(repoDir(r)));
     return [...new Set(dirs)];
   }
@@ -6019,6 +6229,115 @@ export class Daemon {
         };
       },
     };
+  }
+
+  /**
+   * `machine_add` (admin, machine-add.ts, SPEC §4.6.14): checked inside the queue, its run (every
+   * step of `volley machine add` over ssh, minutes) awaited outside it, each row published on the
+   * reply topic as it happens. One run per name at a time. `machine_added` is journaled with how
+   * it signed in, never a password, once a step has run (a refusal before that is not).
+   */
+  private machineAddOp(
+    p: Record<string, unknown>,
+    sender: string,
+    progress: (row: Record<string, unknown>) => void,
+  ): AuthOutcome | DeferredAuth {
+    const req = parseMachineAdd(p);
+    if (typeof req === "string")
+      return { reply: authReply("machine_add", { ok: false, error: req }) };
+    if (this.adding.has(req.name)) {
+      return {
+        reply: authReply("machine_add", {
+          ok: false,
+          error: `"${req.name}" is already being added: wait for that run to end`,
+        }),
+      };
+    }
+    this.adding.add(req.name);
+    const env = { ...realMachineAddEnv(this.version), ...this.opts.machineAdd };
+    const hub = {
+      paired: () => Object.keys(this.peers.paired()),
+      hosts: () => Object.keys(this.config.effective().hosts ?? {}),
+      mint: (name: string) => this.peers.mintFor(name, sender),
+    };
+    return {
+      later: async () => {
+        let r: MachineAddOutcome;
+        try {
+          r = await runMachineAdd(req, env, hub, (row) => progress({ op: "machine_add", ...row }));
+        } finally {
+          this.adding.delete(req.name);
+        }
+        const reply = authReply("machine_add", r.ok ? r : { ok: false, error: r.error });
+        // A refusal before anything ran (no step) is answered, never journaled, as a parse refusal is.
+        if (!r.ok && r.step === undefined) return { reply };
+        return {
+          reply,
+          journal: {
+            type: "machine_added",
+            data: {
+              by: sender,
+              name: req.name,
+              target: req.address,
+              auth: req.key !== undefined ? "key" : "password",
+              sudo: req.sudo !== undefined,
+              ok: r.ok,
+              ...(r.ok ? { ready: r.result.ready } : r.step !== undefined ? { step: r.step } : {}),
+            },
+          },
+        };
+      },
+    };
+  }
+
+  /**
+   * `peer_retarget` (admin, peers.ts, SPEC §4.6.14): checked inside the queue, its ssh run and the
+   * wait for the box's record `up` through the new tunnel awaited outside it. One run per box at
+   * a time, with Repair's (`doctoring`): both rewrite its peer.json.
+   */
+  private peerRetarget(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const req = this.peers.retargetRequest(p);
+    if (!("host" in req)) return { reply: authReply("peer_retarget", req) };
+    if (this.doctoring.has(req.name)) {
+      return {
+        reply: authReply("peer_retarget", {
+          ok: false,
+          error: `a retarget or doctor run on "${req.name}" is already in progress`,
+        }),
+      };
+    }
+    this.doctoring.add(req.name);
+    return {
+      later: async () => {
+        try {
+          const r = await this.peers.runRetarget(req, sender, (name, since) =>
+            this.machineUp(name, since, DAEMON_DEFAULTS.peer_retarget_grace_ms),
+          );
+          return { reply: authReply("peer_retarget", r) };
+        } finally {
+          this.doctorDone(req.name);
+        }
+      },
+    };
+  }
+
+  /**
+   * Resolves true once machine `name` publishes an `up` record whose `last_seen` is `since` or
+   * later (a heartbeat, not our own republish), false after `ms` on the daemon's clock.
+   */
+  private machineUp(name: string, since: number, ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const done = (up: boolean) => {
+        this.recordWaiters.delete(waiter);
+        this.time.clearTimeout(timer);
+        resolve(up);
+      };
+      const waiter = (n: string, r: MachineRecord) => {
+        if (n === name && r.tunnel === "up" && Date.parse(r.last_seen) >= since) done(true);
+      };
+      this.recordWaiters.add(waiter);
+      const timer = this.time.setTimeout(() => done(false), ms);
+    });
   }
 
   /**
@@ -7395,7 +7714,8 @@ export class Daemon {
         const t = this.ranDef(log.record, task);
         if (t === undefined || t.host === "local" || this.autoHostReached(wave, t)) {
           const w = log.record.wave;
-          return w == null
+          // A wave named by an `owner/name` has no clone here to lock fetches into (#448).
+          return w == null || isSlugRepo(w)
             ? this.host.exec
             : lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
         }
@@ -8294,7 +8614,7 @@ export class Daemon {
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
     // Its machine takes no new agents: parked until the owner's re-place answer (silent too).
     if (this.parkClosed(wave, task)) return;
-    const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const admission = admissionFor(rec, this.closedToNew(), this.pressure(wave));
     const used = spawnsUsed(rec);
     const budget = spawnBudget(
       rec.wave,
@@ -9164,7 +9484,11 @@ export class Daemon {
         );
         continue;
       }
-      const repo = rec.wave?.repo !== undefined ? expandHome(rec.wave.repo) : undefined;
+      // A wave named by an `owner/name` has no clone here to probe its branches in (#448).
+      const repo =
+        rec.wave?.repo !== undefined && !isSlug(rec.wave.repo)
+          ? expandHome(rec.wave.repo)
+          : undefined;
       const ns = rec.wave?.namespace ?? this.opts.namespace;
       for (const t of reconcileTargets(rec, log.journal.readAll())) {
         jobs.push(
@@ -9307,12 +9631,12 @@ export class Daemon {
   private hostOfTask(wave: WaveId, task: TaskId): [Host, string?] {
     const def = this.ranDef(this.waves.get(wave)?.record, task);
     if (def === undefined || def.host === "local" || this.autoHostReached(wave, def))
-      return [this.host];
+      return [this.localHostOfTask(wave, task)];
     try {
       const remote = this.remoteHost(wave, def);
       return [remote, forwardOf(remote)];
     } catch {
-      return [this.host];
+      return [this.localHostOfTask(wave, task)];
     }
   }
 
@@ -11062,6 +11386,12 @@ export class Daemon {
     const replyTo = tokenId !== null ? tokenReplyTopic(tokenId) : authReplyTopic(cid);
     const send = (r: AuthReply) =>
       this.publish(replyTo, this.envelope(AUTH_CHANNEL, "ack", r, cid), false);
+    // A long op's rows, before its answer (`machine_add`): progress envelopes on the same topic.
+    const progress = (row: Record<string, unknown>) => {
+      void this.publish(replyTo, this.envelope(AUTH_CHANNEL, "progress", row, cid), false).catch(
+        () => {},
+      );
+    };
     const key = `${topic}/${cid}`;
     const prior = this.authAnswered.get(key);
     if (prior !== undefined) return send(prior);
@@ -11113,15 +11443,17 @@ export class Daemon {
             .pop();
         out = DESK_OPS.has(payload.op as string)
           ? await this.deskOp(exec, sender, payload)
-          : PEER_ADMIN_OPS.has(payload.op as string)
-            ? await this.peerAdminOp(exec, sender, payload)
-            : await accountOp(
-                exec,
-                sender,
-                payload,
-                lastSeen,
-                new Date(this.startedAt).toISOString(),
-              );
+          : ROLE_OPS.has(payload.op as string)
+            ? await this.roleOp(exec, sender, payload)
+            : PEER_ADMIN_OPS.has(payload.op as string)
+              ? await this.peerAdminOp(exec, sender, payload, progress)
+              : await accountOp(
+                  exec,
+                  sender,
+                  payload,
+                  lastSeen,
+                  new Date(this.startedAt).toISOString(),
+                );
       }
     } catch (e) {
       out = failed(e);
@@ -11233,12 +11565,15 @@ export class Daemon {
     exec: ExecFn,
     sender: string,
     p: Record<string, unknown>,
+    progress: (row: Record<string, unknown>) => void,
   ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
     const accounts = await listAccounts(exec);
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    if (op === "machine_add") return this.machineAddOp(p, sender, progress);
     if (op === "peer_doctor") return this.peerDoctor(p, sender);
+    if (op === "peer_retarget") return this.peerRetarget(p, sender);
     if (op === "repo_add") return this.repoAdd(p, sender);
     if (op === "repo_remove") return this.repoRemove(p, sender);
     if (op === "repo_list") return { reply: authReply(op, this.repoList()) };
@@ -11259,6 +11594,307 @@ export class Daemon {
       await this.evict(p.name as string, sender);
     const { rejected: _r, ...answer } = r;
     return { reply: authReply(op, answer) };
+  }
+
+  /**
+   * `role_plan` / `role_move` / `role_rollback` (SPEC §4.6.24) from `sender`: the account ops'
+   * admin check, then roles/ops.ts. A plan probes the target over ssh and a move runs for
+   * minutes, so both are answered outside the queue.
+   */
+  private async roleOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome | DeferredAuth> {
+    const op = p.op as string;
+    const accounts = await listAccounts(exec);
+    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    return {
+      later: async () => ({ reply: authReply(op, await this.roleOps.handle(op, p, sender)) }),
+    };
+  }
+
+  /** What the role planners read and run (roles/deps.ts), or why there is nothing yet. */
+  private roleDeps(): RoleDeps | string {
+    const roles = this.roles;
+    if (roles === null) return "no machine roles record yet: is the supervisor started?";
+    const hosts = this.config.effective().hosts;
+    const localName = this.config.localName();
+    const localHost = readSetupInstall(this.opts.home)?.desk_host ?? hostname();
+    const brokerMachine = roles.broker.machine;
+    const brokerTarget = hosts[brokerMachine]?.target;
+    return {
+      localName,
+      hosts,
+      paired: (name) => Object.hasOwn(this.peers.paired(), name),
+      record: (name) => (name === localName ? this.ownRecord : this.machines.record(name)),
+      version: this.version,
+      roles,
+      remote: (name) => this.remoteFor(name),
+      exec: this.opts.authExec ?? realExec,
+      platform: this.opts.fleet?.os?.platform?.() ?? platform(),
+      uid: process.getuid?.() ?? 0,
+      home: process.env.HOME ?? homedir(),
+      volleydHome: this.opts.home,
+      brokerHost:
+        brokerMachine === localName || brokerTarget === undefined
+          ? localHost
+          : hostOf(brokerTarget),
+      localHost,
+      localPortBusy: (port) =>
+        new Promise((resolve) => {
+          const s = createServer();
+          s.once("error", () => resolve(true));
+          s.listen(port, () => s.close(() => resolve(false)));
+        }),
+      writeRoles: async (r) => {
+        writeRoles(this.opts.home, r);
+        // During a broker move there is no broker to publish to: the next start publishes it.
+        await this.enqueue(() => this.publishRoles()).catch((e: unknown) => {
+          if (this.brokerMoving === null) throw e;
+          this.log(
+            `roles: the record is published at reconnect (${e instanceof Error ? e.message : String(e)})`,
+          );
+        });
+      },
+      now: () => dateOf(this.time),
+      sleep: (ms) => clockSleep(this.time, ms),
+    };
+  }
+
+  /** Nothing new is admitted: the kill switch, or a role move waiting for a quiet fleet. */
+  private closedToNew(): boolean {
+    return this.killSwitch || this.roleOps.draining();
+  }
+
+  /** What only a supervisor move needs (roles/plan-supervisor.ts). */
+  private supervisorDeps(): SupervisorDeps {
+    const exec = this.opts.authExec ?? realExec;
+    return {
+      busyWaves: () =>
+        [...this.waves]
+          .map(([wave, log]) => ({ wave, status: log.record.state?.status ?? "running" }))
+          .filter(({ status }) =>
+            ["running", "paused", "awaiting_decision", "releasing"].includes(status),
+          ),
+      liveAgents: () => {
+        const local = this.config.localName();
+        return [local, ...Object.keys(this.config.effective().hosts)].flatMap((machine) =>
+          this.agentsOn(machine).map((agent_id) => ({ agent_id, machine })),
+        );
+      },
+      bundle: {
+        volleydHome: this.opts.home,
+        authDir:
+          process.env.VOLLEY_AUTH_DIR ??
+          readSetupInstall(this.opts.home)?.auth_dir ??
+          defaultAuthDir(realAuthDeps.layout()),
+        claudeRoot: this.opts.claude?.root ?? claudeRoot(),
+      },
+      volleyDir: dirname(dirname(HOOKS_DIR)),
+      rotateOwn: async () => {
+        const r = await exec(["volley", "auth", "rotate", DAEMON_AGENT_ID, "--json"]);
+        let password: unknown;
+        try {
+          password = (JSON.parse(r.stdout) as { password?: unknown }).password;
+        } catch {}
+        if (r.code !== 0 || typeof password !== "string")
+          throw new Error(`volley auth rotate ${DAEMON_AGENT_ID}: exit ${r.code}`);
+        const file = join(this.opts.home, "broker.json");
+        writeFileSync(
+          `${file}.tmp`,
+          `${JSON.stringify({ username: DAEMON_AGENT_ID, password })}\n`,
+          {
+            mode: 0o600,
+          },
+        );
+        renameSync(`${file}.tmp`, file);
+        this.log("roles: rotated volleyd's login after the failed receive (broker.json written)");
+      },
+      handingOver: (id) => {
+        this.handingOver = id;
+      },
+    };
+  }
+
+  /** What only a broker move needs (roles/plan-broker.ts). */
+  private brokerDeps(): BrokerDeps {
+    const s = this.supervisorDeps();
+    return {
+      busyWaves: s.busyWaves,
+      liveAgents: s.liveAgents,
+      install: () => {
+        const i = readSetupInstall(this.opts.home);
+        return i === null
+          ? null
+          : { layout: i.layout, stateFile: i.state_file, authDir: i.auth_dir };
+      },
+      brokerUrl: this.opts.brokerUrl,
+      unitUrl: (url) => this.pointUnitAt(url),
+      connect: (url) => this.probeLink(url),
+      probeAnonymous: (url) => probeAnonymous(url),
+      retarget: async (r, by, up) => {
+        const req = this.peers.retargetRequest(r);
+        if (!("host" in req)) return req.error ?? `peer_retarget ${r.name} refused`;
+        const res = await this.peers.runRetarget(req, by, up);
+        return res.ok ? null : (res.error ?? `peer_retarget ${r.name} failed`);
+      },
+      moving: (id) => {
+        this.brokerMoving = id;
+      },
+      ...this.opts.roleBroker,
+    };
+  }
+
+  /**
+   * A login as volleyd at `url` beside the daemon's own connection (a broker move's health check,
+   * and the machine records it waits for there); the version through the dynsec admin login.
+   */
+  private async probeLink(url: string): Promise<ProbeLink> {
+    const b = new VolleyBroker();
+    await b.connect({
+      url,
+      agentId: `${DAEMON_AGENT_ID}-probe`,
+      connectTimeoutMs: DAEMON_DEFAULTS.probe_ms,
+      ...authFields(this.opts.auth),
+    });
+    const admin = this.opts.dynsecAdmin;
+    return {
+      sysVersion: async () => {
+        if (admin === undefined) return null;
+        const link = await brokerControl(url, admin)();
+        try {
+          return await link.sysVersion();
+        } finally {
+          await link.close().catch(() => {});
+        }
+      },
+      machine: async (name) => {
+        const raw = await b.queryRetained(machineTopic(name), DAEMON_DEFAULTS.probe_ms);
+        const p = raw === null ? null : (parseEnvelope(raw)?.payload as MachineRecord | undefined);
+        return p !== undefined && p !== null && typeof p.last_seen === "string"
+          ? { tunnel: p.tunnel, last_seen: p.last_seen }
+          : null;
+      },
+      close: () => b.disconnect(),
+    };
+  }
+
+  /**
+   * Point this volleyd's service at `url` for its next start (a broker move's own tunnel): its
+   * systemd user unit's `VOLLEY_BROKER_URL` rewritten and reloaded. Nothing to change when it
+   * names `url` already, or when there is no such unit (a launchd service is checked by the plan).
+   */
+  private async pointUnitAt(url: string): Promise<{ line: string; undo: () => Promise<void> }> {
+    const nothing = { undo: async () => {} };
+    if (url === this.opts.brokerUrl)
+      return { line: `VOLLEY_BROKER_URL is ${url} already.`, ...nothing };
+    const unit = join(
+      process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? homedir(), ".config"),
+      "systemd",
+      "user",
+      "volleyd.service",
+    );
+    if (!existsSync(unit))
+      return { line: `no ${unit}: VOLLEY_BROKER_URL left as it is.`, ...nothing };
+    const before = readFileSync(unit, "utf-8");
+    const line = /^Environment="?VOLLEY_BROKER_URL=[^"\n]*"?$/m;
+    if (!line.test(before))
+      return { line: `${unit} names no VOLLEY_BROKER_URL: left as it is.`, ...nothing };
+    const exec = this.opts.authExec ?? realExec;
+    const write = async (text: string) => {
+      writeFileSync(`${unit}.tmp`, text);
+      renameSync(`${unit}.tmp`, unit);
+      const r = await exec(["systemctl", "--user", "daemon-reload"]);
+      if (r.code !== 0) throw new Error(`systemctl --user daemon-reload: exit ${r.code}`);
+    };
+    await write(before.replace(line, `Environment="VOLLEY_BROKER_URL=${url}"`));
+    return {
+      line: `${unit} names ${url} for volleyd's next start.`,
+      undo: () => write(before),
+    };
+  }
+
+  /**
+   * A role move run in the background ended here. A supervisor move that handed over unloads
+   * this supervisor's own service; one that failed ends the hand-over, and a broker connection
+   * lost meanwhile (the receive rotated volleyd's login) is fatal now: the service manager starts
+   * this supervisor again, with the login `rotateOwn` wrote.
+   */
+  private async moveFinished(moveId: string, r: MoveResult): Promise<void> {
+    if (this.brokerMoving === moveId) {
+      // The broker moved (or stayed, rolled back): reconnect by restarting, which republishes
+      // every retained topic volleyd owns on whichever broker its service names now.
+      this.brokerMoving = null;
+      const lost = this.deferredFail;
+      this.deferredFail = null;
+      if (lost !== null) {
+        this.log(`roles: ${moveId} ${r.ok ? "done" : "failed"}; restarting to reconnect`);
+        this.fail(lost);
+      }
+      return;
+    }
+    if (this.handingOver !== moveId) return;
+    if (r.ok && r.status === "running") {
+      const exec = this.opts.authExec ?? realExec;
+      const platformNow = this.opts.fleet?.os?.platform?.() ?? platform();
+      const stop =
+        platformNow === "darwin"
+          ? ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/${SERVICE_LABEL}`]
+          : ["systemctl", "--user", "stop", "volleyd.service"];
+      this.log(`roles: ${moveId} handed over; unloading this supervisor (${stop.join(" ")})`);
+      await exec(stop).catch((e: unknown) =>
+        this.log(`roles: ${stop.join(" ")}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      return;
+    }
+    this.handingOver = null;
+    const lost = this.deferredFail;
+    this.deferredFail = null;
+    if (lost !== null) this.fail(lost);
+  }
+
+  /**
+   * At start: a supervisor move handed to this machine (its handover.json came in the bundle)
+   * goes on here, under the same id (roles/handover.ts).
+   */
+  private async continueHandovers(): Promise<void> {
+    for (const h of pendingHandovers(this.opts.home, this.config.localName())) {
+      const d = this.roleDeps();
+      if (typeof d === "string") {
+        this.log(`roles: hand-over ${h.move_id} not continued: ${d}`);
+        continue;
+      }
+      markContinued(this.opts.home, h);
+      this.log(`roles: continuing the hand-over ${h.move_id} from ${h.from}`);
+      const steps = resumeSteps(
+        d,
+        {
+          ownStatus: async () => {
+            const raw = await this.broker.queryRetained(this.statusTopic, DAEMON_DEFAULTS.probe_ms);
+            return raw === null ? null : (parseEnvelope(raw)?.type ?? null);
+          },
+          mintCode: (name, by) => this.peers.mintFor(name, by),
+          remoteAt: (spec) => this.remoteBySpec(spec),
+        },
+        h,
+      );
+      await this.moves
+        .run({
+          move_id: h.move_id,
+          role: "supervisor",
+          from: h.from,
+          to: h.to,
+          by: h.by,
+          steps,
+          resume: resumeRecord(h, h.by, dateOf(this.time)),
+          ...(h.record?.rolls_back !== undefined ? { rolls_back: h.record.rolls_back } : {}),
+        })
+        .catch((e: unknown) =>
+          this.log(`roles: hand-over ${h.move_id}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+    }
   }
 
   private async handle(
@@ -11439,8 +12075,13 @@ export class Daemon {
       case "peer_invite":
       case "peer_remove":
       case "peer_doctor":
+      case "peer_retarget":
       case "repo_add":
       case "repo_remove":
+      // Machine roles (SPEC §4.6.24): admin ops, never on the mailbox.
+      case "role_plan":
+      case "role_move":
+      case "role_rollback":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,
@@ -11523,7 +12164,9 @@ export class Daemon {
   private async repoVisibility(wave: Wave): Promise<VisibilityFacts | null> {
     if (!this.readsRepo()) return null;
     const mode = this.publicHygiene(wave);
-    const view = await readRepoView(this.host.exec, expandHome(wave.repo));
+    const view = isSlugRepo(wave)
+      ? viewFromSlug(await readSlugView(this.host.exec, wave.repo))
+      : await readRepoView(this.host.exec, expandHome(wave.repo));
     const github = view.github !== undefined ? { github: view.github } : {};
     if (mode !== "auto")
       return { visibility: null, source: "config", public_hygiene: mode, ...github };
@@ -11551,6 +12194,14 @@ export class Daemon {
     wave: Wave,
   ): { info: BriefPrefaceInfo | null; path: string } | { refusal: Reply } {
     const path = briefPrefacePath(wave.repo, wave.brief_preface);
+    // A wave named by an `owner/name` has no clone here to read a repo-relative preface in (#448).
+    if (isSlugRepo(wave) && !isAbsolute(path)) {
+      if (wave.brief_preface !== undefined)
+        this.log(
+          `wave ${wave.wave}: brief_preface ${wave.brief_preface} not read: no clone of ${wave.repo} here (name it by an absolute path)`,
+        );
+      return { info: null, path };
+    }
     const max =
       wave.config.brief_preface_max_bytes ?? this.config.effective().brief_preface_max_bytes;
     try {
@@ -11803,8 +12454,9 @@ export class Daemon {
     readsTree: boolean,
   ): Promise<ReadFootprints> {
     const repo = expandHome(wave.repo);
+    // A wave named by an `owner/name` has no tree here (#448): its Files lists stay as written.
     const tree =
-      readsTree && existsSync(repo)
+      readsTree && !isSlugRepo(wave) && existsSync(repo)
         ? await readReleaseTree(this.host.exec, repo, wave.release_branch)
         : null;
     const issueBody = this.opts.issueBody;
@@ -12092,6 +12744,23 @@ export class Daemon {
   }
 
   /**
+   * How the supervisor runs a wave's `gh` work (`ghRepoContext`): in its clone, or, for a wave
+   * named by an `owner/name` it holds no clone of (#448), with `--repo <owner/name>` appended to
+   * every `gh` argv but `gh api` (which rejects it; its endpoint names the repository) and no
+   * `cwd`. A wave without a repo runs in the daemon's directory.
+   */
+  private ghFor(repo: string | undefined): GhIn {
+    const ctx = ghRepoContext(repo ?? process.cwd());
+    if (ctx.cwd !== undefined) return { exec: this.host.exec, cwd: repoDir(ctx.cwd), clone: true };
+    const exec: ExecFn = (argv, opts = {}) => {
+      const { cwd: _cwd, ...rest } = opts;
+      const named = argv[0] === "gh" && argv[1] !== "api";
+      return this.host.exec(named ? [...argv, ...ctx.args] : argv, rest);
+    };
+    return { exec, cwd: process.cwd(), clone: false };
+  }
+
+  /**
    * A released red head (ci_failed / agent_blocked_ci) re-verifies its head first: its PR's head
    * and the CI on it are read beside the queue (as the pipeline's CI check reads them). Green now
    * (the blocker's fix landed and CI was re-run): answered `re-verify`, when it offers it, so the
@@ -12099,10 +12768,10 @@ export class Daemon {
    */
   private recheckRedHead(wave: WaveId, id: string, pr: number): void {
     const repo = this.waves.get(wave)?.record.wave?.repo;
-    const cwd = repo !== undefined ? repoDir(repo) : process.cwd();
+    const gh = this.ghFor(repo);
     void (async () => {
-      const view = await this.host
-        .exec(["gh", "pr", "view", String(pr), "--json", "headRefOid"], { cwd })
+      const view = await gh
+        .exec(["gh", "pr", "view", String(pr), "--json", "headRefOid"], { cwd: gh.cwd })
         .catch(() => null);
       let head: string | undefined;
       try {
@@ -12111,9 +12780,10 @@ export class Daemon {
       } catch {
         head = undefined;
       }
+      // A wave the supervisor holds no clone of reads no CI here: autopilot's rule runs again.
       const ci =
-        head !== undefined
-          ? await ciStateOf(this.host.exec, cwd, head).catch(() => "none" as const)
+        head !== undefined && gh.clone
+          ? await ciStateOf(this.host.exec, gh.cwd, head).catch(() => "none" as const)
           : "none";
       await this.enqueue(async () => {
         const d = this.waves.get(wave)?.record.decisions[id];
@@ -12186,16 +12856,16 @@ export class Daemon {
     this.issueChecks.add(wave);
     void this.track(
       (async () => {
-        const cwd = repoDir(repo);
+        const gh = this.ghFor(repo);
         let failed = false;
         for (const t of merged)
-          if (!(await this.issueMerged(wave, cwd, state.release_branch, t))) failed = true;
+          if (!(await this.issueMerged(wave, gh, state.release_branch, t))) failed = true;
         // A merged-to-release write that failed (an issue gh cannot read) holds back no release.
         if (release) {
           this.releasePolledAt.set(wave, this.now());
-          const pr = await this.releasePr(cwd, state.release_branch);
+          const pr = await this.releasePr(gh, state.release_branch);
           // A failed write is retried on the ci_poll_ms cadence below, not the release poll's.
-          if (pr !== null && (await this.verifyIssues(wave, cwd, pr)).failed.length > 0) {
+          if (pr !== null && (await this.verifyIssues(wave, gh, pr)).failed.length > 0) {
             failed = true;
             this.releasePolledAt.delete(wave);
           }
@@ -12223,8 +12893,8 @@ export class Daemon {
   }
 
   /** An issue as gh reads it, or null (logged) when it could not. */
-  private async readIssue(wave: WaveId, cwd: string, issue: number): Promise<IssueView | null> {
-    const r = await this.host.exec(issueViewArgv(issue), { cwd }).catch(() => null);
+  private async readIssue(wave: WaveId, gh: GhIn, issue: number): Promise<IssueView | null> {
+    const r = await gh.exec(issueViewArgv(issue), { cwd: gh.cwd }).catch(() => null);
     const v = r?.code === 0 ? parseIssueView(r.stdout) : null;
     if (v === null)
       this.log(`${wave}: issue #${issue} not read: ${r?.stderr.trim() || "gh printed no issue"}`);
@@ -12246,12 +12916,12 @@ export class Daemon {
   /** Label and comment a merged task's issue (what is left of it); false when not all of it ran. */
   private async issueMerged(
     wave: WaveId,
-    cwd: string,
+    gh: GhIn,
     releaseBranch: string,
     t: TaskIssue,
   ): Promise<boolean> {
     // GitHub is read first: a marker comment there (a journal that lost its event) is not repeated.
-    const view = await this.readIssue(wave, cwd, t.issue);
+    const view = await this.readIssue(wave, gh, t.issue);
     if (view === null || t.pr === undefined) return false;
     const actions = mergedActions({
       wave,
@@ -12265,13 +12935,13 @@ export class Daemon {
       this.issueSettled.add(`${wave}/${t.issue}`);
       return true;
     }
-    const r = await runIssueActions(this.host.exec, cwd, actions, { task: t.task, pr: t.pr });
+    const r = await runIssueActions(gh.exec, gh.cwd, actions, { task: t.task, pr: t.pr });
     return this.journalIssueRun(wave, r);
   }
 
   /** The release branch's merged PR (the release reached main), or null. */
-  private async releasePr(cwd: string, releaseBranch: string): Promise<number | null> {
-    const r = await this.host.exec(releasePrArgv(releaseBranch), { cwd }).catch(() => null);
+  private async releasePr(gh: GhIn, releaseBranch: string): Promise<number | null> {
+    const r = await gh.exec(releasePrArgv(releaseBranch), { cwd: gh.cwd }).catch(() => null);
     return r?.code === 0 ? releasedPr(r.stdout) : null;
   }
 
@@ -12282,7 +12952,7 @@ export class Daemon {
    */
   private async verifyIssues(
     wave: WaveId,
-    cwd: string,
+    gh: GhIn,
     releasePr: number,
   ): Promise<{ closed: number[]; left_open: number[]; failed: string[] }> {
     const state = this.waves.get(wave)?.record.state;
@@ -12291,7 +12961,7 @@ export class Daemon {
     const views = new Map<number, IssueView>();
     const failed: string[] = [];
     for (const t of tasks) {
-      const v = await this.readIssue(wave, cwd, t.issue);
+      const v = await this.readIssue(wave, gh, t.issue);
       if (v !== null) views.set(t.issue, v);
       else failed.push(`issue #${t.issue} not read`);
     }
@@ -12305,7 +12975,7 @@ export class Daemon {
     for (const t of tasks) {
       const mine = actions.filter((a) => a.kind !== "ensure_label" && a.issue === t.issue);
       if (mine.length === 0) continue;
-      const r = await runIssueActions(this.host.exec, cwd, mine, {
+      const r = await runIssueActions(gh.exec, gh.cwd, mine, {
         task: t.task,
         release_pr: releasePr,
       });
@@ -12383,23 +13053,23 @@ export class Daemon {
       return { ok: false, error: `wave '${w.wave}''s issues are being checked; try again shortly` };
     this.issueChecks.add(w.wave);
     const defer = (async (): Promise<Reply> => {
-      const cwd = repoDir(repo);
+      const gh = this.ghFor(repo);
       // A PR number given by hand is checked first: a typo must not close every issue.
       if (typeof pr === "number") {
-        const v = await this.host.exec(prViewArgv(pr), { cwd }).catch(() => null);
+        const v = await gh.exec(prViewArgv(pr), { cwd: gh.cwd }).catch(() => null);
         if (v?.code !== 0 || !mergedFrom(v.stdout, state.release_branch))
           return {
             ok: false,
             error: `PR #${pr} is not a merged pull request from ${state.release_branch}`,
           };
       }
-      const release = typeof pr === "number" ? pr : await this.releasePr(cwd, state.release_branch);
+      const release = typeof pr === "number" ? pr : await this.releasePr(gh, state.release_branch);
       if (release === null)
         return {
           ok: false,
           error: `no merged pull request from ${state.release_branch} found; pass --pr <n>`,
         };
-      const r = await this.verifyIssues(w.wave, cwd, release);
+      const r = await this.verifyIssues(w.wave, gh, release);
       if (r.failed.length > 0)
         return { ok: false, error: `issues not all verified: ${r.failed.join("; ")}` };
       return answer();
@@ -12556,9 +13226,9 @@ export class Daemon {
     this.heldCheckedAt.set(key, this.now());
     this.heldChecks.add(key);
     const repo = this.waves.get(wave)?.record.wave?.repo;
-    const cwd = repo !== undefined ? { cwd: repoDir(repo) } : {};
+    const gh = this.ghFor(repo);
     const state = async (argv: string[]) => {
-      const r = await this.host.exec(argv, cwd).catch(() => null);
+      const r = await gh.exec(argv, repo !== undefined ? { cwd: gh.cwd } : {}).catch(() => null);
       let v: unknown;
       try {
         v = r?.code === 0 ? (JSON.parse(r.stdout) as { state?: unknown }).state : undefined;
@@ -13585,6 +14255,9 @@ function loadWaves(home: string): WaveLog[] {
 
 /** A remote host's forward (tunnelKey): what its tunnel and tunnel check are keyed by. */
 const forwardOf = (h: RemoteHost) => tunnelKey(h.spec.target, h.spec.tunnel.remote_port);
+
+/** A role move's retained progress topic (SPEC §4.6.24). */
+const moveTopic = (moveId: string) => `${ROLES_TOPIC}/moves/${moveId}`;
 
 /** The broker's host and port as this machine reaches it (a paired machine's tunnel target). */
 function brokerAddress(url: string): { host: string; port: number } {

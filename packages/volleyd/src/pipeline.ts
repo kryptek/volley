@@ -52,6 +52,7 @@ import { type MergeToken, type TrainToken, mintMergeToken, mintTrainToken } from
 import { type RunningImplementer, nudgeTargets, nudgeText, parsePrFiles } from "./overlap";
 import { isRespawnAnswer } from "./recovery";
 import type { WaveRecord } from "./reducer";
+import { isSlug } from "./repos";
 import {
   type Disagreement,
   type FixupResult,
@@ -2721,8 +2722,9 @@ function flakeQuestion(
   const at = report.head.slice(0, 12);
   const test = r.flake?.test ?? "a test";
   const file = r.flake?.test_file ?? "its file";
-  const release =
-    r.evidence.release_ci.state === "red" ? `; ${v.release_branch} is red on it too` : "";
+  const sameTest =
+    r.flake !== undefined && r.evidence.release_ci.failing_tests.includes(r.flake.test);
+  const release = sameTest ? `; ${v.release_branch} is red on it too` : "";
   return `CI failed on ${at} (PR #${report.pr.number}): ${runUrls(data).join(" ")} — ${test} fails, and the PR does not touch ${file}${release}: a flake. volleyd never re-runs CI. fix flake: a dedicated fixer for the test (requested); fixup: a fixup agent at ${at} with the CI result as its directive; re-verify: you fixed it; or cancel?`;
 }
 
@@ -4929,7 +4931,8 @@ export class PipelineDriver {
   private formTrain(branch: string, queue: QueueEntry[]): boolean {
     if (this.deps.mergeTrain?.() !== true || this.mergeMode() !== "auto") return false;
     const rec = this.deps.record();
-    const cwd = this.ghCwd();
+    // A train integrates in a clone of the wave's repo: a slug-only wave (#448) merges one by one.
+    const cwd = this.clonePath();
     if (cwd === undefined) return false;
     const t = formTrain(
       { [branch]: this.withoutPassedOver(queue) },
@@ -5477,7 +5480,9 @@ export class PipelineDriver {
    * task's `gh run list --commit`.
    */
   private runsVia(): RunsVia | undefined {
-    const cwd = this.ghCwd();
+    // A wave the supervisor holds no clone of (#448): `gh api` resolves `{owner}/{repo}` from a
+    // clone and takes no `--repo`, so its runs come from `gh run list --commit … --repo` instead.
+    const cwd = this.clonePath();
     return cwd !== undefined ? { exec: this.timed(this.deps.exec), cwd } : undefined;
   }
 
@@ -5552,16 +5557,39 @@ export class PipelineDriver {
     );
   }
 
-  /** The wave's repo root on this machine: where the pipeline's GitHub reads run. */
-  private ghCwd(): string | undefined {
+  /**
+   * The wave's `repo:` when it is an `owner/name` the supervisor holds no clone of (#448): its
+   * GitHub work runs with `--repo` and no `cwd`, and nothing reads a checkout.
+   */
+  private slugRepo(): string | undefined {
     const repo = this.deps.record().state?.repo;
-    return repo != null ? expandHome(repo) : undefined;
+    return repo != null && isSlug(repo) ? repo : undefined;
   }
 
-  /** `--repo <slug>` (host-qualified off github.com) when GitHub's slug was read; else none. */
+  /** The wave's clone on this machine (none for a slug-only wave, #448): where git runs. */
+  private clonePath(): string | undefined {
+    const repo = this.deps.record().state?.repo;
+    return repo != null && !isSlug(repo) ? expandHome(repo) : undefined;
+  }
+
+  /**
+   * Where the pipeline's GitHub reads run on this machine: the wave's repo root, or, for a
+   * slug-only wave, the daemon's own directory (ghExec drops the cwd and passes `--repo`).
+   */
+  private ghCwd(): string | undefined {
+    return this.clonePath() ?? (this.slugRepo() !== undefined ? process.cwd() : undefined);
+  }
+
+  /**
+   * `--repo <slug>` (host-qualified off github.com) when GitHub's slug was read, else the wave's
+   * own `owner/name` when the supervisor holds no clone of it (#448); else none.
+   */
   private repoArgs(): string[] {
     const gh = this.deps.record().state?.github;
-    if (gh === undefined) return [];
+    if (gh === undefined) {
+      const slug = this.slugRepo();
+      return slug !== undefined ? ["--repo", slug] : [];
+    }
     const host = URL.canParse(gh.url) ? new URL(gh.url).host : "github.com";
     return ["--repo", host === "github.com" ? gh.slug : `${host}/${gh.slug}`];
   }
@@ -5571,17 +5599,21 @@ export class PipelineDriver {
    * (ghCwd) with repoArgs, whatever `cwd` the caller passed — never in an agent's worktree, which
    * cleanup may have removed (a missing cwd fails the spawn: ENOENT). Any other argv goes to
    * `other` (default: the task's own exec). Without a repo root, everything goes to `other`
-   * with the caller's cwd: unreachable from a wave file (the schema requires `repo`).
+   * with the caller's cwd: unreachable from a wave file (the schema requires `repo`). A slug-only
+   * wave (#448) runs its `gh` here with no cwd at all, `--repo` naming the repository.
    * A `gh api` call gets no `--repo` (gh api rejects it; its endpoint names the repository).
    */
   private ghExec(task: TaskId, other: ExecFn = this.io(task)): ExecFn {
-    const root = this.ghCwd();
-    if (root === undefined) return other;
+    const root = this.clonePath();
+    if (root === undefined && this.slugRepo() === undefined) return other;
     const local = this.timed(this.deps.exec);
-    return (argv, opts = {}) =>
-      argv[0] === "gh"
-        ? local(argv[1] === "api" ? argv : [...argv, ...this.repoArgs()], { ...opts, cwd: root })
-        : other(argv, opts);
+    return (argv, opts = {}) => {
+      if (argv[0] !== "gh") return other(argv, opts);
+      const { cwd: _cwd, ...rest } = opts;
+      // A slug-only wave (#448) runs its `gh` with no cwd at all: `--repo` names the repository.
+      const where = root !== undefined ? { ...rest, cwd: root } : rest;
+      return local(argv[1] === "api" ? argv : [...argv, ...this.repoArgs()], where);
+    };
   }
 
   /**
@@ -5593,7 +5625,7 @@ export class PipelineDriver {
     const wt = this.headWorktree(v.p);
     if (wt !== undefined && this.deps.worktreeGone?.(v.task, wt) !== true)
       return { exec: this.io(v.task), cwd: wt };
-    const root = this.ghCwd();
+    const root = this.clonePath();
     if (root === undefined) return undefined;
     const fetch = v.p.pr !== undefined ? `refs/pull/${v.p.pr.number}/head` : v.p.branch;
     return {
@@ -6201,13 +6233,16 @@ export class PipelineDriver {
     // repo, whatever machine the task's agents ran on. A paired machine's fence never holds a
     // MergeToken, so a merge sent there would always be refused.
     const repo = this.deps.record().state?.repo;
+    const slug = this.slugRepo() !== undefined;
     const r =
       repo != null
         ? await mergePr(
             this.timed(this.deps.exec),
             token,
-            repo,
+            // A slug-only wave (#448): no cwd, `--repo <owner/name>` on every argv.
+            slug ? undefined : repo,
             this.deps.deleteBranch?.() ?? false,
+            slug ? this.repoArgs() : [],
           )
         : await mergePr(
             this.io(v.task),
@@ -6227,11 +6262,12 @@ export class PipelineDriver {
 
   /** A merge train's PR with a merge commit, from the wave's repo (the supervisor's act). */
   private async mergeTrainPr(token: TrainToken): Promise<PipelineEvent | null> {
-    const repo = this.deps.record().state?.repo;
+    const slug = this.slugRepo() !== undefined;
     const r = await mergeTrain(
       this.timed(this.deps.exec),
       token,
-      repo != null ? expandHome(repo) : undefined,
+      this.clonePath(),
+      slug ? this.repoArgs() : [],
     );
     return r.ok
       ? { kind: "supervisor_merged", sha: r.merge_sha, head: token.head }

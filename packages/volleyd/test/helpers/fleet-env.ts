@@ -57,6 +57,10 @@ export interface Fleet {
   local: FakeHost;
   /** The supervisor's fake exec (git, gh): add replies with `on`. */
   exec: FakeExec;
+  /** The exec `volley auth` and a role move's local steps run through (`authExec`). */
+  auth: FakeExec;
+  /** The options the daemon starts with (a second daemon on another home: `env.start`). */
+  options: Parameters<DaemonEnv["start"]>[0];
   /** The supervisor's primary profile's `.claude.json` (its folder trust). */
   claudeJson: string;
   /**
@@ -97,8 +101,11 @@ export interface Fleet {
   finish: (agentId: string, type: "done" | "failed" | "reaped" | "blocked") => Promise<void>;
   /** Wait until `agentId` is supervised (the readiness `placed` of its machine counts it). */
   supervised: (agentId: string) => Promise<void>;
-  /** An admin op as `admin-1` on the account-op topic; its answer. */
-  adminOp: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+  /** An admin op as `admin-1` (or `as`) on the account-op topic; its answer. */
+  adminOp: (
+    payload: Record<string, unknown>,
+    as?: string,
+  ) => Promise<Record<string, unknown> | null>;
   /** Stop the daemon and start a second one on the same home and fakes (a volleyd restart). */
   restart: () => Promise<Daemon>;
   /** The owner answers (no ownership check: `Daemon.resolveDecision`). */
@@ -121,6 +128,11 @@ export async function makeFleet(
      * works on what `repos` / `hosts.box.repos` give it.
      */
     boxRepo?: string | null;
+    /**
+     * Every machine but the box its own fake remote host, running its scripts as its own
+     * `ssh -T <target>` (default: one shared host, the box's, for every machine).
+     */
+    perMachine?: boolean;
   } = {},
 ): Promise<Fleet> {
   const env = await makeDaemonEnv();
@@ -128,6 +140,7 @@ export async function makeFleet(
   const repo = join(dir, "repo");
   mkdirSync(repo);
   let box: FakeRemoteHost | undefined;
+  const others = new Map<string, FakeRemoteHost>();
   const accounts = new Map<string, string>([
     ["admin-1", "admin"],
     [PEER, "peer"],
@@ -153,6 +166,22 @@ export async function makeFleet(
     .on(["volley", "auth", "revoke"], (argv) => {
       accounts.delete(argv[3] as string);
       return {};
+    })
+    // A pairing (peer_join) creates a peer account; a re-pairing or a hand-over rotates one.
+    .on(["volley", "auth", "add"], (argv) => {
+      const name = argv[3] as string;
+      accounts.set(name, argv[5] as string);
+      return { stdout: JSON.stringify({ username: name, password: `pw-${name}` }) };
+    })
+    .on(["volley", "auth", "rotate"], (argv) => {
+      const name = argv[3] as string;
+      return { stdout: JSON.stringify({ username: name, password: `pw2-${name}` }) };
+    })
+    .on(["volley", "auth", "signin-link"], {
+      stdout: JSON.stringify({
+        token: `vly_signin_0123abcd_${"0".repeat(32)}`,
+        expires_at: "2026-10-19T11:00:00.000Z",
+      }),
     });
   const local = fakeHost(fake);
   let localLoad: [number, number, number] = [0.5, 0.5, 0.5];
@@ -246,6 +275,14 @@ export async function makeFleet(
       hooksDir: "/opt/local-hooks",
       claudeJsonPath: claudeJson,
       remoteHost: (s) => {
+        if (o.perMachine === true && s.name !== PEER) {
+          let h = others.get(s.name);
+          if (h === undefined) {
+            h = fakeRemoteHost(s, local);
+            others.set(s.name, h);
+          }
+          return h;
+        }
         if (box === undefined) {
           box = fakeRemoteHost(s, local);
           box.onLaunch = onLaunch;
@@ -308,10 +345,15 @@ export async function makeFleet(
   };
   const beat = async (over: Partial<MachineRecord> = {}) => {
     await clock.advance(1000);
-    await publishRecord(boxRecord(over));
+    const record = boxRecord(over);
+    await publishRecord(record);
+    // Folded in (its verdict is recomputed in the same fold): a verdict that did not change
+    // within machine_heartbeat_ms is not published again, so its checked_at cannot be the wait.
     await eventually(async () => {
       await tick(0);
-      return (await verdict(PEER))?.checked_at === new Date(clock.now()).toISOString();
+      const a = await client.request("peers", {});
+      const m = (a.result as { machines: MachineRecord[] }).machines.find((x) => x.name === PEER);
+      return m?.last_seen === record.last_seen;
     });
   };
   const state = async (wave: string) => {
@@ -333,6 +375,8 @@ export async function makeFleet(
     client,
     local,
     exec: fake,
+    auth,
+    options,
     claudeJson,
     holdSessions: (hold) => {
       const pending = held ?? [];
@@ -396,7 +440,7 @@ export async function makeFleet(
         );
       });
     },
-    adminOp: async (payload) => {
+    adminOp: async (payload, as = "admin-1") => {
       const c = new VolleyBroker();
       await c.connect({ url: env.broker.url, agentId: `cli-${randomUUID().slice(0, 6)}` });
       const cid = randomUUID();
@@ -411,10 +455,10 @@ export async function makeFleet(
         }
       });
       await c.publish(
-        authOpsTopic("admin-1"),
+        authOpsTopic(as),
         JSON.stringify(
           buildEnvelope({
-            agentId: "admin-1",
+            agentId: as,
             parentId: null,
             channel: "_system/auth",
             type: "query",
