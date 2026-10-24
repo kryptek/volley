@@ -1,0 +1,9 @@
+#!/bin/sh
+printf '%s\n' "sudo $*" >>"$STUB_LOG"
+printf '[stub] sudo %s\n' "$*" >&2
+case "${1:-}" in
+  -v) exit 0 ;;
+  tee) cat >/dev/null ;;
+  mkdir | chmod) exit 0 ;;
+  *) exec "$@" ;;
+esac
