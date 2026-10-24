@@ -4751,21 +4751,49 @@ export class Daemon {
    * started in).
    */
   private get host(): Host {
-    this.localHost ??= this.opts.spawner?.host ?? this.newLocalHost();
+    this.localHost ??=
+      this.opts.spawner?.host ??
+      this.localHostFor(
+        resolveLocalTerminal(
+          this.config.effective().fleet.local_terminal,
+          this.opts.fleet?.os?.platform?.() ?? process.platform,
+          this.opts.spawner?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
+        ),
+      );
     return this.localHost;
   }
-
-  private newLocalHost(): Host {
-    const s = this.opts.spawner;
-    const terminal = resolveLocalTerminal(
-      this.config.effective().fleet.local_terminal,
-      this.opts.fleet?.os?.platform?.() ?? process.platform,
-      s?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
-    );
-    if (s?.localHostFor !== undefined) return s.localHostFor(terminal);
-    return terminal === "tmux" ? new LocalTmuxHost(realExec) : new LocalCmuxHost(realExec);
-  }
   private localHost: Host | undefined;
+
+  /** The `local` host for one terminal, built once (an agent restored from another terminal). */
+  private localHostFor(terminal: LocalTerminal): Host {
+    let h = this.localHosts.get(terminal);
+    if (h === undefined) {
+      const build = this.opts.spawner?.localHostFor;
+      h =
+        build !== undefined
+          ? build(terminal)
+          : terminal === "tmux"
+            ? new LocalTmuxHost(realExec)
+            : new LocalCmuxHost(realExec);
+      this.localHosts.set(terminal, h);
+    }
+    return h;
+  }
+  private readonly localHosts = new Map<LocalTerminal, Host>();
+
+  /**
+   * The `local` host a task's agent runs on: the terminal its `agent_spawned` recorded, whatever
+   * `fleet.local_terminal` says now (SPEC §4.6.4: a workspace belongs to the terminal it started
+   * in); this start's local host when nothing was recorded.
+   */
+  private localHostOfTask(wave: WaveId, task: TaskId): Host {
+    if (this.opts.spawner?.host !== undefined) return this.host;
+    const spawned = this.spawnedRecord((e) => e.task === task, wave);
+    const terminal = spawned?.host === "local" ? spawned.terminal : undefined;
+    if ((terminal !== "cmux" && terminal !== "tmux") || terminal === this.host.screenSource)
+      return this.host;
+    return this.localHostFor(terminal);
+  }
 
   private get claudeJsonPath(): string {
     return this.opts.spawner?.claudeJsonPath ?? join(homedir(), ".claude.json");
@@ -9394,12 +9422,12 @@ export class Daemon {
   private hostOfTask(wave: WaveId, task: TaskId): [Host, string?] {
     const def = this.ranDef(this.waves.get(wave)?.record, task);
     if (def === undefined || def.host === "local" || this.autoHostReached(wave, def))
-      return [this.host];
+      return [this.localHostOfTask(wave, task)];
     try {
       const remote = this.remoteHost(wave, def);
       return [remote, forwardOf(remote)];
     } catch {
-      return [this.host];
+      return [this.localHostOfTask(wave, task)];
     }
   }
 

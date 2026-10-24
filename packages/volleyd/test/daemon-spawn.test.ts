@@ -52,6 +52,8 @@ describe("daemon spawn loop", () => {
   let env: DaemonEnv;
   let agent: VolleyBroker;
   let host: FakeHost;
+  /** The fake exec setup's host runs on. */
+  let exec: ReturnType<typeof fakeExec>;
   let creds: MemoryCredentials;
   let repo: string;
   let claudeJson: string;
@@ -173,6 +175,7 @@ describe("daemon spawn loop", () => {
       return fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {};
     });
     creds = memoryCredentials();
+    exec = fake;
     host = fakeHost(fake);
     if (o.freshBase === true) {
       const prepare = host.prepareWorktree.bind(host);
@@ -561,6 +564,44 @@ describe("daemon spawn loop", () => {
         (e.type === "alarm_raised" &&
           /host|terminal|tmux|cmux/.test(`${e.data.alarm ?? e.data.code}`));
       expect(journal().filter(about)).toEqual([]);
+    });
+
+    it("a restart under another terminal keeps a running agent on the one it started in", async () => {
+      await setup({ local: { terminal: "cmux", platform: "darwin", cmux: true } });
+      expect((await event("agent_spawned"))?.data.terminal).toBe("cmux");
+      await event("agent_registered");
+      await waits.settled();
+      await daemon.stop();
+      // The owner switches the machine to tmux, then volleyd restarts (`volley deploy`).
+      writeFileSync(join(env.home, "config.yaml"), "fleet:\n  local_terminal: tmux\n");
+      const cmuxHost = Object.assign(fakeHost(exec), { screenSource: "cmux" as const });
+      const tmuxHost = Object.assign(fakeHost(exec), { screenSource: "tmux" as const });
+      built = [];
+      daemon = await env.start({
+        clock,
+        fleet: { os: { ...CALM_OS, platform: () => "darwin" } },
+        spawner: {
+          localHostFor: (terminal: "cmux" | "tmux") => {
+            built.push(terminal);
+            return terminal === "cmux" ? cmuxHost : tmuxHost;
+          },
+          cmuxFound: () => true,
+          claudeJsonPath: claudeJson,
+          hooksDir: "/opt/volley-hooks",
+          reapGraceMs: 300,
+          credentials: creds,
+        },
+      });
+      await daemon.reconciled();
+      await waits.settled();
+      // New spawns would go to tmux; the restored agent stays on cmux.
+      expect(built).toEqual(["tmux", "cmux"]);
+      // Its retire ends the cmux workspace, not a tmux session.
+      await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
+      await event("agent_retired");
+      await waits.settled();
+      expect(cmuxHost.sessionsEnded).toHaveLength(1);
+      expect(tmuxHost.sessionsEnded).toEqual([]);
     });
   });
 

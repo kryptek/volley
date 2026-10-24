@@ -1946,8 +1946,11 @@ spawn` retries at once. While the kill switch is engaged nothing is spawned.
 supervisor's own machine. Unset (`null`, the default) it is `cmux` on macOS when cmux is installed
 and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. A `cmux` set anywhere but
 macOS is `tmux` too. `volley setup`'s Terminal step records its choice there (and in
-`setup.json`). volleyd reads it when it starts; a change applies at the next start, since a
-running agent's workspace belongs to the terminal it started in.
+`setup.json`). volleyd reads it when it starts; a change applies to agents spawned after the
+next start, since a running agent's workspace belongs to the terminal it started in: a volleyd
+restarted under another value keeps reaching each running agent (its screen, keys, retire)
+through the terminal its `agent_spawned` recorded. An explicit `cmux` copied to a Mac without
+cmux stays until the Terminal step runs there (`volley setup --step terminal` replaces it).
 
 | | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) |
 |---|---|---|

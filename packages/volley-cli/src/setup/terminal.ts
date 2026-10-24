@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -531,6 +532,8 @@ export function writeLocalTerminal(volleydHome: string, terminal: LocalTerminal)
   const tmp = `${file}.${randomUUID()}.tmp`;
   try {
     writeFileSync(tmp, after);
+    // The owner's file mode carries across the rename (a new file gets the umask's).
+    if (existsSync(file)) chmodSync(tmp, statSync(file).mode & 0o777);
     renameSync(tmp, file);
   } catch (e) {
     rmSync(tmp, { force: true });

@@ -579,6 +579,16 @@ describe("setup: the terminal (cmux, tmux)", () => {
       );
     });
 
+    it("keeps an existing config.yaml's file mode", async () => {
+      await start("linux");
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(config(), "fleet:\n  local_name: hub\n");
+      chmodSync(config(), 0o600);
+      for (const c of (await planTerminal(m.ctx)).changes) await c.apply();
+      expect(readFileSync(config(), "utf-8")).toContain("local_terminal: tmux");
+      expect(statSync(config()).mode & 0o777).toBe(0o600);
+    });
+
     it("blocks on a config.yaml that is not YAML, and never overwrites it", async () => {
       await start("linux");
       mkdirSync(m.ctx.volleydHome, { recursive: true });
