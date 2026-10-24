@@ -363,16 +363,32 @@ describe("WaveWindow: the wave's Claude account (#499)", () => {
     ).toEqual(["Balanced (default)", "Team account", "Personal"]);
   });
 
-  it("picking sends wave_account_set and shows the confirm line", async () => {
+  it("picking sends wave_account_set and shows the confirm line until the account moves on", async () => {
     const set = vi.fn(async () => ({ ok: true }));
-    renderWave({ wave: on({ pinned: null, source: "balanced" }), accounts, onSetAccount: set });
+    const view = (account: WaveView["account"]) => (
+      <WaveWindow
+        wave={on(account)}
+        me={null}
+        frame={frame}
+        accounts={accounts}
+        onSetAccount={set}
+      />
+    );
+    const { rerender } = renderWave({
+      wave: on({ pinned: null, source: "balanced" }),
+      accounts,
+      onSetAccount: set,
+    });
     await act(async () => {
       fireEvent.change(pick(), { target: { value: "personal" } });
     });
     expect(set).toHaveBeenCalledWith("personal");
-    expect(
-      screen.getByText("New agents start on Personal; running ones finish where they are."),
-    ).toBeInTheDocument();
+    const line = "New agents start on Personal; running ones finish where they are.";
+    rerender(view({ pinned: "personal", source: "wave" }));
+    expect(screen.getByText(line)).toBeInTheDocument();
+    // Another client moves the wave: the line would name a stale account, so it goes.
+    rerender(view({ pinned: "team", source: "wave", moved_from: "personal" }));
+    expect(screen.queryByText(line)).toBeNull();
     await act(async () => {
       fireEvent.change(pick(), { target: { value: "" } });
     });

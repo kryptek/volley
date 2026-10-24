@@ -55,7 +55,7 @@ function registry(root: string, signedIn: boolean) {
  * A wave whose T2 waits on T1: it spawns only when the test asks (`spawn`). T1 starts under the
  * primary (`team` signs in, trusting the repo, only once it runs), so its window is the primary's.
  */
-async function env(waveExtra?: string) {
+async function env(waveExtra?: string, t2 = "T2: { issue: 42, after: [T1] }") {
   const base = tempDir("volleyd-wave-acct-");
   const root = join(base, "claude");
   restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });
@@ -64,7 +64,7 @@ async function env(waveExtra?: string) {
   mkdirSync(primary, { recursive: true });
   registry(root, false);
   s = await makeSupervisedEnv({
-    tasks: ["T2: { issue: 42, after: [T1] }"],
+    tasks: [t2],
     spawned: 1,
     ...(waveExtra !== undefined ? { waveExtra } : {}),
     daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
@@ -170,6 +170,23 @@ describe("wave_account_set (daemon)", () => {
       error: "unknown wave 'nowave'",
     });
     expect(moves()).toEqual([]);
+  }, 20_000);
+
+  it("a task naming its own account keeps it under the wave's pin", async () => {
+    await env(undefined, "T2: { issue: 42, after: [T1], account: primary }");
+    expect((await op("wave_account_set", { wave: "w1", acct: "team", by: "o" })).ok).toBe(true);
+    expect(await nextSpawnAccount()).toBe("primary");
+  }, 20_000);
+
+  it("picking the wave's current account is a no-op; a non-string acct is refused", async () => {
+    await env();
+    expect((await op("wave_account_set", { wave: "w1", acct: "team", by: "o" })).ok).toBe(true);
+    const again = await op("wave_account_set", { wave: "w1", acct: "team", by: "o" });
+    expect(again).toMatchObject({ ok: true, result: { unchanged: true } });
+    const bad = await op("wave_account_set", { wave: "w1", acct: 7, by: "o" });
+    expect(bad).toMatchObject({ ok: false });
+    expect(bad.error).toMatch(/requires payload\.acct/);
+    expect(moves()).toEqual([{ from: null, to: "team", by: "o" }]);
   }, 20_000);
 
   it("a pick an open account_limit offers answers it: the decision id is in the event", async () => {

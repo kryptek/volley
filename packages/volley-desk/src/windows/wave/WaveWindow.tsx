@@ -350,7 +350,8 @@ function WaveAccountRow({
   const suggested = limit?.suggested ?? null;
   const [picked, setPicked] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<string | null>(null);
+  // The account volleyd took (null: balanced); undefined while there is no pick to confirm.
+  const [done, setDone] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   // A new account from volleyd ends the local pick: the chip and the dropdown follow it.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on the published account only
@@ -360,6 +361,7 @@ function WaveAccountRow({
   const current = pinned ?? BALANCED;
   const preselect = suggested !== null && suggested !== pinned ? suggested : null;
   const value = picked ?? preselect ?? current;
+  const doneName = done === null ? "the account with the most headroom" : name(done ?? null);
   const choices = waveAccountChoices(accounts, waveMachines(wave.state));
   // The current account (and a suggestion) stays listed even before the Desk knows its record.
   for (const id of [pinned, preselect])
@@ -370,10 +372,10 @@ function WaveAccountRow({
     setPicked(v);
     setBusy(true);
     setError(null);
-    setDone(null);
+    setDone(undefined);
     const r = await onSet(acct);
     setBusy(false);
-    if (r.ok) setDone(acct === null ? "the account with the most headroom" : name(acct));
+    if (r.ok) setDone(acct);
     else {
       setPicked(null);
       setError(r.error ?? "volleyd refused the account");
@@ -414,9 +416,10 @@ function WaveAccountRow({
           Switch
         </button>
       )}
-      {done !== null && (
+      {/* Only while the published account is still the pick: a later move makes it stale. */}
+      {done !== undefined && done === pinned && (
         <output className="wave-acct-note">
-          New agents start on {done}; running ones finish where they are.
+          New agents start on {doneName}; running ones finish where they are.
         </output>
       )}
       {error !== null && (
