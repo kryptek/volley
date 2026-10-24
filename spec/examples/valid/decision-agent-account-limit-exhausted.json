@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T14:06:01.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "agent_account_limit-7c2e9b0a4d1f",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "agent_account_limit",
+    "question": "Needs you: w1-t1-implementer-1 (T1/implementer) hit the usage limit of Claude account primary (the hooks reported a usage-limit prompt). Move it to work (5h 12%, 7d 40%)? The session restarts with a resume note. not now: it waits at the prompt and resumes by itself when the window resets at 2026-10-21T18:10:00.000Z.",
+    "options": [
+      "move w1-t1-implementer-1 to work",
+      "not now"
+    ],
+    "pointers": {},
+    "opened_at": "2026-10-21T14:06:01.000Z",
+    "agent_id": "w1-t1-implementer-1",
+    "role": "implementer",
+    "acct": "primary",
+    "window": "five_hour",
+    "pct": 100,
+    "resets_at": "2026-10-21T18:10:00.000Z",
+    "suggested": "work",
+    "class": "credit_exhausted",
+    "source": "hook",
+    "text": "Usage limit reached; Claude will resume automatically when it resets"
+  }
+}

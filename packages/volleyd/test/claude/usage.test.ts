@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type AccountUsage,
   type AgentOnAccount,
+  LIMIT_HIT_ALARM,
   type ProbeLogin,
   type ProbeState,
   type UsageBook,
@@ -15,6 +16,9 @@ import {
   foldUsage,
   forgetAgent,
   limitDecisions,
+  limitHitDecision,
+  limitHitResetsAt,
+  markLimitHit,
   mostHeadroom,
   parseAgentMoveAnswer,
   parseMoveAnswer,
@@ -24,6 +28,7 @@ import {
   rankAccounts,
   restoreBook,
   sampleAccount,
+  suggestedMove,
   untilLabel,
   waveAccount,
   waveAccountMoves,
@@ -1015,6 +1020,195 @@ describe("agentLimitDecisions", () => {
     expect(parseAgentMoveAnswer("move a-1 to work")).toEqual({ agent: "a-1", to: "work" });
     expect(parseAgentMoveAnswer("not now")).toBeNull();
     expect(parseAgentMoveAnswer("move wave w1 to work")).toBeNull();
+  });
+});
+
+describe("suggestedMove", () => {
+  const at = "2026-10-18T14:00:00.000Z";
+  const records = (work: [number, number], spare: [number, number] = [50, 50]) => {
+    let b = fold(emptyBook(), "a-1", "w1", sample("primary", 100, at, 20));
+    b = fold(b, "x", null, sample("work", work[0], at, work[1]));
+    b = fold(b, "y", null, sample("spare", spare[0], at, spare[1]));
+    return accountRecords(b);
+  };
+  const run = (accounts = records([12, 40]), candidates = ["primary", "work", "spare"]) =>
+    suggestedMove({
+      accounts,
+      acct: "primary",
+      candidates,
+      model: "claude-opus-5-5",
+      warnAtPct: 90,
+      now: NOW,
+    });
+
+  it("is the ranker's first pick among the other candidates under the level, never the account itself", () => {
+    const accounts = records([12, 40]);
+    const best = run(accounts);
+    expect(best?.account).toBe("work");
+    expect(best).toEqual(
+      rankAccounts(accounts, ["work", "spare"], { model: "claude-opus-5-5", now: NOW })[0],
+    );
+    expect(run(accounts, ["primary"])).toBeUndefined();
+  });
+
+  it("leaves out a candidate at the level in a window that counts", () => {
+    expect(run(records([12, 95]))?.account).toBe("spare");
+    expect(run(records([12, 95], [91, 10]))).toBeUndefined();
+  });
+});
+
+describe("markLimitHit", () => {
+  const at = "2026-10-18T14:00:00.000Z";
+  const later = "2026-10-18T14:05:00.000Z";
+
+  it("sets the 5-hour window to 100 with the book's future reset", () => {
+    const b = fold(emptyBook(), "a-1", "w1", sample("primary", 88, at));
+    const m = markLimitHit(b, { account: "primary", at: later });
+    expect(m.accounts.primary?.five_hour).toEqual({ pct: 100, resets_at: RESETS, at: later });
+    // the other windows and the agents stay
+    expect(m.accounts.primary?.weekly).toEqual(b.accounts.primary?.weekly);
+    expect(m.agents).toEqual(b.agents);
+    expect(LIMIT_HIT_ALARM).toBe("account_limit_hit");
+  });
+
+  it("falls back to at + 5 h when the book has no reset or a passed one", () => {
+    const fiveH = new Date(Date.parse(later) + 5 * 3_600_000).toISOString();
+    expect(markLimitHit(emptyBook(), { account: "work", at: later }).accounts.work).toMatchObject({
+      five_hour: { pct: 100, resets_at: fiveH, at: later },
+      weekly: null,
+      sampled_at: later,
+    });
+    const past = fold(emptyBook(), "a-1", "w1", {
+      ...sample("primary", 88, at),
+      rate_limits: { five_hour: { pct: 88, resets_at: "2026-10-18T13:00:00.000Z" } },
+    });
+    expect(
+      markLimitHit(past, { account: "primary", at: later }).accounts.primary?.five_hour,
+    ).toEqual({ pct: 100, resets_at: fiveH, at: later });
+  });
+
+  it("a newer real sample replaces it, an older one does not; it survives bookState", () => {
+    const b = fold(emptyBook(), "a-1", "w1", sample("primary", 88, at));
+    const m = markLimitHit(b, { account: "primary", at: later });
+    expect(fold(m, "a-1", "w1", sample("primary", 90, at)).accounts.primary?.five_hour?.pct).toBe(
+      100,
+    );
+    expect(
+      fold(m, "a-1", "w1", sample("primary", 3, "2026-10-18T14:10:00.000Z")).accounts.primary
+        ?.five_hour?.pct,
+    ).toBe(3);
+    expect(restoreBook(bookState(m)).accounts).toEqual(m.accounts);
+  });
+
+  it("is applied even when the window it replaces is stamped after `at` (a clock running ahead)", () => {
+    const ahead = "2026-10-18T14:20:00.000Z";
+    const b = fold(emptyBook(), "a-1", "w1", sample("primary", 88, ahead));
+    const m = markLimitHit(b, { account: "primary", at: later });
+    expect(m.accounts.primary?.five_hour).toEqual({ pct: 100, resets_at: RESETS, at: ahead });
+    expect(limitHitResetsAt(b, { account: "primary", at: later })).toBe(RESETS);
+    expect(
+      fold(m, "a-1", "w1", sample("primary", 3, "2026-10-18T14:30:00.000Z")).accounts.primary
+        ?.five_hour?.pct,
+    ).toBe(3);
+  });
+
+  it("counts as empty once its reset has passed", () => {
+    const m = markLimitHit(emptyBook(), { account: "primary", at: later });
+    const rec = accountRecords(m);
+    const after = Date.parse(later) + 5 * 3_600_000 + 1;
+    expect(rankAccounts(rec, ["primary"], { now: Date.parse(later) })[0]?.five_hour_pct).toBe(100);
+    expect(rankAccounts(rec, ["primary"], { now: after })[0]?.five_hour_pct).toBe(0);
+  });
+});
+
+describe("limitHitDecision", () => {
+  const at = "2026-10-18T14:00:00.000Z";
+  const agent = (over: Partial<AgentOnAccount> = {}): AgentOnAccount => ({
+    agent_id: "a-1",
+    wave: "w1",
+    task: "T1",
+    role: "implementer",
+    acct: "primary",
+    model: "claude-opus-5-5",
+    machine: "local",
+    pinned: false,
+    moving: false,
+    ...over,
+  });
+  const records = (work: [number, number] = [12, 40]) => {
+    let b = fold(emptyBook(), "a-1", "w1", sample("primary", 88, at, 20));
+    b = markLimitHit(b, { account: "primary", at });
+    b = fold(b, "x", null, sample("work", work[0], at, work[1]));
+    return accountRecords(b);
+  };
+  const run = (o: Partial<Parameters<typeof limitHitDecision>[0]> = {}) =>
+    limitHitDecision({
+      accounts: records(),
+      agent: agent(),
+      candidates: ["primary", "work"],
+      warnAtPct: 90,
+      resets_at: RESETS,
+      source: "hook",
+      text: "You've hit your limit",
+      now: NOW,
+      ...o,
+    });
+
+  it("offers the move to the ranker's pick, with the limit-hit extras", () => {
+    const d = run();
+    expect(d?.input).toEqual({
+      kind: "agent_account_limit",
+      task: "T1",
+      question: `Needs you: a-1 (T1/implementer) hit the usage limit of Claude account primary (the hooks reported a usage-limit prompt). Move it to work (5h 12%, 7d 40%)? The session restarts with a resume note. not now: it waits at the prompt and resumes by itself when the window resets at ${RESETS}.`,
+      options: ["move a-1 to work", "not now"],
+      park: false,
+      pointers: {},
+    });
+    expect(d?.extra).toEqual({
+      agent_id: "a-1",
+      role: "implementer",
+      acct: "primary",
+      window: "five_hour",
+      pct: 100,
+      resets_at: RESETS,
+      suggested: "work",
+      class: "credit_exhausted",
+      source: "hook",
+      text: "You've hit your limit",
+    });
+    const { park: _park, ...input } = d?.input ?? {};
+    expect(
+      schemaErrors(
+        "decision.schema.json",
+        envelope("_waves/decisions", "decision_opened", {
+          decision_id: "agent_account_limit-0123456789ab",
+          wave: "w1",
+          opened_at: at,
+          ...input,
+          ...d?.extra,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps the screen capture pointer of a screen detection", () => {
+    const d = run({ source: "screen", text: null, screen: "/path/to/capture.txt" });
+    expect(d?.input.pointers).toEqual({ screen: "/path/to/capture.txt" });
+    expect(d?.input.question).toContain("(a usage-limit prompt is on its screen)");
+    expect(d?.extra).toMatchObject({ source: "screen" });
+    expect(d?.extra).not.toHaveProperty("text");
+  });
+
+  it("names a pin it cannot honour", () => {
+    const d = run({ agent: agent({ pinned: true }) });
+    expect(d?.input.question).toContain(
+      "Its task is pinned to primary, which is at its limit: the pin cannot be honoured.",
+    );
+  });
+
+  it("is null with no other account with room (the caller opens model_switch)", () => {
+    expect(run({ accounts: records([95, 40]) })).toBeNull();
+    expect(run({ candidates: ["primary"] })).toBeNull();
   });
 });
 

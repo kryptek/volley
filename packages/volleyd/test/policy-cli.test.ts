@@ -33,6 +33,9 @@ describe("volleyd policy", () => {
       'hooks_auth_failed, mcp_not_registered, unknown_screen · pipeline.on === "relaunch" · relaunch · relaunch_max per <task>/<role> · max 3',
     );
     expect(r.stdout).toContain("plan_change, repo_untrusted, model_switch, release_go, stage_go");
+    expect(r.stdout).toContain(
+      'agent_account_limit · class === "credit_exhausted" && suggested !== null · move <agent> to <suggested> · account_move_max per <task>/<role> · max 2',
+    );
     void daemon;
   });
 
@@ -45,6 +48,11 @@ describe("volleyd policy", () => {
       "owner_only",
       ...POLICY_TABLE.map((x) => x.policy),
     ]);
+    const names = out.rules.map((x) => x.policy);
+    expect(names.indexOf("agent_account_limit/move-exhausted")).toBeGreaterThan(0);
+    expect(names.indexOf("agent_account_limit/move-exhausted")).toBeLessThan(
+      names.indexOf("agent_account_limit/move"),
+    );
   });
 
   it("the README's Autopilot section shows the default table verbatim", () => {
