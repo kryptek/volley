@@ -1,0 +1,5 @@
+#!/bin/sh
+printf '%s\n' "systemctl $*" >>"$STUB_LOG"
+case "$*" in
+  *is-active*snapd*) [ "${STUB_SNAPD:-}" = active ] ;;
+esac

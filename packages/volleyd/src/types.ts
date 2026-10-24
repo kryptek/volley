@@ -899,6 +899,14 @@ export const WAVE_EVENT_TYPES = [
   "train_started",
   "train_merged",
   "train_failed",
+  // Machine roles (SPEC §4.6.24): the roles record changed, and a role move's progress, in the
+  // `_system` journal.
+  "roles_changed",
+  "role_move_started",
+  "role_move_step",
+  "role_move_completed",
+  "role_move_failed",
+  "role_rolled_back",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

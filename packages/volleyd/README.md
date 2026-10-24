@@ -1675,6 +1675,29 @@ journaled, so a client that sends its own mailbox message (the Desk) asks for th
 and then publishes, and the agent gets exactly one message. When there is nothing to interrupt with
 (no hook, no workspace) or it fails, the request still answers `ok` with `interrupted: false`.
 
+## Machine roles
+
+The broker, the supervisor and the Desk are *machine roles* (SPEC §4.6.24): each may run on any
+machine of the pool. volleyd keeps the record of where each runs in `$VOLLEYD_HOME/roles.json`
+and publishes it retained on `volley/_system/roles` at start (`volley role status` prints it).
+
+- **The first start** writes the default: all three on this machine (`fleet.local_name`),
+  `broker.address` `{ ssh: null, mqtt_port: <the broker URL's port>, ws_port: 9001 }`,
+  `broker.lan` and `desk.url` from `setup.json` (what `volley setup` recorded; without it `false`
+  and `http://localhost:5199`), `version: 1`, `updated_by: "volleyd-defaults"`. Every later start
+  reads the file, so a hand edit of `roles.json` takes effect at the next start. A write is a
+  temp file renamed over `roles.json`.
+- **`roles_changed { by, roles }`** is journaled in `_system` when the record differs from the
+  last one journaled (where each role runs, not its `version` or author): once on the first
+  start, then after a change. A restart with the same record republishes it and journals nothing.
+- **A bad file** (not JSON, refused by `roles.schema.json`, or naming a machine that is neither
+  `fleet.local_name` nor a `hosts.<name>`) is logged with its path
+  (`roles: roles.json: supervisor.machine: "box-z" is neither this machine …`) and left as it
+  is; volleyd publishes the last record it journaled instead.
+
+Moving a role (`role_plan`, `role_move`, `role_rollback`) is not implemented yet: volleyd
+answers those ops `unknown op`.
+
 ## Footprints and the overlap plan
 
 Tasks of one wave that touch the same files collide when they merge. A task's footprint (its

@@ -549,7 +549,10 @@ describe("volleyd daemon: lease requests over MQTT", () => {
   };
   const ids = (xs: { lease_id: string }[]) => xs.map((x) => x.lease_id);
   const systemEvents = () =>
-    readJournalFile(join(t.home, "waves", SYSTEM_WAVE, "journal.jsonl")).map((e) => e.type);
+    readJournalFile(join(t.home, "waves", SYSTEM_WAVE, "journal.jsonl"))
+      .map((e) => e.type)
+      // The first start's machine roles record (SPEC §4.6.24) aside.
+      .filter((type) => type !== "roles_changed");
 
   beforeEach(async () => {
     t = await makeDaemonEnv();

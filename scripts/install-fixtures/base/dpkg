@@ -1,0 +1,6 @@
+#!/bin/sh
+printf '%s\n' "dpkg $*" >>"$STUB_LOG"
+case "${1:-}" in
+  --print-architecture) printf 'amd64\n' ;;
+  -s) [ -e "$STUB_STATE/dpkg/$2" ] ;;
+esac

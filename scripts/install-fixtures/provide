@@ -1,0 +1,6 @@
+#!/bin/sh
+# provide <name> <dir>: install stub tool <name> into <dir> (tools/<name>, else the generic tool).
+mkdir -p "$2"
+if [ -f "$STUB_FIXTURES/tools/$1" ]; then src="$STUB_FIXTURES/tools/$1"; else src="$STUB_FIXTURES/tools/tool"; fi
+cp "$src" "$2/$1"
+chmod +x "$2/$1"

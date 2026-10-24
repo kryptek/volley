@@ -22,3 +22,17 @@ describe("the daemon's enums match the schemas", () => {
     expect([...DECISION_KINDS].sort()).toEqual([...schema].sort());
   });
 });
+
+describe("machine roles (SPEC §4.6.24)", () => {
+  it("WAVE_EVENT_TYPES carries the record's and the moves' events", () => {
+    for (const t of [
+      "roles_changed",
+      "role_move_started",
+      "role_move_step",
+      "role_move_completed",
+      "role_move_failed",
+      "role_rolled_back",
+    ])
+      expect(WAVE_EVENT_TYPES).toContain(t);
+  });
+});

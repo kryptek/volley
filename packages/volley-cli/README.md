@@ -544,6 +544,26 @@ Connection flags as `volley peer`'s (`--broker-url`, `--namespace`, `--username`
 
 ---
 
+## `volley role`
+
+Which machine runs each machine role (SPEC §4.6.24): the broker, the supervisor (volleyd) and
+the Desk. Read from volleyd's retained record `volley/_system/roles`, so it needs the broker,
+not an answer from volleyd.
+
+```sh
+volley role status
+#   broker      on mac
+#   supervisor  on mac
+#   desk        on mac (http://192.0.2.20:5199)
+volley role status --json       # the whole record: the broker's address, lan, version, …
+```
+
+With no record (volleyd has never run against this broker) it exits 1 with
+`no roles record: is volleyd running?`. `--timeout <s>` (default 2) bounds the wait for the
+retained record; `--broker-url`, `--username` and `--password` as everywhere.
+
+---
+
 ## `volley lease`
 
 Heavy operations (integration-test suites, builds, browsers) share machine-global **lease pools**

@@ -1,0 +1,6 @@
+#!/bin/sh
+printf '%s\n' "uname $*" >>"$STUB_LOG"
+case "${1:-}" in
+  -m) printf '%s\n' "$STUB_UNAME_M" ;;
+  *) printf '%s\n' "$STUB_UNAME_S" ;;
+esac

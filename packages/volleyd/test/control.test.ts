@@ -326,7 +326,8 @@ describe("volleyd daemon + control channel", () => {
       type: "config_changed",
       payload: {
         wave: SYSTEM_WAVE,
-        seq: 1,
+        // seq 1 is the first start's `roles_changed` (SPEC §4.6.24).
+        seq: 2,
         data: {
           by: "tester",
           patch: { hard_ceiling: 3 },

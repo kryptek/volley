@@ -322,6 +322,8 @@ export const DAEMON_DEFAULTS = {
   screen_closed_backoff_s: 3600,
   /** The broker port when the broker URL names none (MQTT's registered port). */
   mqtt_default_port: 1883,
+  /** The broker's WebSocket listener (the Desk page's), as `volley setup` configures it. */
+  ws_default_port: 9001,
   /** ssh `ConnectTimeout` for every remote command and tunnel (seconds). */
   ssh_connect_timeout_s: 10,
   /** ssh `ServerAliveInterval` for the reverse tunnel (seconds). */
