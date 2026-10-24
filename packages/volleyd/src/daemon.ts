@@ -214,6 +214,7 @@ import {
   isMachineLogin,
   limitDecisions,
   limitHitDecision,
+  limitHitResetsAt,
   markLimitHit,
   moveAnswer,
   parseAgentMoveAnswer,
@@ -9051,9 +9052,11 @@ export class Daemon {
         // takes the agent (autopilot answers the move), else the owner's model_switch as before.
         const ag = this.accountOfAgent(agentId, a);
         const resetsAt = await this.markLimitHit(wave, task, agentId, ag.acct, x.source);
+        // Already moving (a warn-level move waits for it to stop): the respawn lands elsewhere.
+        if (this.moving.has(agentId)) return;
         const hit = limitHitDecision({
           accounts: accountRecords(this.usage),
-          agent: { ...ag, pinned: this.pinned(wave, task), moving: this.moving.has(agentId) },
+          agent: { ...ag, pinned: this.pinned(wave, task), moving: false },
           candidates: this.claude.candidates(ag.machine),
           warnAtPct: this.config.effective(wave).claude.warn_at_pct,
           resets_at: resetsAt,
@@ -10836,11 +10839,9 @@ export class Daemon {
     source: "hook" | "screen",
   ): Promise<string> {
     const at = dateOf(this.time).toISOString();
+    const resetsAt = limitHitResetsAt(this.usage, { account: acct, at });
     this.usage = markLimitHit(this.usage, { account: acct, at });
     writeFileAtomic(this.usageFile, bookState(this.usage));
-    const resetsAt =
-      this.usage.accounts[acct]?.five_hour?.resets_at ??
-      new Date(Date.parse(at) + 5 * 3_600_000).toISOString();
     await this.append(wave, {
       type: "alarm_raised",
       task,

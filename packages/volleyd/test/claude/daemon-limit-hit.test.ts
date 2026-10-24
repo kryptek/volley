@@ -9,7 +9,13 @@ import type { JournalEvent } from "../../src/types";
 import { AUTOPILOT_ON, NS } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
 import { FIXTURES } from "../helpers/fake-host";
-import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
+import {
+  AGENT,
+  ARTIFACTS_OK,
+  type SupervisedEnv,
+  type SupervisedEnvOptions,
+  makeSupervisedEnv,
+} from "../helpers/supervised-env";
 import { tempDir } from "../helpers/tmp";
 import { stubEnv } from "../helpers/with-env";
 
@@ -64,7 +70,15 @@ async function record(acct: string): Promise<Record<string, unknown> | null> {
 }
 
 /** A balanced wave (autopilot on) whose agent runs on the primary; `work` signed in after. */
-async function onPrimary(o: { config?: string; waveExtra?: string; tasks?: string[] } = {}) {
+async function onPrimary(
+  o: {
+    config?: string;
+    waveExtra?: string;
+    tasks?: string[];
+    spawned?: number;
+    exec?: SupervisedEnvOptions["exec"];
+  } = {},
+) {
   const base = tempDir("volleyd-limit-hit-");
   const root = join(base, "claude");
   restore = stubEnv({ VOLLEY_CLAUDE_DIR: root });
@@ -76,6 +90,8 @@ async function onPrimary(o: { config?: string; waveExtra?: string; tasks?: strin
     ...(o.config !== undefined ? { config: o.config } : {}),
     ...(o.waveExtra !== undefined ? { waveExtra: o.waveExtra } : {}),
     ...(o.tasks !== undefined ? { tasks: o.tasks } : {}),
+    ...(o.spawned !== undefined ? { spawned: o.spawned } : {}),
+    ...(o.exec !== undefined ? { exec: o.exec } : {}),
   });
   const dir = join(root, "work");
   mkdirSync(dir, { recursive: true });
@@ -264,6 +280,29 @@ describe("the exhausted account is marked at its limit", () => {
     } finally {
       await client.close();
     }
+  }, 30_000);
+
+  it("a task spawned after the hit gets the account with room", async () => {
+    await onPrimary({
+      config: "hard_ceiling: 1, autopilot: { account_move_max: 0 }",
+      tasks: ["T2: { issue: 42 }"],
+      spawned: 1,
+      exec: ARTIFACTS_OK,
+    });
+    // work fuller than the primary's last sample: only the mark puts the primary behind it
+    await seed(89);
+    await s.hook("awaiting-credit.json");
+    await s.event(isLimitHit);
+    // T1's verified done frees the ceiling: T2 spawns after the mark
+    await s.status("done", { summary: "ok" });
+    await s.event("agent_retired");
+    await s.daemon.tick();
+    const t2 = await s.event((e) => e.type === "agent_spawned" && e.task === "T2");
+    expect(t2.data.claude_account).toBe("work");
+    const chosen = s
+      .journal()
+      .find((e) => e.type === "account_chosen" && e.task === "T2" && e.data.account === "work");
+    expect(chosen?.data.source).not.toBe("move");
   }, 30_000);
 
   it("another agent on the account gets its own warn-level move", async () => {

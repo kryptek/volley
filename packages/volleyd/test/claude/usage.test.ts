@@ -17,6 +17,7 @@ import {
   forgetAgent,
   limitDecisions,
   limitHitDecision,
+  limitHitResetsAt,
   markLimitHit,
   mostHeadroom,
   parseAgentMoveAnswer,
@@ -820,6 +821,18 @@ describe("markLimitHit", () => {
         ?.five_hour?.pct,
     ).toBe(3);
     expect(restoreBook(bookState(m)).accounts).toEqual(m.accounts);
+  });
+
+  it("is applied even when the window it replaces is stamped after `at` (a clock running ahead)", () => {
+    const ahead = "2026-10-18T14:20:00.000Z";
+    const b = fold(emptyBook(), "a-1", "w1", sample("primary", 88, ahead));
+    const m = markLimitHit(b, { account: "primary", at: later });
+    expect(m.accounts.primary?.five_hour).toEqual({ pct: 100, resets_at: RESETS, at: ahead });
+    expect(limitHitResetsAt(b, { account: "primary", at: later })).toBe(RESETS);
+    expect(
+      fold(m, "a-1", "w1", sample("primary", 3, "2026-10-18T14:30:00.000Z")).accounts.primary
+        ?.five_hour?.pct,
+    ).toBe(3);
   });
 
   it("counts as empty once its reset has passed", () => {

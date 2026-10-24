@@ -837,24 +837,33 @@ export const LIMIT_HIT_ALARM = "account_limit_hit";
 const FIVE_HOURS_MS = 5 * 3_600_000;
 
 /**
- * An agent hit `account`'s usage limit at `at`: its 5-hour window reads 100%, resetting when the
- * book says (if still ahead), else 5 hours on. Folded freshest-wins, so a later sample or probe
+ * The reset of `account`'s 5-hour window when an agent hits its limit at `at`: the book's, if
+ * still ahead, else 5 hours on.
+ */
+export function limitHitResetsAt(book: UsageBook, o: { account: string; at: string }): string {
+  const known = book.accounts[o.account]?.five_hour?.resets_at ?? null;
+  return known !== null && Date.parse(known) > Date.parse(o.at)
+    ? known
+    : new Date(Date.parse(o.at) + FIVE_HOURS_MS).toISOString();
+}
+
+/**
+ * An agent hit `account`'s usage limit at `at`: its 5-hour window reads 100% until
+ * `limitHitResetsAt`. Always applied: stamped no older than the window it replaces (a sample from a
+ * machine whose clock runs ahead of ours can carry a later `at`), so only a later sample or probe
  * reading replaces it; `bookState` keeps it.
  */
 export function markLimitHit(book: UsageBook, o: { account: string; at: string }): UsageBook {
   const prev = book.accounts[o.account];
-  const known = prev?.five_hour?.resets_at ?? null;
-  const resets_at =
-    known !== null && Date.parse(known) > Date.parse(o.at)
-      ? known
-      : new Date(Date.parse(o.at) + FIVE_HOURS_MS).toISOString();
+  const seen = prev?.five_hour?.at;
+  const at = seen !== undefined && newer(seen, o.at) ? seen : o.at;
   return {
     ...book,
     accounts: {
       ...book.accounts,
       [o.account]: {
         ...prev,
-        five_hour: pickWindow(prev?.five_hour ?? null, { pct: 100, resets_at }, o.at),
+        five_hour: { pct: 100, resets_at: limitHitResetsAt(book, o), at },
         weekly: prev?.weekly ?? null,
         sampled_at: prev?.sampled_at ?? o.at,
       },

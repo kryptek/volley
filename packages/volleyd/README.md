@@ -817,7 +817,12 @@ moving, or a second time for the same task role, account, window and `resets_at`
 `class: "credit"`, or the usage-limit prompt on a silent agent's screen) first marks its account
 at the limit: `markLimitHit` folds `five_hour = { pct: 100, resets_at }` into the usage book
 (`resets_at` the window's known reset while it is ahead, else 5 hours on) as a reading of that
-moment, so a later sample or probe replaces it and `usage.json` keeps it across a restart. volleyd
+moment (never older than the reading it replaces, so a sample from a machine whose clock runs
+ahead cannot hide it), so a later sample or probe replaces it and `usage.json` keeps it across a
+restart. The mark is always the 5-hour window: when the 7-day or model-family weekly limit is what
+was hit, it lapses at the 5-hour reset and the question names that reset, until a real sample
+reports the weekly window. An agent already being moved gets no decision (its respawn lands on
+the other account anyway). volleyd
 journals `alarm_raised { alarm: "account_limit_hit", agent_id, acct, resets_at, source }` and
 re-publishes the record: new spawns rank the account last until the reset, and its other agents
 get their own warn-level decision. Then, when another account on the agent's machine has room
