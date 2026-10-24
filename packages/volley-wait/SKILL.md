@@ -105,7 +105,7 @@ Map the result and print exactly one summary line:
 | `0` | `volley wait`: stdout contains JSON `{"agent_id":"...","terminal_type":"<type>",...}` | `✅ <target> reached <type>` |
 | `0` | `volley sub`: collected `--max-messages` messages (each one is a JSON line on stdout) | `✅ <target> received <n> matching message(s)` |
 | `124` | exit 124 alone (`volley wait` additionally emits `timeout after <n>s` on stderr; `volley sub` does not — rely on the exit code, not the stderr text) | `⏰ timeout after <n>s — no matching message` |
-| `1` | stderr typically starts with `volley: cannot connect to broker at <url>: ...` or includes `Hint: install mosquitto` | `❌ broker error: <first line of stderr>` — and append `  → brew services start mosquitto` if the stderr mentions `cannot connect to broker` or `Hint: install mosquitto` |
+| `1` | stderr typically starts with `volley: cannot connect to broker at <url>: ...` or includes `Hint: install mosquitto` | `❌ broker error: <first line of stderr>` — and append `  → volley setup --check   (volley setup --repair fixes what it finds)` if the stderr mentions `cannot connect to broker` or `Hint: install mosquitto` |
 | `2` | usage error from the CLI (should not happen if the skill validated args properly) | `❌ usage error from volley CLI: <first line of stderr>` |
 | anything else | unknown | `❌ unexpected exit (<code>): <first line of stderr>` |
 

@@ -4,27 +4,19 @@ These steps verify the volley-issues skill against a real downstream repo + live
 
 ## Setup (once)
 
-- [ ] `brew services start mosquitto` (or any MQTT broker on localhost:1883).
-- [ ] Symlink the skill: `bash packages/volley-issues/scripts/install.sh`.
-- [ ] Confirm volley-mcp is registered with Claude Code at user scope. Run `claude mcp list` — you should see `volley: ... ✓ Connected`. If missing, register it (substituting the absolute path to this volley repo):
-
-   ```sh
-   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_NAMESPACE":"example-dispatch"}}'
-   ```
-
-   Do NOT hand-edit `~/.claude/settings.json` — Claude Code rejects `mcpServers` as an unknown top-level field; MCP servers are stored in a separate config managed by the `claude mcp` CLI. Quit Claude Code (Cmd-Q) and reopen after registering. The MCP server picks a fresh `-XXXX` suffix at every startup, so this coordinator's actual agent_id is `coordinator-XXXX` — discoverable via vol_register's response.
+- [ ] Volley installed with the one command (the root README's Quickstart), or `volley setup` run on this machine: `volley setup --check` reports every row `done`. That covers the broker, this skill linked, and volley-mcp registered with Claude Code at user scope (no password in it, `VOLLEY_AGENT_ID=coordinator`, `VOLLEY_NAMESPACE=default`). Run `claude mcp list` — you should see `volley: ... ✓ Connected`. If missing, `volley setup --step claude-code`, then restart Claude Code (exit the session and start `claude` again). Do NOT hand-edit `~/.claude/settings.json` — Claude Code rejects `mcpServers` as an unknown top-level field; MCP servers are stored in a separate config managed by the `claude mcp` CLI. The MCP server picks a fresh `-XXXX` suffix at every startup, so this coordinator's actual agent_id is `coordinator-XXXX` — discoverable via vol_register's response.
 - [ ] In Claude Code: confirm `vol_register`, `vol_list_agents`, `vol_subscribe`, `vol_send_mailbox`, `vol_query`, `vol_tap` appear in the available MCP tools list.
 - [ ] Pick a small, real, low-risk downstream issue to dispatch. (A typo fix or one-line config change is ideal.)
 
 ## Coordinator registration
 
-- [ ] In Claude Code: call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: "<your-cwd>", model: "claude-opus-4-7" })`. Confirm the response's `agent_id` matches the pattern `coordinator-[a-z0-9]{4}` (auto-suffix). Record this exact id — it's the `parent_id` you embed in dispatched children's spawn briefs.
+- [ ] In Claude Code: call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: "<your-cwd>", model: "<the model this session runs>" })`. Confirm the response's `agent_id` matches the pattern `coordinator-[a-z0-9]{4}` (auto-suffix). Record this exact id — it's the `parent_id` you embed in dispatched children's spawn briefs.
 
 ## Single-issue dispatch
 
 - [ ] In Claude Code: `/volley-issues #<chosen-issue>`.
 - [ ] Confirm the skill: (a) creates a worktree under `/private/tmp/example-issue-<N>/`, (b) writes ISSUE.md there, (c) launches a cmux workspace with a `claude --dangerously-skip-permissions` subprocess.
-- [ ] Confirm a NEW agent appears in `vol_list_agents({ namespace: "example-dispatch" })` within ~5s. The new agent's `parent_id` should equal the coordinator's recorded agent_id, and its `cwd` should equal `/private/tmp/example-issue-<N>`. The child's `agent_id` will be `coordinator-YYYY` (a different suffix from the coordinator) — record it for the wait-latency check.
+- [ ] Confirm a NEW agent appears in `vol_list_agents({ namespace: "default" })` within ~5s. The new agent's `parent_id` should equal the coordinator's recorded agent_id, and its `cwd` should equal `/private/tmp/example-issue-<N>`. The child's `agent_id` will be `coordinator-YYYY` (a different suffix from the coordinator) — record it for the wait-latency check.
 - [ ] Let the agent work. Watch progress: `/volley watch <child-agent-id>` (uses the `/volley` skill), substituting the discovered child agent_id.
 - [ ] When the agent publishes terminal `done`, confirm the coordinator wakes within **< 5s** (this is the whole point of the dogfood). The coordinator reads the agent's worktree, reviews the diff, and proceeds to commit + PR per the Coordinator loop.
 - [ ] Verify the PR was created on GitHub against the right base branch (main for single-issue, release branch for batch).
@@ -62,8 +54,8 @@ The sections above exercise the legacy path. With `volleyd status` exiting 0 and
    ```sh
    mosquitto_pub -t "volley/_system/registry/<child-A-id>" -n -r
    mosquitto_pub -t "volley/_system/registry/<child-B-id>" -n -r
-   mosquitto_pub -t "volley/example-dispatch/<child-A-id>/status" -n -r
-   mosquitto_pub -t "volley/example-dispatch/<child-B-id>/status" -n -r
+   mosquitto_pub -t "volley/default/<child-A-id>/status" -n -r
+   mosquitto_pub -t "volley/default/<child-B-id>/status" -n -r
    ```
 
 ## Sign-off
