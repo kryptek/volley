@@ -128,7 +128,7 @@ const DARK = {
   hlStrong: "rgba(255, 255, 255, 0.35)",
 };
 
-/** The palettes with values. The rest of `THEME_IDS` arrive with #368 (lighter) and #369 (the dark ten). */
+/** The palettes with values. The rest of `THEME_IDS` arrive with #369 (the dark ten). */
 export const THEMES: readonly ThemeDef[] = [
   // Today's Desk, verbatim from desk.css `:root` (not the mockup's approximation): T0 is zero visual change.
   {
@@ -155,6 +155,43 @@ export const THEMES: readonly ThemeDef[] = [
       pit: "#0b0f1c",
       cur1: "#3a7182", // AA: derived #468c9d gave white 3.8:1; these are 5.4 / 12.4
       cur2: "#1f3746",
+    },
+  },
+  {
+    id: "lighter",
+    name: "Material Lighter",
+    tone: "light",
+    v: {
+      bg: "#eceff1",
+      bgGlow1: "#e0f7fa",
+      bgGlow2: "#f3e5f5",
+      win1: "#ffffff",
+      win2: "#fafafa",
+      panel: "#ffffff",
+      edge: "rgba(84, 110, 122, 0.18)",
+      ink: "#263238",
+      dim: "#5e6c73" /* AA: #90a4ae */,
+      mute: "#546e7a",
+      narr: "#37474f",
+      acc: "#00bcd4",
+      ok: "#43a047",
+      link: "#4f6b98" /* AA: #6182b8 */,
+      well: "#eef1f3",
+      pit: "#e7ecef",
+      onAcc: "#ffffff",
+      onHi: "#00363d",
+      cur1: "#00798a", // AA: #00a5b8 / #00798a gave white 3.0 / 5.1; these are 5.1 / 8.4
+      cur2: "#005662",
+      accText: "#006974", // AA: #00838f was 3.8:1 on the surfaces
+      shade: "rgba(38, 50, 56, 0.18)",
+      hl: "rgba(255, 255, 255, 0.9)",
+      hlStrong: "rgba(255, 255, 255, 0.6)",
+      hotInk: "#a83a12",
+      amberInk: "#92400e",
+      okInk: "#1b5e20",
+      badInk: "#b71c1c",
+      infoInk: "#075985",
+      mineInk: "#755c00",
     },
   },
 ];

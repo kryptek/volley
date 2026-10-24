@@ -45,6 +45,7 @@
 }
 .dag-id {
   font: 600 13px var(--f-mono);
+  fill: var(--acc-ink);
 }
 .dag-stage {
   font: 11.5px var(--f-ui);
@@ -107,13 +108,13 @@
   overflow: auto;
   max-height: 170px;
   white-space: pre;
-  color: #cfd6e6;
+  color: var(--code-ink);
 }
 .y-k {
-  color: #8fb4ff;
+  color: var(--syn-key);
 }
 .y-v {
-  color: #f0d58a;
+  color: var(--syn-val);
 }
 .y-c {
   color: var(--dim);
@@ -176,7 +177,7 @@
   border-color: rgba(163, 171, 192, 0.4);
 }
 .chip--ci {
-  color: var(--amber);
+  color: var(--amber-text);
   border-color: color-mix(in srgb, var(--amber) 45%, transparent);
   background: color-mix(in srgb, var(--amber) 8%, transparent);
 }
@@ -196,14 +197,14 @@
   align-items: baseline;
 }
 .wave-ci-what {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .wave-ci-pipe {
-  color: var(--amber);
+  color: var(--amber-text);
   font: 11.5px var(--f-mono);
 }
 .wave-ci-stuck {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 
 /* Autopilot (SPEC §4.6.16–19): its chip, the merge queue, the release train and fixer tasks. */
@@ -230,7 +231,7 @@
   font-size: 12px;
 }
 .wave-train [aria-current="step"] {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .wave-train .train-verified {
   color: var(--ok-ink);
@@ -295,6 +296,9 @@
 .cluster-id {
   font-weight: 600;
 }
+.cluster-id[style] {
+  color: var(--hue);
+}
 .cluster-hot {
   font-size: 11px;
   min-width: 0;
@@ -304,7 +308,7 @@
   max-width: 100%;
 }
 .cluster-hold .cluster-state {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .cluster-train .cluster-state {
   color: var(--info-ink);
@@ -316,7 +320,7 @@
   gap: 0;
 }
 .chip--churn {
-  color: var(--amber);
+  color: var(--amber-text);
   border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }
 .wave-queue a {
@@ -404,4 +408,33 @@
 .wave-acct-note {
   flex-basis: 100%;
   color: var(--mute);
+}
+/* A cluster's hue as text: darkened on a light theme, like --acc-ink. */
+html[data-tone="light"] .dag-cluster {
+  fill: color-mix(in oklab, var(--hue) 55%, black);
+}
+html[data-tone="light"] .cluster-id[style] {
+  color: color-mix(in oklab, var(--hue) 55%, black);
+}
+/* The light tone: a node is the window's white with its state's tint, not a see-through tint
+   over the cluster hull. */
+html[data-tone="light"] .dag-node rect:not(.dag-hull) {
+  fill: var(--win1);
+}
+/* Outlines a node state doesn't colour, drawn from --mute so they show on white (:where keeps
+   the specificity of the base rule, so the state strokes still win). */
+:where(html[data-tone="light"]) .dag-node rect {
+  stroke: color-mix(in srgb, var(--mute) 45%, transparent);
+}
+html[data-tone="light"] .dag-edge {
+  stroke: color-mix(in srgb, var(--mute) 60%, transparent);
+}
+html[data-tone="light"] .dag-node.st-merged rect:not(.dag-hull) {
+  fill: color-mix(in srgb, var(--ok) 10%, var(--win1));
+}
+html[data-tone="light"] .dag-node.st-merge_ready rect:not(.dag-hull) {
+  fill: color-mix(in srgb, var(--t-acc) 10%, var(--win1));
+}
+html[data-tone="light"] .dag-node.st-decision rect:not(.dag-hull) {
+  fill: color-mix(in srgb, var(--amber) 10%, var(--win1));
 }

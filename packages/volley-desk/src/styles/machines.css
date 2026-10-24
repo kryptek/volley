@@ -58,8 +58,8 @@ button.m-local:focus-visible {
   border-color: color-mix(in srgb, var(--t-acc) 50%, transparent);
 }
 .m-local--active {
-  color: #ffd27a;
-  border-color: rgba(255, 210, 122, 0.45);
+  color: var(--amber-ink);
+  border-color: color-mix(in srgb, var(--amber-ink) 45%, transparent);
 }
 .m-stats {
   display: flex;
@@ -102,7 +102,7 @@ button.m-local:focus-visible {
 .m-notice {
   display: block;
   margin: 0 0 10px;
-  color: #7ee2a0;
+  color: var(--ok-ink);
 }
 .m-readonly {
   margin: 12px 0 0;
@@ -166,13 +166,13 @@ button.m-local:focus-visible {
   margin: 0;
 }
 .m-ready--ok {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 .m-ready--warn {
-  color: #ffd60a;
+  color: var(--amber-ink);
 }
 .m-ready--bad {
-  color: #ff6961;
+  color: var(--bad-ink);
 }
 .m-ready--down {
   color: var(--mute);
@@ -206,13 +206,13 @@ button.m-local:focus-visible {
   font-weight: 700;
 }
 .m-check--ok .m-glyph {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 .m-check--warn .m-glyph {
-  color: #ffd60a;
+  color: var(--amber-ink);
 }
 .m-check--block .m-glyph {
-  color: #ff6961;
+  color: var(--bad-ink);
 }
 .m-check-id {
   color: var(--mute);
@@ -429,15 +429,15 @@ button.m-local:focus-visible {
   color: var(--mute);
 }
 .repo-chip--ready {
-  color: var(--ok);
+  color: var(--ok-text);
   border-color: color-mix(in srgb, var(--ok) 40%, transparent);
 }
 .repo-chip--cloning {
-  color: var(--amber);
+  color: var(--amber-text);
   border-color: color-mix(in srgb, var(--amber) 40%, transparent);
 }
 .repo-chip--blocked {
-  color: var(--bad);
+  color: var(--bad-text);
   border-color: color-mix(in srgb, var(--bad) 40%, transparent);
 }
 .repo-chip b {
@@ -498,14 +498,14 @@ button.m-local:focus-visible {
   flex-wrap: wrap;
 }
 .repo-state--ready {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 .repo-state--cloning {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .repo-state--blocked,
 .repo-state--absent {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 .m-repos-block {
   display: flex;
