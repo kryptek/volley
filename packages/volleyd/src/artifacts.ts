@@ -1061,14 +1061,27 @@ const MAX_FAILING_TESTS = 20;
 
 /**
  * Failing test ids in a `gh run view --log-failed` log (`<job>\t<step>\t<line>`): vitest's
- * `FAIL  <file> > <suite> > <name>` and bun's `(fail) <name>` lines, each once, in log order. Pure.
+ * `FAIL  <file> > <suite> > <name>` and bun's `(fail) <name>` lines, each once, in log order.
+ * Under GitHub Actions bun heads each file's lines with `##[group]<file>:`; a `(fail)` line inside
+ * one reads `<file> > <name>`, outside one a bare `<name>`. Pure.
  */
 export function failingTests(log: string): string[] {
   const out: string[] = [];
+  let current: string | undefined;
   for (const raw of log.split("\n")) {
     const text = (raw.split("\t").at(-1) ?? "").replace(/^\S*\d{2}:\d{2}:\d{2}\S*Z\s/, "").trim();
-    const m = /^FAIL\s+(.+)$/.exec(text) ?? /^\(fail\)\s+(.+?)(\s+\[[\d.]+\s*m?s\])?$/.exec(text);
-    const id = m?.[1]?.trim();
+    const group = /^##\[group\](\S+\.[cm]?[jt]sx?):?$/.exec(text);
+    if (group !== null) {
+      current = group[1];
+      continue;
+    }
+    if (text.startsWith("##[endgroup]")) {
+      current = undefined;
+      continue;
+    }
+    const vitest = /^FAIL\s+(.+)$/.exec(text)?.[1]?.trim();
+    const bun = /^\(fail\)\s+(.+?)(\s+\[[\d.]+\s*m?s\])?$/.exec(text)?.[1]?.trim();
+    const id = vitest ?? (bun && current !== undefined ? `${current} > ${bun}` : bun);
     if (id !== undefined && id !== "" && !out.includes(id)) out.push(id);
     if (out.length >= MAX_FAILING_TESTS) break;
   }

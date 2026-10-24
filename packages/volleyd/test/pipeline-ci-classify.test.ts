@@ -78,10 +78,57 @@ describe("a red head is classified before anyone is asked", () => {
     expect(facts(d).evidence).toMatchObject({
       release_ci: { state: "red", failing_tests: [FLAKE] },
     });
+    expect(d?.question).toContain("is red on it too");
     // The release branch was read with its own --branch run list.
     expect(
       h.calls.some((c) => c[2] === "list" && c.includes("--branch") && c.includes("release/w1")),
     ).toBe(true);
+  });
+
+  it("flake question: the release branch is named only when it fails the same test", async () => {
+    h = pipelineHarness();
+    h.world.releaseRuns = fx("gh-run-list-release-red.json");
+    h.world.runLogs[812] = fx("gh-run-log-failed-flake.txt");
+    await redHead({ log: "job\tstep\tFAIL  test/a.test.ts > x > y\n" });
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("flake");
+    expect(d?.question).not.toContain("is red on it too");
+  });
+
+  it("a bun id the release branch does not fail, release red elsewhere → own_change, fixup first", async () => {
+    h = pipelineHarness();
+    h.world.releaseRuns = fx("gh-run-list-release-red.json");
+    h.world.runLogs[812] = fx("gh-run-log-failed-flake.txt");
+    await redHead({ log: "job\tstep\t(fail) formula > renders the brew formula [2ms]\n" });
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("own_change");
+    expect(d?.options?.[0]).toBe("fixup");
+    expect(events("remediation_requested")).toEqual([]);
+  });
+
+  it("a PR's own new bun test, file read from the group header → own_change by its file", async () => {
+    h = pipelineHarness();
+    h.world.prFiles[7] = JSON.stringify({
+      files: [{ path: "scripts/packaging/formula.test.ts" }],
+    });
+    h.world.releaseRuns = fx("gh-run-list-release-red.json");
+    h.world.runLogs[812] = fx("gh-run-log-failed-flake.txt");
+    await redHead({
+      log: [
+        "job\tstep\t2026-10-24T01:02:03Z ##[group]scripts/packaging/formula.test.ts:",
+        "job\tstep\t2026-10-24T01:02:04Z (fail) formula > renders the brew formula [2ms]",
+        "job\tstep\t2026-10-24T01:02:04Z ##[endgroup]",
+        "",
+      ].join("\n"),
+    });
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("own_change");
+    expect(d?.options?.[0]).toBe("fixup");
+    expect(facts(d).evidence).toMatchObject({
+      failing_tests: ["scripts/packaging/formula.test.ts > formula > renders the brew formula"],
+      test_files: ["scripts/packaging/formula.test.ts"],
+    });
+    expect(events("remediation_requested")).toEqual([]);
   });
 
   it("flake answered `fix flake`: the request stands, the task stays parked with the reason, nothing re-verifies", async () => {
