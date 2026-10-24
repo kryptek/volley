@@ -36,9 +36,11 @@ function signinAfter(...msgs: DeskMessage[]): ClaudeSignin | undefined {
 }
 
 const URL_EVENT = signinMsg("claude_signin_url", {
-  url: LOCAL_URL,
-  flow: "browser_callback",
+  url: MANUAL_URL,
+  flow: "manual_code",
   manual_url: MANUAL_URL,
+  callback_url: LOCAL_URL,
+  code_prompt: true,
   attach: ATTACH,
 });
 
@@ -47,9 +49,10 @@ function controlOk(): ControlFn & ReturnType<typeof vi.fn> {
     ok: true,
     result: {
       acct: ACCT,
-      url: LOCAL_URL,
-      flow: "browser_callback",
+      url: MANUAL_URL,
+      flow: "manual_code",
       manual_url: MANUAL_URL,
+      callback_url: LOCAL_URL,
       attach: ATTACH,
     },
   })) as unknown as ControlFn & ReturnType<typeof vi.fn>;
@@ -78,15 +81,24 @@ function setup(signin: ClaudeSignin | undefined, control: ControlFn = controlOk(
 const card = () => within(screen.getByRole("article", { name: "box-a" }));
 
 describe("the store keys a paired machine's sign-in by primary@<name>", () => {
-  it("keeps the phone's manual_url and the ssh attach", () => {
+  it("keeps the code-page link, the callback shortcut, the prompt and the ssh attach", () => {
     expect(signinAfter(URL_EVENT)).toMatchObject({
       acct: ACCT,
       state: "waiting",
-      url: LOCAL_URL,
-      flow: "browser_callback",
+      url: MANUAL_URL,
+      flow: "manual_code",
       manual_url: MANUAL_URL,
+      callback_url: LOCAL_URL,
+      code_prompt: true,
       attach: ATTACH,
     });
+  });
+
+  it("a newer URL event without callback_url drops the shortcut", () => {
+    const { callback_url: _c, ...rest } = URL_EVENT.envelope?.payload as Record<string, unknown>;
+    expect(signinAfter(URL_EVENT, signinMsg("claude_signin_url", rest))).not.toHaveProperty(
+      "callback_url",
+    );
   });
 });
 
@@ -101,27 +113,27 @@ describe("Sign in on <machine>: PeerSigninSheet", () => {
     ]);
   });
 
-  it("renders Open sign-in with the forwarded localhost URL, and the phone disclosure", async () => {
+  it("shows the code-page link with its QR code and the one box; the shortcut only while a callback_url exists", async () => {
     const t = setup(undefined);
     fireEvent.click(card().getByRole("button", { name: "Sign in on box-a" }));
     t.rerender(signinAfter(URL_EVENT));
     const sheet = within(await screen.findByRole("dialog", { name: "Sign in on box-a" }));
-    const open = sheet.getByRole("link", { name: /Open sign-in/ });
-    expect(open).toHaveAttribute("href", LOCAL_URL);
-    expect(sheet.getByText(/browser on this computer/)).toBeInTheDocument();
-    // The phone disclosure: the manual URL to open there, then the attach command.
-    const phone = sheet.getByText("From a phone instead");
-    fireEvent.click(phone);
-    expect(sheet.getByRole("link", { name: /Open on the phone/ })).toHaveAttribute(
+    expect(sheet.getByRole("link", { name: "Open Anthropic sign-in ↗" })).toHaveAttribute(
       "href",
       MANUAL_URL,
     );
-    expect(screen.getByRole("dialog")).toHaveTextContent(ATTACH);
-    expect(sheet.getByText(/never into Volley/)).toBeInTheDocument();
-    // No field of any kind: a code is never typed into the Desk.
-    const dialog = screen.getByRole("dialog", { name: "Sign in on box-a" });
-    expect(dialog.querySelectorAll("input, textarea, select, [contenteditable]")).toHaveLength(0);
-    expect(within(dialog).queryByRole("textbox")).toBeNull();
+    expect(sheet.getByRole("img", { name: "QR code of the sign-in link" })).toBeInTheDocument();
+    const box = sheet.getByLabelText("Paste the code, or the address your browser ended up on");
+    expect(box).toHaveAttribute("type", "password");
+    expect(box).toHaveAttribute("autocomplete", "off");
+    expect(
+      sheet.getByRole("link", { name: "Open here instead (browser on the supervisor’s machine)" }),
+    ).toHaveAttribute("href", LOCAL_URL);
+    // The terminal is a fallback, under its own disclosure.
+    expect(sheet.getByText("Terminal instead").closest("details")).not.toHaveAttribute("open");
+    const { callback_url: _c, ...rest } = URL_EVENT.envelope?.payload as Record<string, unknown>;
+    t.rerender(signinAfter(signinMsg("claude_signin_url", rest)));
+    expect(sheet.queryByRole("link", { name: /Open here instead/ })).toBeNull();
   });
 
   it("claude_signin_done turns the card green with the plan and refreshes the doctor (fix: false)", async () => {
@@ -169,7 +181,10 @@ describe("Sign in on <machine>: PeerSigninSheet", () => {
     });
     const sheet = within(await screen.findByRole("dialog", { name: "Sign in on box-a" }));
     expect(sheet.queryByRole("alert")).toBeNull();
-    expect(sheet.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", LOCAL_URL);
+    expect(sheet.getByRole("link", { name: /Open Anthropic sign-in/ })).toHaveAttribute(
+      "href",
+      MANUAL_URL,
+    );
   });
 
   it("volleyd refusing the sign-in shows its error", async () => {
@@ -209,34 +224,125 @@ describe("Sign in on <machine>: PeerSigninSheet", () => {
   });
 });
 
-describe("SigninLink: the sign-in link and phone steps, shared with Add Claude account", () => {
-  it("renders Open sign-in, the browser-here line and the closed phone disclosure", () => {
+describe("SigninLink: the link, the box, the refusals (shared with Add Claude account)", () => {
+  const CODE = "abcSECRET42#def";
+  const box = () =>
+    screen.getByLabelText("Paste the code, or the address your browser ended up on");
+  const submit = async (text: string) => {
+    fireEvent.change(box(), { target: { value: text } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+  };
+  const link = (control: ControlFn, extra: { callbackUrl?: string } = {}) =>
     render(
       <SigninLink
+        acct="work@box-a"
         machine="box-a"
-        url={LOCAL_URL}
-        flow="browser_callback"
-        attach={ATTACH}
+        url={MANUAL_URL}
         manualUrl={MANUAL_URL}
+        attach={ATTACH}
+        control={control}
+        {...extra}
       />,
     );
-    expect(screen.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", LOCAL_URL);
-    expect(screen.getByText(/browser on this computer/)).toBeInTheDocument();
-    expect(screen.getByText("From a phone instead").closest("details")).not.toHaveAttribute("open");
-    expect(screen.getByRole("link", { name: /Open on the phone/ })).toHaveAttribute(
-      "href",
-      MANUAL_URL,
-    );
-    expect(document.body).toHaveTextContent(ATTACH);
-    expect(screen.getByText(/Waiting for the sign-in to finish/)).toBeInTheDocument();
-    expect(screen.queryByRole("textbox")).toBeNull();
+
+  it("Submit sends claude_signin_entry with the text as typed (trimmed) and empties the box; done shows the masked e-mail", async () => {
+    const control = vi.fn(async () => ({
+      ok: true,
+      result: { acct: "work@box-a", signed_in: true, email: "owner@example.com" },
+    })) as unknown as ControlFn & ReturnType<typeof vi.fn>;
+    link(control);
+    await submit(` ${CODE} `);
+    expect(control.mock.calls[0]?.slice(0, 2)).toEqual([
+      "claude_signin_entry",
+      { acct: "work@box-a", entry: CODE },
+    ]);
+    expect(document.body).toHaveTextContent("Signed in as o•••@example.com");
+    expect(document.body).not.toHaveTextContent("owner@example.com");
+    expect(document.body.innerHTML).not.toContain(CODE);
   });
 
-  it("a manual-code sign-in opens the steps at once, with no phone link", () => {
-    render(<SigninLink machine="box-a" url={MANUAL_URL} flow="manual_code" attach={ATTACH} />);
-    expect(screen.getByText("Type the code on the machine").closest("details")).toHaveAttribute(
-      "open",
+  it("the box is emptied at once, before volleyd answers", async () => {
+    let answer!: (r: { ok: boolean }) => void;
+    const control = vi.fn(
+      () =>
+        new Promise((r) => {
+          answer = r;
+        }),
+    ) as unknown as ControlFn;
+    link(control);
+    fireEvent.change(box(), { target: { value: CODE } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    expect(box()).toHaveValue("");
+    await act(async () => answer({ ok: true }));
+  });
+
+  it("a fresh: true refusal shows volleyd's words and Get a fresh link, which sends claude_signin and swaps the link", async () => {
+    const NEW_URL = MANUAL_URL.replace("state=s", "state=t");
+    const control = vi.fn(async (op: string) =>
+      op === "claude_signin_entry"
+        ? { ok: false, error: "code rejected: Invalid code", fresh: true }
+        : { ok: true, result: { acct: "work@box-a", url: NEW_URL, manual_url: NEW_URL } },
+    ) as unknown as ControlFn & ReturnType<typeof vi.fn>;
+    link(control);
+    await submit(CODE);
+    expect(screen.getByRole("alert")).toHaveTextContent("code rejected: Invalid code");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Get a fresh link" }));
+    });
+    expect(control.mock.calls[1]?.slice(0, 2)).toEqual(["claude_signin", { acct: "work@box-a" }]);
+    expect(screen.getByRole("link", { name: "Open Anthropic sign-in ↗" })).toHaveAttribute(
+      "href",
+      NEW_URL,
     );
-    expect(screen.queryByRole("link", { name: /Open on the phone/ })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("the another-sign-in refusal shows without the pasted address", async () => {
+    const address = "http://localhost:51052/callback?code=abcSECRET42&state=xyzSTATE42";
+    const control = vi.fn(async () => ({
+      ok: false,
+      error: "that address belongs to another sign-in; open a fresh link",
+    })) as unknown as ControlFn;
+    link(control);
+    await submit(address);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "that address belongs to another sign-in; open a fresh link",
+    );
+    expect(screen.getByRole("button", { name: "Get a fresh link" })).toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain("abcSECRET42");
+    expect(document.body.innerHTML).not.toContain("xyzSTATE42");
+    expect(box()).toHaveValue("");
+  });
+
+  it("a link too long for a QR code renders the link without a QR instead of crashing", () => {
+    const long = `${MANUAL_URL}&pad=${"x".repeat(4000)}`;
+    render(
+      <SigninLink
+        acct="work@box-a"
+        machine="box-a"
+        url={long}
+        manualUrl={long}
+        attach={ATTACH}
+        control={controlOk()}
+      />,
+    );
+    expect(screen.getByRole("link", { name: /Open Anthropic sign-in/ })).toHaveAttribute(
+      "href",
+      long,
+    );
+    expect(screen.queryByRole("img", { name: "QR code of the sign-in link" })).toBeNull();
+  });
+
+  it("Open here instead appears only with a callback_url", () => {
+    const { unmount } = link(controlOk());
+    expect(screen.queryByRole("link", { name: /Open here instead/ })).toBeNull();
+    unmount();
+    link(controlOk(), { callbackUrl: LOCAL_URL });
+    expect(screen.getByRole("link", { name: /Open here instead/ })).toHaveAttribute(
+      "href",
+      LOCAL_URL,
+    );
   });
 });

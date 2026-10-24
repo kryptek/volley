@@ -574,12 +574,16 @@ export interface ClaudeSignin {
   acct: string;
   state: "waiting" | "done" | "failed";
   url?: string;
-  /** `browser`, or `manual_code` (the page shows a code for the sign-in terminal). */
+  /** `browser_callback`, or `manual_code` (the page shows a code to paste in the Desk). */
   flow?: string;
   /** The tmux session to attach to for a `manual_code` sign-in. */
   attach?: string;
-  /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
+  /** The printed (code-page) URL: it works from any device; the page shows a code. */
   manual_url?: string;
+  /** The localhost-callback URL: a shortcut for a browser on the supervisor's machine. */
+  callback_url?: string;
+  /** The sign-in terminal shows Claude Code's `Paste code here` prompt. */
+  code_prompt?: boolean;
   plan?: string;
   /** The login's e-mail, from `claude_signin_done` (SPEC §4.6.11). */
   email?: string;

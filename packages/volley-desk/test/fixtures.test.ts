@@ -433,6 +433,49 @@ describe("demo steering: volleyd's Claude answers", () => {
       vi.useRealTimers();
     }
   });
+
+  it("a demo sign-in: add answers with the code-page link; a pasted code is ok, done 1.1 s later", async () => {
+    vi.useFakeTimers();
+    try {
+      let st = initialState();
+      const client = createDemoSteerClient(
+        (msgs) => {
+          st = reduceAll(st, msgs);
+        },
+        () => false,
+      );
+      const acks: Record<string, { ok?: boolean; result?: Record<string, unknown> }> = {};
+      client.onMessage((m) => {
+        if (m.envelope?.type === "ack")
+          acks[m.envelope.correlation_id ?? ""] = m.envelope.payload as (typeof acks)[string];
+      });
+      const ask = (id: string, payload: Record<string, unknown>) =>
+        client.publish(
+          "volley/default/volleyd/mailbox",
+          JSON.stringify({ agent_id: "desk", type: "query", correlation_id: id, payload }),
+        );
+      await ask("add", { op: "claude_account_add", label: "Side Project", machine: "local" });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(acks.add?.result).toMatchObject({ acct: "side-project", flow: "manual_code" });
+      expect(st.signins?.["side-project"]).toMatchObject({
+        state: "waiting",
+        manual_url: expect.stringContaining("platform.claude.com"),
+        callback_url: expect.stringContaining("localhost"),
+      });
+      await ask("entry", { op: "claude_signin_entry", acct: "side-project", entry: "abc" });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(acks.entry).toMatchObject({ ok: true, result: { acct: "side-project" } });
+      expect(st.signins?.["side-project"]?.state).toBe("waiting");
+      await vi.advanceTimersByTimeAsync(1100);
+      expect(st.signins?.["side-project"]).toMatchObject({
+        state: "done",
+        email: "you@example.com",
+      });
+      expect(JSON.stringify(acks.entry)).not.toContain('"abc"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("demo: the wave's Claude account (#499)", () => {
@@ -543,8 +586,10 @@ describe("demo mode's read-only control", () => {
     expect((await reads("claude_account_remove", {})).ok).toBe(true);
     // a card missing data asks volleyd to read it: the demo answers ok
     expect((await reads("claude_prime", { acct: "team" })).ok).toBe(true);
-    for (const op of ["claude_account_add", "claude_signin", "resolve"])
-      expect((await reads(op, {})).ok).toBe(false);
-    expect(control).toHaveBeenCalledTimes(6);
+    // a sign-in is acted out (its link, then a pasted code's done), so the dialog can be seen
+    for (const op of ["claude_account_add", "claude_signin", "claude_signin_entry"])
+      expect((await reads(op, {})).ok).toBe(true);
+    expect((await reads("resolve", {})).ok).toBe(false);
+    expect(control).toHaveBeenCalledTimes(9);
   });
 });

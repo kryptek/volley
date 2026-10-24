@@ -79,6 +79,8 @@ export type ControlOp =
   | "claude_account_rename"
   | "claude_account_remove"
   | "claude_signin"
+  // Finish a waiting sign-in with the code or redirect address the owner pasted (SPEC §4.6.11).
+  | "claude_signin_entry"
   | "claude_prime"
   | "claude_sync"
   | "claude_balance"
@@ -121,6 +123,8 @@ export interface ControlResponse {
   plan?: { version: number; diff: PlanDiff; unchanged: boolean; decisions?: DecisionPayload[] };
   /** peer_invite / peer_join: the secret, sealed to the request's `reply_key` (peers.ts). */
   sealed?: string;
+  /** claude_signin_entry: the entry was refused and the sign-in restarted (a fresh link). */
+  fresh?: true;
 }
 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);

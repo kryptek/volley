@@ -112,6 +112,8 @@ export interface ControlReply {
   result?: unknown;
   /** The request never reached the broker (the publish failed): nothing was refused. */
   unsent?: true;
+  /** `claude_signin_entry` refused: volleyd restarted the sign-in, a fresh link follows. */
+  fresh?: true;
 }
 
 export interface SteerTransport {
@@ -241,6 +243,7 @@ export function createSteerTransport(
             ok: p.ok === true,
             ...(typeof p.error === "string" ? { error: p.error } : {}),
             ...(p.result !== undefined ? { result: p.result } : {}),
+            ...(p.fresh === true ? { fresh: true as const } : {}),
           });
         }
       });

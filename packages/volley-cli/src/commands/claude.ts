@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { maskEmail } from "volley-mcp/mask";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
@@ -15,6 +16,7 @@ import {
 } from "../claude/groups";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
+import { askHidden } from "../hidden-input";
 import type { IO } from "../io";
 
 export interface ClaudeArgs {
@@ -31,12 +33,16 @@ export interface ClaudeArgs {
  * own mailbox. `list` also reads every account's retained usage record, to show each Anthropic
  * account once, and asks `claude_balance` to mark the logins the next spawn would pick.
  * Signing in happens in the browser, through Claude Code's own flow: this command prints the
- * sign-in URL volleyd got from `claude auth login` and never sees a code or a token.
+ * sign-in links volleyd got from `claude auth login` (the code page's first, it works from any
+ * device) and passes the code or address the owner pastes to volleyd once
+ * (`claude_signin_entry`), never printing it.
  */
 
 const HELP = `Usage:
-  volley claude add <label> [--machine <name>] [--wait]   Add a profile and start its sign-in
+  volley claude add <label> [--machine <name>] [--wait]  Add a profile and start its sign-in
   volley claude signin <acct> [--wait]                    Sign an existing profile in again
+  volley claude signin <acct> --code <code-or-address>    Finish the sign-in waiting for <acct>
+  volley claude code <acct> <code-or-address>             Finish a sign-in started elsewhere
   volley claude list [--json] [--show-email]              Accounts grouped by e-mail, their machines, usage, sharing
   volley claude balance [--model <m>] [--machine <name>] [--json] [--show-email]
                                                           Per machine, the accounts ranked by headroom
@@ -51,9 +57,13 @@ const HELP = `Usage:
                                                           for a paired machine, a profile kept for it)
 
 Each profile is its own Claude Code CLAUDE_CONFIG_DIR (default ~/.volley/claude/<acct>). add and
-signin print a sign-in URL: open it in a browser on the supervisor's machine. When the URL is the
-manual-code kind, paste the code into the terminal it names (tmux attach -t volley-signin-<acct>),
-never anywhere else. --wait blocks until the sign-in finishes.
+signin print Anthropic's sign-in link: open it on any device, then give volleyd the code the page
+shows (the prompt --wait shows on a terminal, \`volley claude code\` or signin --code, which
+finish the sign-in already waiting rather than start a new one). If you opened the
+second link (the supervisor's machine's shortcut) in a browser elsewhere and it ended on a
+localhost address that did not load, give that whole address instead. volleyd types the code into
+the sign-in waiting on that machine, or completes the address there. --wait blocks until the
+sign-in finishes.
 
 Options:
   --machine <name>       add: a paired machine: the profile is created and signed in there
@@ -61,7 +71,11 @@ Options:
                          (local: the supervisor's own)
   --model <m>            balance: rank for this model and print its pick (default: each family's)
   --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails,
-                         124 if it has not ended within --timeout, default 960)
+                         124 if it has not ended within --timeout, default 960); on a terminal,
+                         asks for the code or address (not echoed; Enter alone keeps waiting)
+  --code <text>          signin: finish the sign-in waiting for <acct> (no new link) with the
+                         code its page showed, or the address the browser ended up on; sent to
+                         volleyd once, never printed
   --timeout <seconds>    How long to wait for volleyd's answer (default 60; move: 180)
   --json                 list: print the raw result, with the usage records as "records";
                          balance: print volleyd's answer
@@ -76,6 +90,7 @@ const OPTIONS = {
   machine: { type: "string" },
   model: { type: "string" },
   wait: { type: "boolean" },
+  code: { type: "string" },
   timeout: { type: "string" },
   json: { type: "boolean" },
   "show-email": { type: "boolean" },
@@ -91,6 +106,10 @@ const DEFAULT_TIMEOUT_S = 60;
 const MOVE_TIMEOUT_S = 180;
 /** --wait without --timeout: volleyd's own sign-in timeout (15 min), and a minute more. */
 const SIGNIN_WAIT_S = 960;
+/** A pasted code: volleyd answers within `signin_entry_wait_ms` (30 s) and a restart. */
+const ENTRY_TIMEOUT_S = 90;
+/** How long a refusal's fresh link may take to arrive on the sign-in topic. */
+const FRESH_LINK_MS = 5_000;
 /** How long volleyd's retained status may take to arrive. */
 const PROBE_MS = 1_000;
 /** `list`'s best-effort `claude_balance` for the next-pick marker: never the full --timeout. */
@@ -112,9 +131,20 @@ interface SigninResult {
   url?: string;
   flow?: "browser_callback" | "manual_code";
   attach?: string;
+  manual_url?: string;
+  callback_url?: string;
   signed_in?: boolean;
   account?: { id: string; label: string };
 }
+
+/** The no-echo prompt `--wait` shows on a terminal (tests replace it). */
+export const signinPrompt = {
+  tty: (): boolean => process.stdin.isTTY === true,
+  ask: (prompt: string, signal?: AbortSignal): Promise<string | null> =>
+    askHidden(prompt, signal, "cancelled (Ctrl-C): nothing was sent"),
+};
+
+const ENTRY_PROMPT = "Paste the code, or the address your browser ended up on: ";
 
 export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
   const [verb, ...rest] = argv;
@@ -142,6 +172,14 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
   if (v["show-email"] === true && verb !== "list" && verb !== "balance")
     return usage("--show-email is for list and balance only");
   if (v.model !== undefined && verb !== "balance") return usage("--model is for balance only");
+  // A code belongs to the sign-in whose link the owner opened: starting another (claude_signin)
+  // would supersede it, so --code only finishes the one already waiting.
+  if (v.code !== undefined && verb !== "signin")
+    return usage(
+      "--code is for signin only: it finishes the sign-in already waiting (or: --wait, volley claude code <acct> <code>)",
+    );
+  if (v.code !== undefined && v.wait === true)
+    return usage("--code finishes the waiting sign-in; it takes no --wait");
   let op: string;
   let fields: Record<string, unknown>;
   switch (verb) {
@@ -154,6 +192,11 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       if (pos.length !== 1) return usage("needs exactly one <acct>");
       op = "claude_signin";
       fields = { acct: pos[0] };
+      break;
+    case "code":
+      if (pos.length !== 2) return usage("needs <acct> <code-or-address>");
+      op = "claude_signin_entry";
+      fields = { acct: pos[0], entry: pos[1] };
       break;
     case "list":
       if (pos.length !== 0) return usage("takes no arguments");
@@ -218,6 +261,10 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       io.stderr(`volley claude: volleyd is not running in namespace '${namespace}'\n`);
       return EXIT.ERROR;
     }
+    if (verb === "code")
+      return await sendEntry(io, broker, namespace, pos[0] as string, pos[1] as string, timeoutMs);
+    if (v.code !== undefined)
+      return await sendEntry(io, broker, namespace, pos[0] as string, v.code, timeoutMs);
     const ends = v.wait === true ? await watchSigninEnds(broker) : null;
     const answer = await request(broker, namespace, op, fields, timeoutMs);
     if (answer === null) {
@@ -231,7 +278,27 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
     if (verb === "add" || verb === "signin") {
       const r = answer.result as SigninResult;
       printSignin(io, r);
-      if (ends !== null && r.signed_in !== true) {
+      if (r.signed_in === true) return EXIT.OK;
+      let entry: string | undefined;
+      if (ends !== null && signinPrompt.tty()) {
+        // The prompt gives way when the sign-in ends on its own (the shortcut link used).
+        const stop = new AbortController();
+        const ended = ends(r.acct, SIGNIN_WAIT_S * 1000).then((e) => {
+          stop.abort();
+          return e;
+        });
+        const typed = await signinPrompt.ask(ENTRY_PROMPT, stop.signal);
+        if (typed === null || typed.trim() === "") {
+          const end = stop.signal.aborted ? await ended : null;
+          if (end !== null) return reportEnd(io, r.acct, end);
+        } else {
+          stop.abort();
+          entry = typed;
+        }
+      }
+      if (entry !== undefined)
+        return await sendEntry(io, broker, namespace, r.acct, entry, timeoutMs);
+      if (ends !== null) {
         const waitMs = v.timeout !== undefined ? timeoutMs : SIGNIN_WAIT_S * 1000;
         const end = await ends(r.acct, waitMs);
         if (end === null) {
@@ -359,20 +426,99 @@ function printSignin(io: IO, r: SigninResult): void {
     io.stdout(`${r.acct} is signed in.\n`);
     return;
   }
-  // `<acct>@<name>`: a profile on a paired machine, its callback forwarded to the supervisor.
-  const machine = r.acct.includes("@") ? r.acct.slice(r.acct.indexOf("@") + 1) : null;
-  if (r.flow === "manual_code") {
-    const where = machine !== null ? ` on ${machine}` : "";
+  printLinks(io, r);
+}
+
+/**
+ * A sign-in's links: Anthropic's code page first (it works from any device), the supervisor's
+ * localhost shortcut second, then where the code goes.
+ */
+function printLinks(io: IO, r: SigninResult): void {
+  const manual = r.manual_url ?? (r.flow === "manual_code" ? r.url : undefined);
+  const callback = r.callback_url ?? (r.flow === "browser_callback" ? r.url : undefined);
+  io.stdout(`Sign in to Claude for ${r.acct}:\n`);
+  if (manual !== undefined) io.stdout(`  Open on any device: ${manual}\n`);
+  if (callback !== undefined)
     io.stdout(
-      `Sign in to Claude for ${r.acct}: open this URL in a browser, then paste the code it shows into the sign-in terminal${where} (${r.attach}):\n  ${r.url}\n`,
+      `  ${manual !== undefined ? "Or on this machine" : "Open on the supervisor's machine"}: ${callback}\n`,
     );
-    return;
-  }
   io.stdout(
-    machine !== null
-      ? `Sign in to Claude for ${r.acct}: open this URL in a browser on this computer (the supervisor's machine: the sign-in on ${machine} is forwarded here):\n  ${r.url}\n`
-      : `Sign in to Claude for ${r.acct}: open this URL in a browser on the supervisor's machine:\n  ${r.url}\n`,
+    `Then give volleyd the code the page shows (or the address your browser ended up on): \`volley claude code ${r.acct} <code>\`.\n`,
   );
+}
+
+/**
+ * `claude_signin_entry`: hand volleyd what the owner pasted, once. Never printed: the answer is
+ * the sign-in's end, or volleyd's refusal (which it has redacted); a refusal with `fresh` means
+ * volleyd restarted the sign-in, whose new links are printed.
+ */
+async function sendEntry(
+  io: IO,
+  broker: VolleyBroker,
+  namespace: string,
+  acct: string,
+  entry: string,
+  timeoutMs: number,
+): Promise<ExitCode> {
+  const links = await watchSigninUrls(broker, acct);
+  try {
+    const answer = await request(
+      broker,
+      namespace,
+      "claude_signin_entry",
+      { acct, entry },
+      Math.max(timeoutMs, ENTRY_TIMEOUT_S * 1000),
+    );
+    if (answer === null) {
+      io.stderr(`volley claude: volleyd did not finish the sign-in of ${acct} in time\n`);
+      return EXIT.TIMEOUT;
+    }
+    if (answer.ok) {
+      const email = (answer.result as { email?: string } | undefined)?.email;
+      io.stdout(
+        email !== undefined ? `signed in as ${maskEmail(email)}\n` : `${acct} is signed in.\n`,
+      );
+      return EXIT.OK;
+    }
+    io.stderr(`volley claude: ${answer.error ?? "refused"}\n`);
+    if ((answer as { fresh?: boolean }).fresh === true) {
+      const next = await links.next(FRESH_LINK_MS);
+      if (next !== null) {
+        io.stdout("A fresh sign-in started.\n");
+        printLinks(io, next);
+      } else io.stdout("A fresh sign-in started: `volley claude list` shows its link.\n");
+    }
+    return EXIT.ERROR;
+  } finally {
+    await links.stop();
+  }
+}
+
+/** The URL events on one account's sign-in topic from now on: the next one, up to `ms`. */
+async function watchSigninUrls(broker: VolleyBroker, acct: string) {
+  const seen: SigninResult[] = [];
+  let wake: (() => void) | null = null;
+  const stop = await broker.subscribeStream(
+    `volley/_system/claude/${acct}/signin`,
+    ({ payload }) => {
+      const e = parseEnvelope(payload);
+      if (e?.type !== "claude_signin_url") return;
+      seen.push(e.payload as SigninResult);
+      wake?.();
+    },
+  );
+  return {
+    stop,
+    next: (ms: number) =>
+      new Promise<SigninResult | null>((resolve) => {
+        if (seen.length > 0) return resolve(seen.at(-1) as SigninResult);
+        const t = setTimeout(() => resolve(null), ms);
+        wake = () => {
+          clearTimeout(t);
+          resolve(seen.at(-1) as SigninResult);
+        };
+      }),
+  };
 }
 
 interface SigninEnd {

@@ -11,10 +11,12 @@ import {
   type SigninEvent,
   parseAuthStatus,
   parseSigninUrl,
+  showsCodePrompt,
   signinFlow,
   signinSession,
   statusIdentity,
   stoppedReason,
+  urlEvent,
 } from "./signin";
 import {
   BROWSER_HELPER,
@@ -37,13 +39,16 @@ import {
  *              A profile also gets mkdir -p + chmod 700 <home>/.volley/claude/<acct>, and its
  *              signin.sh exports that dir as CLAUDE_CONFIG_DIR.
  *   the URL  → `cat <dir>/url` (the helper's localhost-callback URL) and the session's
- *              `capture-pane` (the printed manual-code URL), every poll until one is known.
- *              For the callback URL's port p the supervisor holds `ssh -N -L 127.0.0.1:p:
- *              127.0.0.1:p <target>` (forward.ts, with the token minted here and nowhere else),
- *              then publishes `claude_signin_url { url, flow: browser_callback, manual_url,
- *              attach: "ssh <target> -t tmux attach -t volley-signin-<acct>" }`. A port taken on
- *              this machine restarts the sign-in once (Claude Code picks a fresh port), then
- *              fails naming the port.
+ *              `capture-pane` (the printed code-page URL and the `Paste code here` prompt), every
+ *              poll until both are known. The printed URL is the link (`url` = `manual_url`,
+ *              `flow: manual_code`, as signin.ts's `urlEvent`), with `attach: "ssh <target> -t
+ *              tmux attach -t volley-signin-<acct>"`. For the callback URL's port p the
+ *              supervisor tries to hold `ssh -N -L 127.0.0.1:p:127.0.0.1:p <target>` (forward.ts,
+ *              with the token minted here and nowhere else): best-effort, it only makes the
+ *              callback URL a shortcut for a browser on the supervisor's machine, so the event
+ *              carries `callback_url` only while the forward is up, and a port taken here never
+ *              fails the sign-in. The callback URL itself goes to `onCallback` either way: a
+ *              redirect pasted from any device is completed on the box (service.ts).
  *   done     → the box's `claude auth status` (a profile's under its CLAUDE_CONFIG_DIR) reports
  *              loggedIn: `claude_signin_done { plan }`; a profile's also carries the identity in
  *              its `.claude.json` (`cat .claude.json` in the profile dir: `{ email?, org? }`, no
@@ -53,9 +58,9 @@ import {
  *   Every end kills the session (no consent: it holds no agent's work) and the forward; a
  *   superseded sign-in drops only its forward (the session is the newer one's).
  *
- * volleyd sees authorize URLs and a plan label, never a code or a token: the code goes from the
- * browser through the forward (bytes never read) or is typed into the box's terminal by the
- * owner.
+ * volleyd sees authorize URLs and a plan label, never a token: a code or redirect the owner
+ * pastes passes through once, to the box (service.ts), or the browser's redirect goes through
+ * the forward (bytes never read).
  */
 
 /**
@@ -121,6 +126,8 @@ export interface RemoteSigninDeps {
   profile?: true;
   /** The box's HOME, once the sign-in learned it (`printenv HOME`). */
   onHome?: (home: string) => void;
+  /** The `$BROWSER` (localhost-callback) URL, once known: its port and `state`, kept in memory. */
+  onCallback?: (url: string) => void;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf-8").toString("base64");
@@ -230,66 +237,56 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
 
   const settleMs = d.settleMs ?? DAEMON_DEFAULTS.signin_forward_settle_ms;
   const deadline = d.now() + d.timeoutMs;
-  let restarted = false;
-  let published = false;
+  /** The last URL event published (JSON), and whether there is anything left to learn. */
+  let published: string | null = null;
+  let settled = false;
+  let callback: string | null = null;
+  /** The callback URL a forward was tried for (once), and whether it is up. */
+  let tried = false;
   for (let poll = 1; ; poll++) {
     if (aborted()) {
       if (d.signal?.reason !== SUPERSEDED) return fail(stoppedReason(d.signal));
       return superseded();
     }
-    if (!published) {
-      const file = await run([{ argv: ["cat", urlFile] }]);
-      const callback = file?.code === 0 ? parseSigninUrl(file.stdout) : null;
+    if (!settled) {
+      if (callback === null) {
+        const file = await run([{ argv: ["cat", urlFile] }]);
+        const url = file?.code === 0 ? parseSigninUrl(file.stdout) : null;
+        if (url !== null && signinFlow(url) === "browser_callback") {
+          callback = url;
+          d.onCallback?.(url);
+        }
+      }
       const pane = await run([{ argv: ["tmux", "capture-pane", "-p", "-J", "-t", session] }]);
-      const printed = pane?.code === 0 ? parseSigninUrl(pane.stdout) : null;
-      const manual = printed !== null && signinFlow(printed) === "manual_code" ? printed : null;
+      const screen = pane?.code === 0 ? pane.stdout : "";
+      const printedUrl = parseSigninUrl(screen);
+      const printed =
+        printedUrl !== null && signinFlow(printedUrl) === "manual_code" ? printedUrl : null;
       const port = callback !== null ? callbackPort(callback) : null;
-      if (callback !== null && signinFlow(callback) === "browser_callback" && port !== null) {
-        let opened: Awaited<ReturnType<typeof openForward>>;
+      if (!tried && port !== null) {
+        tried = true;
         try {
           const token = mintSigninForwardToken(target, port, d.reservedPorts);
-          opened = await openForward(d.exec, token, () => d.sleep(settleMs));
-        } catch (e) {
-          opened = { ok: false, busy: true, reason: e instanceof Error ? e.message : String(e) };
+          const opened = await openForward(d.exec, token, () => d.sleep(settleMs));
+          if (opened.ok) forward = opened.forward;
+        } catch {
+          // A broker tunnel's port: no forward, the code page and a pasted redirect still work.
         }
-        if (!opened.ok) {
-          if (!opened.busy)
-            return fail(`the sign-in forward to ${target} failed: ${opened.reason}`);
-          if (restarted)
-            return fail(
-              `port ${port} on this machine is taken (${opened.reason}), so the sign-in on ${target} cannot reach this browser; run \`${attach}\` and sign in there`,
-            );
-          restarted = true;
-          // start() kills the session first, which may be a newer sign-in's by now.
-          if (aborted()) continue;
-          const again = await start();
-          if (again !== null) return fail(again);
-          await d.sleep(d.pollMs);
-          continue;
-        }
-        forward = opened.forward;
         // Aborted while the forward settled: the loop's top drops it.
         if (aborted()) continue;
-        published = true;
-        await d.publish({
-          type: "claude_signin_url",
-          acct,
-          url: callback,
-          flow: "browser_callback",
-          attach,
-          ...(manual !== null ? { manual_url: manual } : {}),
-        });
-      } else if (manual !== null && poll > 1) {
-        // No $BROWSER call: the printed URL, whose code is typed into the box's terminal.
-        published = true;
-        await d.publish({
-          type: "claude_signin_url",
-          acct,
-          url: manual,
-          flow: "manual_code",
-          attach,
-        });
       }
+      const e = urlEvent(acct, attach, {
+        printed,
+        callback: forward !== null ? callback : null,
+        prompt: showsCodePrompt(screen),
+      });
+      if (e !== null && JSON.stringify(e) !== published) {
+        published = JSON.stringify(e);
+        await d.publish(e);
+      }
+      settled =
+        (printed !== null && e?.code_prompt === true && callback !== null) ||
+        (published !== null && poll > 5);
     }
     const status = await run(
       [

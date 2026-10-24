@@ -721,6 +721,8 @@ export interface DaemonOptions {
     signinTimeoutMs?: number;
     /** How long a paired machine's sign-in forward must stay up (default: config-defaults). */
     forwardSettleMs?: number;
+    /** How long a pasted code or redirect waits for the sign-in to end (default: config-defaults). */
+    signinEntryWaitMs?: number;
   };
 }
 
@@ -1665,6 +1667,9 @@ export class Daemon {
         : {}),
       ...(opts.claude?.signinTimeoutMs !== undefined
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
+        : {}),
+      ...(opts.claude?.signinEntryWaitMs !== undefined
+        ? { signinEntryWaitMs: opts.claude.signinEntryWaitMs }
         : {}),
       rank: (candidates, model) =>
         rankAccounts(accountRecords(this.usage), candidates, { model, now: this.now() }),
@@ -11367,6 +11372,9 @@ export class Daemon {
         return { ok: true, defer: this.claude.remove(p, by) };
       case "claude_signin":
         return { ok: true, defer: this.claude.signin(p, by) };
+      // The code or redirect address the owner pasted: never logged, journaled or echoed.
+      case "claude_signin_entry":
+        return { ok: true, defer: this.claude.enterSignin(p, by) };
       // Identity, plan and a usage reading of one login (as after its sign-in); 5 min apart.
       case "claude_prime":
         return { ok: true, defer: this.claude.prime(p, by) };

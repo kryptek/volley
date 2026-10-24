@@ -112,17 +112,36 @@ describe("runRemoteSignin", () => {
     expect(w.ran("mkdir")).toEqual([["mkdir", "-p", DIR]]);
   });
 
-  it("publishes one claude_signin_url (browser_callback, manual_url, ssh attach) and holds one forward", async () => {
+  it("publishes one claude_signin_url (the code-page link first, callback_url, ssh attach) and holds one forward", async () => {
     const w = world({ signInAfter: 3 });
-    await w.run();
+    const callbacks: string[] = [];
+    await runRemoteSignin({
+      host: new SshTmuxHost(SPEC, w.exec),
+      exec: w.exec,
+      publish: async (e) => {
+        w.events.push(e);
+      },
+      sleep: async () => {
+        await flushMicrotasks(1);
+      },
+      now: () => 0,
+      pollMs: 10,
+      timeoutMs: 200,
+      settleMs: 5,
+      reservedPorts: [18830, 1883],
+      onCallback: (url) => callbacks.push(url),
+    });
+    expect(callbacks).toEqual([CALLBACK]);
     const urls = w.events.filter((e) => e.type === "claude_signin_url");
     expect(urls).toEqual([
       {
         type: "claude_signin_url",
         acct: "primary@box-a",
-        url: CALLBACK,
-        flow: "browser_callback",
+        url: PRINTED,
+        flow: "manual_code",
         manual_url: PRINTED,
+        callback_url: CALLBACK,
+        code_prompt: true,
         attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
       },
     ]);
@@ -161,41 +180,33 @@ describe("runRemoteSignin", () => {
     expect(w.forwards[0]?.stopped).toBe(true);
   });
 
-  it("a local port already in use restarts the sign-in once, on Claude Code's fresh port", async () => {
-    const w = world({
-      signInAfter: 4,
-      busy: 1,
-      callbacks: [CALLBACK, CALLBACK.replace("51051", "51052")],
-    });
+  it("a local port already in use: no restart, the code-page link without callback_url, and the sign-in proceeds", async () => {
+    const w = world({ signInAfter: 4, busy: 1 });
     const last = await w.run();
     expect(last).toMatchObject({ type: "claude_signin_done" });
-    expect(w.box.starts).toBe(2);
-    expect(w.forwards.map((f) => f.argv)).toEqual([
-      forwardArgv(TARGET, 51051),
-      forwardArgv(TARGET, 51052),
+    expect(w.box.starts).toBe(1);
+    expect(w.forwards.map((f) => f.argv)).toEqual([forwardArgv(TARGET, 51051)]);
+    expect(w.events.filter((e) => e.type === "claude_signin_url")).toEqual([
+      {
+        type: "claude_signin_url",
+        acct: "primary@box-a",
+        url: PRINTED,
+        flow: "manual_code",
+        manual_url: PRINTED,
+        code_prompt: true,
+        attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
+      },
     ]);
-    const urls = w.events.filter((e) => e.type === "claude_signin_url");
-    expect(urls).toHaveLength(1);
-    expect(urls[0]).toMatchObject({ url: CALLBACK.replace("51051", "51052") });
   });
 
-  it("a port still taken after the restart fails with the reason, naming the port", async () => {
-    const w = world({ busy: 2 });
-    const last = await w.run();
-    expect(last).toMatchObject({ type: "claude_signin_failed" });
-    const reason = (last as { reason: string }).reason;
-    expect(reason).toContain("port 51051");
-    expect(reason).toMatch(/local forwarding|in use/);
-    expect(w.box.starts).toBe(2);
-    expect(w.events.filter((e) => e.type === "claude_signin_url")).toEqual([]);
-    expect(w.box.session).toBe(false);
-  });
-
-  it("never forwards a broker tunnel's port: it counts as taken", async () => {
-    const w = world({ reserved: [51051] });
+  it("never forwards a broker tunnel's port; the sign-in still proceeds without a callback_url", async () => {
+    const w = world({ reserved: [51051], signInAfter: 3 });
     const last = await w.run();
     expect(w.forwards).toEqual([]);
-    expect((last as { reason: string }).reason).toContain("port 51051");
+    expect(last).toMatchObject({ type: "claude_signin_done" });
+    const url = w.events.find((e) => e.type === "claude_signin_url");
+    expect(url).toMatchObject({ url: PRINTED, flow: "manual_code" });
+    expect(url).not.toHaveProperty("callback_url");
   });
 
   it("a box without tmux fails with the command to run there by hand", async () => {
@@ -214,6 +225,8 @@ describe("runRemoteSignin", () => {
       acct: "primary@box-a",
       url: PRINTED,
       flow: "manual_code",
+      manual_url: PRINTED,
+      code_prompt: true,
       attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
     });
     expect(w.forwards).toEqual([]);
@@ -311,9 +324,11 @@ describe("runRemoteSignin of a profile the supervisor created there (profile: tr
       {
         type: "claude_signin_url",
         acct: "work@box-a",
-        url: CALLBACK,
-        flow: "browser_callback",
+        url: PRINTED,
+        flow: "manual_code",
         manual_url: PRINTED,
+        callback_url: CALLBACK,
+        code_prompt: true,
         attach: "ssh dev@box-a -t tmux attach -t volley-signin-work",
       },
     ]);

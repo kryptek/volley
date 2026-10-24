@@ -1,6 +1,7 @@
 /**
  * Settings › Appearance (formerly the dock's Appearance aside): the theme
- * (`look/themes.ts`, a card per palette with its swatches), a search field
+ * (`look/themes.ts`, a card per palette with its swatches), the current
+ * pipeline step's effect (a card per effect with a live preview), a search field
  * over every background (the current one always stays listed), the dim
  * slider, the window style, the Needs-you effect, the tethers and the agent
  * icons (Clawd characters or the classic spinner). Every
@@ -10,14 +11,60 @@
  * the lite surface (`lite`, a touch screen) the liquid chrome is not offered
  * either, with a note under the window style.
  */
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { BG_NO_WEBGL_NOTE, SURFACE_LITE_NOTE, needsWebGL } from "../look/Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "../look/backgrounds";
-import { ATTN_LABEL, CHROME_LABEL, ICON_LABEL, THEME_LABEL } from "../look/options";
+import {
+  ATTN_LABEL,
+  CHROME_LABEL,
+  ICON_LABEL,
+  STEP_FX_LABEL,
+  type StepFx,
+  THEME_LABEL,
+} from "../look/options";
 import { LIGHT_THEME_IDS, type ThemeTokens, themeById } from "../look/themes";
 import { DIM_MAX, type Look } from "../look/useLook";
 import { Group, Row, Seg, Toggle, clearOnEscape } from "./primitives";
 import "../styles/look.css";
+import STEP_FX_CSS from "../styles/stepfx.css?inline";
+
+/**
+ * The preview step's box (the pipeline step's) inside its shadow root; `--acc` is the theme
+ * accent there, for Classic.
+ */
+const PREVIEW_CSS = `:host { display: block; --acc: var(--t-acc); }
+.fx-cur { display: block; text-align: center; font-size: 11px; padding: 4px 0; border-radius: 6px; border: 1px solid transparent; }`;
+
+/**
+ * One effect's live preview, the mockup's `.demo`: `<span data-fx><span class="fx-cur">`.
+ * It renders in a shadow root with its own copy of stepfx.css, because every rule there is
+ * `[data-fx=…] .fx-cur` and <html> carries the chosen effect: in the page, each card would
+ * also wear the chosen one. The previews run only while this page is mounted; reduced motion
+ * stills them (stepfx.css).
+ */
+function FxPreview({ fx }: { fx: StepFx }) {
+  const host = useRef<HTMLSpanElement>(null);
+  const [root, setRoot] = useState<ShadowRoot | null>(null);
+  useLayoutEffect(() => {
+    const el = host.current;
+    if (el) setRoot(el.shadowRoot ?? el.attachShadow({ mode: "open" }));
+  }, []);
+  return (
+    <span ref={host} className="fx-demo" aria-hidden="true">
+      {root &&
+        createPortal(
+          <>
+            <style>{`${STEP_FX_CSS}\n${PREVIEW_CSS}`}</style>
+            <span data-fx={fx}>
+              <span className="fx-cur">fixup</span>
+            </span>
+          </>,
+          root,
+        )}
+    </span>
+  );
+}
 
 /** The five colours a theme card shows. */
 const SWATCHES = [
@@ -80,6 +127,29 @@ export function Appearance({
                 </button>
               );
             })}
+          </fieldset>
+        </div>
+      </Group>
+      <Group title="Current step">
+        <div className="s-pad">
+          <fieldset className="fx-grid" aria-label="Current step">
+            {STEP_FX_LABEL.map(([id, name, desc]) => (
+              <button
+                key={id}
+                type="button"
+                className="fx-opt"
+                aria-label={name}
+                aria-describedby={`fx-desc-${id}`}
+                aria-pressed={look.fx === id}
+                onClick={() => setLook({ fx: id })}
+              >
+                <FxPreview fx={id} />
+                <span className="fx-name">{name}</span>
+                <span className="fx-desc" id={`fx-desc-${id}`}>
+                  {desc}
+                </span>
+              </button>
+            ))}
           </fieldset>
         </div>
       </Group>

@@ -547,10 +547,12 @@ evidence behind each choice below.
 > sharing one subscription among people.
 
 ```sh
-volley claude add "Work"            # profile + background sign-in; prints the sign-in URL
-volley claude add "Work" --wait     # … and waits until the sign-in finishes
+volley claude add "Work"            # profile + background sign-in; prints the sign-in links
+volley claude add "Work" --wait     # … asks for the code (not echoed) and waits until it finishes
 volley claude add "Work" --machine peer-a  # a profile on a paired machine, signed in there
-volley claude signin work           # sign an existing profile in again
+volley claude signin work           # sign an existing profile in again (--wait as add)
+volley claude code work <code-or-address>  # finish the sign-in waiting for work with the code the page showed
+volley claude signin work --code <code-or-address>  # the same: finishes the waiting sign-in, starts no new one
 volley claude list                  # one block per account (by e-mail): machines, usage, sharing
 volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
@@ -605,21 +607,43 @@ for.
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
 `claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session
 (`volley-signin-<acct>`, from a script the [fence](#the-authority-fence) seals) with `$BROWSER`
-set to a helper that only writes down the URL Claude Code asks it to open. That URL redirects to
-Claude Code's own listener on this machine, so open it in a browser **here**; the browser hands
-the code straight back to the `claude` process. volleyd answers the op with the URL and publishes
-`claude_signin_url { acct, url, flow, attach }` on `volley/_system/claude/<acct>/signin` (not
-retained: whoever opens it first picks the account; not retained is not private — under the
-example broker ACL every client, agents included, may read `volley/#` and so the URL while the
-sign-in runs: restrict `volley/_system/claude/#` to the owner's clients to keep it from them), then polls `claude auth status` until
-`loggedIn` → `claude_signin_done { acct, plan, email?, org? }`, or `claude_signin_failed { acct, reason }`
-(the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
-run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
-the one Claude Code printed (`flow: manual_code`): its page shows a code to paste into the
-sign-in terminal (`tmux attach -t volley-signin-<acct>`), never into the Desk. `claude setup-token`
-is never used: it prints a bearer token Volley would have to carry. The `_system` journal records
+set to a helper that only writes down the URL Claude Code asks it to open. Claude Code has no
+switch for a sign-in flavour: every `claude auth login` runs both of one PKCE sign-in, handing
+`$BROWSER` the authorize URL that redirects to its own `http://localhost:<port>/callback` listener
+and printing the one that redirects to Anthropic's code page while its prompt waits (`Paste code
+here if prompted >`). volleyd answers the op with, and publishes on
+`volley/_system/claude/<acct>/signin`, `claude_signin_url { acct, url, flow, attach, manual_url?,
+callback_url?, code_prompt? }`: `url` is the printed code-page URL (`flow: manual_code`, the same
+as `manual_url`), which works from any device; `callback_url` is the `$BROWSER` one, a shortcut
+for a browser on this machine; `code_prompt: true` once the session shows the prompt. Before
+anything is printed, `url` is the `$BROWSER` URL (`browser_callback`); the event is published again
+when it changes. The topic is not retained: whoever opens it first picks the account; not retained
+is not private — under the example broker ACL every client, agents included, may read
+`volley/#` and so the URL while the sign-in runs: restrict `volley/_system/claude/#` to the
+owner's clients to keep it from them. volleyd then polls `claude auth status` until `loggedIn` →
+`claude_signin_done { acct, plan, email?, org? }`, or `claude_signin_failed { acct, reason }` (the
+login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to run
+`CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). `claude setup-token` is never used: it
+prints a bearer token Volley would have to carry. The `_system` journal records
 `claude_account_added`, `claude_signin_started` and `claude_signin_done` / `_failed`, never the
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
+
+**Finishing a sign-in from any device.** `claude_signin_entry { acct, entry }` (the Desk's sign-in
+box, `volley claude signin --code`, the `--wait` prompt, `volley claude code`) takes what the
+owner pasted (`src/claude/signin-entry.ts`): the code the code page shows, or the
+`http://localhost:<port>/callback?code=…&state=…` address a browser ended up on when the shortcut
+link could not reach the listener (another device). A code is typed into the waiting session on
+the machine where it runs (`tmux send-keys -t volley-signin-<acct> -l -- <code>`, then `Enter`); an
+address is completed by `curl -fsS --max-time 10 http://127.0.0.1:<port>/callback?<query>` (the
+query byte for byte) on that machine, only when its port and `state` are the sign-in's own
+`$BROWSER` URL's (else `that address belongs to another sign-in; open a fresh link`, nothing run).
+Each runs locally through the fenced exec or on a paired machine as a fenced REMOTE step, with a
+`SigninEntryToken` the fence lets type or request exactly that text, once. volleyd answers when the
+sign-in ends (`{ acct, signed_in, email? }`), at most `signin_entry_wait_ms` (30 s) later; a
+refusal it reads off the session's screen (or the login failing) restarts the sign-in and answers
+`code rejected: <line>` with `fresh: true` and a new `claude_signin_url`. The code and `state` are
+never journaled (`claude_signin_entry { acct, kind, by }` only), logged (`claude_signin_entry
+<acct> (<kind>)`), kept or echoed: every message that could carry them passes `redact` first.
 
 **Signing a paired machine in.** `claude_signin { acct: "primary@<name>" }` (the Desk's **Sign in
 on <machine>**) signs a paired machine's own default profile in, with Claude Code's own flow on
@@ -628,16 +652,16 @@ reads the box's `$HOME`, writes the sealed `signin.sh` (no `CLAUDE_CONFIG_DIR`: 
 profile; the credential env unset) and `browser.sh` to `~/.volley/signin/primary/` there, and
 starts `bash signin.sh` in the box's tmux session `volley-signin-primary`. It polls the url file
 and the session's screen every `claude_signin_poll_ms`. For the localhost-callback URL's port *p*
-it holds a transient forward, `ssh -N -L 127.0.0.1:p:127.0.0.1:p … <target>` (`src/claude/forward.ts`):
-the same port on this machine's loopback as on the box's, because the OAuth redirect must match
-verbatim. Only then does it publish `claude_signin_url { acct, url, flow: "browser_callback",
-manual_url, attach: "ssh <target> -t tmux attach -t volley-signin-primary" }`: `url` opens in a
+it tries to hold a transient forward, `ssh -N -L 127.0.0.1:p:127.0.0.1:p … <target>`
+(`src/claude/forward.ts`): the same port on this machine's loopback as on the box's, because the
+OAuth redirect must match verbatim. It publishes `claude_signin_url { acct, url, flow:
+"manual_code", manual_url, callback_url?, code_prompt?, attach: "ssh <target> -t tmux attach -t
+volley-signin-primary" }`: `url` is the code-page link, for any device (the code goes in the
+Desk's box or `volley claude code`, and volleyd types it on the box); `callback_url` opens in a
 browser on **this** machine and the forward carries the callback to `claude` on the box (an opaque
-encrypted pipe; no byte of it is read or logged). `manual_url`, the URL Claude Code printed, is for
-a phone: its page shows a code, typed into the terminal `attach` reaches, never into Volley. A
-forward that exits within `signin_forward_settle_ms` because the port is taken here (or a port a
-broker tunnel uses, which is never forwarded) restarts the sign-in once (Claude Code picks a fresh
-port), then fails naming the port. The box's `claude auth status` reporting `loggedIn` ends it with
+encrypted pipe; no byte of it is read or logged). The forward is best-effort: one that exits within
+`signin_forward_settle_ms` because the port is taken here (or a port a broker tunnel uses, which is
+never forwarded) only leaves `callback_url` out; the sign-in proceeds. The box's `claude auth status` reporting `loggedIn` ends it with
 `claude_signin_done { acct, plan }`. The timeout, the login exiting, the daemon stopping, ssh
 failing or a box without tmux (the reason gives `ssh <target> -t claude auth login` to run by
 hand) end it with `claude_signin_failed`. Every end kills the session (no consent: it holds no
@@ -645,7 +669,7 @@ agent's work) and the forward. A newer sign-in for the same machine supersedes i
 at once and nothing more of it is published. A machine whose `claude auth status` already reports
 `loggedIn` is refused (log it out with `ssh <target> claude auth logout` first). While it waits,
 `claude_accounts` lists it under `remote_signins: [{ acct, state: "pending", url?, flow?, attach?,
-manual_url? }]` for a late client.
+manual_url?, callback_url?, code_prompt? }]` for a late client.
 
 **A profile on a paired machine.** `claude_account_add { label, machine: "<name>" }` (`volley
 claude add <label> --machine <name>`) for a configured paired machine records `{ id, machine:
@@ -4188,7 +4212,12 @@ ALLOW (program by bare name only — never a path):
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
-    <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
+    <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work) ·
+    send-keys -t <it> Enter · send-keys -t <it> -l -- <code> (only with the SigninEntryToken
+    naming exactly that session and code, typed once: `mintSigninEntryToken`)
+  curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query>   (exactly, only with the
+    SigninEntryToken naming exactly that URL, once: a sign-in's redirect the owner pasted,
+    completed on the machine whose listener waits; also a REMOTE step)
   (agent logins are minted and deleted over volleyd's own Dynamic Security control
   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
@@ -4275,6 +4304,7 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
     `sealRemoteSigninScript`) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
+    send-keys -t volley-signin-<acct> -l -- <code> (its SigninEntryToken, once) |
     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
     PATH, from printenv, then the server's own dirs) —
@@ -4282,7 +4312,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     work) — any other kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
-    directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
+    directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME ·
+    curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query> (its SigninEntryToken, once)
   rm -rf <home>/.volley/claude/<acct> (exactly, only with the ProfileRemoveToken
     `mintProfileRemoveToken` minted for exactly that dir: a person's `claude_account_remove`)
   claude auth status (exactly: the box's login state and plan, never a credential; a login

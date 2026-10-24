@@ -19,6 +19,7 @@ describe("useLook", () => {
       tethers: true,
       theme: "volley",
       icons: "clawd",
+      fx: "glint",
       autoArrange: true,
       showFinished: false,
       finishedGraceMin: 10,
@@ -37,7 +38,7 @@ describe("useLook", () => {
     act(() => result.current[1]({ chrome: "spotlight", attn: "electric", narr: "shiny" }));
     act(() => result.current[1]({ tethers: false, autoArrange: false }));
     act(() => result.current[1]({ showFinished: true, finishedGraceMin: 30 }));
-    act(() => result.current[1]({ icons: "classic", theme: "dracula" }));
+    act(() => result.current[1]({ icons: "classic", theme: "dracula", fx: "aurora" }));
     const want = {
       bg: "Silk",
       dim: 0.45,
@@ -47,6 +48,7 @@ describe("useLook", () => {
       tethers: false,
       theme: "dracula",
       icons: "classic",
+      fx: "aurora",
       autoArrange: false,
       showFinished: true,
       finishedGraceMin: 30,
@@ -83,6 +85,7 @@ describe("useLook", () => {
         narr: "loud",
         tethers: "yes",
         icons: "ring",
+        fx: 4,
         theme: "neon",
         autoArrange: null,
         showFinished: 1,
@@ -99,5 +102,13 @@ describe("useLook", () => {
     expect(loadLook().icons).toBe("classic");
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ icons: "ring" }));
     expect(loadLook().icons).toBe("clawd");
+  });
+
+  it("current step: glint by default, a stored classic loads, anything else falls back", () => {
+    expect(LOOK0.fx).toBe("glint");
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ fx: "classic" }));
+    expect(loadLook().fx).toBe("classic");
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ fx: "sparkle" }));
+    expect(loadLook().fx).toBe("glint");
   });
 });

@@ -653,7 +653,10 @@ describe("Settings › Machines v2: the machine card's Claude accounts", () => {
     expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
       "Sign in with p•••@example.com on box-a",
     );
-    expect(dialog.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
+    expect(dialog.getByRole("link", { name: /Open Anthropic sign-in/ })).toHaveAttribute(
+      "href",
+      URL,
+    );
   });
 
   it("no button while the tunnel is down or without control", async () => {

@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
 import { COMPACT_MAX, COMPACT_MIN } from "./claude/context-window";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
+import { parseSigninEntry } from "./claude/signin-entry";
 import {
   BROWSER_HELPER,
   SIGNIN_COMMAND,
@@ -98,7 +99,12 @@ import { AGENT_BRANCH } from "./worktree";
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
  *     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
- *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
+ *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work) ·
+ *     send-keys -t <it> Enter · send-keys -t <it> -l -- <code> (only with the SigninEntryToken
+ *     naming exactly that session and code, typed once: `mintSigninEntryToken`)
+ *   curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query>   (exactly, only with the
+ *     SigninEntryToken naming exactly that URL, once: a sign-in's redirect the owner pasted,
+ *     completed on the machine whose listener waits; also a REMOTE step)
  *   (agent logins are minted and deleted over volleyd's own Dynamic Security control
  *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
  *   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
@@ -185,6 +191,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
+ *     send-keys -t volley-signin-<acct> -l -- <code> (its SigninEntryToken, once) |
  *     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
  *     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
@@ -192,7 +199,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     work) — any other kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
  *     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
- *     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
+ *     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME ·
+ *     curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query> (its SigninEntryToken, once)
  *   rm -rf <home>/.volley/claude/<acct> (exactly, only with the ProfileRemoveToken
  *     `mintProfileRemoveToken` minted for exactly that dir: a person's `claude_account_remove`)
  *   claude auth status (exactly: the box's login state and plan, never a credential; a login
@@ -722,6 +730,67 @@ export function mintProfileRemoveToken(dir: string): ProfileRemoveToken {
   return token;
 }
 
+const entries = new WeakSet<object>();
+/** Entry tokens already used: a pasted code is typed, a pasted redirect requested, once. */
+const spentEntries = new WeakSet<object>();
+
+/**
+ * Permission to finish one waiting sign-in with what the owner pasted (SPEC §4.6.11): type
+ * `code` into the sign-in session (`tmux send-keys -t <session> -l -- <code>`), or request `url`
+ * (`curl -fsS --max-time 10 <url>`, Claude Code's own callback on 127.0.0.1), once, on this
+ * machine or as a REMOTE step. Only `mintSigninEntryToken` creates one. Callers:
+ * claude/service.ts enterSignin.
+ */
+export interface SigninEntryToken {
+  readonly session: string;
+  readonly code?: string;
+  readonly url?: string;
+}
+
+/** The callback a pasted redirect is completed at: Claude Code's listener, nothing to quote. */
+const SIGNIN_CALLBACK_URL = /^http:\/\/127\.0\.0\.1:([0-9]{4,5})\/callback\?[A-Za-z0-9._~%+=&-]+$/;
+
+/**
+ * Mint the entry token: throws `FenceError` unless `session` is a `volley-signin-<acct>` session
+ * and `code` a code `parseSigninEntry` accepts, or `url` a 127.0.0.1 callback on 1024..65535.
+ */
+export function mintSigninEntryToken(
+  e: { session: string; code: string } | { session: string; url: string },
+): SigninEntryToken {
+  if (!SIGNIN_SESSION.test(e.session))
+    throw new FenceError("sign-in entry", "not a volley-signin-* session");
+  if ("code" in e) {
+    const p = parseSigninEntry(e.code);
+    if (p.kind !== "code" || p.code !== e.code)
+      throw new FenceError("sign-in entry", "not a sign-in code");
+  } else {
+    const port = Number(SIGNIN_CALLBACK_URL.exec(e.url)?.[1] ?? 0);
+    if (port < 1024 || port > 65535)
+      throw new FenceError("sign-in entry", "not a sign-in callback on 127.0.0.1");
+  }
+  const token = Object.freeze({ ...e });
+  entries.add(token);
+  return token;
+}
+
+/** True (and the token spent) when `opts` carries an unspent entry token matching `want`. */
+function entryAllows(opts: FenceOptions, want: (t: SigninEntryToken) => boolean): boolean {
+  const t = opts.signinEntry;
+  if (t === undefined || !entries.has(t) || spentEntries.has(t) || !want(t)) return false;
+  spentEntries.add(t);
+  return true;
+}
+
+/** `curl -fsS --max-time 10 <url>` with the entry token naming exactly that url. */
+function entryCurl(args: readonly string[], opts: FenceOptions): Verdict {
+  return entryAllows(
+    opts,
+    (t) => t.url !== undefined && sameArgv(args, ["-fsS", "--max-time", "10", t.url]),
+  )
+    ? ALLOW
+    : deny("curl (only a sign-in's pasted callback, with its token)");
+}
+
 const setups = new WeakSet<object>();
 
 /** What one setup run may execute: `setupFence`'s inputs for the detected layout, Desk-safe. */
@@ -874,6 +943,8 @@ export interface FenceOptions {
   forward?: SigninForwardToken;
   /** For a remote `rm -rf <home>/.volley/claude/<acct>`: the removal's token for that dir. */
   profileRemove?: ProfileRemoveToken;
+  /** For typing a pasted sign-in code or requesting a pasted callback: the entry's token. */
+  signinEntry?: SigninEntryToken;
   /** A setup step for the Desk (setup-ops.ts): only the SETUP rows, and nothing else. */
   setup?: SetupToken;
   /** The command's working directory; only the SETUP rows read it (the Desk build). */
@@ -1364,6 +1435,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
         : deny("claude (only from .volley/launch.sh)");
     case "tmux":
       return localTmux(args, opts);
+    case "curl":
+      return entryCurl(args, opts);
     case "volley":
       return volley(args);
     case "mosquitto":
@@ -2350,6 +2423,8 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
     case "claude":
       // The box's login state and plan (remote-signin.ts); a login runs only from signin.sh.
       return sameArgv(args, ["auth", "status"]) ? ALLOW : deny("claude (only auth status)");
+    case "curl":
+      return entryCurl(args, opts);
     case "nc":
       return args.length === 3 &&
         args[0] === "-z" &&
@@ -2427,6 +2502,7 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     if (t !== "-t" || target === undefined || target.startsWith("-")) return deny("tmux send-keys");
     if (tail.length === 1 && keyAllowed(tail[0] ?? "", opts)) return ALLOW;
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
+    if (entryAllows(opts, (e) => e.session === target && e.code === tail[2])) return ALLOW;
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
   }
@@ -2491,6 +2567,18 @@ function localTmux(args: string[], opts: FenceOptions): Verdict {
     case "has-session":
     case "kill-session":
       return sameArgv(rest, ["-t", target("-t", rest) ?? ""]) && session("-t") ? ALLOW : deny(verb);
+    case "send-keys": {
+      // A sign-in waiting at `Paste code here`: Enter, and the pasted code with its token.
+      const [t, s, ...tail] = rest;
+      if (t !== "-t" || !SIGNIN_SESSION.test(s ?? "")) return deny(verb);
+      if (sameArgv(tail, ["Enter"])) return ALLOW;
+      return tail.length === 3 &&
+        tail[0] === "-l" &&
+        tail[1] === "--" &&
+        entryAllows(opts, (e) => e.session === s && e.code === tail[2])
+        ? ALLOW
+        : deny("tmux send-keys (only a sign-in's pasted code, with its token)");
+    }
     default:
       return deny(verb);
   }

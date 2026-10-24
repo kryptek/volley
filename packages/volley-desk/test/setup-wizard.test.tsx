@@ -621,6 +621,21 @@ describe("the Desk's QR encoder", () => {
     expect(encodeQr("z".repeat(213)).version).toBe(10);
   });
 
+  it("decodes back up to version 20: an authorize URL of Claude Code's sign-in fits", async () => {
+    const { decodeMatrix } = (await import(
+      /* @vite-ignore */ path.join(CLI_QR, "qr-decode.ts")
+    )) as Decoder;
+    const authorize = `https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-4000-8000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload+user%3Aplugins&code_challenge=${"c".repeat(43)}&code_challenge_method=S256&state=${"s".repeat(43)}`;
+    for (const text of [authorize, "q".repeat(214), "r".repeat(520), "w".repeat(666)]) {
+      for (const mask of [0, 3, 7]) {
+        const d = decodeMatrix(encodeQr(text, { mask }).matrix);
+        expect(d.text).toBe(text);
+      }
+    }
+    expect(encodeQr("w".repeat(666)).version).toBe(20);
+    expect(() => encodeQr("w".repeat(667))).toThrow(/too long/);
+  });
+
   it("draws one unit square per dark module inside the quiet zone", () => {
     const qr = encodeQr("a");
     const dark = qr.matrix.flat().filter(Boolean).length;

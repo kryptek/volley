@@ -83,7 +83,7 @@ import type {
 } from "../store/types";
 import { AckLine, type RowState } from "./ConfigRows";
 import { GroupList } from "./GroupNav";
-import { SigninLink } from "./PeerSigninSheet";
+import { SigninLink, startedFields } from "./PeerSigninSheet";
 import {
   REMOVE_ACCOUNT_TIMEOUT_MS,
   type RemovableProfile,
@@ -752,12 +752,7 @@ export function signInPreset(g: AccountGroup, m: MatrixMachine): SignInPreset {
 }
 
 /** What volleyd's `claude_account_add` answer carries for the sign-in (as its URL event). */
-interface Started {
-  url?: string;
-  flow?: string;
-  attach?: string;
-  manual_url?: string;
-}
+type Started = ReturnType<typeof startedFields>;
 
 type Adding =
   | { phase: "pick"; error?: string }
@@ -858,17 +853,7 @@ function AddAccount({
       return;
     }
     onStarted?.(acct, name, machine);
-    const field = (k: keyof Started) =>
-      typeof res[k] === "string" ? { [k]: res[k] as string } : {};
-    setS((cur) =>
-      cur.phase === "waiting"
-        ? {
-            ...cur,
-            acct,
-            r: { ...field("url"), ...field("flow"), ...field("attach"), ...field("manual_url") },
-          }
-        : cur,
-    );
+    setS((cur) => (cur.phase === "waiting" ? { ...cur, acct, r: startedFields(res) } : cur));
   };
 
   // Sign in on <machine> starts the sign-in on open, once (a re-render or a strict-mode remount
@@ -980,45 +965,26 @@ function AddAccount({
             <p className="s-error" role="alert">
               The sign-in did not finish: {signin.reason ?? "unknown reason"}
             </p>
-          ) : remote ? (
-            url ? (
-              <>
-                <SigninLink
-                  machine={machine}
-                  url={url}
-                  flow={signin?.flow ?? r.flow}
-                  attach={signin?.attach ?? r.attach}
-                  manualUrl={signin?.manual_url ?? r.manual_url}
-                  lead={`Sign in on Anthropic’s own page; the profile lives on ${machine}.`}
-                />
-                <div className="waiting">
-                  <span className="spinner" aria-hidden="true" /> Waiting for sign-in…
-                </div>
-              </>
-            ) : (
-              <p className="dim">
-                <span className="spinner" aria-hidden="true" /> Starting the sign-in on {machine}…
-              </p>
-            )
+          ) : url && newAcct ? (
+            <SigninLink
+              acct={newAcct}
+              machine={remote ? machine : "the supervisor’s machine"}
+              url={url}
+              attach={signin?.attach ?? r.attach}
+              manualUrl={signin?.manual_url ?? r.manual_url}
+              callbackUrl={signin ? signin.callback_url : r.callback_url}
+              control={control}
+              lead={
+                remote
+                  ? `Sign in on Anthropic’s own page; the profile lives on ${machine}.`
+                  : "Sign in on Anthropic’s own page."
+              }
+            />
           ) : (
-            <>
-              {url && (
-                <div className="ny-actions">
-                  <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
-                    Open Anthropic sign-in ↗
-                  </a>
-                </div>
-              )}
-              <p className="dim">
-                The page hands the sign-in straight back to Claude Code on{" "}
-                {machineName(LOCAL_MACHINE)}: open it in a browser there.
-                {signin?.flow === "manual_code" &&
-                  ` If it shows a code, paste it into the sign-in terminal${signin.attach ? ` (tmux attach -t ${signin.attach})` : ""}, never here.`}
-              </p>
-              <div className="waiting">
-                <span className="spinner" aria-hidden="true" /> Waiting for sign-in…
-              </div>
-            </>
+            <p className="dim">
+              <span className="spinner" aria-hidden="true" /> Starting the sign-in
+              {remote ? ` on ${machine}` : ""}…
+            </p>
           )}
           <div className="ny-actions">
             <button type="button" className="btn" onClick={onClose}>
@@ -1212,6 +1178,8 @@ export function ClaudeAccounts({
   const configured = configuredMachines(hosts, machines, localName);
   const pending = pendingProfiles(registry, records);
   const prime = usePrime(registryControl, groups, now);
+  /** What starts and finishes a sign-in: volleyd, or in demo mode the demo's own answers. */
+  const signinControl = control ?? registryControl;
   /** A finished sign-in's e-mail already on its machine: the duplicate prompt (`AddAccount`). */
   const sameAs = (machine: string, email: string, acct: string) =>
     sameAccountOnMachine(registry, machine, email, {
@@ -1349,7 +1317,7 @@ export function ClaudeAccounts({
             rows={machineRows(g, configured)}
             others={signedIn.others[g.key] ?? {}}
             onAdd={
-              control
+              signinControl
                 ? () =>
                     setAdding({
                       // A real profile label only: never the card's e-mail or the primary's name.
@@ -1359,7 +1327,7 @@ export function ClaudeAccounts({
                 : null
             }
             onSignInOn={
-              control
+              signinControl
                 ? (r) => {
                     const m = configured.find((x) => x.op === r.op);
                     if (m) setSigningIn(signInPreset(g, m));
@@ -1390,7 +1358,7 @@ export function ClaudeAccounts({
         <button
           type="button"
           className="claude-card claude-card--add"
-          disabled={!control}
+          disabled={!signinControl}
           onClick={() => setAdding({ label: "", holds: [] })}
         >
           + Add Claude account
@@ -1398,7 +1366,7 @@ export function ClaudeAccounts({
       </div>
       <PendingProfiles
         rows={pending}
-        onFinish={control ? (r) => setSigningIn(pendingPreset(r)) : null}
+        onFinish={signinControl ? (r) => setSigningIn(pendingPreset(r)) : null}
         onCancel={registryControl ? (r) => void cancelPending(r) : null}
       />
       {removing && registryControl && (
@@ -1414,12 +1382,12 @@ export function ClaudeAccounts({
           }}
         />
       )}
-      {signingIn && control && (
+      {signingIn && signinControl && (
         <SignInOnDialog
           key={`${signingIn.key}@${signingIn.machine}`}
           preset={signingIn}
           signins={signins}
-          control={control}
+          control={signinControl}
           onStarted={(acct, label, op) =>
             setTries((ts) => [...ts, { key: signingIn.key, op, label, acct }])
           }
@@ -1431,12 +1399,12 @@ export function ClaudeAccounts({
           }}
         />
       )}
-      {adding && control && (
+      {adding && signinControl && (
         <AddAccount
           machines={addMachines(adding.holds)}
           baseLabel={adding.label}
           signins={signins}
-          control={control}
+          control={signinControl}
           sameAs={sameAs}
           removeNew={removeNew}
           onClose={() => {

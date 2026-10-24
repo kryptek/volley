@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { signinPrompt } from "../../src/commands/claude";
 import { EXIT } from "../../src/exit-codes";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { runCli } from "../helpers/run-cli";
 
 const URL_CB =
   "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback&state=x";
+const URL_CODE =
+  "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=x";
+const URL_CODE_2 = URL_CODE.replace("state=x", "state=y");
 
 /**
  * A minimal volleyd: a live retained status, and a mailbox that answers each control query with
@@ -66,14 +70,16 @@ const run = (argv: string[]) =>
   });
 
 describe("volley claude", () => {
-  it("add sends claude_account_add and prints the sign-in URL", async () => {
+  it("add sends claude_account_add and prints the code-page link first, the callback link second", async () => {
     const v = await fakeVolleyd(tb.url, () => ({
       ok: true,
       result: {
         account: { id: "work", label: "Work" },
         acct: "work",
-        url: URL_CB,
-        flow: "browser_callback",
+        url: URL_CODE,
+        flow: "manual_code",
+        manual_url: URL_CODE,
+        callback_url: URL_CB,
         attach: "tmux attach -t volley-signin-work",
       },
     }));
@@ -82,66 +88,161 @@ describe("volley claude", () => {
     expect(r.exitCode).toBe(0);
     expect(v.seen[0]).toMatchObject({ op: "claude_account_add", label: "Work", machine: "local" });
     expect(r.stdout).toContain("Claude account work added.");
-    expect(r.stdout).toContain(URL_CB);
-    expect(r.stdout).toMatch(/browser on the supervisor's machine/);
+    const any = r.stdout.indexOf(`Open on any device: ${URL_CODE}`);
+    const here = r.stdout.indexOf(`Or on this machine: ${URL_CB}`);
+    expect(any).toBeGreaterThan(-1);
+    expect(here).toBeGreaterThan(any);
+    expect(r.stdout).toContain("volley claude code work <code>");
     await v.b.disconnect();
   });
 
-  it("add --machine <peer> sends the machine; the forwarded URL is opened on this computer", async () => {
+  it("a sign-in with only the callback URL names the supervisor's machine", async () => {
     const v = await fakeVolleyd(tb.url, () => ({
       ok: true,
-      result: {
-        account: { id: "work", label: "Work", machine: "peer-a" },
-        acct: "work@peer-a",
-        url: URL_CB,
-        flow: "browser_callback",
-        attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
-      },
-    }));
-    const r = await run(["add", "Work", "--machine", "peer-a"]);
-    expect(r.stderr).toBe("");
-    expect(r.exitCode).toBe(0);
-    expect(v.seen[0]).toMatchObject({ op: "claude_account_add", label: "Work", machine: "peer-a" });
-    expect(r.stdout).toContain("Claude account work added.");
-    expect(r.stdout).toContain("Sign in to Claude for work@peer-a");
-    expect(r.stdout).toMatch(/open this URL in a browser on this computer/);
-    expect(r.stdout).toContain(URL_CB);
-    await v.b.disconnect();
-  });
-
-  it("a paired machine's manual-code URL names the ssh attach to its sign-in terminal", async () => {
-    const v = await fakeVolleyd(tb.url, () => ({
-      ok: true,
-      result: {
-        acct: "work@peer-a",
-        url: URL_CB,
-        flow: "manual_code",
-        attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
-      },
+      result: { acct: "work@peer-a", url: URL_CB, flow: "browser_callback" },
     }));
     const r = await run(["signin", "work@peer-a"]);
-    expect(r.stdout).toContain(
-      "paste the code it shows into the sign-in terminal on peer-a (ssh dev@peer-a -t tmux attach -t volley-signin-work)",
-    );
+    expect(v.seen[0]).toMatchObject({ op: "claude_signin", acct: "work@peer-a" });
+    expect(r.stdout).toContain(`Open on the supervisor's machine: ${URL_CB}`);
+    expect(r.stdout).not.toContain("Open on any device");
     await v.b.disconnect();
   });
 
-  it("a manual-code URL names the terminal to paste the code into", async () => {
-    const v = await fakeVolleyd(tb.url, () => ({
-      ok: true,
-      result: {
-        acct: "work",
-        url: URL_CB,
-        flow: "manual_code",
-        attach: "tmux attach -t volley-signin-work",
-      },
-    }));
-    const r = await run(["signin", "work"]);
-    expect(v.seen[0]).toMatchObject({ op: "claude_signin", acct: "work" });
-    expect(r.stdout).toContain(
-      "paste the code it shows into the sign-in terminal (tmux attach -t volley-signin-work)",
-    );
+  /** A volleyd whose sign-in finishes when the entry arrives (or refuses it, with `refuse`). */
+  async function entryVolleyd(refuse?: { error: string; fresh?: true }) {
+    const v: Awaited<ReturnType<typeof fakeVolleyd>> = await fakeVolleyd(tb.url, (op, p) => {
+      if (op === "claude_signin_entry") {
+        if (refuse === undefined)
+          return {
+            ok: true,
+            result: { acct: p.acct, signed_in: true, email: "owner@example.com" },
+          };
+        if (refuse.fresh === true)
+          setTimeout(() => {
+            void v.b.publish(
+              `volley/_system/claude/${p.acct as string}/signin`,
+              v.env("_system/claude", "claude_signin_url", {
+                type: "claude_signin_url",
+                acct: p.acct,
+                url: URL_CODE_2,
+                flow: "manual_code",
+                manual_url: URL_CODE_2,
+              }),
+              { qos: 1, retain: false },
+            );
+          }, 0);
+        return { ok: false, ...refuse };
+      }
+      return {
+        ok: true,
+        result: {
+          acct: (p.acct as string | undefined) ?? "work",
+          url: URL_CODE,
+          flow: "manual_code",
+          manual_url: URL_CODE,
+          callback_url: URL_CB,
+        },
+      };
+    });
+    return v;
+  }
+  const SECRETS = ["abcSECRET42", "xyzSTATE42"];
+  const neverPrinted = (r: { stdout: string; stderr: string }) => {
+    for (const secret of SECRETS) {
+      expect(r.stdout).not.toContain(secret);
+      expect(r.stderr).not.toContain(secret);
+    }
+  };
+
+  it("signin --code finishes the waiting sign-in: claude_signin_entry only, masked e-mail on done", async () => {
+    // A fresh claude_signin would supersede the sign-in the code belongs to (new PKCE + state).
+    const v = await entryVolleyd();
+    const r = await run(["signin", "team", "--code", "abcSECRET42"]);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(v.seen.map((q) => q.op)).toEqual(["claude_signin_entry"]);
+    expect(v.seen[0]).toMatchObject({ acct: "team", entry: "abcSECRET42" });
+    expect(r.stdout).toContain("signed in as o•••@example.com");
+    expect(r.stdout).not.toContain("owner@example.com");
+    neverPrinted(r);
     await v.b.disconnect();
+  });
+
+  it("--code with a redirect address sends the address exactly as given", async () => {
+    const v = await entryVolleyd();
+    const address = "http://localhost:51051/callback?code=abcSECRET42&state=xyzSTATE42";
+    const r = await run(["signin", "team", "--code", address]);
+    expect(r.exitCode).toBe(0);
+    expect(v.seen).toEqual([
+      expect.objectContaining({ op: "claude_signin_entry", acct: "team", entry: address }),
+    ]);
+    neverPrinted(r);
+    await v.b.disconnect();
+  });
+
+  it("volley claude code <acct> <entry> is the stand-alone form", async () => {
+    const v = await entryVolleyd();
+    const r = await run(["code", "team@box-a", "abcSECRET42"]);
+    expect(r.exitCode).toBe(0);
+    expect(v.seen).toEqual([
+      expect.objectContaining({
+        op: "claude_signin_entry",
+        acct: "team@box-a",
+        entry: "abcSECRET42",
+      }),
+    ]);
+    expect(r.stdout).toContain("signed in as o•••@example.com");
+    neverPrinted(r);
+    await v.b.disconnect();
+  });
+
+  it("a rejected code says so and prints the fresh link volleyd started", async () => {
+    const v = await entryVolleyd({ error: "code rejected: Invalid code", fresh: true });
+    const r = await run(["code", "team", "abcSECRET42"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("code rejected: Invalid code");
+    expect(r.stdout).toContain(`Open on any device: ${URL_CODE_2}`);
+    neverPrinted(r);
+    await v.b.disconnect();
+  });
+
+  it("--code is refused on a verb that does not sign in", async () => {
+    const r = await run(["list", "--code", "abc"]);
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toMatch(/--code is for signin only/);
+    expect(r.stderr).not.toContain("abc\n");
+  });
+
+  it("add --code is refused: no code exists before add prints its link", async () => {
+    const r = await run(["add", "Work", "--code", "abcSECRET42"]);
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toMatch(/--code is for signin only/);
+    neverPrinted(r);
+  });
+
+  it("add --wait on a terminal prints both links, then asks for the code with echo off", async () => {
+    const v = await entryVolleyd();
+    const asked: string[] = [];
+    const saved = { ...signinPrompt };
+    signinPrompt.tty = () => true;
+    signinPrompt.ask = async (prompt) => {
+      asked.push(prompt);
+      return "abcSECRET42";
+    };
+    try {
+      const r = await run(["add", "Work", "--wait"]);
+      expect(r.exitCode).toBe(0);
+      expect(asked).toEqual(["Paste the code, or the address your browser ended up on: "]);
+      const any = r.stdout.indexOf(`Open on any device: ${URL_CODE}`);
+      expect(any).toBeGreaterThan(-1);
+      expect(r.stdout.indexOf(`Or on this machine: ${URL_CB}`)).toBeGreaterThan(any);
+      expect(v.seen.at(-1)).toMatchObject({ op: "claude_signin_entry", entry: "abcSECRET42" });
+      expect(r.stdout).toContain("signed in as o•••@example.com");
+      neverPrinted(r);
+    } finally {
+      Object.assign(signinPrompt, saved);
+      await v.b.disconnect();
+    }
   });
 
   it("add --wait waits for claude_signin_done on the sign-in topic", async () => {
