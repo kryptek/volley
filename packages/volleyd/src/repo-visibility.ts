@@ -59,6 +59,15 @@ export interface SlugView {
 }
 
 /**
+ * A `readSlugView` result as a `RepoView` (a wave named by its `owner/name`, #448): gh's words
+ * mean visibility `unknown` and no `github`.
+ */
+export function viewFromSlug(view: SlugView | string): RepoView {
+  if (typeof view === "string") return { visibility: "unknown" };
+  return { visibility: view.visibility, github: { slug: view.slug, url: view.url } };
+}
+
+/**
  * `gh repo view <slug> --json nameWithOwner,url,visibility` on the supervisor (read-only, through
  * the fence): the repository exists and its canonical name; or why not, in gh's words.
  */

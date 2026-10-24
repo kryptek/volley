@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { isMap, parseDocument } from "yaml";
 import type { DecisionInput } from "../decisions";
+import { isSlug } from "../repos";
 import { type PathError, toPathErrors, validator } from "../schemas";
 import type { JournalEvent, ReleaseStageState, ReleaseState, WaveId } from "../types";
 import { expandHome } from "../worktree";
@@ -136,6 +137,9 @@ export interface WavePlaybook extends ReadPlaybook {
  * it is invalid, or configured and missing from a repo that is here.
  */
 export function wavePlaybook(wave: { repo: string; playbook?: string }): WavePlaybook | null {
+  // A wave named by an `owner/name` the supervisor holds no clone of (#448) has no repo here to
+  // look for the default in; one naming a playbook is refused at submit (resolveWaveRepo).
+  if (wave.playbook === undefined && isSlug(wave.repo)) return null;
   const path = playbookPath(wave.repo, wave.playbook);
   if (path === null) return null;
   const read = readPlaybook(path);

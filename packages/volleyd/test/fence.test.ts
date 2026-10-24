@@ -1343,6 +1343,27 @@ describe("merge token (autopilot merging)", () => {
     expect(() => assertAllowed([...MERGE, "--delete-branch"], { merge })).not.toThrow();
   });
 
+  it("either form may end in exactly --repo <owner/name> (a slug-only wave, #448)", () => {
+    const merge = token();
+    for (const repo of ["b/b", "ghe.example.com/b/b"]) {
+      expect(() => assertAllowed([...MERGE, "--repo", repo], { merge })).not.toThrow();
+      expect(() =>
+        assertAllowed([...MERGE, "--delete-branch", "--repo", repo], { merge }),
+      ).not.toThrow();
+    }
+    const variants: string[][] = [
+      [...MERGE, "-R", "b/b"],
+      [...MERGE, "--repo", "/path/to/repo"],
+      [...MERGE, "--repo", "b"],
+      [...MERGE, "--repo", "b/b", "--repo", "b/b"],
+      [...MERGE, "--repo", "b/b", "--delete-branch"],
+      [...MERGE, "--repo", "b/b", "--admin"],
+      ["gh", "pr", "merge", "7", "--repo", "b/b", "--squash", "--match-head-commit", H],
+    ];
+    for (const argv of variants)
+      expect(() => assertAllowed(argv, { merge }), argv.join(" ")).toThrow(FenceError);
+  });
+
   it("denies another PR, another head, other strategies, admin/auto and loose shapes", () => {
     expect(() => assertAllowed(MERGE, { merge: token(8) })).toThrow(FenceError);
     expect(() => assertAllowed(MERGE, { merge: token(7, H2) })).toThrow(FenceError);
@@ -1430,6 +1451,10 @@ describe("train token (the merge train)", () => {
 
   it("allows exactly the train's PR at exactly its head, with a merge commit", () => {
     expect(() => assertAllowed(TRAIN, { train: train() })).not.toThrow();
+    expect(() => assertAllowed([...TRAIN, "--repo", "b/b"], { train: train() })).not.toThrow();
+    expect(() =>
+      assertAllowed([...TRAIN, "--repo", "b/b", "--delete-branch"], { train: train() }),
+    ).toThrow(FenceError);
   });
 
   it("denies another PR, another head, squash, other strategies, admin/auto and loose shapes", () => {
@@ -1662,6 +1687,19 @@ describe("the issue lifecycle's gh writes (#416): exact forms only", () => {
   });
   it.each(denied.map((a) => [a.join(" "), a]))("denies %s", (_l, argv) => {
     expect(() => assertAllowed(argv as string[])).toThrow(FenceError);
+  });
+  it("each form may end in --repo <owner/name>, and nowhere else (#448)", () => {
+    const writes = allowed.filter((a) => a[1] === "label" || (a[1] === "issue" && a[2] !== "view"));
+    expect(writes.length).toBe(6);
+    for (const a of writes) {
+      expect(() => assertAllowed([...a, "--repo", "b/b"])).not.toThrow();
+      expect(() => assertAllowed([...a, "--repo", "/abs/path"])).toThrow(FenceError);
+      expect(() => assertAllowed([...a, "-R", "b/b"])).toThrow(FenceError);
+      expect(() => assertAllowed([...a.slice(0, 3), "--repo", "b/b", ...a.slice(3)])).toThrow(
+        FenceError,
+      );
+      expect(() => assertAllowed([...a, "--repo", "b/b", "--repo", "b/b"])).toThrow(FenceError);
+    }
   });
   it("never on a paired machine: the writes run on the supervisor's own", () => {
     const step = { argv: ["gh", "issue", "edit", "412", "--add-label", "merged-to-release"] };

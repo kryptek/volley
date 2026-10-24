@@ -33,7 +33,11 @@ export type MergeOutcome =
   | { ok: true; merge_sha: string | null }
   | { ok: false; reason: RefusalReason; stderr: string };
 
-export function mergeArgv(token: MergeToken, deleteBranch: boolean): string[] {
+/**
+ * `repo`: `["--repo", <owner/name>]` for a wave the supervisor holds no clone of (#448), appended
+ * to every argv here (the fence allows exactly that ending); else none, the argv running in `cwd`.
+ */
+export function mergeArgv(token: MergeToken, deleteBranch: boolean, repo: string[] = []): string[] {
   return [
     "gh",
     "pr",
@@ -43,12 +47,22 @@ export function mergeArgv(token: MergeToken, deleteBranch: boolean): string[] {
     "--match-head-commit",
     token.head,
     ...(deleteBranch ? ["--delete-branch"] : []),
+    ...repo,
   ];
 }
 
 /** A merge train's PR, with a merge commit: the member PRs, whose heads it contains, read as merged. */
-export function trainMergeArgv(token: TrainToken): string[] {
-  return ["gh", "pr", "merge", String(token.pr), "--merge", "--match-head-commit", token.head];
+export function trainMergeArgv(token: TrainToken, repo: string[] = []): string[] {
+  return [
+    "gh",
+    "pr",
+    "merge",
+    String(token.pr),
+    "--merge",
+    "--match-head-commit",
+    token.head,
+    ...repo,
+  ];
 }
 
 /**
@@ -64,8 +78,9 @@ export async function mergePr(
   token: MergeToken,
   cwd?: string,
   deleteBranch = false,
+  repo: string[] = [],
 ): Promise<MergeOutcome> {
-  return merged(exec, token, mergeArgv(token, deleteBranch), { merge: token }, cwd);
+  return merged(exec, token, mergeArgv(token, deleteBranch, repo), { merge: token }, cwd, repo);
 }
 
 /**
@@ -77,8 +92,9 @@ export async function mergeTrain(
   exec: ExecFn,
   token: TrainToken,
   cwd?: string,
+  repo: string[] = [],
 ): Promise<MergeOutcome> {
-  return merged(exec, token, trainMergeArgv(token), { train: token }, cwd);
+  return merged(exec, token, trainMergeArgv(token, repo), { train: token }, cwd, repo);
 }
 
 /** The PR one token may merge: its number, its gated head, its release branch. */
@@ -90,10 +106,19 @@ async function merged(
   argv: string[],
   fenced: { merge: MergeToken } | { train: TrainToken },
   cwd: string | undefined,
+  repo: string[],
 ): Promise<MergeOutcome> {
   const where = cwd !== undefined ? { cwd } : {};
   const pre = await exec(
-    ["gh", "pr", "view", String(token.pr), "--json", "baseRefName,headRefOid,isDraft,state"],
+    [
+      "gh",
+      "pr",
+      "view",
+      String(token.pr),
+      "--json",
+      "baseRefName,headRefOid,isDraft,state",
+      ...repo,
+    ],
     where,
   );
   const failed = (pre.stderr || pre.stdout).trim();
@@ -117,7 +142,7 @@ async function merged(
     return { ok: false, reason: refusalReason(stderr), stderr };
   }
   const view = await exec(
-    ["gh", "pr", "view", String(token.pr), "--json", "mergeCommit,state"],
+    ["gh", "pr", "view", String(token.pr), "--json", "mergeCommit,state", ...repo],
     where,
   );
   return { ok: true, merge_sha: view.code === 0 ? mergeSha(view.stdout) : null };
