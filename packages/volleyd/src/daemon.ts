@@ -25,6 +25,7 @@ import {
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { countLiveAgents } from "volley-cli/setup/broker";
+import { cmuxInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -216,7 +217,7 @@ import {
   waveAccountMoves,
 } from "./claude/usage";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
-import { ConfigStore } from "./config-store";
+import { ConfigStore, resolveLocalTerminal } from "./config-store";
 import {
   ADMISSION_TOPIC,
   ARCHIVE_TOPIC,
@@ -298,6 +299,7 @@ import { type Tree, footprintOf, readReleaseTree } from "./footprint";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
+import { LocalTmuxHost } from "./hosts/local-tmux";
 import {
   type RemoteHost,
   type RemoteHostSpec,
@@ -428,6 +430,7 @@ import type {
   Footprint,
   GitHubRepo,
   JournalEvent,
+  LocalTerminal,
   MergeMode,
   NewEvent,
   NudgeOnMerge,
@@ -728,8 +731,15 @@ export interface DaemonOptions {
 
 /** How the daemon spawns agents. Every field has a production default. */
 export interface SpawnerOptions {
-  /** The `local` host (default: cmux on this machine, through the fenced exec). */
+  /**
+   * The `local` host (default: `localHost` for the resolved `fleet.local_terminal`: cmux or tmux
+   * on this machine, through the fenced exec).
+   */
   host?: Host;
+  /** Builds the `local` host for a terminal (tests; default: LocalCmuxHost or LocalTmuxHost). */
+  localHost?: (terminal: LocalTerminal) => Host;
+  /** Whether cmux is installed here, for an unset `fleet.local_terminal` (default: `cmuxInstalled`). */
+  cmuxFound?: () => boolean;
   /** Claude Code's folder-trust file (default `~/.claude.json`). */
   claudeJsonPath?: string;
   /** `packages/volley-hooks` (default: the one in this checkout). */
@@ -4680,10 +4690,25 @@ export class Daemon {
     return { pinned: null, source: "balanced" };
   }
 
-  /** The `local` host agents run on. */
+  /**
+   * The `local` host agents run on: cmux or tmux by `fleet.local_terminal`, resolved once (a
+   * change applies at the next start: running agents' workspaces belong to the terminal they
+   * started in).
+   */
   private get host(): Host {
-    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
+    this.localHost ??= this.opts.spawner?.host ?? this.newLocalHost();
     return this.localHost;
+  }
+
+  private newLocalHost(): Host {
+    const s = this.opts.spawner;
+    const terminal = resolveLocalTerminal(
+      this.config.effective().fleet.local_terminal,
+      this.opts.fleet?.os?.platform?.() ?? process.platform,
+      s?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
+    );
+    if (s?.localHost !== undefined) return s.localHost(terminal);
+    return terminal === "tmux" ? new LocalTmuxHost(realExec) : new LocalCmuxHost(realExec);
   }
   private localHost: Host | undefined;
 

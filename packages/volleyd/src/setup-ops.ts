@@ -16,7 +16,7 @@ import {
   recordCmuxSocketMode,
   setupLogFile,
 } from "volley-cli/setup/journal";
-import { planServices } from "volley-cli/setup/services";
+import { planServicesForDesk as planServices } from "volley-cli/setup/services";
 import {
   type AnonymousProbe,
   type Change,
@@ -216,14 +216,14 @@ export function terminalOnly(
     return {
       reason:
         "the cmux socket password is typed at a hidden prompt and checked with cmux from outside it, which only a terminal on the supervisor's machine can do",
-      command: "volley setup --step services",
+      command: "volley setup --step terminal",
     };
   }
   if (step === "services" && summary.startsWith(CMUX_REACH)) {
     return {
       reason:
         "it checks cmux again from outside cmux, which only a terminal on the supervisor's machine can do: open cmux and choose its Automation mode (or set its socket password) first",
-      command: "volley setup --step services",
+      command: "volley setup --step terminal",
     };
   }
   return undefined;

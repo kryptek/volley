@@ -1,7 +1,7 @@
 import { chmodSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { writeCmuxPassword } from "volley-cli/setup/cmux";
+import { writeCmuxPassword } from "volley-cli/setup/terminal";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import {
   FenceError,

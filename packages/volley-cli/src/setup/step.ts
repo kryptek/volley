@@ -1,7 +1,12 @@
 import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
-import { CMUX_CHECK_OUT, CMUX_CHECK_SCRIPT, type CmuxSocketMode } from "./cmux";
 import { lsofArgv, ssArgv } from "./desk-port";
+import {
+  CMUX_CHECK_OUT,
+  CMUX_CHECK_SCRIPT,
+  type CmuxSocketMode,
+  type LocalTerminal,
+} from "./terminal";
 
 /**
  * What every `volley setup` step shares. A step is a planner: it reads the machine's state and
@@ -112,8 +117,13 @@ export interface SetupContext {
    * stdout. volleyd sets it to seal the token to the Desk that asked (`setup_apply`).
    */
   deliverToken?: (t: IssuedToken) => void;
-  /** cmux's socket control mode as the Services step's check last found it (setup.json keeps it). */
+  /**
+   * cmux's socket control mode as the cmux check last found it (the Terminal step's; the Desk's
+   * Services step's): setup.json keeps it.
+   */
   cmuxSocketMode?: CmuxSocketMode;
+  /** The terminal the Terminal step put on record in config.yaml (setup.json keeps it). */
+  terminal?: LocalTerminal;
 }
 
 /** A one-time admin token as `volley auth token --json` prints it. */
@@ -132,7 +142,7 @@ export interface Change {
   apply: () => Promise<string[]>;
 }
 
-export type StepName = "detect" | "security" | "accounts" | "services" | "phone";
+export type StepName = "detect" | "security" | "accounts" | "terminal" | "services" | "phone";
 
 export interface StepPlan {
   step: StepName;
@@ -144,6 +154,8 @@ export interface StepPlan {
   blocked?: string;
   /** Why this step is left out of this run (the later ones still run). */
   skipped?: string;
+  /** What `volley setup --check` shows on the step's row (default: from the plan's state). */
+  row?: string;
   /** Checks after the changes; returns the problems left. */
   verify?: () => Promise<string[]>;
   /** What `verify` confirmed, one line each (filled by it; printed once it passes). */

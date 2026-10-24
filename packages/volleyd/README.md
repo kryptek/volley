@@ -1872,6 +1872,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
+| `fleet.local_terminal` | the next volleyd start ([local hosts](#local-hosts-cmux-or-tmux)) | agents already running keep their terminal |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
@@ -1897,8 +1898,8 @@ lists every key with its default and example pools, commented out.
 
 `volleyd daemon` spawns an implementer for every admitted task (`--no-spawn` turns that off;
 `volleyd spawn` starts one by hand). One spawn (`src/spawn.ts`) runs these steps through a
-`Host` (`src/hosts/host.ts`; `local-cmux` is the local one, `ssh-tmux` a
-[remote one](#remote-hosts-ssh--tmux)), every command through the fence:
+`Host` (`src/hosts/host.ts`; `local-cmux` or `local-tmux` is the local one ([below](#local-hosts-cmux-or-tmux)),
+`ssh-tmux` a [remote one](#remote-hosts-ssh--tmux)), every command through the fence:
 
 | # | Step | Module | Refusal (journaled as `alarm_raised { code }`) |
 |---|---|---|---|
@@ -1915,6 +1916,33 @@ A refusal releases the lock, revokes credentials minted for the attempt and neve
 The gate runs before credentials are minted, so a rejected brief costs nothing to undo. A
 refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
 spawn` retries at once. While the kill switch is engaged nothing is spawned.
+
+### Local hosts: cmux or tmux
+
+`fleet.local_terminal` (`cmux` | `tmux`, SPEC §4.6.4) picks the terminal agents run in on the
+supervisor's own machine. Unset (`null`, the default) it is `cmux` on macOS when cmux is installed
+and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. `volley setup`'s Terminal
+step records its choice there (and in `setup.json`). volleyd reads it when it starts; a change
+applies at the next start, since a running agent's workspace belongs to the terminal it started
+in.
+
+| | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) |
+|---|---|---|
+| Launch | `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `tmux new-session -d -x <cols> -y <rows> -s volley-<wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (a taken name gets `-2`, `-3`, …) |
+| Find | `cmux list-workspaces`, by title | `tmux has-session -t =<session>` |
+| Screen | `cmux read-screen --workspace <ref> --lines <n>` (`source: cmux`) | `tmux capture-pane -p -t =<session>: -S-<n>` (`source: tmux`) |
+| Keys, text | `cmux send-key` / `cmux send` | `tmux send-keys -t =<session>: <key>` / `send-keys … -l -- <text>` |
+| Resize | not possible (`resized: false`) | `tmux resize-window -t =<session>: -x <cols> -y <rows>` |
+| Close | `cmux close-workspace` (consent) | `tmux kill-session -t =<session>` (consent; a session already gone is closed) |
+
+The tmux sessions live on your default tmux server, so `tmux ls` lists them and `tmux attach -t
+volley-w1-T1-implementer` shows an agent. The fence admits local tmux only for those session
+names (`volley-<wave>-<task>-<role>[-<n>]`, never a `volley-signin-*` sign-in session's, so a
+wave named `signin` cannot run in local tmux) and only in the shapes above; the launch needs the
+worktree's sealed `launch.sh` like cmux's. A retire kills the session, then stops whatever still
+runs under the worktree, as with cmux. `agent_spawned` carries `terminal: cmux | tmux`. On Linux
+the volleyd unit `volley setup` writes has `KillMode=process`, so restarting volleyd (`volley
+deploy`) leaves a tmux server it started, and the agents in it, running.
 
 ### Bundles
 
@@ -4208,6 +4236,14 @@ ALLOW (program by bare name only — never a path):
     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
     version a seeded profile records as its `lastOnboardingVersion`)
+  tmux (local agents, hosts/local-tmux.ts, under `fleet.local_terminal: tmux`) — sessions
+    named `volley-<wave>-<task>-<role>[-<n>]` only (AGENT_SESSION; never `volley-signin-*`),
+    targeted exactly (`=<it>`, its pane `=<it>:`):
+    new-session -d [-x <n> -y <n>] -s <it> -c <dir> 'bash .volley/launch.sh' (that order, with
+      the LaunchToken sealed for <dir>; n in 20..500) · capture-pane -p [-J] -t =<it>: -S-<n> ·
+      has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
+      send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
+      send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs

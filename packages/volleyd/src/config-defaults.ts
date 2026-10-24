@@ -66,9 +66,11 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   // local_agents null: fallback once any hosts.<name> is configured, else always.
+  // local_terminal null: cmux on macOS when cmux is installed, else tmux (read at volleyd start).
   fleet: {
     local_name: null,
     local_agents: null,
+    local_terminal: null,
     fallback: { max_agents: 3, per_machine: {} },
     repo_root: "~/.volley/repos",
   },

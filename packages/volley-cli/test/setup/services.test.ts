@@ -400,6 +400,14 @@ describe("setup: services", () => {
       expect(unit).toContain(
         `Environment="PATH=${join(m.ctx.home, ".volley", "bin")}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"`,
       );
+      // A restart of volleyd (`volley deploy`) stops volleyd only, never the tmux server it
+      // started and the agents in it; the Desk's unit keeps systemd's default.
+      expect(unit).toMatch(/^# A restart stops this process only: .*\nKillMode=process$/m);
+      const desk = readFileSync(
+        join(m.ctx.home, ".config", "systemd", "user", "volley-desk.service"),
+        "utf-8",
+      );
+      expect(desk).not.toContain("KillMode");
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "daemon-reload"]);
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "enable", "volleyd.service"]);
       expect(m.execCalls).toContainEqual(["systemctl", "--user", "restart", "volley-desk.service"]);
@@ -457,6 +465,10 @@ describe("setup: services", () => {
       workdir: "/tmp",
     };
     expect(renderSystemd(spec)).toContain('ExecStart="/opt/bun bin/bun" a&b serve');
+    expect(renderSystemd(spec)).not.toContain("KillMode");
+    expect(renderSystemd({ ...spec, killMode: "process" })).toContain(
+      "RestartSec=10\n# A restart stops this process only: the tmux server volleyd may start (agents run in it) keeps running.\nKillMode=process\nStandardOutput=",
+    );
     expect(renderLaunchd(spec)).toContain("<string>a&amp;b</string>");
     expect(renderLaunchd(spec)).toContain("<key>KeepAlive</key>");
   });

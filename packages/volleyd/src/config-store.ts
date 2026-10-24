@@ -11,6 +11,7 @@ import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
   ConfigPayload,
   LocalAgentsMode,
+  LocalTerminal,
   RepoAssignment,
   Tunables,
   TunablesPatch,
@@ -140,6 +141,19 @@ function overrideErrors(value: unknown): PathError[] {
         : [],
     );
   });
+}
+
+/**
+ * `fleet.local_terminal`, resolved: null is `cmux` on macOS when cmux is installed
+ * (`cmuxFound`), else `tmux` (every Linux supervisor; a Mac without cmux).
+ */
+export function resolveLocalTerminal(
+  set: LocalTerminal | null | undefined,
+  platform: NodeJS.Platform,
+  cmuxFound: () => boolean,
+): LocalTerminal {
+  if (set === "cmux" || set === "tmux") return set;
+  return platform === "darwin" && cmuxFound() ? "cmux" : "tmux";
 }
 
 /** `fleet.local_agents`, resolved: null is `fallback` when any host is configured, else `always`. */

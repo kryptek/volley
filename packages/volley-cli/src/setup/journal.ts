@@ -2,8 +2,13 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
-import { type CmuxSocketMode, isCmuxSocketMode } from "./cmux";
 import type { SetupContext, StepName } from "./step";
+import {
+  type CmuxSocketMode,
+  type LocalTerminal,
+  isCmuxSocketMode,
+  isLocalTerminal,
+} from "./terminal";
 
 /**
  * `$VOLLEYD_HOME/setup.log`: one JSON line per step event of `volley setup`, whoever ran it (the
@@ -80,8 +85,10 @@ export interface SetupInstall {
   desk_port?: number;
   /** Whether the WebSocket listener is open to the LAN (`--lan`); `volley auth init` keeps it. */
   lan?: boolean;
-  /** cmux's socket control mode, as the Services step last found it (macOS). */
+  /** cmux's socket control mode, as the cmux check last found it (macOS). */
   cmux_socket_mode?: CmuxSocketMode;
+  /** The terminal volleyd starts local agents in, as the Terminal step chose it (config.yaml's `fleet.local_terminal`). */
+  terminal?: LocalTerminal;
 }
 
 export const setupInstallFile = (volleydHome: string) => join(volleydHome, "setup.json");
@@ -93,6 +100,8 @@ export function writeSetupInstall(ctx: SetupContext): void {
   const lan = ctx.lan ?? prior?.lan;
   // A run whose Services step did not check cmux keeps the mode on record too.
   const cmux = ctx.cmuxSocketMode ?? prior?.cmux_socket_mode;
+  // And a run that skipped the Terminal step keeps its choice.
+  const terminal = ctx.terminal ?? prior?.terminal;
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -102,12 +111,13 @@ export function writeSetupInstall(ctx: SetupContext): void {
     desk_port: ctx.deskPort,
     ...(lan !== undefined ? { lan } : {}),
     ...(cmux !== undefined ? { cmux_socket_mode: cmux } : {}),
+    ...(terminal !== undefined ? { terminal } : {}),
   };
   saveInstall(ctx, install);
 }
 
 /**
- * Record the cmux socket mode the Services step found in an existing setup.json (the Desk's
+ * Record the cmux socket mode the cmux check found in an existing setup.json (the Desk's
  * Services runs; a terminal run that stops at cmux writes the whole record instead). No-op
  * without a record or a checked mode.
  */
@@ -158,6 +168,7 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
         : {}),
       ...(typeof v.lan === "boolean" ? { lan: v.lan } : {}),
       ...(isCmuxSocketMode(v.cmux_socket_mode) ? { cmux_socket_mode: v.cmux_socket_mode } : {}),
+      ...(isLocalTerminal(v.terminal) ? { terminal: v.terminal } : {}),
     };
   } catch {
     return null;

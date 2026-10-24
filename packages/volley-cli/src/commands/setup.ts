@@ -30,6 +30,7 @@ import {
   listenerUrls,
   setupFence,
 } from "../setup/step";
+import { planTerminal } from "../setup/terminal";
 import { defaultAuthDir } from "./auth";
 import { findRepoRoot } from "./dash";
 import { DESK_PORT } from "./desk-serve";
@@ -37,7 +38,7 @@ import { DESK_PORT } from "./desk-serve";
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
 /**
- * `volley setup`: the first-run (and repair) wizard. Five steps, each planned (what it found,
+ * `volley setup`: the first-run (and repair) wizard. Six steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
  *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
@@ -46,18 +47,23 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *   4. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
+ *                socket checked the way the service reaches it) or tmux, put on record in
+ *                config.yaml (`fleet.local_terminal`) and setup.json
+ *   5. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
- *   5. Phone     a one-time steer sign-in link as a QR code
+ *   6. Phone     a one-time steer sign-in link as a QR code
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
- * $VOLLEYD_HOME/setup.log (summaries only, never a secret).
+ * $VOLLEYD_HOME/setup.log (summaries only, never a secret). `--check` plans every step and
+ * prints one row each, changing nothing.
  */
 
 const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],
   ["accounts", planAccounts],
+  ["terminal", planTerminal],
   ["services", planServices],
   ["phone", planPhone],
 ];
@@ -163,6 +169,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       options: {
         yes: { type: "boolean", short: "y" },
         repair: { type: "boolean" },
+        check: { type: "boolean" },
         lan: { type: "boolean" },
         "no-lan": { type: "boolean" },
         step: { type: "string", multiple: true },
@@ -274,14 +281,15 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
-    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
+    `volley setup${values.check === true ? " --check" : ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
+  if (values.check === true) return check(ctx, only, io);
   const yes = ctx.yes;
-  // A run that stops once the Services step has checked cmux (often at the cmux change itself:
+  // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
   // the runs where its mode matters most) still records the mode it found, and replaces an
-  // earlier run's.
+  // earlier run's; and the terminal it put on record.
   const stopped = () => {
-    if (ctx.cmuxSocketMode !== undefined) writeSetupInstall(ctx);
+    if (ctx.cmuxSocketMode !== undefined || ctx.terminal !== undefined) writeSetupInstall(ctx);
     return EXIT.ERROR;
   };
   const skipped: string[] = [];
@@ -370,9 +378,51 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   return EXIT.OK;
 }
 
-export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
+/**
+ * `volley setup --check`: plan every step (or the `--step` ones) and print one row each: in
+ * place, the changes a run would make, skipped, blocked, or what could not be checked. Changes
+ * nothing, journals nothing, asks nothing. Exit 0 when every row is in place (or skipped).
+ */
+async function check(ctx: SetupContext, only: string[], io: IO): Promise<ExitCode> {
+  // Ask nothing: the LAN question takes its --yes answer (off, unless the config or a flag says).
+  ctx.yes = true;
+  const steps = STEPS.filter(([name]) => only.length === 0 || only.includes(name));
+  const rows: [string, string][] = [];
+  let ok = true;
+  for (const [name, planner] of steps) {
+    let plan: StepPlan;
+    try {
+      plan = await planner(ctx);
+    } catch (e) {
+      ok = false;
+      rows.push([name, `✗ cannot check: ${e instanceof Error ? e.message : String(e)}`]);
+      continue;
+    }
+    const n = plan.changes.length;
+    const status =
+      plan.blocked !== undefined
+        ? `✗ ${plan.row ?? `blocked: ${plan.blocked.split("\n")[0]}`}`
+        : plan.skipped !== undefined
+          ? `– skipped: ${plan.skipped}`
+          : n > 0
+            ? `→ ${plan.row !== undefined ? `${plan.row}; ` : ""}${n === 1 ? "1 change" : `${n} changes`} to make: ${plan.changes.map((c) => c.summary).join("; ")}`
+            : `✓ ${plan.row ?? "in place"}`;
+    if (plan.blocked !== undefined || n > 0) ok = false;
+    rows.push([plan.title, status]);
+  }
+  const width = Math.max(...rows.map(([t]) => t.length));
+  io.stdout(`${rows.map(([t, s]) => `  ${t.padEnd(width)}  ${s}`).join("\n")}\n`);
+  io.stdout(
+    ok
+      ? "Everything is in place.\n"
+      : "Run `volley setup` (or `volley setup --repair`) to make the changes above.\n",
+  );
+  return ok ? EXIT.OK : EXIT.ERROR;
+}
 
-First-run (and repair) wizard: five steps, each showing what it found and what it will change
+export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [--check] [options]
+
+First-run (and repair) wizard: six steps, each showing what it found and what it will change
 before changing anything.
 
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
@@ -386,13 +436,16 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+  4. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
+               way volleyd's service reaches it; the socket password it needs is asked for,
+               hidden), else tmux (stops, printing the install line, when tmux is missing);
+               recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
+  5. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
                PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
-               --user), on macOS the cmux socket password volleyd's service needs (asked for,
-               hidden), the Volley hooks for coordinator sessions (your status line keeps
+               --user), the Volley hooks for coordinator sessions (your status line keeps
                working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
                (stops if another program listens on that port)
-  5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
+  6. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
 
 Rerunning changes nothing that is in place. The one-time admin token and the phone's link
@@ -402,9 +455,12 @@ issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log.
 Options:
   -y, --yes            Apply every step without asking
   --repair             Check and fix only: no new admin token, no phone link
+  --check              Show one row per step (in place, or what a run would change) and
+                       change nothing; exit 1 unless everything is in place
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
-  --step <name>        Only this step (repeatable): detect, security, accounts, services, phone
+  --step <name>        Only this step (repeatable): detect, security, accounts, terminal,
+                       services, phone
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)

@@ -61,6 +61,8 @@ describe("daemon spawn loop", () => {
   let waits: JournalWait;
   /** The simulated session's publishes (teardown waits for them). */
   const sessions = new Set<Promise<void>>();
+  /** With `local`: the terminals the daemon built its local host for. */
+  let built: string[] = [];
   /** With `freshBase`: while true, `git fetch origin release/w1` fails (offline). */
   let fetchFails = false;
   /** With `freshBase`: the next spawn's fetch loses a ref-lock race to another git process. */
@@ -91,9 +93,21 @@ describe("daemon spawn loop", () => {
       config?: string;
       /** The wave's tasks (default: T1 alone), each on issue 42. */
       tasks?: string[];
+      /** Extra keys for each task's entry (`host: local`). */
+      taskKeys?: string;
+      /**
+       * Build the local host by `fleet.local_terminal` (the fake host, with the terminal recorded
+       * in `built`): the global config's key, the machine's platform and whether cmux is there.
+       */
+      local?: { terminal?: "cmux" | "tmux"; platform: NodeJS.Platform; cmux: boolean };
     } = {},
   ) {
     env = await makeDaemonEnv();
+    if (o.local?.terminal !== undefined)
+      writeFileSync(
+        join(env.home, "config.yaml"),
+        `fleet:\n  local_terminal: ${o.local.terminal}\n`,
+      );
     repo = realpathSync(env.home);
     repo = join(repo, "repo");
     mkdirSync(repo);
@@ -193,10 +207,23 @@ describe("daemon spawn loop", () => {
       void session.finally(() => sessions.delete(session));
     };
     clock = fakeClock(Date.now());
+    const local = o.local;
+    built = [];
     daemon = await env.start({
       clock,
+      ...(local !== undefined
+        ? { fleet: { os: { ...CALM_OS, platform: () => local.platform } } }
+        : {}),
       spawner: {
-        host,
+        ...(local === undefined
+          ? { host }
+          : {
+              localHost: (terminal: "cmux" | "tmux") => {
+                built.push(terminal);
+                return Object.assign(host, { screenSource: terminal });
+              },
+              cmuxFound: () => local.cmux,
+            }),
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
         reapGraceMs: 300,
@@ -207,7 +234,7 @@ describe("daemon spawn loop", () => {
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
       wave,
-      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n${(o.tasks ?? ["T1"]).map((t) => `  ${t}: { issue: 42 }\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n${(o.tasks ?? ["T1"]).map((t) => `  ${t}: { issue: 42${o.taskKeys ?? ""} }\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
     );
     const r = await runCli(["run", wave], env.env);
     expect(r.exitCode).toBe(0);
@@ -481,6 +508,49 @@ describe("daemon spawn loop", () => {
       by: "claude-trust-dialog",
     });
     expect(daemon.record("w1")?.state?.tasks[0]?.stage).toBe("implement");
+  });
+
+  describe("the local terminal (fleet.local_terminal)", () => {
+    it("tmux: the local host is the tmux one, and agent_spawned carries the terminal", async () => {
+      await setup({ local: { terminal: "tmux", platform: "darwin", cmux: true } });
+      const spawned = await event("agent_spawned");
+      expect(built).toEqual(["tmux"]);
+      expect(spawned?.data).toMatchObject({ host: "local", terminal: "tmux" });
+      await event("agent_registered");
+      await waits.settled();
+    });
+
+    it("cmux: the local host is the cmux one", async () => {
+      await setup({ local: { terminal: "cmux", platform: "linux", cmux: false } });
+      const spawned = await event("agent_spawned");
+      expect(built).toEqual(["cmux"]);
+      expect(spawned?.data.terminal).toBe("cmux");
+      await event("agent_registered");
+      await waits.settled();
+    });
+
+    it("unset on a Mac with cmux: cmux", async () => {
+      await setup({ local: { platform: "darwin", cmux: true } });
+      expect((await event("agent_spawned"))?.data.terminal).toBe("cmux");
+      expect(built).toEqual(["cmux"]);
+      await event("agent_registered");
+      await waits.settled();
+    });
+
+    it("unset on Linux: tmux, and an explicit host: local spawns there without a warning", async () => {
+      await setup({ local: { platform: "linux", cmux: true }, taskKeys: ", host: local" });
+      const spawned = await event("agent_spawned");
+      expect(built).toEqual(["tmux"]);
+      expect(spawned?.data).toMatchObject({ host: "local", terminal: "tmux" });
+      await event("agent_registered");
+      await waits.settled();
+      // No refusal, and no alarm about the host or its terminal.
+      const about = (e: JournalEvent) =>
+        e.type === "spawn_failed" ||
+        (e.type === "alarm_raised" &&
+          /host|terminal|tmux|cmux/.test(`${e.data.alarm ?? e.data.code}`));
+      expect(journal().filter(about)).toEqual([]);
+    });
   });
 
   describe("one repo_untrusted decision per (machine, profile, repo) (#418)", () => {

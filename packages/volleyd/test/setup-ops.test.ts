@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LAYOUTS, type Layout, generateConfig } from "volley-cli/auth/config";
 import { realAuthDeps } from "volley-cli/auth/context";
 import { planAccounts } from "volley-cli/setup/accounts";
-import { CMUX_CHECK_SCRIPT } from "volley-cli/setup/cmux";
-import { planServices } from "volley-cli/setup/services";
+import { planServicesForDesk as planServices } from "volley-cli/setup/services";
 import type { SetupContext } from "volley-cli/setup/step";
+import { CMUX_CHECK_SCRIPT } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
@@ -703,7 +703,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     );
     expect(cmux?.terminal).toEqual({
       reason: expect.stringContaining("hidden prompt"),
-      command: "volley setup --step services",
+      command: "volley setup --step terminal",
     });
     expect(services.found.join("\n")).toContain("(cmux said: ERROR: Invalid password)");
     const r = await apply("services", services.plan_id);
@@ -717,7 +717,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
         "Make volleyd's service reach cmux (cmux's socket is not answering): checked again when applied",
         { auth: { layout: LAYOUTS["brew-arm64"] } } as unknown as SetupContext,
       )?.command,
-    ).toBe("volley setup --step services");
+    ).toBe("volley setup --step terminal");
   });
 
   it("services: the Desk shows cmux's socket mode, and its Services run records it in setup.json", async () => {

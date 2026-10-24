@@ -874,6 +874,7 @@ async function launchAttempt(
         ...(req.stage !== undefined ? { stage: req.stage.name } : {}),
         attempt,
         host: host.name,
+        terminal: host.screenSource ?? "cmux",
         workspace,
         worktree: ctx.worktree,
         branch: wt.branch,
