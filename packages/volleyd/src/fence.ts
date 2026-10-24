@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join, posix, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
 import { COMPACT_MAX, COMPACT_MIN } from "./claude/context-window";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
@@ -150,7 +150,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   tar -czf <abs>.tgz -C <abs> --files-from <abs>   (a supervisor move's bundle; never -x)
  *   volley desk install --port <n> --broker-host <host> · volley desk uninstall ·
  *     volley desk check --url http://127.0.0.1:<n> --version <v>   (a Desk move to this machine)
- *   and as REMOTE steps on a paired machine (below): the same three `volley desk` verbs;
+ *   and as REMOTE steps on a paired machine (below; each as `bun <volley_dir>/packages/volley-cli/
+ *   src/cli.ts <args>`, the box's own checkout, never `volley`): the same three `desk` verbs;
  *   volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
  *   volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
  *   supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
@@ -288,15 +289,18 @@ import { AGENT_BRANCH } from "./worktree";
  *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
  *     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
- *   volley peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
- *   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+ *   every volley argv on a box runs its own checkout, `bun <volley_dir>/packages/volley-cli/src/
+ *     cli.ts <args>` (remoteVolleyArgv; the host's `volley_dir` exactly), never a `volley` on its
+ *     PATH; VOLLEY below is that prefix:
+ *   VOLLEY peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
+ *   VOLLEY peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
  *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
  *     credentials or port, isCloneUrl); or, for its repositories (#435), after [--fix --yes]
  *     any number of --repo-add <owner/name>[=ABS] (isSlug; ABS as --supervisor-volley-dir's) and
  *     --repo-remove <owner/name>, then --clone only under --fix with an add (each added
  *     repository cloned from https://github.com/<owner>/<name>.git, built on the box, never an
- *     argv here); no other volley argv runs on a box
+ *     argv here); the role-move steps above; no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer or a `repo_add`, SPEC
  *     §4.6.21: adding a repository to a machine is the owner's consent to trust its clone there):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
@@ -1100,7 +1104,26 @@ export interface ProfileHost {
    * `VOLLEY_BROKER_URL` its launch.sh may name. Absent: any loopback port.
    */
   broker_port?: number;
+  /**
+   * Its Volley checkout (`hosts.<name>.volley_dir`): the only `volley` that runs there is
+   * `bun <volley_dir>/packages/volley-cli/src/cli.ts …` (remoteVolleyArgv). Absent: none runs.
+   */
+  volley_dir?: string;
 }
+
+/** The Volley CLI's script in the checkout at `volleyDir`. */
+export const volleyCliPath = (volleyDir: string): string =>
+  posix.join(volleyDir, "packages", "volley-cli", "src", "cli.ts");
+
+/**
+ * A `volley <args>` as a paired machine runs it: its own checkout, by bun, never a `volley` found
+ * on the box's PATH (a non-interactive ssh PATH may have none). The form `volley deploy` uses.
+ */
+export const remoteVolleyArgv = (volleyDir: string, args: readonly string[]): string[] => [
+  "bun",
+  volleyCliPath(volleyDir),
+  ...args,
+];
 
 export interface FenceOptions {
   consent?: ConsentToken;
@@ -2454,6 +2477,20 @@ function isRemoteDoctor(rest: readonly string[]): boolean {
   return fix && adds > 0 && i === rest.length - 1 && rest[i] === "--clone";
 }
 
+const REMOTE_VOLLEY_ARGS =
+  "peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>], peer doctor --json --probe-login <profile>, or a role move's step";
+
+/**
+ * The volley argv (after the CLI script) a paired machine runs: a role move's steps (SPEC
+ * §4.6.24), peer_retarget's (§4.6.14), or the doctor.
+ */
+function remoteVolleyArgs(args: readonly string[]): boolean {
+  if (isRoleRemoteVolley(args)) return true;
+  const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
+  const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
+  return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest);
+}
+
 const remoteDeny = (v: Verdict): Verdict =>
   v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
 
@@ -2909,17 +2946,16 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       return isSshBackProbe(args)
         ? ALLOW
         : deny("ssh (only -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true)");
-    case "volley": {
-      // A role move's steps (SPEC §4.6.24) and peer_retarget's (§4.6.14).
-      if (isRoleRemoteVolley(args)) return ALLOW;
-      // The doctor: elsewhere volley is a local program (`volley auth`).
-      const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
-      const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
-      return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest)
+    case "bun": {
+      // The box's own checkout (remoteVolleyArgv), never a bare `volley` from its PATH (#550).
+      const dir = opts.remote?.host?.volley_dir;
+      const [script, ...rest] = args;
+      return dir !== undefined &&
+        isVolleyDir(dir) &&
+        script === volleyCliPath(dir) &&
+        remoteVolleyArgs(rest)
         ? ALLOW
-        : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>], or peer doctor --json --probe-login <profile>)`,
-          );
+        : deny(`bun (only <volley_dir>/packages/volley-cli/src/cli.ts ${REMOTE_VOLLEY_ARGS})`);
     }
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.

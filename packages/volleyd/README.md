@@ -1713,6 +1713,9 @@ refuses them). volleyd moves the **Desk**, the **supervisor** and the **broker**
   `role_move_started`, a `role_move_step` per step change, `role_move_completed` or
   `role_move_failed { step, error, rolled_back }`. Each move's log is
   `$VOLLEYD_HOME/roles/<move_id>/log.jsonl`, beside its record (`move.json`).
+- **On a paired machine** a step written below as `volley …` runs that machine's own checkout,
+  `bun <volley_dir>/packages/volley-cli/src/cli.ts …`, as one fenced step over ssh: never a
+  `volley` on its PATH, which a non-interactive ssh command may lack.
 - **A failing step** undoes every step done so far, in reverse, and the move ends `failed`.
 - **Retention.** A finished move's directory (its record, log and what it replaced) is kept 7
   days; the first start after that removes it and clears its retained topic. There is no tunable.
@@ -3182,8 +3185,9 @@ tunnel and publishes no record.
 
 `peer_retarget { name, address, port?, tunnel? }` (an admin op, a step of a broker move)
 re-points a paired machine's tunnel: volleyd runs `volley peer retarget --to <address> [--port
-<n>] [--tunnel ssh|none]` there over ssh (the machine rewrites `peer.json`, restarts its service
-and exits 0 only once its tunnel answers), writes a new port to `hosts.<name>.tunnel.remote_port`,
+<n>] [--tunnel ssh|none]` there over ssh, by the machine's own checkout as every `volley` step
+on a paired machine is (`bun <volley_dir>/packages/volley-cli/src/cli.ts peer retarget …`; the
+machine rewrites `peer.json`, restarts its service and exits 0 only once its tunnel answers), writes a new port to `hosts.<name>.tunnel.remote_port`,
 and answers `{ name, address, port?, tunnel?, up: true }` once the machine's record comes `up`
 through the new tunnel (120 s grace, `peer_retarget_grace_ms`; else `ok: false`), journaling
 `peer_retargeted`. An unknown host or an address starting with `-` is refused before anything
@@ -3326,12 +3330,17 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
 `{ op: "peer_doctor", name, fix?, clone?, repos_add?, repos_remove? }` (`repos_add` /
 `repos_remove`: `--repo-add` / `--repo-remove` for each, one list or the other; with `repos_add`,
-`clone` passes `--clone` alone and needs no origin). volleyd runs `volley peer doctor --json
---supervisor-volley-dir <volley_dir>` (so every volley MCP entry on the box is checked against
+`clone` passes `--clone` alone and needs no origin). volleyd runs the box's own checkout, `bun
+<volley_dir>/packages/volley-cli/src/cli.ts peer doctor --json --supervisor-volley-dir
+<volley_dir>` (never a `volley` on the box's PATH, which a non-interactive ssh command may lack;
+the form `volley deploy` runs), so every volley MCP entry on the box is checked against
 the checkout agents are launched from; a volley older than the flag refuses it, and the doctor
 runs again without), plus `--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
-in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box
-and no other `volley` command. `<url>` is the running wave's origin as the supervisor's own doctor
+in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box,
+with that host's own CLI script, and no other `volley` command. When the doctor prints no report
+because bun is not on the box's ssh PATH, or `<volley_dir>/packages/volley-cli/src/cli.ts` is not
+there, the error says so and names the fix (Repair's `path_ok` line; `volley deploy` or Repair,
+or re-pairing with the right `--volley-dir`). `<url>` is the running wave's origin as the supervisor's own doctor
 read it from its clone, as `https://<host>/<path>` (`gh auth setup-git` signs git in to it; the
 fence admits no credentials, port or other form); while no wave runs, or its origin has a port,
 `clone: true` is refused before ssh (`the wave repo's origin is not known …`). The answer is the doctor's report (`checks`, `versions`, `auth`, ...); without
@@ -4547,7 +4556,8 @@ MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
   tar -czf <abs>.tgz -C <abs> --files-from <abs>   (a supervisor move's bundle; never -x)
   volley desk install --port <n> --broker-host <host> · volley desk uninstall ·
     volley desk check --url http://127.0.0.1:<n> --version <v>   (a Desk move to this machine)
-  and as REMOTE steps on a paired machine (below): the same three `volley desk` verbs;
+  and as REMOTE steps on a paired machine (below; each as `bun <volley_dir>/packages/volley-cli/
+  src/cli.ts <args>`, the box's own checkout, never `volley`): the same three `desk` verbs;
   volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
   volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
   supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
@@ -4685,15 +4695,18 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
-  volley peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
-  volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+  every volley argv on a box runs its own checkout, `bun <volley_dir>/packages/volley-cli/src/
+    cli.ts <args>` (remoteVolleyArgv; the host's `volley_dir` exactly), never a `volley` on its
+    PATH; VOLLEY below is that prefix:
+  VOLLEY peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
+  VOLLEY peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
     <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
     credentials or port, isCloneUrl); or, for its repositories (#435), after [--fix --yes]
     any number of --repo-add <owner/name>[=ABS] (isSlug; ABS as --supervisor-volley-dir's) and
     --repo-remove <owner/name>, then --clone only under --fix with an add (each added
     repository cloned from https://github.com/<owner>/<name>.git, built on the box, never an
-    argv here); no other volley argv runs on a box
+    argv here); the role-move steps above; no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer or a `repo_add`, SPEC
     §4.6.21: adding a repository to a machine is the owner's consent to trust its clone there):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·

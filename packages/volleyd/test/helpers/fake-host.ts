@@ -433,7 +433,15 @@ export function fakeRemoteHost(
     run: (steps: RemoteStep[], opts: RemoteRunOptions = {}) =>
       local.fake.exec(["ssh", "-T", "-o", "BatchMode=yes", spec.target, "bash", "-s"], {
         ...opts,
-        remote: { steps },
+        // The host record SshTmuxHost.run passes: its volley_dir is the checkout that may run.
+        remote: {
+          steps,
+          host: {
+            name: spec.name,
+            worktree_root: spec.worktree_root ?? "",
+            volley_dir: spec.volley_dir,
+          },
+        },
       }),
     probePath: async () => {
       h.probes++;
