@@ -95,10 +95,14 @@ export function Machines({ ctx, setSummary }: StepProps) {
   const shown = useMemo(() => Object.fromEntries(paired.map((m) => [m.name, m])), [paired]);
   const self =
     local ?? Object.values(state.machines ?? {}).find((m) => m.kind === "supervisor")?.name;
-  const names = [...(self ? [self] : []), ...paired.map((m) => m.name)].join(" ");
+  const list = [...(self ? [self] : []), ...paired.map((m) => m.name)];
+  // Keyed on the names, not the records: a record's update alone must not re-write the summary.
+  const key = list.join("\n");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for `list`'s contents.
+  const names = useMemo(() => list, [key]);
 
   useEffect(() => {
-    setSummary({ machines: names === "" ? [] : names.split(" ") });
+    setSummary({ machines: names });
   }, [names, setSummary]);
 
   const start = () => setOpen(by);

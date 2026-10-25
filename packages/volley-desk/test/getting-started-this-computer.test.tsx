@@ -46,13 +46,17 @@ function mount({
     setup_plan: () => ({ ok: true, result: PLAN }),
   },
   localName = "studio" as string | null,
+  ack,
+  noConfig = false,
 }: {
   supervisor?: MachinePayload;
   handlers?: Record<string, (f: Record<string, unknown>) => AuthAnswer>;
   localName?: string | null;
+  ack?: ConfigAck;
+  noConfig?: boolean;
 } = {}) {
   const { ops, calls } = fakeOps(handlers);
-  const { config, send } = fakeConfig();
+  const { config, send } = fakeConfig(ack);
   const ctx: WizardContext = {
     ops,
     control: null,
@@ -70,7 +74,7 @@ function mount({
     deskUrl: "http://desk.example:5199/",
     identity: "admin-0123abcd",
     openSettings: vi.fn(),
-    config,
+    ...(noConfig ? {} : { config }),
   };
   const setSummary = vi.fn();
   render(
@@ -243,6 +247,41 @@ describe("Getting started › This computer", () => {
       );
       expect(await screen.findByRole("heading", { name: "desk-1" })).toBeInTheDocument();
       expect(setSummary).toHaveBeenLastCalledWith({ machine: "desk-1" });
+    });
+
+    it("a name volleyd refuses shows its reason and the title stays", async () => {
+      mount({
+        ack: {
+          applied: false,
+          rejected: [{ path: "fleet.local_name", reason: "desk-1 is a configured host" }],
+        },
+      });
+      fireEvent.change(input(), { target: { value: "desk-1" } });
+      fireEvent.keyDown(input(), { key: "Enter" });
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "The name was not set: desk-1 is a configured host",
+      );
+      expect(screen.getByRole("heading", { name: "studio" })).toBeInTheDocument();
+    });
+
+    it("no answer in time shows the transport's error", async () => {
+      mount({
+        ack: { applied: false, rejected: [], error: "volleyd did not answer within 10s" },
+      });
+      fireEvent.change(input(), { target: { value: "desk-1" } });
+      fireEvent.blur(input());
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "The name was not set: volleyd did not answer within 10s",
+      );
+    });
+
+    it("without a config transport, says which volleyd command to run", () => {
+      mount({ noConfig: true });
+      fireEvent.change(input(), { target: { value: "desk-1" } });
+      fireEvent.blur(input());
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "volleyd config set fleet.local_name desk-1",
+      );
     });
 
     it("an unchanged name writes nothing", () => {

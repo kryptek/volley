@@ -4,7 +4,7 @@ import type { WizardContext } from "../src/getting-started/steps";
 import { Machines } from "../src/getting-started/steps/Machines";
 import type { MachineAddRequest, PeerOps } from "../src/store/peerOps";
 import { initialState } from "../src/store/reducer";
-import type { MachineAddRow } from "../src/store/types";
+import type { MachineAddRow, MachinePayload } from "../src/store/types";
 import { fakeOps } from "./helpers/auth-ops";
 import { NOW, machineRecord } from "./helpers/desk-msgs";
 import { fakePeerOps } from "./helpers/peer-ops";
@@ -15,18 +15,22 @@ const DESK_1 = machineRecord({ name: "desk-1", os: "darwin", cores: 10, tunnel: 
 
 function mount(peerOps: Partial<PeerOps> = {}) {
   const peer = fakePeerOps(peerOps);
-  const ctx: WizardContext = {
+  const ctxWith = (extra: Record<string, MachinePayload> = {}): WizardContext => ({
     ops: fakeOps({}).ops,
     control: null,
     state: {
       ...initialState(),
-      machines: { studio: SUPERVISOR, "box-a": BOX_A, "desk-1": DESK_1 },
+      machines: { studio: SUPERVISOR, "box-a": BOX_A, "desk-1": DESK_1, ...extra },
       config: {
         version: 1,
         updated_at: new Date(NOW).toISOString(),
         updated_by: "volleyd",
         fleet: { local_name: "studio" },
-        hosts: { "box-a": {}, "desk-1": {} },
+        hosts: {
+          "box-a": {},
+          "desk-1": {},
+          ...Object.fromEntries(Object.keys(extra).map((n) => [n, {}])),
+        },
       },
     },
     deskUrl: "http://desk.example:5199/",
@@ -34,17 +38,20 @@ function mount(peerOps: Partial<PeerOps> = {}) {
     openSettings: vi.fn(),
     peerOps: peer,
     now: NOW,
-  };
+  });
   const setSummary = vi.fn();
-  render(
+  const step = (ctx: WizardContext) => (
     <Machines
       ctx={ctx}
       summary={{ machines: [], repos: [], people: [] }}
       setSummary={setSummary}
       onContinue={vi.fn()}
-    />,
+    />
   );
-  return { peer, setSummary };
+  const { rerender } = render(step(ctxWith()));
+  /** Re-render with more machine records, each a configured host. */
+  const withMachines = (extra: Record<string, MachinePayload>) => rerender(step(ctxWith(extra)));
+  return { peer, setSummary, withMachines };
 }
 
 const radio = (name: RegExp) => screen.getByRole("radio", { name });
@@ -111,6 +118,15 @@ describe("Getting started › Your machines", () => {
     expect(screen.getByText(/Waiting for the machine to join/)).toBeInTheDocument();
     expect(screen.getByText(/10 minutes/)).toBeInTheDocument();
     expect(setSummary).not.toHaveBeenCalledWith(expect.objectContaining({ connectedBy: "code" }));
+  });
+
+  it("a machine that joins with the code writes connectedBy: code to the summary", async () => {
+    const { peer, setSummary, withMachines } = mount();
+    fireEvent.click(screen.getByRole("button", { name: "Add it" }));
+    await waitFor(() => expect(peer.invite).toHaveBeenCalledTimes(1));
+    await screen.findByText(/Waiting for the machine to join/);
+    withMachines({ "box-b": machineRecord({ name: "box-b" }) });
+    await waitFor(() => expect(setSummary).toHaveBeenCalledWith({ connectedBy: "code" }));
   });
 
   it("+ Another computer opens the chosen way too", async () => {
