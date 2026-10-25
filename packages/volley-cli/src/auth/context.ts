@@ -285,17 +285,20 @@ export function ensureOwnedDir(
 }
 
 /**
- * Under sudo, the snap layout's auth dir and its admin.json and coordinator.json go to the
- * invoking user, as ~/.volley/volleyd/dynsec-admin.json does: the user-level setup and the
- * coordinator's CLIs read them. mosquitto reads only the state file, which stays root's. Other
- * layouts, and root with no sudo user, keep them root's.
+ * Under sudo, the snap layout's auth dir and the files in it (admin.json, coordinator.json, the
+ * account and token registries) go to the invoking user, as ~/.volley/volleyd/dynsec-admin.json
+ * does: the user-level setup and the coordinator's CLIs read and rewrite them. mosquitto never
+ * reads this dir (its state file, outside it, stays root's). Other layouts, and root with no sudo
+ * user, keep them root's. `volley setup` and `volley auth` call it when they finish, since a
+ * registry rewritten by rename comes back root's.
  */
 export function handAuthDirToInvoker(ctx: Pick<AuthContext, "dir" | "layout" | "env" | "deps">) {
-  if (ctx.layout.name !== "snap") return;
+  if (ctx.layout.name !== "snap" || !existsSync(ctx.dir)) return;
   const user = ctx.deps.invokingUser(ctx.env);
   if (typeof user !== "object" || user === null) return;
-  for (const p of [ctx.dir, join(ctx.dir, ADMIN_FILE), join(ctx.dir, "coordinator.json")]) {
-    if (existsSync(p)) ctx.deps.chown(p, user.uid, user.gid);
+  ctx.deps.chown(ctx.dir, user.uid, user.gid);
+  for (const e of readdirSync(ctx.dir, { withFileTypes: true })) {
+    if (e.isFile()) ctx.deps.chown(join(ctx.dir, e.name), user.uid, user.gid);
   }
 }
 

@@ -120,6 +120,15 @@ describe("volley auth", () => {
         expect(statSync(join(authDir, "coordinator.json")).mode & 0o777).toBe(0o600);
       });
 
+      it("under sudo: an account command hands back the registries it rewrote", async () => {
+        const deps = snapDeps({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+        expect((await run(["init"], deps)).code).toBe(0);
+        deps.chowns.length = 0;
+        expect((await run(["add", "tablet", "--role", "watch"], deps)).code).toBe(0);
+        expect(deps.chowns).toContainEqual([authDir, 1234, 5678]);
+        expect(deps.chowns).toContainEqual([join(authDir, "accounts.json"), 1234, 5678]);
+      });
+
       it.each([
         ["as root with no sudo user", "root"],
         ["without sudo", null],

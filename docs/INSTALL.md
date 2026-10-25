@@ -224,7 +224,7 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
   ```
 
   Under sudo, setup gives the Volley auth dir (`/var/snap/mosquitto/common/volley`: `admin.json`,
-  `coordinator.json`) to you, as it does `~/.volley/volleyd/dynsec-admin.json`, so the second run
+  `coordinator.json`, the account registries) to you, as it does `~/.volley/volleyd/dynsec-admin.json`, so the second run
   and your CLIs can read them; the broker's own files stay root's. Run as root with no sudo user,
   it stays root's.
 - **Services** are `systemd --user` units. To keep volleyd and the Desk running while you are
