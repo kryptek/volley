@@ -32,7 +32,8 @@
  * (configured hosts) is the section's call, at render time. volleyd's
  * readiness verdict on each (§4.6.15) goes into `readiness` by name. The
  * machine roles record (§4.6.24) goes into `roles` and each move's progress
- * into `roleMoves` by move id, both only from volleyd.
+ * into `roleMoves` by move id, both only from volleyd. The coordinator role's state (§4.6.25)
+ * goes into `coordinatorRole`, only from volleyd; its cleared topic is null.
  *
  * Autopilot (SPEC §4.6.16): of each wave's live `events` mirror only volleyd's
  * `decision_auto_resolved` / `decision_escalated` and the overlap plan's events (`wave_planned`,
@@ -51,6 +52,7 @@ import {
   type ClaudeAccountPayload,
   type ClaudeSignin,
   type ConfigPayload,
+  type CoordinatorRolePayload,
   type CoordinatorState,
   type CoordinatorView,
   type DecisionPayload,
@@ -131,6 +133,7 @@ export type Route =
   | { kind: "machine"; name: string }
   | { kind: "readiness"; name: string }
   | { kind: "roles" }
+  | { kind: "coordinatorRole" }
   | { kind: "roleMove"; moveId: string }
   | { kind: "inbox"; id: string };
 
@@ -152,6 +155,8 @@ export function routeTopic(topic: string): Route | null {
       return { kind: "readiness", name: c };
     }
     if (p.length === 3 && b === "roles") return { kind: "roles" };
+    if (p.length === 4 && b === "federation" && c === "coordinator")
+      return { kind: "coordinatorRole" };
     if (p.length === 5 && b === "roles" && c === "moves" && d)
       return { kind: "roleMove", moveId: d };
     return null;
@@ -266,6 +271,8 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceReadiness(state, route.name, m);
     case "roles":
       return reduceRoles(state, m);
+    case "coordinatorRole":
+      return reduceCoordinatorRole(state, m);
     case "roleMove":
       return reduceRoleMove(state, route.moveId, m);
     case "inbox":
@@ -323,6 +330,17 @@ function reduceRoles(state: DeskState, m: DeskMessage): DeskState {
   }
   if (env.agent_id !== "volleyd" || env.type !== "roles") return state;
   return { ...state, roles: env.payload as RolesPayload };
+}
+
+/**
+ * The coordinator role's state (SPEC §4.6.25): taken only from volleyd; a cleared topic (the role
+ * off) is null.
+ */
+function reduceCoordinatorRole(state: DeskState, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, coordinatorRole: null };
+  if (env.agent_id !== "volleyd" || env.type !== "coordinator") return state;
+  return { ...state, coordinatorRole: env.payload as CoordinatorRolePayload };
 }
 
 /**
@@ -460,8 +478,8 @@ export function resync(state: DeskState): DeskState {
     if (sv.registry) unconfirmed.add(sv.id);
     supervisors[sv.id] = { ...sv, registry: null, status: null };
   }
-  // The roles record is retained: the replay brings it back.
-  const { roles: _roles, ...kept } = state;
+  // The roles record and the coordinator role are retained: the replay brings them back.
+  const { roles: _roles, coordinatorRole: _coordinatorRole, ...kept } = state;
   return {
     ...kept,
     waves: {},

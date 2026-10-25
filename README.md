@@ -30,6 +30,7 @@
 - [The 60-second mental model](#the-60-second-mental-model) — three ideas, one diagram
 - [See it running](#see-it-running) — the dashboard, in one screenshot
 - [Quickstart](#quickstart) — one command, on macOS or Ubuntu/Debian
+  - [Reach it from anywhere](#reach-it-from-anywhere)
   - [See everything in one view](#see-everything-in-one-view)
 - [Use cases](#use-cases) — five concrete scenarios
   - [1. Dispatch long-running work to autonomous agents](#1-dispatch-long-running-work-to-autonomous-agents)
@@ -165,12 +166,35 @@ password: setup wires the logins itself.
 - **Claude Code.** Open a new terminal (for `PATH`) and start `claude`; a session that was
   already open needs a restart once. `/volley list` shows your session; `/volley-issues` runs a
   wave.
+- **Getting started.** The admin link opens the Desk on **Getting started**, its first-launch
+  wizard: Welcome → This computer → Your machines → Repos → People → Access → You're good to go!.
+  It shows this machine's checks, pairs your other computers, adds repositories, invites people,
+  chooses how you reach the cluster from away (Tailscale, your own VPN, or this network only) and
+  which always-on machine keeps your coordinator running. Each step shows what it will change
+  before it applies it; Settings › Setup & Security reopens it
+  ([the Desk's README](packages/volley-desk/README.md#getting-started)).
 
 `volley setup --check` says what is missing without changing anything; rerunning the one command
 or `volley setup` changes nothing that is in place. **What the installer does**, every flag,
 `--uninstall`, the Linux notes, the Homebrew path (`brew install kryptek/volley/volley`, then
 `volley setup`), adding a second machine (`volley machine add you@box`) and setup from a clone:
 [`docs/INSTALL.md`](docs/INSTALL.md).
+
+### Reach it from anywhere
+
+Volley never opens a public listener. Away from home you reach it over a private network you set
+up once: **Tailscale** (the default: `volley setup --network tailscale`, or Getting started ›
+Access, then the Tailscale app on your phone) or **your own VPN** (`--network manual
+--network-address <host-or-ip>`). With Tailscale, setup serves the Desk over HTTPS at the
+machine's name (`https://<name>.example.ts.net`, `volley desk install --tailscale` on a machine
+that serves only the Desk), so the phone opens it from Wi-Fi or cellular, signs in with a link
+and gets browser notifications. Pick an always-on machine for the **coordinator** and volleyd
+keeps a Claude Code Remote Control session alive there: open it from the Claude app on your
+phone, or the Desk's **Open coordinator**, and run `/volley-issues` from anywhere with your
+laptop's lid closed. Details: [`docs/INSTALL.md`](docs/INSTALL.md#reach-it-from-outside-your-network)
+(the Network step and its flags), the Desk's
+[On your private network](packages/volley-desk/README.md#on-your-private-network), and volleyd's
+[coordinator role](packages/volleyd/README.md#the-coordinator-role).
 
 ### See everything in one view
 

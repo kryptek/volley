@@ -13,6 +13,7 @@ import {
 import { makeBufferIO } from "../../src/io";
 import { LAN_QUESTION } from "../../src/setup/broker";
 import { readSetupInstall } from "../../src/setup/journal";
+import { NETWORK_QUESTION } from "../../src/setup/network";
 import { setupFence } from "../../src/setup/step";
 import { CMUX_CHECK_SCRIPT } from "../../src/setup/terminal";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
@@ -72,12 +73,79 @@ describe("volley setup", () => {
       .split("\n")
       .map((l) => JSON.parse(l) as { at: string; step: string; event: string; summary?: string });
 
+  it("--yes --network tailscale with Tailscale running records its name and address; the end names both Desk addresses", async () => {
+    m.tailscale.installed = true;
+    m.tailscale.state = "Running";
+    const r = await run(["--yes", "--lan", "--network", "tailscale"]);
+    expect(r.code).toBe(0);
+    expect(readSetupInstall(m.ctx.volleydHome)?.network).toEqual({
+      kind: "tailscale",
+      name: "studio.example.ts.net",
+      address: "100.64.0.2",
+    });
+    expect(
+      journal()
+        .filter((e) => e.step === "network" && e.event === "applied")
+        .map((e) => e.summary),
+    ).toEqual([
+      "Record this machine's private address in setup.json (tailscale: studio.example.ts.net, 100.64.0.2)",
+    ]);
+    expect(m.execCalls.some((a) => a.includes("up") || a.includes("--cask"))).toBe(false);
+    // The Services step serves the Desk on the tailnet: two loopback-only serves, never Funnel.
+    expect(
+      journal()
+        .filter((e) => e.step === "services" && e.event === "applied")
+        .map((e) => e.summary),
+    ).toContain("Serve the Desk on your private network (https://studio.example.ts.net)");
+    expect(m.tailscale.serves).toEqual(
+      new Map([
+        [443, "http://127.0.0.1:5199"],
+        [8443, "http://127.0.0.1:9001"],
+      ]),
+    );
+    expect(m.execCalls.some((a) => a.includes("funnel"))).toBe(false);
+    expect(readSetupInstall(m.ctx.volleydHome)?.desk_private_url).toBe(
+      "https://studio.example.ts.net",
+    );
+    expect(r.stdout).toContain("Desk: http://desk.example:5199 · https://studio.example.ts.net");
+    // A rerun without the flag keeps the record and changes nothing there.
+    const again = await run(["--yes", "--step", "network"]);
+    expect(again.stdout).toContain("already done");
+    expect(readSetupInstall(m.ctx.volleydHome)?.network?.kind).toBe("tailscale");
+  });
+
+  it("--network manual with an address this machine does not have fails the step and records nothing", async () => {
+    const r = await run([
+      "--yes",
+      "--step",
+      "network",
+      "--network",
+      "manual",
+      "--network-address",
+      "203.0.113.7",
+    ]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain(
+      "203.0.113.7 is not an address of this machine (interfaces: en0 192.0.2.10)",
+    );
+    expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
+  });
+
+  it("--network takes tailscale, manual or none; --network-address goes with manual", async () => {
+    expect((await run(["--network", "funnel"])).stderr).toContain(
+      "--network must be one of tailscale, manual, none",
+    );
+    const stray = await run(["--network", "tailscale", "--network-address", "192.0.2.10"]);
+    expect(stray.code).toBe(2);
+    expect(stray.stderr).toContain("it goes with --network manual");
+  });
+
   it("prints the planned diff and writes nothing before the confirmation", async () => {
     m.answers = [false, false];
     const r = await run([]);
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("[1/9] Broker");
-    expect(r.stdout).toContain("[2/9] Security");
+    expect(r.stdout).toContain("[1/10] Broker");
+    expect(r.stdout).toContain("[2/10] Security");
     expect(r.stdout).toContain("-allow_anonymous true");
     expect(r.stdout).toContain("+allow_anonymous false");
     expect(r.stdout).toContain("Nothing was changed");
@@ -144,6 +212,7 @@ describe("volley setup", () => {
       "accounts",
       "accounts",
       "accounts",
+      "network",
       "signin",
       "claude-code",
       "claude-code",
@@ -224,6 +293,7 @@ describe("volley setup", () => {
       namespace: "default",
       broker_url: fake.url,
       metrics: join(m.ctx.volleydHome, "setup-metrics.json"),
+      network: { kind: "none" },
     });
     expect(readSetupInstall(m.ctx.volleydHome)).toEqual(saved);
   });
@@ -358,7 +428,7 @@ describe("volley setup", () => {
     // A rerun does not call the Services step done either.
     const again = await run([]);
     expect(again.stdout).not.toContain(COMPLETE);
-    expect(again.stdout.match(/already done/g)?.length ?? 0).toBeLessThan(6);
+    expect(again.stdout.match(/already done/g)?.length ?? 0).toBeLessThan(7);
   });
 
   it("a rerun whose Desk plist launchd will not load exits non-zero, with the Desk still loaded", async () => {
@@ -385,7 +455,7 @@ describe("volley setup", () => {
     const clients = fake.clients();
     const r = await run([]);
     expect(r.code).toBe(0);
-    expect(r.stdout.match(/already done/g)).toHaveLength(9);
+    expect(r.stdout.match(/already done/g)).toHaveLength(10);
     expect(m.questions).toEqual([]);
     expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
     expect(fake.clients()).toEqual(clients);
@@ -417,7 +487,7 @@ describe("volley setup", () => {
     const r = await run(["--repair", "--yes"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Create the missing identity desk");
-    expect(r.stdout.match(/already done/g)).toHaveLength(8);
+    expect(r.stdout.match(/already done/g)).toHaveLength(9);
     const after = fake.clients();
     expect([...after.keys()].sort()).toEqual([...before.keys(), "desk"].sort());
     for (const [u, c] of before) expect(after.get(u)?.password).toBe(c.password);
@@ -433,14 +503,15 @@ describe("volley setup", () => {
   });
 
   it("asks once per step with changes, interactively", async () => {
-    m.answers = [true, true, true, true, true, true, true, true, true];
-    m.typed = ["coord-main"];
+    m.answers = [true, true, true, true, true, true, true, true, true, true];
+    m.typed = ["no", "coord-main"];
     const r = await run([]);
     expect(r.code).toBe(0);
     expect(m.questions).toEqual([
       LAN_QUESTION,
       "Apply these 3 changes (Security)?",
       "Apply these 3 changes (Accounts)?",
+      "Apply this change (Network)?",
       "Apply this change (Sign-ins)?",
       "Apply these 4 changes (Claude Code)?",
       "Apply this change (Terminal)?",
@@ -449,10 +520,10 @@ describe("volley setup", () => {
       "Run a 1-issue test wave now?",
     ]);
     // The coordinator name is asked once, typed visibly.
-    expect(m.asked).toEqual(["Coordinator name [coord-studio]: "]);
+    expect(m.asked).toEqual([`${NETWORK_QUESTION} `, "Coordinator name [coord-studio]: "]);
     expect(readSetupInstall(m.ctx.volleydHome)?.coordinator).toBe("coord-main");
     expect(r.stdout).toMatch(
-      /Setup complete in \d+ m \d+ s \(10 questions, 0 sign-ins, 0 sudo\); test wave merged in /,
+      /Setup complete in \d+ m \d+ s \(12 questions, 0 sign-ins, 0 sudo\); test wave merged in /,
     );
   });
 
@@ -461,7 +532,7 @@ describe("volley setup", () => {
     const r = await run(["--yes"]);
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("BROKER_TOO_OLD");
-    expect(r.stdout).not.toContain("[2/9]");
+    expect(r.stdout).not.toContain("[2/10]");
     expect(readFileSync(m.layout.config, "utf-8")).toBe(ANONYMOUS_CONFIG);
   });
 
@@ -475,16 +546,16 @@ describe("volley setup", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("no such service");
     expect(journal().slice(-1)[0]).toMatchObject({ step: "security", event: "failed" });
-    expect(r.stdout).not.toContain("[3/9]");
+    expect(r.stdout).not.toContain("[3/10]");
   });
 
   it("--step runs only the steps it names", async () => {
     const r = await run(["--step", "services", "--yes"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("[7/9] Services");
-    expect(r.stdout).not.toContain("[1/9]");
-    expect(r.stdout).not.toContain("[6/9]");
-    expect(r.stdout).not.toContain("[8/9]");
+    expect(r.stdout).toContain("[8/10] Services");
+    expect(r.stdout).not.toContain("[1/10]");
+    expect(r.stdout).not.toContain("[7/10]");
+    expect(r.stdout).not.toContain("[9/10]");
     expect(m.loaded.has("systems.volley.desk")).toBe(true);
     expect((await run(["--step", "nope"])).code).toBe(2);
   });
@@ -495,7 +566,7 @@ describe("volley setup", () => {
     writeFileSync(config, "spawn:\n  ceiling: 3\n");
     const r = await run(["--yes", "--lan"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("[6/9] Terminal");
+    expect(r.stdout).toContain("[7/10] Terminal");
     expect(r.stdout).toContain("cmux is not installed");
     expect(readFileSync(config, "utf-8")).toBe(
       "spawn:\n  ceiling: 3\nfleet:\n  local_terminal: tmux\n",
@@ -513,7 +584,7 @@ describe("volley setup", () => {
     expect(r.stdout).toContain(
       "  ✗ Blocked: neither cmux nor tmux is installed, and volleyd starts local agents in one of them: install tmux (brew install tmux)",
     );
-    expect(r.stdout).not.toContain("[7/9]");
+    expect(r.stdout).not.toContain("[8/10]");
     expect(journal().slice(-1)[0]).toMatchObject({ step: "terminal", event: "blocked" });
     expect(existsSync(join(m.ctx.volleydHome, "config.yaml"))).toBe(false);
   });
@@ -575,7 +646,13 @@ describe("volley setup", () => {
       const r = await run(["--peer", "--yes"]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      for (const s of ["[1/4] Sign-ins", "[2/4] Claude Code", "[3/4] Terminal", "[4/4] Peer"]) {
+      for (const s of [
+        "[1/5] Sign-ins",
+        "[2/5] Network",
+        "[3/5] Claude Code",
+        "[4/5] Terminal",
+        "[5/5] Peer",
+      ]) {
         expect(r.stdout).toContain(s);
       }
       expect(r.stdout).not.toMatch(HUB_ONLY);
@@ -623,7 +700,7 @@ describe("volley setup", () => {
       const calls = m.execCalls.length;
       const r = await run(["--peer"]);
       expect(r.code).toBe(0);
-      expect(r.stdout.match(/already done/g)).toHaveLength(4);
+      expect(r.stdout.match(/already done/g)).toHaveLength(5);
       expect(m.questions).toEqual([]);
       expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
     });
@@ -632,6 +709,53 @@ describe("volley setup", () => {
       const r = await run(["--peer", "--check"]);
       expect(r.stdout).not.toMatch(HUB_ONLY);
       expect(m.loaded.size).toBe(0);
+    });
+
+    it("--check on a paired machine prints the reach rows under its Network row", async () => {
+      mkdirSync(join(m.ctx.home, ".volley"), { recursive: true });
+      writeFileSync(
+        peerJson(),
+        JSON.stringify({
+          name: "box-a",
+          host: "me@hub",
+          username: "peer-box-a",
+          password: "pw",
+          remote_port: 21883,
+          broker: {},
+        }),
+      );
+      const asked: string[] = [];
+      m.deps.reach = {
+        internetUp: async () => {
+          asked.push("internet");
+          return true;
+        },
+        tunnelUp: async (port) => {
+          asked.push(`tunnel:${port}`);
+          return false;
+        },
+        daemonLive: async () => {
+          asked.push("daemon");
+          return true;
+        },
+      };
+      try {
+        const r = await run(["--peer", "--check"]);
+        const lines = r.stdout.split("\n");
+        const at = lines.findIndex((l) => /^ {2}\S Network\b/.test(l));
+        expect(at).toBeGreaterThan(-1);
+        const after = lines.slice(at + 1).join("\n");
+        expect(after).toContain("      ✓ network.internet: online");
+        expect(after).toContain("      ! tunnel.up: 127.0.0.1:21883 refuses");
+        expect(after).toContain("        fix: `volley peer doctor`");
+        expect(after).toContain("      ! supervisor.live: not reached (see above)");
+        expect(asked).toEqual(["internet", "tunnel:21883"]);
+        // --json carries exactly the steps (no reach rows).
+        const j = await run(["--peer", "--check", "--json"]);
+        expect(j.stdout).not.toContain("tunnel.up");
+      } finally {
+        Reflect.deleteProperty(m.deps, "reach");
+      }
     });
 
     it("refuses the hub's flags and steps", async () => {

@@ -1,6 +1,7 @@
 /**
  * The CLI's I/O surface and exit codes — the same contract as volley-cli (0 ok, 1 error,
- * 2 usage, 124 timeout), injected into every command so tests capture output in-process.
+ * 2 usage, 69 supervisor unreachable, 124 timeout), injected into every command so tests
+ * capture output in-process.
  */
 export const EXIT = {
   OK: 0,
@@ -8,6 +9,8 @@ export const EXIT = {
   USAGE: 2,
   /** `resolve` / `inbox answer`: an answer the decision cannot apply (code BAD_ANSWER). */
   BAD_ANSWER: 3,
+  /** The supervisor does not answer: diagnosed, nothing submitted (volley-cli's table has it too). */
+  SUPERVISOR_UNREACHABLE: 69,
   TIMEOUT: 124,
 } as const;
 

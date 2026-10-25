@@ -23,6 +23,7 @@ import {
   agentJsonFiles,
   binaryOf,
   ensureOwnedDir,
+  handAuthDirToInvoker,
   openAdmin,
   readCredentials,
   report,
@@ -233,6 +234,7 @@ export async function initOrMigrate(ctx: AuthContext, f: MigrateFlags): Promise<
     }
     admin = { username: DYNSEC_ADMIN_USER, password };
     writeSecret(adminPath, `${JSON.stringify(admin)}\n`);
+    handAuthDirToInvoker(ctx);
     const owner = deps.brokerOwner();
     if (owner !== null) deps.chown(f.stateFile, owner.uid, owner.gid);
     restartNeeded = true;
@@ -366,6 +368,7 @@ async function fixedIdentities(
         coordinatorFile,
         `${JSON.stringify({ username: "coordinator", password: coordinatorPw })}\n`,
       );
+      handAuthDirToInvoker(ctx);
       out.push(`Wrote ${coordinatorFile} (mode 0600): the coordinator's hook credentials.`);
     }
     const vdir = volleydHome(env, sudoUser?.home);

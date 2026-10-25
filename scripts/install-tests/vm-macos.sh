@@ -65,7 +65,7 @@ boot() {
 }
 
 lib_init
-NAME=$(vm_name "$LABEL")
+NAME=$(vm_name "$LABEL") || exit 1
 refuse_existing "$NAME"
 track "$NAME"
 

@@ -11,6 +11,7 @@ import { CMUX_CHECK_SCRIPT } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { Daemon } from "../src/daemon";
 import type { ExecFn } from "../src/exec";
 import { readJournalFile } from "../src/journal";
@@ -57,6 +58,7 @@ interface WireStep {
   skipped?: string;
   plan_id: string;
   lan?: { planned: boolean; current: boolean | null };
+  network?: { planned: string; current: string | null };
 }
 
 /**
@@ -80,6 +82,8 @@ interface Machine {
   /** Holds the Desk build until released (null: no hold). */
   buildGate: Promise<void> | null;
   restarts: number;
+  /** Tailscale: installed, its backend state, and what `tailscale up` prints (exit `upCode`). */
+  tailscale: { installed: boolean; state: string; upCode: number };
 }
 
 function machine(root: string, layoutName: "brew-arm64" | "etc" | "snap" = "brew-arm64"): Machine {
@@ -104,6 +108,7 @@ function machine(root: string, layoutName: "brew-arm64" | "etc" | "snap" = "brew
     restartGate: null,
     buildGate: null,
     restarts: 0,
+    tailscale: { installed: false, state: "NeedsLogin", upCode: 0 },
   } as Machine;
   const hooks = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
   const settings = join(home, ".claude", "settings.json");
@@ -117,6 +122,33 @@ function machine(root: string, layoutName: "brew-arm64" | "etc" | "snap" = "brew
       return { stdout: `${JSON.stringify({ accounts })}\n` };
     })
     .on(["mosquitto", "-h"], () => ({ stdout: "mosquitto version 2.1.2\n" }))
+    .on(["tailscale"], (argv) => {
+      const t = m.tailscale;
+      if (!t.installed) return { code: 127, stderr: "tailscale: not found" };
+      const sub = argv.slice(1).join(" ");
+      if (sub === "version") return { stdout: "1.76.1\n" };
+      if (sub === "status --json") {
+        return {
+          stdout: JSON.stringify({
+            BackendState: t.state,
+            Self:
+              t.state === "Running"
+                ? { DNSName: "supervisor.example.ts.net.", TailscaleIPs: ["100.64.0.1"] }
+                : null,
+          }),
+        };
+      }
+      if (sub === "serve status --json") return { stdout: "{}\n" };
+      if (sub === "up") {
+        if (t.upCode === 0) t.state = "Running";
+        return {
+          code: t.upCode,
+          timedOut: t.upCode !== 0,
+          stderr: "\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/0123abcd\n\n",
+        };
+      }
+      return { code: 1, stderr: `unexpected ${argv.join(" ")}` };
+    })
     .on(RESTART_ARGV, () => {
       m.restarts++;
       m.anonymous = { tcp: "refused", ws: "refused" };
@@ -197,6 +229,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       repoRoot: m.repo,
       bun: BUN,
       exists: (p) => (p.startsWith(`${root}/`) ? existsSync(p) : present.has(p)),
+      interfaces: () => ({ en0: [{ address: "192.0.2.10", family: "IPv4", internal: false }] }),
       probeAnonymous: async (url) =>
         url.startsWith("ws:")
           ? url.includes("desk.example")
@@ -343,7 +376,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
   const until = (ok: () => boolean, deadlineMs?: number) =>
     eventually(ok, { ...(deadlineMs !== undefined ? { deadlineMs } : {}), what: "the restart" });
 
-  it("setup_plan from an admin answers the five steps in order, as `volley setup` plans them", async () => {
+  it("setup_plan from an admin answers the six steps in order, as `volley setup` plans them", async () => {
     mkdirSync(m.volleydHome, { recursive: true });
     writeFileSync(
       join(m.volleydHome, "setup.log"),
@@ -356,6 +389,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       "detect",
       "security",
       "accounts",
+      "network",
       "services",
       "phone",
     ]);
@@ -950,6 +984,98 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     expect(setupLog().filter((e) => e.event === "planned")).toHaveLength(1);
   });
 
+  it("network: Tailscale by default with no record, missing on a Mac: install with brew, then sign in", async () => {
+    await start();
+    const network = step((await plan()).steps, "network");
+    expect(network.title).toBe("Network");
+    expect(network.network).toEqual({ planned: "tailscale", current: null });
+    expect(network.changes.map((c) => [c.summary, c.terminal?.command])).toEqual([
+      ["Install Tailscale (brew install --cask tailscale)", undefined],
+      [
+        "Sign in to Tailscale (tailscale up: prints a sign-in link to open in your browser)",
+        undefined,
+      ],
+    ]);
+  });
+
+  it("network: setup_plan { network: manual, network_address } re-plans for the VPN's address", async () => {
+    await start();
+    const steps = (await plan({ network: "manual", network_address: "203.0.113.7" })).steps;
+    const network = step(steps, "network");
+    expect(network.network).toEqual({ planned: "manual", current: null });
+    expect(network.blocked).toBe(
+      "203.0.113.7 is not an address of this machine (interfaces: en0 192.0.2.10)",
+    );
+    const bound = step(
+      (await plan({ network: "manual", network_address: "192.0.2.10" })).steps,
+      "network",
+    );
+    expect(bound.blocked).toBeUndefined();
+    const r = await apply("network", bound.plan_id, {
+      network: "manual",
+      network_address: "192.0.2.10",
+    });
+    expect(r?.ok, r?.error).toBe(true);
+    expect(JSON.parse(readFileSync(join(m.volleydHome, "setup.json"), "utf-8")).network).toEqual({
+      kind: "manual",
+      address: "192.0.2.10",
+    });
+    // The record decides from now on, without the request naming it.
+    expect(step((await plan()).steps, "network").network).toEqual({
+      planned: "manual",
+      current: "manual",
+    });
+    // A kind the step does not know is refused.
+    const bad = await op("admin-1", { op: "setup_plan", reply_key: replyKey, network: "funnel" });
+    expect(bad).toMatchObject({ ok: false });
+    expect(bad?.error).toContain("tailscale, manual, none");
+  });
+
+  it("network on Linux: the install and the sudo sign-in come back as a terminal's, with the command", async () => {
+    platform = "linux";
+    await start();
+    const network = step((await plan()).steps, "network");
+    expect(network.changes.map((c) => c.terminal?.command)).toEqual([
+      "curl -fsSL https://tailscale.com/install.sh | sh",
+      "sudo tailscale up",
+    ]);
+    const r = await apply("network", network.plan_id);
+    expect(r?.ok, r?.error).toBe(true);
+    expect(schemaErrors("setup-result.schema.json#/$defs/applied", r?.result)).toEqual([]);
+    const result = r?.result as { terminal: { summary: string; command: string }[] };
+    expect(result.terminal.map((t) => t.summary)).toEqual([
+      "Install Tailscale (needs sudo: Tailscale's package repository)",
+      "Sign in to Tailscale (sudo tailscale up: prints a sign-in link to open in your browser)",
+    ]);
+    expect(m.fake.argvs(["tailscale", "up"])).toEqual([]);
+  });
+
+  it("network: the Desk's sign-in reports `Sign in to Tailscale: <url>`, run with network_signin_timeout_ms", async () => {
+    m.tailscale = { installed: true, state: "NeedsLogin", upCode: 143 };
+    await start();
+    const network = step((await plan()).steps, "network");
+    expect(network.found).toContain("Tailscale 1.76.1: not signed in (NeedsLogin)");
+    const r = await apply("network", network.plan_id);
+    expect(r?.ok, r?.error).toBe(true);
+    const result = r?.result as { lines: string[]; problems: string[] };
+    expect(result.lines).toContain("Sign in to Tailscale: https://login.tailscale.com/a/0123abcd");
+    expect(result.problems).toEqual([]);
+    const up = m.fake.calls.find((c) => c.argv.join(" ") === "tailscale up");
+    expect(up?.opts.timeoutMs).toBe(DAEMON_DEFAULTS.network_signin_timeout_ms);
+    // Once signed in, planning again records the name and address.
+    m.tailscale.state = "Running";
+    const again = step((await plan()).steps, "network");
+    expect(again.changes.map((c) => c.summary)).toEqual([
+      "Record this machine's private address in setup.json (tailscale: supervisor.example.ts.net, 100.64.0.1)",
+    ]);
+    expect((await apply("network", again.plan_id))?.ok).toBe(true);
+    expect(JSON.parse(readFileSync(join(m.volleydHome, "setup.json"), "utf-8")).network).toEqual({
+      kind: "tailscale",
+      name: "supervisor.example.ts.net",
+      address: "100.64.0.1",
+    });
+  });
+
   it("every terminal-only rule still matches a change the planners make (a reworded summary fails here)", async () => {
     const flagged: string[] = [];
     const collect = async () => {
@@ -987,6 +1113,24 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     await collect();
     cmuxSays(1, "Failed to connect to /tmp/cmux.sock: Connection refused");
     await collect();
+    // Tailscale on Linux: its install and its sudo sign-in; then, signed in and recorded, the
+    // Desk's serve under sudo.
+    platform = "linux";
+    await collect();
+    const setupJson = join(m.volleydHome, "setup.json");
+    const before = existsSync(setupJson) ? readFileSync(setupJson, "utf-8") : null;
+    m.tailscale = { installed: true, state: "Running", upCode: 0 };
+    writeFileSync(
+      setupJson,
+      JSON.stringify({
+        ...(before !== null ? JSON.parse(before) : {}),
+        network: { kind: "tailscale", name: "supervisor.example.ts.net", address: "100.64.0.1" },
+      }),
+    );
+    await collect();
+    if (before !== null) writeFileSync(setupJson, before);
+    else rmSync(setupJson);
+    platform = "darwin";
     // A root-owned broker (etc) not secured yet: its config, its state file and its restart.
     m = machine(root, "etc");
     writeFileSync(m.layout.config, "listener 1883\nallow_anonymous true\n");

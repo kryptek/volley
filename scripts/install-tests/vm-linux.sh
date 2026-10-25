@@ -34,7 +34,7 @@ LAYER=2
 LABEL=$DISTRO
 
 lib_init
-NAME=$(vm_name "$DISTRO")
+NAME=$(vm_name "$DISTRO") || exit 1
 refuse_existing "$NAME"
 track "$NAME"
 
@@ -80,5 +80,6 @@ if reboot_wait "$ADDR" 300; then
   poll 60 fresh || fail "volleyd's retained status is not working and newer than the boot (the line above)"
 fi
 
-summarize --total-ms "$TOTAL_MS"
+# --no-lan on a VM with a LAN address skips the phone step, as on Layer 3's Mac.
+summarize --total-ms "$TOTAL_MS" --allow-skipped phone
 finish

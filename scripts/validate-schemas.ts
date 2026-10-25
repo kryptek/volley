@@ -35,6 +35,7 @@
  *   - `archive-*.json` -> archive.schema.json
  *   - `roles-*.json` -> roles.schema.json
  *   - `rolemove-*.json` -> role-move.schema.json
+ *   - `coordinator-*.json` -> coordinator-role.schema.json
  *   - `digest-*.json` -> digest.schema.json
  *   - `setupplan-*.json` -> setup-result.schema.json `$defs/plan` (a result, not an envelope)
  *   - `setupapply-*.json` -> setup-result.schema.json `$defs/applied` (a result, not an envelope)
@@ -81,6 +82,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   archive: "archive.schema.json",
   roles: "roles.schema.json",
   rolemove: "role-move.schema.json",
+  coordinator: "coordinator-role.schema.json",
   digest: "digest.schema.json",
   setupplan: "setup-result.schema.json#/$defs/plan",
   setupapply: "setup-result.schema.json#/$defs/applied",

@@ -15,7 +15,9 @@ usage() {
 Usage: install.sh [options]          (piped: curl -fsSL <url> | sh -s -- [options])
 
 Installs Volley's prerequisites (Homebrew on macOS; git, tmux, curl, bun, gh, mosquitto >= 2.1
-and Claude Code, each only when missing), clones Volley at a release tag into ~/.volley/src,
+and Claude Code, each only when missing; on Linux mosquitto is the snap, snapd installed with apt
+first when missing, and the install stops before Volley when no mosquitto 2.1 can be put on the
+machine), clones Volley at a release tag into ~/.volley/src,
 writes the `volley` and `volleyd` commands into ~/.volley/bin, adds that directory to PATH in
 your shell's startup file once, then runs `volley setup`. On macOS, when Homebrew resolves
 Volley's tap (kryptek/volley/volley), neither --version nor --source is given and ~/.volley/bin
@@ -28,6 +30,15 @@ Options:
   --peer             This machine joins a supervisor's fleet: no broker (mosquitto is neither
                      installed nor checked), no Homebrew tap; `volley setup --peer` runs with
                      VOLLEY_BROKER=skip
+  --broker container The broker runs in a container you start (docker run
+                     eclipse-mosquitto:2.1-alpine): mosquitto is neither installed nor checked,
+                     no Homebrew tap; `volley setup --layout container` runs
+  --network <kind>   tailscale | manual | none, passed to `volley setup --network`: how this
+                     machine is reached from outside your network. tailscale also installs
+                     Tailscale (Linux: from Tailscale's apt repository, with the other packages;
+                     macOS: brew install --cask tailscale); --check then lists it
+  --network-address <host-or-ip>
+                     With --network manual: this machine's address on your own VPN
   --no-setup         Stop before `volley setup`; it prints the command to run
   --check            Print each prerequisite as found or missing; exit 1 if any is missing.
                      Changes nothing
@@ -36,8 +47,8 @@ Options:
   --purge            With --uninstall: remove ~/.volley/volleyd too
   -h, --help         Show this help
 
-Exit status: 0 done, 1 --check found something missing (or a step failed), 2 a usage error or an
-unsupported platform.
+Exit status: 0 done, 1 --check found something missing (or a step failed, or no mosquitto 2.1
+could be installed), 2 a usage error or an unsupported platform.
 EOF
 }
 
@@ -55,6 +66,9 @@ RC_LINE='export PATH="$HOME/.volley/bin:$PATH" # volley'
 OS_RELEASE="${VOLLEY_INSTALL_OS_RELEASE:-/etc/os-release}"
 TTY="${VOLLEY_INSTALL_TTY:-/dev/tty}"
 SYSTEM_DIRS="${VOLLEY_INSTALL_SYSTEM_DIRS-/opt/homebrew/bin:/usr/local/bin:/snap/bin}"
+# Seconds between `snap install` tries (a snapd with no snaps yet stands by after 5 s idle, and a
+# request that lands while it stops is cancelled).
+SNAP_RETRY_S="${VOLLEY_INSTALL_SNAP_RETRY_S:-10}"
 
 say() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -142,10 +156,18 @@ detect_platform() {
 MAC_TOOLS="brew bun mosquitto gh git tmux claude"
 LINUX_TOOLS="git tmux curl ca-certificates bun gh mosquitto claude"
 
-# The x.y.z `mosquitto -h` prints, or nothing.
+# The x.y.z `mosquitto -h` prints, else the mosquitto snap's (its broker is a service: /snap/bin
+# holds only its clients), or nothing.
 mosquitto_version() {
-  have mosquitto || return 0
-  mosquitto -h 2>&1 | sed -n 's/^mosquitto version \([0-9][0-9]*\.[0-9][0-9]*[0-9.]*\).*/\1/p' | head -n 1
+  if have mosquitto; then
+    mosquitto -h 2>&1 | sed -n 's/^mosquitto version \([0-9][0-9]*\.[0-9][0-9]*[0-9.]*\).*/\1/p' | head -n 1
+  else
+    snap_mosquitto_version
+  fi
+}
+snap_mosquitto_version() {
+  have snap || return 0
+  snap list mosquitto 2>/dev/null | sed -n 's/^mosquitto  *\([0-9][0-9]*\.[0-9][0-9.]*\) .*/\1/p' | head -n 1
 }
 
 # Whether the mosquitto on PATH is 2.1 or newer (Dynamic Security's %u in role ACLs).
@@ -158,17 +180,26 @@ mosquitto_ok() {
   [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 1 ]; }
 }
 
-# The prerequisites for this platform (a peer runs no broker).
+# The prerequisites for this platform (a peer runs no broker; `--network tailscale` adds Tailscale).
 platform_tools() {
   if [ "$PLATFORM" = macos ]; then tools=$MAC_TOOLS; else tools=$LINUX_TOOLS; fi
-  if [ -n "$PEER" ]; then tools=$(printf '%s' "$tools" | sed 's/ *mosquitto//'); fi
+  if [ -n "$NO_BROKER" ]; then tools=$(printf '%s' "$tools" | sed 's/ *mosquitto//'); fi
+  if [ "$NETWORK" = tailscale ]; then tools="$tools tailscale"; fi
   printf '%s' "$tools"
+}
+
+# The macOS app's CLI (App Store or `brew install --cask tailscale`), when tailscale is not on PATH.
+TAILSCALE_APP_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+
+tailscale_ok() {
+  have tailscale || { [ "$PLATFORM" = macos ] && [ -x "$TAILSCALE_APP_CLI" ]; }
 }
 
 present() {
   case "$1" in
     ca-certificates) dpkg -s ca-certificates >/dev/null 2>&1 ;;
     mosquitto) mosquitto_ok ;;
+    tailscale) tailscale_ok ;;
     *) have "$1" ;;
   esac
 }
@@ -179,7 +210,8 @@ check() {
   for t in $(platform_tools); do
     if present "$t"; then
       where=$(command -v "$t" 2>/dev/null || true)
-      [ "$t" = mosquitto ] && where="$(mosquitto_version), $where"
+      [ "$t" = tailscale ] && [ -z "$where" ] && where=$TAILSCALE_APP_CLI
+      [ "$t" = mosquitto ] && where="$(mosquitto_version), ${where:-(snap)}"
       [ "$t" = ca-certificates ] && where="(dpkg)"
       printf '  found    %-16s %s\n' "$t" "$(tildify "$where")"
     else
@@ -187,6 +219,8 @@ check() {
       note=''
       if [ "$t" = mosquitto ] && have mosquitto; then
         note="$(mosquitto_version) on PATH; Volley needs 2.1 or newer"
+      elif [ "$t" = mosquitto ] && [ -n "$(snap_mosquitto_version)" ]; then
+        note="the snap is $(snap_mosquitto_version); Volley needs 2.1 or newer"
       fi
       printf '  missing  %-16s %s\n' "$t" "$note"
     fi
@@ -242,7 +276,7 @@ brew_volley() {
 install_brew_volley() {
   BREW=''
   # A peer's checkout is at the supervisor's tag; the formula would bring a broker too.
-  [ -z "$PEER" ] || return 1
+  [ -z "$NO_BROKER" ] || return 1
   [ -z "$SOURCE$VERSION" ] || return 1
   [ ! -e "$BIN/volley" ] || return 1
   brew info "$TAP_FORMULA" >/dev/null 2>&1 || return 1
@@ -267,7 +301,7 @@ install_macos() {
   fi
   formulas=''
   for t in $(platform_tools); do
-    case "$t" in brew | claude) continue ;; esac
+    case "$t" in brew | claude | tailscale) continue ;; esac
     have "$t" || formulas="$formulas $(brew_formula "$t")"
   done
   if [ -n "$formulas" ]; then
@@ -275,7 +309,43 @@ install_macos() {
     # shellcheck disable=SC2086 # one word per formula
     brew install $formulas
   fi
+  install_tailscale_macos
   install_claude
+}
+
+# `--network tailscale` on macOS: the app (its CLI comes with it), unless one is there.
+install_tailscale_macos() {
+  [ "$NETWORK" = tailscale ] || return 0
+  tailscale_ok && return 0
+  say "brew install --cask tailscale"
+  brew install --cask tailscale || die "brew install --cask tailscale failed; rerun once it is fixed."
+}
+
+# Tailscale's apt repository for this distribution: `<ubuntu|debian>/<codename>` (a derivative
+# reads as the distribution it is like).
+tailscale_dist() {
+  id=$(os_field ID)
+  like=$(os_field ID_LIKE)
+  case " $id $like " in
+    " ubuntu "* | *" ubuntu "*)
+      code=$(os_field UBUNTU_CODENAME)
+      [ -n "$code" ] || code=$(os_field VERSION_CODENAME)
+      printf 'ubuntu/%s' "$code"
+      ;;
+    *) printf 'debian/%s' "$(os_field VERSION_CODENAME)" ;;
+  esac
+}
+
+# Download $1 whole to $2 (as root), or stop: a broken keyring or list would fail every later
+# `apt-get update`.
+fetch_as_root() {
+  tmp=$(mktemp "${TMPDIR:-/tmp}/volley-install.XXXXXX")
+  if ! curl -fsSL "$1" -o "$tmp" || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    die "could not download $1"
+  fi
+  as_root tee "$2" <"$tmp" >/dev/null
+  rm -f "$tmp"
 }
 
 SUDO_OK=''
@@ -283,22 +353,34 @@ as_root() {
   if [ -n "$SUDO_OK" ]; then sudo "$@"; else "$@"; fi
 }
 
-snapd_active() {
-  have snap && have systemctl && systemctl is-active --quiet snapd 2>/dev/null
+# snapd can install a snap: running, or socket-activated (a fresh cloud image: snapd.service starts
+# on the first `snap` call).
+snapd_usable() {
+  have snap && have systemctl &&
+    { systemctl is-active --quiet snapd.socket 2>/dev/null ||
+      systemctl is-active --quiet snapd.service 2>/dev/null; }
 }
 
-mosquitto_options() {
+# No mosquitto 2.1 could be put on the machine: stop before Volley, with the fix (a machine
+# without a broker is not installed; rerunning once it is fixed is the designed path).
+broker_missing() {
   v=$(mosquitto_version)
-  if [ -n "$v" ]; then
-    say "mosquitto $v is on PATH; Volley needs 2.1 or newer. Stop and remove it first (its broker"
-    say "holds port 1883, and its binary would shadow a newer one), e.g.  sudo apt-get remove mosquitto"
+  if [ -n "$v" ] && have mosquitto; then
+    warn "mosquitto $v is on PATH; Volley needs 2.1 or newer. Stop and remove it first (its broker"
+    warn "holds port 1883, and its binary would shadow a newer one):  sudo apt-get remove mosquitto"
+  elif [ -n "$v" ]; then
+    warn "the mosquitto snap is $v; Volley needs 2.1 or newer:  sudo snap refresh mosquitto"
+  elif have snap && ! snapd_usable; then
+    warn "snapd is installed but not running:  sudo systemctl enable --now snapd.socket"
   else
-    say "mosquitto is not installed."
+    warn "mosquitto 2.1 or newer could not be installed (see the output above)."
   fi
-  say "Install mosquitto 2.1 or newer, either way (then rerun, or let \`volley setup\` check):"
-  say "  sudo snap install mosquitto               (needs snapd)"
-  say "  docker run eclipse-mosquitto:2.1-alpine"
-  say "\`volley setup\`'s Broker step stops with the same advice until one of them runs."
+  warn "Volley needs mosquitto 2.1 or newer. Fix it, then rerun the install:"
+  warn "  curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh"
+  warn "or run the broker in a container and install Volley for that:"
+  warn "  docker run eclipse-mosquitto:2.1-alpine"
+  warn "  curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --broker container"
+  die "stopped before installing Volley: no mosquitto 2.1."
 }
 
 install_linux() {
@@ -310,29 +392,53 @@ install_linux() {
   if ! have bun && ! have unzip; then apt_pkgs="$apt_pkgs unzip"; fi
   need_gh=''
   have gh || need_gh=1
-  # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883.
-  need_snap=''
-  if [ -z "$PEER" ] && ! have mosquitto && snapd_active; then need_snap=1; fi
+  # `--network tailscale`: Tailscale's own apt repository, while sudo is held for the rest.
+  need_ts=''
+  if [ "$NETWORK" = tailscale ] && ! tailscale_ok; then need_ts=1; fi
+  # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883. No snap
+  # command (Debian's cloud image, a minimal Ubuntu): snapd from apt first.
+  need_snap='' need_snapd=''
+  if [ -z "$NO_BROKER" ] && [ -z "$(mosquitto_version)" ]; then
+    if ! have snap; then
+      need_snapd=1 need_snap=1
+    elif snapd_usable; then
+      need_snap=1
+    fi
+  fi
 
-  if [ -n "$apt_pkgs$need_gh$need_snap" ] && [ "$(id -u)" != 0 ]; then
+  if [ -n "$apt_pkgs$need_gh$need_snap$need_ts" ] && [ "$(id -u)" != 0 ]; then
     have sudo || die "sudo is needed to install the missing packages, and it is not installed."
     reasons=''
     [ -n "$apt_pkgs" ] && reasons="$reasons
   - apt-get install$apt_pkgs"
+    [ -n "$need_snapd" ] && reasons="$reasons
+  - apt-get install snapd (for the mosquitto snap)"
     [ -n "$need_gh" ] && reasons="$reasons
   - add GitHub's apt repository (cli.github.com) and install gh"
     [ -n "$need_snap" ] && reasons="$reasons
   - snap install mosquitto"
+    [ -n "$need_ts" ] && reasons="$reasons
+  - add Tailscale's apt repository (pkgs.tailscale.com) and install tailscale"
     say "sudo is needed to:$reasons"
     sudo -v || die "sudo failed; rerun when you can sudo."
     SUDO_OK=1
   fi
 
+  # snapd goes into the one apt-get call (its own reason line above).
+  [ -n "$need_snapd" ] && apt_pkgs="$apt_pkgs snapd"
   if [ -n "$apt_pkgs" ]; then
     say "apt-get install -y$apt_pkgs"
     as_root apt-get update
     # shellcheck disable=SC2086 # one word per package
-    as_root apt-get install -y $apt_pkgs
+    if ! as_root apt-get install -y $apt_pkgs; then
+      # apt's own failure first (any package may be the cause); without snapd there is no broker
+      # either, so stop with that fix too rather than at the next step.
+      [ -n "$need_snapd" ] && ! have snap && {
+        warn "apt-get install -y$apt_pkgs failed."
+        broker_missing
+      }
+      die "apt-get install failed; rerun once it is fixed."
+    fi
   fi
 
   if ! have bun; then
@@ -362,18 +468,40 @@ install_linux() {
     as_root apt-get install -y gh
   fi
 
-  if [ -n "$PEER" ] || mosquitto_ok; then
-    :
-  elif [ -n "$need_snap" ]; then
+  if [ -n "$need_ts" ]; then
+    dist=$(tailscale_dist)
+    say "Installing tailscale from Tailscale's apt repository ($dist)..."
+    as_root mkdir -p -m 755 /usr/share/keyrings
+    fetch_as_root "https://pkgs.tailscale.com/stable/$dist.noarmor.gpg" \
+      /usr/share/keyrings/tailscale-archive-keyring.gpg
+    fetch_as_root "https://pkgs.tailscale.com/stable/$dist.tailscale-keyring.list" \
+      /etc/apt/sources.list.d/tailscale.list
+    as_root apt-get update
+    as_root apt-get install -y tailscale
+  fi
+
+  if [ -n "$need_snap" ]; then
+    # A fresh snapd seeds itself first; `snap install` before that fails.
+    [ -n "$need_snapd" ] && { as_root snap wait system seed.loaded || true; }
     say "Installing mosquitto with snap..."
-    as_root snap install mosquitto
+    # A snapd with no snaps stands by after 5 s idle, and a request that lands while it stops is
+    # cancelled ("context canceled"; Debian 13 right after apt): try again after a pause.
+    tries=1
+    until as_root snap install mosquitto; do
+      if [ "$tries" -ge 3 ]; then
+        warn "snap install mosquitto failed."
+        break
+      fi
+      tries=$((tries + 1))
+      sleep "$SNAP_RETRY_S"
+      as_root snap wait system seed.loaded || true
+    done
     path_add /snap/bin
-    mosquitto_ok || mosquitto_options
-  else
-    mosquitto_options
   fi
 
   install_claude
+
+  [ -n "$NO_BROKER" ] || mosquitto_ok || broker_missing
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -495,6 +623,9 @@ chain_setup() {
   shown=$(tildify "$cmd")
   set -- setup
   [ -n "$PEER" ] && set -- "$@" --peer
+  [ -n "$BROKER" ] && set -- "$@" --layout "$BROKER"
+  [ -n "$NETWORK" ] && set -- "$@" --network "$NETWORK"
+  [ -n "$NETWORK_ADDRESS" ] && set -- "$@" --network-address "$NETWORK_ADDRESS"
   if [ -z "$SETUP" ]; then
     say "Volley is installed. Next: $shown $*"
   elif tty_ok; then
@@ -584,7 +715,7 @@ uninstall() {
 # ---------------------------------------------------------------------------------------------
 
 main() {
-  MODE=install SETUP=1 PEER='' PURGE='' SOURCE=''
+  MODE=install SETUP=1 PEER='' BROKER='' PURGE='' SOURCE='' NETWORK='' NETWORK_ADDRESS=''
   VERSION="${VOLLEY_VERSION:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -592,7 +723,25 @@ main() {
       --uninstall) MODE=uninstall ;;
       --purge) PURGE=1 ;;
       --peer) PEER=1 ;;
+      --broker)
+        [ $# -ge 2 ] || usage_error "--broker needs a kind (container)"
+        BROKER=$2
+        shift
+        ;;
+      --broker=*) BROKER=${1#*=} ;;
       --no-setup) SETUP='' ;;
+      --network)
+        [ $# -ge 2 ] || usage_error "--network needs a kind (tailscale, manual or none)"
+        NETWORK=$2
+        shift
+        ;;
+      --network=*) NETWORK=${1#*=} ;;
+      --network-address)
+        [ $# -ge 2 ] || usage_error "--network-address needs a host or IP"
+        NETWORK_ADDRESS=$2
+        shift
+        ;;
+      --network-address=*) NETWORK_ADDRESS=${1#*=} ;;
       --source)
         [ $# -ge 2 ] || usage_error "--source needs a directory"
         SOURCE=$2
@@ -614,6 +763,19 @@ main() {
     shift
   done
   [ -n "$PURGE" ] && [ "$MODE" != uninstall ] && usage_error "--purge goes with --uninstall"
+  case "$BROKER" in
+    '' | container) ;;
+    *) usage_error "--broker must be container (got $BROKER)" ;;
+  esac
+  [ -n "$BROKER" ] && [ -n "$PEER" ] && usage_error "--broker goes without --peer (a peer runs no broker)"
+  # No broker of our own to install or check: a peer's is the supervisor's; a container's, yours.
+  NO_BROKER=$PEER$BROKER
+  case "$NETWORK" in
+    '' | tailscale | manual | none) ;;
+    *) usage_error "--network must be tailscale, manual or none (got $NETWORK)" ;;
+  esac
+  [ -n "$NETWORK_ADDRESS" ] && [ "$NETWORK" != manual ] &&
+    usage_error "--network-address goes with --network manual"
 
   detect_platform
   path_add_known

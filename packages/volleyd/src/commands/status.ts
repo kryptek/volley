@@ -4,6 +4,7 @@ import { churnCauses } from "../autopilot/digest";
 import { formatBriefPreface } from "../brief";
 import { systemClock } from "../clock";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
+import { type CoordinatorRolePayload, formatCoordinator } from "../coordinator/role";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller, span } from "../ownership";
@@ -28,7 +29,9 @@ mint, delete and sweep, and every 30 s), and how many the credential sweeps dele
 (--json: agent_logins), then the hard ceiling's count, the agents volleyd runs or is starting
 in every wave against hard_ceiling (--json: ceiling { live, max }). With a paired machine
 configured, the next says how the supervisor's own machine takes auto-placed tasks
-(fleet.local_agents) and whether it is the fallback now (--json: local_agents).
+(fleet.local_agents) and whether it is the fallback now (--json: local_agents). With the
+coordinator role on (coordinator.machine), a line says where it runs, its state and its link
+(--json: coordinator).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -65,6 +68,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     const logins = (res.result as { agent_logins?: { live: number; swept: number } }).agent_logins;
     const localAgents = (res.result as { local_agents?: LocalAgentsView }).local_agents;
     const ceiling = (res.result as { ceiling?: { live: number; max: number } }).ceiling;
+    const coordinator = (res.result as { coordinator?: CoordinatorRolePayload }).coordinator;
     let decisions: DecisionPayload[] = [];
     let caller: string | null = null;
     if (states.some((s) => s.open_decisions.length > 0)) {
@@ -77,6 +81,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
         (logins !== undefined ? `${formatLogins(logins)}\n` : "") +
         (ceiling !== undefined ? `hard ceiling: ${ceiling.live}/${ceiling.max}\n` : "") +
         (localAgents !== undefined ? `${formatLocalAgents(localAgents)}\n` : "") +
+        (coordinator !== undefined ? `coordinator: ${formatCoordinator(coordinator)}\n` : "") +
         (states.length === 0
           ? "no waves\n"
           : states.map((s) => formatWave(s, { caller, decisions })).join("\n")),

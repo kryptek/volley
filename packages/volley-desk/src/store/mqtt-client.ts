@@ -98,6 +98,8 @@ export const DESK_SUBSCRIPTIONS = [
   // Where the broker, the supervisor and the Desk run, and each move's progress (SPEC §4.6.24).
   "volley/_system/roles",
   "volley/_system/roles/moves/+",
+  // The coordinator role's state and link (SPEC §4.6.25): Open coordinator, the Coordinator card.
+  "volley/_system/federation/#",
   // The needs-you inbox: one retained record per thing waiting for a person (SPEC §4.6.18).
   "volley/_inbox/+",
   // volleyd's answers to account ops (SPEC §4.6.10); secrets in them are sealed to the requester.

@@ -130,11 +130,52 @@ describe("the shared parts (lib.sh)", () => {
     });
     return r.stdout.toString();
   };
+  const yes = (body: string, env: Record<string, string> = {}) =>
+    lib(`if ${body}; then printf yes; else printf no; fi`, env) === "yes";
 
   test("a VM's name is volley-it-<run id>-<what>, a valid hostname", () => {
     expect(lib("vm_name hub", { VM_RUN_ID: "42" })).toBe("volley-it-42-hub");
     expect(lib("vm_name peer", { GITHUB_RUN_ID: "1234567" })).toBe("volley-it-1234567-peer");
     expect(lib("vm_name hub", { VM_RUN_ID: "Run_7.a" })).toBe("volley-it-run-7-a-hub");
+  });
+
+  test("a VM's name is a valid multipass instance name", () => {
+    const names = [
+      lib("vm_name ubuntu-24.04", { VM_RUN_ID: "42" }),
+      lib("vm_name debian-13", { VM_RUN_ID: "42" }),
+      lib("vm_name hub", { VM_RUN_ID: "Run_7.a" }),
+      lib("vm_name '--Odd..Label--'", { VM_RUN_ID: "-x-" }),
+    ];
+    expect(names).toEqual([
+      "volley-it-42-ubuntu-24-04",
+      "volley-it-42-debian-13",
+      "volley-it-run-7-a-hub",
+      "volley-it-x-odd-label",
+    ]);
+    for (const n of names) expect(n).toMatch(/^[a-z][a-z0-9-]*[a-z0-9]$/);
+    // Still invalid after the sanitizing (too long): nothing printed, exit 1.
+    expect(lib(`vm_name ${"a".repeat(60)} || printf refused`, { VM_RUN_ID: "42" })).toBe("refused");
+  });
+
+  test("mp_valid_name is multipass's rule", () => {
+    for (const ok of ["volley-it-42-ubuntu-24-04", "a", "a".repeat(63)]) {
+      expect(yes(`mp_valid_name '${ok}'`)).toBe(true);
+    }
+    for (const bad of ["a.b", "-a", "a-", "1a", "", "a".repeat(64), "A_b"]) {
+      expect(yes(`mp_valid_name '${bad}'`)).toBe(false);
+    }
+  });
+
+  test("multipass_can_read: a non-hidden path under HOME only", () => {
+    const env = { HOME: "/path/to/home" };
+    expect(yes("multipass_can_read /path/to/home/work/x", env)).toBe(true);
+    expect(yes("multipass_can_read /path/to/home/x", env)).toBe(true);
+    expect(yes("multipass_can_read /path/to/home/work/.hidden/x", env)).toBe(true);
+    expect(yes("multipass_can_read /path/to/home/.cache/x", env)).toBe(false);
+    expect(yes("multipass_can_read /path/to/home", env)).toBe(false);
+    expect(yes("multipass_can_read /path/to/homer/x", env)).toBe(false);
+    expect(yes("multipass_can_read /tmp/x", env)).toBe(false);
+    expect(yes("multipass_can_read /var/tmp/x", env)).toBe(false);
   });
 
   test("multipass's images: Ubuntu's own, Debian's generic cloud image", () => {
@@ -160,7 +201,7 @@ describe("Layer 2: vm-linux.sh", () => {
     const r = run(w, "vm-linux.sh", ["ubuntu-24.04"]);
     expect(r.out).toContain("Layer 2 (ubuntu-24.04) passed.");
     expect(r.code).toBe(0);
-    const vm = "volley-it-42-ubuntu-24.04";
+    const vm = "volley-it-42-ubuntu-24-04";
     expectInOrder(r.calls, [
       new RegExp(`^multipass info ${vm}$`),
       new RegExp(`^multipass launch 24\\.04 --name ${vm} --cloud-init \\S+cloud-init\\.yaml`),
@@ -169,12 +210,17 @@ describe("Layer 2: vm-linux.sh", () => {
       // The checkout under test, then its install.sh.
       new RegExp(`^ssh ${vm}: rm -rf ~/volley .*tar -C ~/volley -xzf - \\(stdin \\d+ bytes\\)$`),
       new RegExp(`^ssh ${vm}: .*sh -s -- --source ~/volley --no-setup +<~/volley/install\\.sh$`),
+      // The snap broker's files are root's: its steps under sudo first (docs/INSTALL.md).
+      new RegExp(
+        `^ssh ${vm}: .*\\[ ! -d /snap/mosquitto/current \\] \\|\\| sudo ~/\\.volley/bin/volley setup --step detect --step security --step accounts --yes --no-lan$`,
+      ),
       new RegExp(
         `^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --yes --no-lan --simulated$`,
       ),
-      new RegExp(`^ssh ${vm}: .*volley setup --check --json$`),
+      // The check sees the sign-ins and services setup made: under the simulator too.
+      new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
       new RegExp(`^ssh ${vm}: sudo reboot$`),
-      new RegExp(`^ssh ${vm}: .*volley setup --check --json$`),
+      new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
       new RegExp(`^ssh ${vm}: .*systemctl --user is-active --quiet volleyd\\.service$`),
       new RegExp(`^ssh ${vm}: .*systemctl --user is-active --quiet volley-desk\\.service$`),
       new RegExp(`^ssh ${vm}: .*volley sub --pattern volley/default/volleyd/status`),
@@ -185,11 +231,16 @@ describe("Layer 2: vm-linux.sh", () => {
       r.calls.filter((c) => c === `ssh ${vm}: cat /proc/sys/kernel/random/boot_id`).length,
     ).toBeGreaterThan(2);
     expect(vmsLeft(w)).toEqual([]);
-    expect(readFileSync(join(w.state, "ssh-key"), "utf8")).toMatch(
-      /volley-it-key\.\w+\/id_ed25519\n$/,
+    expect(readFileSync(join(w.state, "ssh-key"), "utf8")).toBe(
+      `${join(w.out, "key", "id_ed25519")}\n`,
     );
-    // The run's key reached cloud-init and left nothing behind.
+    // The run's key and cloud-init live under VM_OUT (a snap multipass cannot read /tmp), and
+    // nothing is left behind.
+    expect(
+      r.calls.some((c) => c.includes(` --cloud-init ${join(w.out, "key", "cloud-init.yaml")} `)),
+    ).toBe(true);
     expect(readdirSync(w.tmp)).toEqual([]);
+    expect(existsSync(join(w.out, "key"))).toBe(false);
     expect(read(w, "summary.md")).toContain("### Layer 2: ubuntu-24.04 ✅");
     expect(read(w, "summary.md")).toContain("`reboot_check_ms`");
     const m = JSON.parse(read(w, "metrics.json"));
@@ -201,7 +252,7 @@ describe("Layer 2: vm-linux.sh", () => {
   test("cloud-init gets the run's key and nothing else to log in with", () => {
     const w = world();
     expect(run(w, "vm-linux.sh", ["ubuntu-24.04"]).code).toBe(0);
-    const ci = readFileSync(join(w.state, "cloud-init.volley-it-42-ubuntu-24.04.yaml"), "utf8");
+    const ci = readFileSync(join(w.state, "cloud-init.volley-it-42-ubuntu-24-04.yaml"), "utf8");
     expect(ci).toMatch(/^#cloud-config\n/);
     expect(ci).toMatch(/ssh_authorized_keys:\n {6}- "ssh-ed25519 \S+ volley-it-42"\n/);
     expect(ci).toContain("ssh_pwauth: false");
@@ -225,6 +276,26 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(vmsLeft(w)).toEqual([]);
   });
 
+  test("a snap multipass refuses a VM_OUT it cannot read, launching nothing", () => {
+    const w = world();
+    // Outside HOME, as /tmp is.
+    const out = join(w.tmp, "results");
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
+      env: { VM_MULTIPASS_IS_SNAP: "1", VM_OUT: out, HOME: join(w.dir, "home") },
+    });
+    expect(r.code).toBe(2);
+    expect(r.out).toContain(`multipass is a snap and cannot read ${out}`);
+    expect(r.out).toContain("set VM_OUT to a directory under your home directory");
+    expect(r.calls.some((c) => c.startsWith("multipass launch"))).toBe(false);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  test("a snap multipass with VM_OUT under a non-hidden home path runs", () => {
+    const w = world();
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], { env: { VM_MULTIPASS_IS_SNAP: "1" } });
+    expect(r.code).toBe(0);
+  });
+
   test("--version installs the release through curl, not the checkout", () => {
     const w = world();
     const r = run(w, "vm-linux.sh", ["ubuntu-24.04", "--version", "v0.11.0"]);
@@ -241,13 +312,13 @@ describe("Layer 2: vm-linux.sh", () => {
 
   test("refuses to start when a VM of its name exists, and leaves that VM alone", () => {
     const w = world();
-    mkdirSync(join(w.state, "vms", "volley-it-42-ubuntu-24.04"), { recursive: true });
-    writeFileSync(join(w.state, "vms", "volley-it-42-ubuntu-24.04", "addr"), "10.20.0.9");
+    mkdirSync(join(w.state, "vms", "volley-it-42-ubuntu-24-04"), { recursive: true });
+    writeFileSync(join(w.state, "vms", "volley-it-42-ubuntu-24-04", "addr"), "10.20.0.9");
     const r = run(w, "vm-linux.sh", ["ubuntu-24.04"]);
     expect(r.code).toBe(1);
-    expect(r.out).toContain("a VM named volley-it-42-ubuntu-24.04 exists already");
-    expect(r.calls).toEqual(["multipass info volley-it-42-ubuntu-24.04"]);
-    expect(vmsLeft(w)).toEqual(["volley-it-42-ubuntu-24.04"]);
+    expect(r.out).toContain("a VM named volley-it-42-ubuntu-24-04 exists already");
+    expect(r.calls).toEqual(["multipass info volley-it-42-ubuntu-24-04"]);
+    expect(vmsLeft(w)).toEqual(["volley-it-42-ubuntu-24-04"]);
   });
 
   test("a service down after the reboot fails the run; the VM is still deleted", () => {
@@ -258,7 +329,7 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("FAIL: volleyd.service is not active after the reboot");
     expect(r.out).toContain("Layer 2 (ubuntu-24.04) failed.");
-    expect(r.calls.at(-1)).toBe("multipass delete --purge volley-it-42-ubuntu-24.04");
+    expect(r.calls.at(-1)).toBe("multipass delete --purge volley-it-42-ubuntu-24-04");
     expect(vmsLeft(w)).toEqual([]);
   });
 
@@ -289,6 +360,19 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("FAIL: volley setup --check was not green within 2 min of the reboot");
     expect(read(w, "summary.md")).toContain("services is pending");
+  });
+
+  test("--no-lan on a VM with a LAN address: a skipped phone row passes, Layers 2 and 4", () => {
+    const skipped = readFileSync(join(FIXTURES, "check-phone-skipped.json"), "utf8");
+    for (const [script, args] of [
+      ["vm-linux.sh", ["ubuntu-24.04"]],
+      ["vm-pair.sh", []],
+    ] as const) {
+      const w = world();
+      const r = run(w, script, [...args], { rules: [["volley setup --check --json", 0, skipped]] });
+      expect(read(w, "summary.md")).toContain("skipped (allowed: phone)");
+      expect(r.out).not.toContain("a target was missed");
+    }
   });
 
   test("a usage error exits 2 and touches nothing", () => {
@@ -540,9 +624,12 @@ describe("Layer 4: vm-pair.sh", () => {
     expect(read(w, "summary.md")).toContain("| `pair_ready_ms` |");
   });
 
+  // The readiness poll runs out here, busy for the whole cap: a 1 s cap and a longer timeout keep
+  // it inside a slow CI runner's budget.
   test("a peer that never gets ready fails with the verdict's reasons; both VMs are deleted", () => {
     const w = world();
     const r = run(w, "vm-pair.sh", [], {
+      env: { VM_MAX_WAIT_S: "1" },
       rules: [
         [
           "machines/peer/readiness",
@@ -557,7 +644,7 @@ describe("Layer 4: vm-pair.sh", () => {
     expect(r.out).toContain("peer is not ready (Claude is not signed in)");
     expect(r.out).toContain("FAIL: the peer was not ready within 10 min");
     expect(vmsLeft(w)).toEqual([]);
-  });
+  }, 15_000);
 
   // Two polls run out here (the wave's placement, the service's stop), each busy for the whole cap:
   // a 1 s cap and a longer timeout keep it inside a slow CI runner's budget.
@@ -621,15 +708,24 @@ describe("the nightly workflow (install-nightly.yml)", () => {
   ) as {
     on: Record<string, unknown>;
     env: Record<string, string>;
-    jobs: Record<string, { "runs-on": string[]; strategy?: { matrix: Record<string, string[]> } }>;
+    jobs: Record<
+      string,
+      {
+        "runs-on": string[] | string;
+        needs?: string[];
+        if?: string;
+        strategy?: { matrix: Record<string, string[]> };
+        steps?: { uses?: string; with?: { path?: string } }[];
+      }
+    >;
   };
 
   test("never on pull_request or push: a schedule and dispatch only", () => {
     expect(Object.keys(wf.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
   });
 
-  test("three jobs on the two self-hosted runner labels, with their matrices", () => {
-    expect(Object.keys(wf.jobs)).toEqual(["linux-vm", "macos-tart", "pair"]);
+  test("three jobs on the two self-hosted runner labels, with their matrices, and a report", () => {
+    expect(Object.keys(wf.jobs)).toEqual(["linux-vm", "macos-tart", "pair", "report"]);
     expect(wf.jobs["linux-vm"]?.["runs-on"]).toEqual(["self-hosted", "volley-linux-vm"]);
     expect(wf.jobs["linux-vm"]?.strategy?.matrix.distro).toEqual(["ubuntu-24.04", "debian-13"]);
     expect(wf.jobs["macos-tart"]?.["runs-on"]).toEqual(["self-hosted", "volley-macos-tart"]);
@@ -639,5 +735,28 @@ describe("the nightly workflow (install-nightly.yml)", () => {
 
   test("a failing job reports to the tracking issue", () => {
     expect(wf.env.VM_TRACK_ISSUE).toBe("1");
+  });
+
+  test("the report job tells the tracking issue about a job that failed or never ran", () => {
+    const report = wf.jobs.report;
+    expect(report?.["runs-on"]).toBe("ubuntu-latest");
+    expect(report?.needs).toEqual(["linux-vm", "macos-tart", "pair"]);
+    // Always, so a job that failed or never ran is reported (and only in the canonical repository).
+    expect(report?.if).toBe("always() && github.repository == 'kryptek/volley'");
+    const script = JSON.stringify(report?.steps ?? []);
+    // lib.sh's label and title, so the two never make a second issue.
+    expect(script).toContain("install-tests");
+    expect(script).toContain("Nightly install tests are failing");
+    expect(script).toContain("needs.linux-vm.result");
+    expect(script).toContain("needs.macos-tart.result");
+    expect(script).toContain("needs.pair.result");
+  });
+
+  test("no artifact uploads the run's private key", () => {
+    const uploads = Object.values(wf.jobs).flatMap((j) =>
+      (j.steps ?? []).filter((s) => s.uses?.startsWith("actions/upload-artifact")),
+    );
+    expect(uploads).toHaveLength(3);
+    for (const u of uploads) expect(u.with?.path).toMatch(/^!.+\/\*\*\/key$/m);
   });
 });

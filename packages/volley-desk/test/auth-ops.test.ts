@@ -185,6 +185,37 @@ describe("the setup-op contract", () => {
     expect(plan && accountsRequired(plan)).toBe(true);
   });
 
+  it("parses the network step and its kind, in setup's order after accounts", () => {
+    const plan = parseSetupPlan({
+      steps: [
+        { step: "services", title: "Services", found: [], changes: [] },
+        {
+          step: "network",
+          title: "Network",
+          found: [],
+          changes: [{ summary: "Record that this machine is reached on its own network only" }],
+          plan_id: "network-1",
+          network: { planned: "none", current: "tailscale" },
+        },
+        { step: "accounts", title: "Accounts", found: [], changes: [] },
+      ],
+    });
+    expect(plan?.steps.map((s) => s.step)).toEqual(["accounts", "network", "services"]);
+    expect(plan?.steps[1]?.network).toEqual({ planned: "none", current: "tailscale" });
+    const odd = parseSetupPlan({
+      steps: [
+        {
+          step: "network",
+          title: "Network",
+          found: [],
+          changes: [],
+          network: { planned: "funnel" },
+        },
+      ],
+    });
+    expect(odd?.steps[0]?.network).toBeUndefined();
+  });
+
   it("parses a step's notes (what volleyd cannot check), and leaves them out when none", () => {
     const plan = parseSetupPlan({
       steps: [
@@ -282,6 +313,7 @@ describe("the repository ops (SPEC §4.6.21)", () => {
       ok: true,
       slug: "Example-Org/example-repo",
       url: "https://github.com/Example-Org/example-repo",
+      visibility: "private",
       machines: ["hub", "box-a"],
       status: ["hub: cloning (/path/to/repos/Example-Org/example-repo)"],
     });

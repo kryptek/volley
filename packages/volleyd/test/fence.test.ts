@@ -13,6 +13,12 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { REMOTE_LOGIN_ARGV, Scripts, keygenArgv } from "volley-cli/machine/ssh";
 import { addAccount, profileDir } from "../src/claude/profiles";
+import {
+  COORDINATOR_SETTINGS,
+  type CoordinatorScriptVars,
+  renderCoordinatorMcp,
+  renderCoordinatorScript,
+} from "../src/coordinator/role";
 import { exec } from "../src/exec";
 import {
   FenceError,
@@ -20,6 +26,7 @@ import {
   assertAllowed,
   machineAddArgv,
   mintConsentToken,
+  mintCoordinatorKill,
   mintHandoffToken,
   mintMachineAddToken,
   mintMergeToken,
@@ -31,6 +38,8 @@ import {
   mintSigninForwardToken,
   mintTrainToken,
   mintWakeToken,
+  renderRemoteScript,
+  sealCoordinatorScript,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
@@ -625,6 +634,18 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     [["bash", hooks, "--dry-run"]],
     [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883", "--dry-run"]],
     [[inputs.bun, "run", "build"], desk],
+    // The Network step: Tailscale's version, status, address and sign-in; its macOS install.
+    [["tailscale", "version"]],
+    [["tailscale", "status", "--json"]],
+    [["tailscale", "ip", "-4"]],
+    [["tailscale", "up"]],
+    [["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "up"]],
+    [["brew", "install", "--cask", "tailscale"]],
+    // The Desk on the tailnet (macOS): its two loopback-only serves, their status and removal.
+    [["tailscale", "serve", "status", "--json"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:9001"]],
+    [["tailscale", "serve", "--https=8443", "off"]],
   ];
   const SETUP_DENIED: [string[], string?][] = [
     // No setup step runs it (the accounts step issues the token in-process; admin_token runs it
@@ -649,6 +670,16 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     [["sudo", "systemctl", "restart", "mosquitto"]],
     [["sudo", "snap", "restart", "mosquitto"]],
     [["sudo", "volley", "setup"]],
+    [["sudo", "tailscale", "up"]],
+    // Never exposed publicly, and never Tailscale's other settings.
+    [["tailscale", "funnel", "443"]],
+    [["tailscale", "serve", "5199"]],
+    [["tailscale", "serve", "reset"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://0.0.0.0:5199"]],
+    [["tailscale", "funnel", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["sudo", "tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "up", "--ssh"]],
+    [["tailscale", "set", "--ssh"]],
     // The keychain is a terminal's (the logged-in session's).
     [["security", "find-generic-password", "-s", "volley-broker", "-a", "coordinator", "-w"]],
     [["security", "-i"]],
@@ -2053,5 +2084,201 @@ describe("MACHINE ADD's own argv match volley-cli's", () => {
     });
     for (const argv of [keygenArgv("/path/to/home"), [...REMOTE_LOGIN_ARGV]])
       expect(() => assertAllowed(argv, { machineAdd: t }), argv.join(" ")).not.toThrow();
+  });
+});
+
+describe("COORDINATOR (SPEC §4.6.25): the role's script, session and directory, each with its token", () => {
+  const DIR = "/path/to/home/.volley/coordinator";
+  const vars: CoordinatorScriptVars = {
+    dir: DIR,
+    name: "coord-test",
+    namespace: "default",
+    brokerPort: 21883,
+    hooksDir: "/opt/volley/packages/volley-hooks",
+    binDir: "/path/to/home/.volley/bin",
+    capacity: 4,
+    permissionMode: "acceptEdits",
+    continueGraceS: 10,
+  };
+  const script = renderCoordinatorScript(vars);
+  const S = "volley-coordinator-coord-test";
+  const start = (session = S, cwd = DIR) => [
+    "tmux",
+    "new-session",
+    "-d",
+    "-s",
+    session,
+    "-c",
+    cwd,
+    "bash .volley/coordinator.sh",
+  ];
+  const ssh = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box-a", "bash", "-s"];
+  const remote = (argv: string[], extra: Record<string, unknown> = {}) => ({
+    remote: { steps: [{ argv }], host: { name: "box-a", worktree_root: "", broker_port: 21883 } },
+    ...extra,
+  });
+  const write = (path: string, text: string) => ({
+    argv: ["base64", "-d"],
+    stdin: Buffer.from(text).toString("base64"),
+    stdout: path,
+  });
+
+  it("seals only the script renderCoordinatorScript renders for that dir", () => {
+    expect(() => sealCoordinatorScript(DIR, script)).not.toThrow();
+    expect(() => sealCoordinatorScript(DIR, `${script} `)).toThrow(FenceError);
+    expect(() => sealCoordinatorScript("/elsewhere", script)).toThrow(FenceError);
+    expect(() => sealCoordinatorScript("relative/dir", script)).toThrow(FenceError);
+    // Any other flag on the server, or another value for a pinned one.
+    for (const bad of [
+      script.replace("'--spawn' 'same-dir'", "'--spawn' 'worktree'"),
+      script.replace("'--permission-mode' 'acceptEdits'", "'--permission-mode' 'yolo'"),
+      script.replace("'acceptEdits'", "'acceptEdits' '--debug'"),
+      script.replace("'--continue'", "'--continue' '--session-id' 'x'"),
+      script.replace("export VOLLEY_HOOKS_COORDINATOR='1'", "export VOLLEY_AUTH_PASSWORD='pw'"),
+      script.replace("coord-test", "Coord Test"),
+    ])
+      expect(() => sealCoordinatorScript(DIR, bad), bad).toThrow(FenceError);
+    for (const mode of ["auto", "plan", "bypassPermissions", "default", "dontAsk"])
+      expect(() =>
+        sealCoordinatorScript(
+          DIR,
+          renderCoordinatorScript({ ...vars, permissionMode: mode as "plan" }),
+        ),
+      ).not.toThrow();
+  });
+
+  it("pmset -g batt (a Mac's laptop check), exactly", () => {
+    expect(() => assertAllowed(["pmset", "-g", "batt"])).not.toThrow();
+    for (const argv of [
+      ["pmset", "-g"],
+      ["pmset", "sleepnow"],
+      ["pmset", "-g", "batt", "-x"],
+    ])
+      expect(() => assertAllowed(argv), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("claude remote-control never runs directly, with any flags", () => {
+    for (const argv of [
+      ["claude", "remote-control"],
+      ["claude", "remote-control", "--continue"],
+      ["claude", "remote-control", "--name", "coord-test", "--spawn", "worktree"],
+    ]) {
+      expect(() => assertAllowed(argv), argv.join(" ")).toThrow(FenceError);
+      expect(() => assertAllowed(ssh, remote(argv)), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("local tmux: new-session in its own session and dir, with the token; has-session, capture-pane", () => {
+    const coordinator = sealCoordinatorScript(DIR, script);
+    expect(() => assertAllowed(start(), { coordinator })).not.toThrow();
+    expect(() => assertAllowed(start())).toThrow(FenceError);
+    expect(() => assertAllowed(start("volley-coordinator-other"), { coordinator })).toThrow(
+      FenceError,
+    );
+    expect(() => assertAllowed(start("volley-w1-T1-implementer"), { coordinator })).toThrow(
+      FenceError,
+    );
+    expect(() => assertAllowed(start(S, "/elsewhere"), { coordinator })).toThrow(FenceError);
+    // A launch token is no coordinator token, and the coordinator's token starts no launch.sh.
+    const launch = sealLaunchScript(
+      "/tmp/wt",
+      renderLaunchScript({
+        hooksDir: "/opt/volley/packages/volley-hooks",
+        model: "claude-opus-5-5",
+        agentId: "w1-t1-implementer-1",
+        worktree: "/tmp/wt",
+      }),
+    );
+    expect(() => assertAllowed(start(), { launch })).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(["tmux", "new-session", "-d", "-s", S, "-c", DIR, "bash .volley/launch.sh"], {
+        coordinator,
+        launch,
+      }),
+    ).toThrow(FenceError);
+    expect(() => assertAllowed(["tmux", "has-session", "-t", `=${S}`])).not.toThrow();
+    expect(() =>
+      assertAllowed(["tmux", "capture-pane", "-p", "-t", `=${S}:`, "-S-60"]),
+    ).not.toThrow();
+    // Nothing is typed into the coordinator's session.
+    expect(() => assertAllowed(["tmux", "send-keys", "-t", `=${S}:`, "Enter"])).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(["tmux", "send-keys", "-t", `=${S}:`, "-l", "--", "y"], { coordinator }),
+    ).toThrow(FenceError);
+  });
+
+  it("kill-session only with the kill token for exactly that session (no consent)", () => {
+    const kill = ["tmux", "kill-session", "-t", `=${S}`];
+    expect(() =>
+      assertAllowed(kill, { coordinator: mintCoordinatorKill("coord-test") }),
+    ).not.toThrow();
+    expect(() => assertAllowed(kill)).toThrow(FenceError);
+    expect(() => assertAllowed(kill, { coordinator: mintCoordinatorKill("other") })).toThrow(
+      FenceError,
+    );
+    expect(() =>
+      assertAllowed(kill, { coordinator: { kind: "kill", session: S } as never }),
+    ).toThrow(FenceError);
+    expect(() => mintCoordinatorKill("Bad Name")).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(ssh, remote(kill.slice(), { coordinator: mintCoordinatorKill("coord-test") })),
+    ).not.toThrow();
+    expect(() => assertAllowed(ssh, remote(kill.slice()))).toThrow(FenceError);
+  });
+
+  it("REMOTE: the same tmux shapes as steps; the script's broker port is the host's", () => {
+    const coordinator = sealCoordinatorScript(DIR, script);
+    expect(() => assertAllowed(ssh, remote(start(), { coordinator }))).not.toThrow();
+    expect(() => assertAllowed(ssh, remote(start()))).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(ssh, remote(start("volley-coordinator-x"), { coordinator })),
+    ).toThrow(FenceError);
+    const other = sealCoordinatorScript(
+      DIR,
+      renderCoordinatorScript({ ...vars, brokerPort: 1883 }),
+    );
+    expect(() => assertAllowed(ssh, remote(start(), { coordinator: other }))).toThrow(FenceError);
+  });
+
+  it("REMOTE: the directory's files, only with the script's token and only as rendered", () => {
+    const coordinator = sealCoordinatorScript(DIR, script);
+    const mcp = renderCoordinatorMcp("/opt/volley/packages/volley-mcp/src/index.ts", vars);
+    const login = `${JSON.stringify({ username: "coordinator", password: "pw" })}\n`;
+    const steps = [
+      { argv: ["mkdir", "-p", `${DIR}/.volley/auth`, `${DIR}/.claude`, `${DIR}/repos/a`] },
+      write(`${DIR}/.volley/coordinator.sh`, script),
+      write(`${DIR}/.volley/auth/coordinator.json`, login),
+      { argv: ["chmod", "600", `${DIR}/.volley/auth/coordinator.json`] },
+      write(`${DIR}/.mcp.json`, mcp),
+      write(`${DIR}/.claude/settings.json`, COORDINATOR_SETTINGS),
+      { argv: ["ln", "-sfn", "/srv/repos/a/b", `${DIR}/repos/a/b`] },
+    ];
+    const run = (s: typeof steps, token: typeof coordinator | null = coordinator) =>
+      assertAllowed(ssh, {
+        remote: { steps: s, host: { name: "box-a", worktree_root: "", broker_port: 21883 } },
+        ...(token !== null ? { coordinator: token } : {}),
+      });
+    expect(() => run(steps)).not.toThrow();
+    expect(renderRemoteScript({ steps })).toContain("'ln' '-sfn'");
+    for (const s of steps.slice(1))
+      expect(() => run([s], null), s.argv.join(" ")).toThrow(FenceError);
+    const bad = [
+      write(`${DIR}/.volley/coordinator.sh`, `${script}rm -rf ~\n`),
+      write(`${DIR}/.mcp.json`, mcp.replace("bun", "sh")),
+      write(`${DIR}/.mcp.json`, mcp.replace("coord-test", "other")),
+      write(`${DIR}/.claude/settings.json`, '{"permissions":{"allow":["Bash"]}}\n'),
+      write(`${DIR}/.volley/auth/coordinator.json`, "not json"),
+      write("/elsewhere/.mcp.json", mcp),
+      { argv: ["ln", "-sfn", "/srv/repos/a/b", `${DIR}/.volley/coordinator.sh`] },
+      { argv: ["ln", "-sfn", "/srv/repos/a/b", `${DIR}/repos/a/b/c`] },
+      { argv: ["ln", "-sfn", "relative", `${DIR}/repos/a/b`] },
+      { argv: ["ln", "-s", "/srv/repos/a/b", `${DIR}/repos/a/b`] },
+      { argv: ["chmod", "755", `${DIR}/.volley/coordinator.sh`, "/etc/passwd"] },
+    ];
+    for (const s of bad) expect(() => run([s]), JSON.stringify(s.argv)).toThrow(FenceError);
+    // Appending is never a write of these.
+    expect(() => run([{ ...write(`${DIR}/.mcp.json`, mcp), append: true } as never])).toThrow(
+      FenceError,
+    );
   });
 });

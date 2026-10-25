@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.12
+version: 0.13
 ---
 
 # /volley-issues
@@ -15,7 +15,7 @@ There are two dispatch paths (see **Choosing a dispatch path**): the **volleyd p
 
 Before invoking `/volley-issues`:
 
-**This skill is current.** This file declares `version: 0.12` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
+**This skill is current.** This file declares `version: 0.13` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
 1. **Volley installed.** The one command in the root README's Quickstart (it ends with `volley setup`) sets up the broker and everything below. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
@@ -52,7 +52,9 @@ If neither a `#N` nor a `--flag` is supplied, print the usage shapes above and s
 Run `volleyd status` before dispatching anything:
 
 - **Exit 0** (the daemon answered): use the **Volleyd path** below, in its **autopilot flow** (submit and leave). This is the default. With `autopilot: off` for the wave (the user asks to drive it themselves), follow **Driving a wave by hand** instead of Step 5.
-- **Anything else** (daemon not installed, not running, or unreachable): tell the user, then use the **Legacy path**. Do not start a daemon on the user's behalf; `volleyd install` (macOS) or `volleyd daemon` is theirs to run.
+- **Exit 69** (`SUPERVISOR_UNREACHABLE`; every `volley` and `volleyd` command that cannot reach the supervisor gives exit 69: it climbed internet → private network → tunnel → broker → volleyd and stopped at the first rung that failed, submitting nothing): read the reason, cause and fix (`volleyd status --json` prints `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }`), relay the cause and the fix to the owner verbatim, and ask what to do. Wait for their answer, then run `volleyd status` again. You never switch brokers, namespaces or modes yourself (no other `--broker-url`, no `VOLLEY_BROKER_URL` of your own), and do not fall back to the legacy path: the waves and the agents are volleyd's, and they are still there when it answers again. The reasons are `offline`, `network_down`, `tunnel_down`, `broker_down`, `daemon_silent` and `no_broker_here` (`packages/volley-cli/README.md`, "When the supervisor does not answer").
+- **`volleyd` not installed** (the command is not found): tell the user, then use the **Legacy path**. Do not start a daemon on the user's behalf; `volleyd install` (macOS) or `volleyd daemon` is theirs to run.
+- **Any other exit** (a refused login, a bad URL): relay the error to the user and ask; do not fall back to the legacy path.
 
 The user can force the legacy path ("dispatch the old way", `--legacy`). Never mix the two for one wave: an agent volleyd spawned is volleyd's to steer, retire and clean up.
 

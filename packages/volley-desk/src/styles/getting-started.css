@@ -1,0 +1,704 @@
+/* Getting started (src/getting-started/GettingStarted.tsx): a glass window over the Desk, the
+   step rail on the left (250 px) and the stage on the right; one column on a phone. Theme tokens
+   only (--ground, --win1, --win2, --ink, --dim, --line, --t-acc), so both tones read. */
+.gs-scrim {
+  z-index: 30;
+}
+.gs {
+  --gs-art: 220px;
+  --acc: var(--t-acc);
+  position: relative;
+  display: grid;
+  grid-template-columns: 250px 1fr;
+  width: min(1040px, 100%);
+  height: min(700px, calc(100% - 32px));
+  overflow: hidden;
+  color: var(--ink);
+  background-color: var(--modal-fill, var(--win1));
+  --win-body: linear-gradient(160deg, var(--sheet-a), var(--sheet-b) 55%, var(--sheet-c));
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+.gs:focus {
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ rail */
+.gs-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 20px 14px 14px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in oklab, var(--win2) 70%, transparent);
+}
+.gs-brand {
+  margin: 0 6px;
+  font: 600 15px / 1.2 var(--f-display);
+  color: var(--ink);
+}
+.gs-rail {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.gs-rail ol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gs-rail-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gs-rail-step:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+}
+.gs-rail-step:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.gs-rail-step--now {
+  border-color: color-mix(in oklab, var(--t-acc) 45%, transparent);
+  background: color-mix(in oklab, var(--t-acc) 12%, transparent);
+}
+.gs-rail-step:focus-visible {
+  outline: 2px solid var(--t-acc);
+  outline-offset: 1px;
+}
+.gs-rail-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.gs-rail-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.gs-rail-sub {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.gs-badge {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font: 600 11.5px / 1 var(--f-mono);
+}
+.gs-badge--now {
+  border-color: var(--t-acc);
+  background: var(--t-acc);
+  color: var(--on-acc);
+}
+.gs-badge--done {
+  border-color: color-mix(in oklab, var(--t-acc) 60%, transparent);
+  color: var(--acc-ink);
+}
+.gs-side-foot {
+  padding: 0 6px;
+}
+.gs-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12.5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.gs-link:hover {
+  color: var(--ink);
+}
+
+/* ----------------------------------------------------------------- stage */
+.gs-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.gs-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+}
+.gs-hero {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 28px 32px 8px;
+}
+.gs-copy {
+  flex: 1;
+  min-width: 0;
+}
+.gs-hero .gs-hero-art {
+  flex: none;
+  width: var(--gs-art);
+  height: var(--gs-art);
+}
+.gs-eyebrow {
+  margin: 0 0 6px;
+  font: 600 11px / 1.2 var(--f-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--acc-ink);
+}
+.gs-heading {
+  margin: 0 0 10px;
+  font: 600 26px / 1.15 var(--f-display);
+  color: var(--ink);
+}
+.gs-lede {
+  margin: 0;
+  max-width: 60ch;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.gs-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 32px 20px;
+}
+.gs-card {
+  align-self: stretch;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--win2) 55%, transparent);
+}
+.gs-card-title {
+  margin: 0 0 10px;
+  font: 600 13px / 1.2 var(--f-display);
+  color: var(--acc-ink);
+}
+.gs-set-up {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gs-set-up li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.gs-stub-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.gs-stub p {
+  margin: 0;
+}
+.gs-summary {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+.gs-summary-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.gs-summary-row:last-child {
+  border-bottom: 0;
+}
+.gs-summary dt {
+  color: var(--dim);
+}
+.gs-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.gs-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 32px;
+  border-top: 1px solid var(--line);
+}
+.gs-note {
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ------------------------------------------- This computer / Your machines (steps/) */
+.gs-checks {
+  display: grid;
+  gap: 0;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.gs-check {
+  display: grid;
+  grid-template-columns: 18px 150px 1fr;
+  column-gap: 10px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.gs-check:last-child {
+  border-bottom: 0;
+}
+.gs-check-glyph {
+  font-weight: 700;
+  text-align: center;
+}
+.gs-check--ok .gs-check-glyph {
+  color: var(--ok-ink);
+}
+.gs-check--missing .gs-check-glyph,
+.gs-check--missing .gs-check-value {
+  color: var(--bad-ink);
+}
+.gs-check--pending .gs-check-glyph,
+.gs-check--pending .gs-check-value {
+  color: var(--dim);
+}
+.gs-check-label {
+  color: var(--dim);
+}
+.gs-check-value {
+  overflow-wrap: anywhere;
+}
+.gs-check-fix {
+  grid-column: 3;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-name {
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+}
+.gs-name input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+.gs-name label {
+  font-size: 12px;
+  font-weight: 600;
+}
+.gs-name p {
+  margin: 0;
+}
+.gs-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-plan h3 {
+  margin: 0 0 8px;
+  font: 600 13px / 1.2 var(--f-display);
+}
+.gs-machines {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gs-machine {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--win1) 60%, transparent);
+  font-size: 12px;
+}
+.gs-machine-name {
+  font-size: 13px;
+}
+.gs-machine--add {
+  align-items: center;
+  justify-content: center;
+  min-height: 74px;
+  border-style: dashed;
+  color: var(--dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  background: transparent;
+}
+.gs-machine--add:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--acc);
+}
+.gs-machine--add:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.gs-connect {
+  display: grid;
+  gap: 8px;
+}
+.gs-connect .gs-card-title {
+  margin-bottom: 2px;
+}
+.gs-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.gs-choice--on {
+  border-color: var(--acc);
+  background: color-mix(in oklab, var(--acc) 8%, transparent);
+}
+.gs-choice input {
+  margin-top: 2px;
+  accent-color: var(--acc);
+}
+.gs-choice-text {
+  display: grid;
+  gap: 2px;
+  font-size: 13px;
+}
+.gs-choice-text b {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gs-tag {
+  font-size: 11px;
+  font-weight: 500;
+}
+.gs-add-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gs-add .m-add-form {
+  margin-top: 8px;
+}
+
+/* ------------------------------------------------------- repos and people */
+.gs-ok {
+  margin: 0;
+  color: var(--ok-text);
+  font-size: 13px;
+}
+.gs-status-line {
+  margin: 0 0 4px;
+}
+.gs-card > .dim {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.gs-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.gs-repo-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.gs-repo-form .ny-actions {
+  justify-content: flex-start;
+}
+.gs-folder,
+.gs-invite {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+.gs-grow {
+  flex: 1;
+  min-width: 200px;
+}
+.gs-repos {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+.gs-repos li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+.gs-people {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.gs-people th {
+  padding: 0 8px 6px 0;
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-people td {
+  padding: 7px 8px 7px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.gs-people-pending td {
+  color: var(--mute);
+}
+.gs-role {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--mute);
+  white-space: nowrap;
+}
+.gs-roles {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.gs-role-choice {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.gs-invite-link {
+  margin-top: 12px;
+}
+.gs-invite-link .s-hint {
+  margin: 6px 0 0;
+}
+.gs-invite-failed {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+.gs-invite-failed p {
+  margin: 0;
+}
+
+/* -------------------------------------------------------- access and done */
+.gs-access {
+  display: grid;
+  gap: 12px;
+}
+.gs-access p {
+  margin: 0;
+}
+.gs-access-plan {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+}
+.gs-access-plan p,
+.gs-access-report p {
+  margin: 0;
+}
+.checks li.gs-signin {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.gs-signin a {
+  color: var(--acc-ink);
+  word-break: break-all;
+}
+.gs-signin-qr {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.gs-signin-qr .qr {
+  flex: none;
+  border-radius: 8px;
+}
+.gs-coord .s-hint {
+  margin: 0 0 10px;
+}
+.gs-join {
+  display: grid;
+  gap: 10px;
+}
+.gs-join .gs-card-title,
+.gs-join p {
+  margin: 0;
+}
+.gs-join-lines {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+}
+.gs-join-to {
+  display: grid;
+  gap: 4px;
+}
+.gs-join-to input {
+  max-width: 360px;
+}
+
+/* ----------------------------------------------------------------- phone */
+@media (max-width: 820px) {
+  .modal-scrim.gs-scrim {
+    padding: 0;
+  }
+  .gs {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+  }
+  .gs-side {
+    gap: 8px;
+    padding: 12px 16px 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .gs-brand {
+    margin: 0;
+    padding-right: 36px;
+  }
+  .gs-rail {
+    overflow: visible;
+  }
+  .gs-rail ol {
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .gs-rail-step {
+    width: auto;
+    padding: 4px;
+  }
+  /* Badges only: the step's name is in the stage's heading below. */
+  .gs-rail-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .gs-side-foot {
+    position: absolute;
+    top: 14px;
+    right: 52px;
+    padding: 0;
+  }
+  .gs-stage {
+    position: static;
+    overflow: auto;
+  }
+  .gs-close {
+    top: 8px;
+    right: 8px;
+  }
+  .gs-hero {
+    --gs-art: 200px;
+    flex-direction: column-reverse;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px 16px 4px;
+  }
+  .gs-hero-art {
+    align-self: center;
+  }
+  .gs-heading {
+    font-size: 22px;
+  }
+  .gs-body {
+    flex: none;
+    overflow: visible;
+    padding: 8px 16px 16px;
+  }
+  .gs-foot {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .gs-actions {
+    justify-content: flex-end;
+  }
+  .gs-summary-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .gs-check {
+    grid-template-columns: 18px 1fr;
+  }
+  .gs-check-value,
+  .gs-check-fix {
+    grid-column: 2;
+  }
+  .gs-signin-qr {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

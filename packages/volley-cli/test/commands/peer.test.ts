@@ -30,6 +30,7 @@ import {
   defaultName,
   hostKeyHint,
   localNotAdmin,
+  machineEnvelope,
   machineTopic,
   peerDoctorStamp,
   peerFile,
@@ -1154,6 +1155,7 @@ describe("volley peer on the supervisor's machine", () => {
             reason: "heartbeat_timeout",
             load: [1, 0.5, 0.25],
             agents: 2,
+            network: { kind: "tailscale", name: "box-a.example.ts.net", address: "100.64.0.2" },
             last_seen: "2026-10-19T09:00:00.000Z",
           },
         ],
@@ -1164,6 +1166,7 @@ describe("volley peer on the supervisor's machine", () => {
     await v.b.disconnect();
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("box-a\ttunnel down (heartbeat_timeout)");
+    expect(r.stdout).toContain("\tnetwork tailscale (box-a.example.ts.net)\n");
     expect(r.stdout).toContain("box-b\tno heartbeat yet");
   });
 
@@ -1182,7 +1185,7 @@ describe("volley peer on the supervisor's machine", () => {
         { mode: 0o600 },
       );
       // Signed in (it gets as far as finding no volleyd).
-      expect((await run(["list"], d, env)).stderr).toContain("volleyd is not running");
+      expect((await run(["list"], d, env)).stderr).toContain("(daemon_silent)");
     } finally {
       await locked.close();
     }
@@ -1222,8 +1225,8 @@ describe("volley peer on the supervisor's machine", () => {
         deps(fakeExec(() => ({})).exec, { readStdin: async () => "{}" }),
       );
       // Signed in (it gets as far as finding no volleyd), not refused for want of credentials.
-      expect(io.readStderr()).toContain("volleyd is not running");
-      expect(code).toBe(EXIT.ERROR);
+      expect(io.readStderr()).toContain("(daemon_silent)");
+      expect(code).toBe(EXIT.SUPERVISOR_UNREACHABLE);
     } finally {
       await locked.close();
     }
@@ -1298,8 +1301,20 @@ describe("volley peer on the supervisor's machine", () => {
 
   it("a host command with volleyd down says so", async () => {
     const r = await run(["list"], deps(fakeExec(() => ({})).exec));
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("volleyd is not running");
+    expect(r.exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(r.stderr).toContain(
+      `volley peer list: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent in namespace '${NS}'`,
+    );
+  });
+
+  it("--json with volleyd down: the SUPERVISOR_UNREACHABLE object on stdout", async () => {
+    const r = await run(["list", "--json"], deps(fakeExec(() => ({})).exec));
+    expect(r.exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      error: "SUPERVISOR_UNREACHABLE",
+      reason: "daemon_silent",
+      where: { namespace: NS },
+    });
   });
 });
 
@@ -1319,6 +1334,15 @@ describe("volley peer run (the service)", () => {
     mkdirSync(join(home, ".volley"), { recursive: true });
     writeFileSync(peerFile(home), JSON.stringify({ ...cfg, ...over }), { mode: 0o600 });
   };
+
+  it("the record carries laptop: true on a machine with a battery, nothing on one without", async () => {
+    const f = fakeExec(() => ({}));
+    const on = await machineEnvelope(deps(f.exec, { laptop: async () => true }), cfg, "up");
+    expect(parseEnvelope(on)?.payload).toMatchObject({ name: "box-a", laptop: true });
+    expectValidRecord(on);
+    const off = await machineEnvelope(deps(f.exec, { laptop: async () => false }), cfg, "up");
+    expect(parseEnvelope(off)?.payload).not.toHaveProperty("laptop");
+  });
 
   /** A retained readiness verdict for box-a, published as `agentId`. */
   async function readiness(agentId: string, payload: Record<string, unknown>) {
@@ -1718,6 +1742,19 @@ describe("volley peer run (the service)", () => {
     const env = parseEnvelope((await reader.queryRetained(machineTopic("box-a"), 500)) ?? "");
     await reader.disconnect();
     expect(env?.payload).toMatchObject({ name: "box-a", tunnel: "down", reason: "disconnect" });
+  });
+
+  it("the record carries setup.json's network record, and none without one", async () => {
+    const d = deps(fakeExec(() => ({})).exec);
+    const payload = async () =>
+      (JSON.parse(await machineEnvelope(d, cfg, "up")) as { payload: Record<string, unknown> })
+        .payload;
+    rmSync(join(home, ".volley", "volleyd", "setup.json"), { force: true });
+    expect((await payload()).network).toBeUndefined();
+    mkdirSync(join(home, ".volley", "volleyd"), { recursive: true });
+    const network = { kind: "tailscale", name: "box-a.example.ts.net", address: "100.64.0.2" };
+    writeFileSync(join(home, ".volley", "volleyd", "setup.json"), JSON.stringify({ network }));
+    expect((await payload()).network).toEqual(network);
   });
 
   it("stops (exit 0, tunnel killed) once the broker refuses the revoked peer account", async () => {

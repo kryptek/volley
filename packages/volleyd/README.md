@@ -1428,6 +1428,12 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | `picker` | `p-<agent_id>-<tool_use_id>` | a Claude Code picker in any session (the hooks' `picker_opened`) |
 | `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
+| `notice` | `n-coordinator-link`, `n-coordinator-failed` | the coordinator role's link changed, or it failed ([The coordinator role](#the-coordinator-role)) |
+
+A `notice` is volleyd's own (`owner_only: true`): it tells the owner something, never blocks a
+wave, carries its link in `pointers.link`, and takes only `open` (acknowledged: the owner opened
+the link) or `dismiss`. Its id is fixed: one opened again after the last was answered (by the
+owner, or `superseded` by volleyd) reuses the id at the next `version`.
 
 **volleyd is the referee.** An answer is `inbox_answer { id, version, answer, where }`. On the
 mailbox it is the owner's: a wave's item is answered by the wave's owner or the session bound to
@@ -1943,6 +1949,95 @@ box-a: not rolled back`).
   never removed), its health, every paired machine back on the tunnel it had, the Desk told the
   old host, the record. Answered as it starts, like the move; volleyd restarts on the old broker
   once it is done. The broker on box-a keeps running: stop it there.
+
+## The coordinator role
+
+The owner's working session, a Claude Code Remote Control server driven from the phone, is a
+role volleyd can keep alive (SPEC §4.6.25; `src/coordinator/`): `claude remote-control` in a
+fixed directory, in a tmux session named `volley-coordinator-<name>`, on the machine
+`coordinator.machine` names, restarted when it dies, its state retained on
+`volley/_system/federation/coordinator`. `<name>` is the coordinator name `volley setup`
+recorded (`setup.json` `coordinator`), the one waves bind to. The CLI's side is
+[`volley coordinator`](../volley-cli/README.md#volley-coordinator) (status, open, restart, stop);
+the Desk picks the machine in Getting started's Access step or Settings › Machines' Coordinator
+card and opens the session from its top bar
+([The coordinator](../volley-desk/README.md#the-coordinator)). The role needs the broker
+reachable from the machine it runs on, nothing public: the phone reaches the session through the
+Claude app, and the Desk through the private network
+([`volley desk install --tailscale`](../volley-cli/README.md#volley-desk-serve)).
+
+```sh
+volleyd config set coordinator.machine box-a     # a paired machine (or `local`: this one)
+volley coordinator status                        # coord-test on box-a: running since … · https://claude.ai/code/…
+volley coordinator open --browser
+volleyd config set coordinator.machine null      # off: the session is ended, the topic cleared
+```
+
+- **Tunables** (`coordinator.*`): `machine` (default `null`: off), `dir` (default
+  `~/.volley/coordinator`, `~` expanded on that machine; Phase 2 may pin an absolute path common
+  to every machine for a replica, so nothing assumes `~`), `capacity` (4) and
+  `permission_mode` (`acceptEdits`), the server's own flags, `restart_backoff_s` (`[5, 30,
+  120]`) and `allow_laptop` (`false`).
+- **The script.** `<dir>/.volley/coordinator.sh` (`renderCoordinatorScript`, sealed by the fence
+  byte for byte): `cd <dir>`; the coordinator's env (`VOLLEY_AGENT_ID=coordinator`,
+  `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE`, `VOLLEY_BROKER_URL=mqtt://127.0.0.1:<port>` — a paired
+  machine's tunnel end, `hosts.<name>.tunnel.remote_port` — `VOLLEY_AUTH_DIR=<dir>/.volley/auth`,
+  `VOLLEY_HOOKS_COORDINATOR=1`, `VOLLEY_HOOKS_DIR`) and the machine's `~/.volley/bin` first on
+  `PATH`; then `claude remote-control --continue` (alone: Claude Code 2.1.310 refuses it with
+  `--spawn` or `--capacity`), and when that exits within `coordinator_continue_grace_ms`
+  (nothing recorded here) `exec claude remote-control --name <name>
+  --remote-control-session-name-prefix <name> --spawn same-dir --capacity <n> --permission-mode
+  <mode>`. No secret is in it: the login is the file `VOLLEY_AUTH_DIR` names.
+- **The directory**, written before each start (on a paired machine, each a fenced ssh step under
+  the script's token): the script, `.volley/auth/coordinator.json` (the coordinator login, 0600),
+  `.mcp.json` (the `volley` server: `bun <volley_dir>/packages/volley-mcp/src/index.ts` with the
+  same env, no secret), `.claude/settings.json` (`enableAllProjectMcpServers: true`), the folder
+  trust in that machine's `~/.claude.json`, and `repos/<owner>/<name>` links to the machine's
+  clones, so a session there can run `/volley-issues` in a checkout.
+- **Supervision.** Each tick: `has-session` on the machine; missing after volleyd ran it is a
+  death, restarted after the ladder's next wait (it starts over after 10 minutes up); a third
+  death in a row, each within the ladder's total of its start, is `failed` (the server's last
+  screen lines in `last_error`) until `volley coordinator restart`. A volleyd restart adopts the
+  running session; volleyd's shutdown leaves it running. A start that fails (prepare, the launch,
+  no coordinator login) is a death on the same ladder, `last_error` saying why. A machine that
+  is down starts nothing, and a role running there is `stopped` (`<machine> is not up`, its link
+  dropped) until the machine is back, when the session still running there is adopted.
+- **The link.** After a start volleyd reads the server's screen for its first
+  `https://claude.ai/code/…` URL (`session_url`); without one the name is the handle. A question
+  on the screen — the folder trust, or the first run's `Enable Remote Control? (y/n)` on a Claude
+  profile that never ran Remote Control — is reported as `needs_terminal` (`trust` / `consent`),
+  never answered: attach (`tmux attach -t volley-coordinator-<name>` there) and answer it once.
+- **The laptop rule.** Machine records carry `laptop: true` when a battery is present (Linux
+  `/sys/class/power_supply/BAT*`; macOS `pmset -g batt`, run through the fence).
+  `config_set coordinator.machine` naming one is refused (`<name> is a laptop: it sleeps and
+  travels; set coordinator.allow_laptop: true to host the coordinator there anyway`) unless
+  `allow_laptop` is true.
+- **Ops.** `coordinator_restart` and `coordinator_stop` are admin ops (the account-op topic;
+  `volley coordinator restart|stop`); a stop holds until the next restart, across volleyd
+  restarts (`$VOLLEYD_HOME/coordinator-stopped`). `coordinator_status` is also a mailbox read;
+  `volleyd status` prints a `coordinator:` line.
+- **Notices** (`coordinator/notices.ts`, `noticesFor`). Each publish of the topic is compared with
+  the last: a new `session_url` opens the owner-only notice `n-coordinator-link` (`Coordinator on
+  <machine>: open it`, the link in `question` and `pointers.link`), which the Desk pushes to the
+  phone; `state: failed` opens `n-coordinator-failed` (`Coordinator on <machine> stopped`, the last
+  error and `volley coordinator restart`). The open notices a new one replaces are answered
+  `superseded` (`where: autopilot`) first: a new link replaces both, a failure the link notice,
+  the role turned off both. A stop or restart that drops the link closes the link notice, and
+  the role running again closes the failure notice. A volleyd restart adopting the same link
+  opens nothing new.
+- **The handoff text** (`coordinator/handoff.ts`, `renderHandoff`). A fresh session under the
+  server knows nothing of the fleet: when its hooks' registry entry arrives (the one carrying
+  `model_source`, sent once its mailbox session exists, so the mail is kept) naming the role's
+  coordinator name with a `cwd` under the role's `dir`, while the role is `starting` or `running`,
+  volleyd sends it one mailbox `steering` message, shown at its next prompt: `You are the
+  coordinator <name> of this Volley fleet, running on <machine> in <dir> (repos under repos/)`,
+  the running waves (repository, tasks done), the open Needs-you items (id and title), the
+  previous coordinator session's agent id when known, and `Use /volley and /volley-issues as
+  usual.` Each session gets it once: `$VOLLEYD_HOME/coordinator-sessions.json` keeps the last 50
+  greeted, newest last (the next session's previous one).
+- **What is lost when it dies:** the turn in flight. The restart reattaches to the session, not
+  the turn. Phase 2 adds continuity across machines (failover, a replica); Phase 1 runs one
+  supervisor and one broker, and the role reaches the broker the way agents on its machine do.
 
 ## Footprints and the overlap plan
 
@@ -4603,6 +4698,8 @@ ALLOW (program by bare name only — never a path):
     agent's claude by `process.kill`, never by a spawned `kill`)
   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
     retains no $SYS/broker/version)
+  pmset -g batt   (exactly, on macOS: whether this machine has a battery, its record's
+    `laptop`, SPEC §4.6.25)
   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
   volley auth add <agent_id> --role ROLE [--kind KIND] --json
   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
@@ -4644,6 +4741,24 @@ MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
   REMOTE steps: volley broker probe · volley broker receive <abs>/.volley/roles/broker/bundle.tgz
   --lan|--no-lan|--check · volley broker tunnel --show.
 
+COORDINATOR (SPEC §4.6.25, coordinator/; with a CoordinatorToken, checked by identity, and only
+  on the session `volley-coordinator-<name>`, which is never an agent's): volleyd starts
+  `claude remote-control` only from `<dir>/.volley/coordinator.sh`, exactly
+  `renderCoordinatorScript` (`sealCoordinatorScript`: `--continue` alone, then `--name <name>
+  --remote-control-session-name-prefix <name> --spawn same-dir --capacity <n> --permission-mode
+  <mode>`, nothing else; never as a direct argv), and, locally and as REMOTE steps:
+    tmux new-session -d -s volley-coordinator-<name> -c <dir> 'bash .volley/coordinator.sh'
+      (the script token for <dir> and <name>; on a paired machine its broker port the host's) ·
+    has-session -t =<it> · capture-pane -p [-J] -t =<it>: -S-<n> ·
+    kill-session -t =<it> (the kill token `mintCoordinatorKill(name)`: no consent, the session
+      holds no agent's work) — nothing is ever typed into it
+  and as REMOTE steps with the script token, its directory's files: base64 -d (whole, never
+  appended) to `<dir>/.volley/coordinator.sh` (the sealed text), `<dir>/.volley/auth/
+  coordinator.json` (a JSON object of string username and password: the coordinator login),
+  `<dir>/.mcp.json` (exactly `renderCoordinatorMcp` of an absolute volley-mcp entry) and
+  `<dir>/.claude/settings.json` (exactly COORDINATOR_SETTINGS); chmod on those;
+  ln -sfn <abs> <dir>/repos/<owner>/<name> (a repository's link)
+
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
 
@@ -4662,6 +4777,12 @@ SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the
     bash <repo>/packages/volley-hooks/scripts/install.sh [--dry-run]
     <bun> <repo>/packages/volleyd/src/cli.ts install --broker-url mqtt://… --dry-run (the
       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
+    tailscale (on PATH, or /Applications/Tailscale.app/Contents/MacOS/Tailscale) version |
+      status --json | ip -4 | up · brew install --cask tailscale (the Network step; never
+      `tailscale funnel`, an `up` flag, or `sudo tailscale up`) · tailscale serve
+      status --json | --bg --https=443 http://127.0.0.1:<desk port> | --bg --https=8443
+      http://127.0.0.1:9001 (the Desk on the tailnet, macOS; Linux's needs sudo, a
+      terminal's; never `serve reset` or a target off loopback)
   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
   sudo, or the keychain (the logged-in session's): those stay terminal-only.
 
@@ -4856,8 +4977,16 @@ its full text stays in the journal).
 
 ## Exit codes
 
-Same table as `volley`: `0` success · `1` error (validation failure, daemon not running, broker
-down, request rejected) · `2` usage error · `124` the daemon did not answer in time.
+Same table as `volley` (a test keeps the two equal):
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | error: a validation failure, a request the daemon rejected, refused credentials |
+| `2` | usage error |
+| `3` | `resolve` / `inbox answer`: an answer the decision cannot apply (`BAD_ANSWER`) |
+| `69` | `SUPERVISOR_UNREACHABLE`: the broker does not answer, or volleyd is silent. The command diagnosed why (internet → private network → tunnel → broker → volleyd), printed `volleyd <command>: supervisor unreachable (<reason>): <cause>` and a `fix:` line, and submitted nothing; with `--json`, the `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }` object on stdout. `volleyd run` validates the file first, as always. The reasons and their texts: the CLI's [When the supervisor does not answer](../volley-cli/README.md#when-the-supervisor-does-not-answer); the `/volley-issues` skill relays the cause and fix and asks, never switching brokers (`packages/volley-issues/SKILL.md`) |
+| `124` | the daemon did not answer in time |
 
 ---
 

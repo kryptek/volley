@@ -51,6 +51,26 @@ describe("SetupWizard", () => {
     expect(calls.map((c) => c.op)).toEqual(["setup_plan"]);
   });
 
+  it("a step volleyd plans that the wizard does not show (network) leaves its five steps as they are", async () => {
+    const network = {
+      step: "network",
+      title: "Network",
+      found: ["Tailscale: not installed"],
+      changes: [{ summary: "Install Tailscale (brew install --cask tailscale)" }],
+      plan_id: "network-1",
+      network: { planned: "tailscale", current: null },
+    };
+    const steps = [...PLAN.steps.slice(0, 3), network, ...PLAN.steps.slice(3)];
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: { ...PLAN, steps } }) });
+    wizard(ops);
+    await planned();
+    for (const [i, t] of ["Broker", "Security", "Accounts", "Services", "Phone"].entries()) {
+      expect(screen.getByLabelText(`Step ${i + 1}: ${t}`)).toBeInTheDocument();
+    }
+    expect(screen.queryByLabelText(/Step 6/)).toBeNull();
+    expect(screen.queryByText("Install Tailscale (brew install --cask tailscale)")).toBeNull();
+  });
+
   it("step 1 is the prototype's grid of what it found, and the promise", async () => {
     const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
     wizard(ops);

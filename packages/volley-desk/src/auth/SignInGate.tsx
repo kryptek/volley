@@ -66,6 +66,7 @@ import {
   type RedeemRequest,
   type RedeemResult,
   deviceLabel,
+  dropFragment,
   markFirstRun,
   parseToken,
   redeemToken,
@@ -158,16 +159,6 @@ export interface SignInGateProps {
    * per page load. Not fetched when the prop or `VITE_VOLLEY_BROKER_URL` names the broker.
    */
   loadConfig?: () => Promise<ServedDeskConfig | null>;
-}
-
-/** Strip the fragment (the single-use token) from the address bar and the history entry. */
-function dropFragment(): void {
-  try {
-    const { pathname, search } = window.location;
-    window.history.replaceState(window.history.state, "", `${pathname}${search}`);
-  } catch {
-    // No history API: the token is burned on use anyway.
-  }
 }
 
 export function SignInGate({

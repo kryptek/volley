@@ -21,6 +21,10 @@
  * volleyd cannot see it) offers **Send to mailbox**: the same answer as a mailbox message to the
  * session, which reads it at its next turn.
  *
+ * A notice (SPEC §4.6.18: volleyd telling the owner something, such as the coordinator's new link)
+ * offers **Open**, its `pointers.link` in a new tab that also answers `open`, and **Dismiss**
+ * (`dismiss`); it never blocks a wave.
+ *
  * A group of identical decisions (`inboxGroups.ts`, #417) is one row for its `members`: a `×N`
  * chip, an `N tasks waiting · …` line, and every answer, hold or release fans out to each member
  * in turn (each its own `inbox_answer` with its own version). A member answered elsewhere is
@@ -275,7 +279,34 @@ export function InboxRow(p: InboxRowProps) {
     ) : (
       <>
         <fieldset className="inbox-options" aria-label="Answers">
-          {(item.options ?? []).map((o, i) => (
+          {item.kind === "notice" && item.pointers.link && (
+            <a
+              className={`coord-btn ${btn}`}
+              href={item.pointers.link}
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-disabled={busy}
+              onClick={(e) => {
+                // A second click while the first `open` is in flight would be refused as stale.
+                if (busy) e.preventDefault();
+                else void send("open");
+              }}
+            >
+              Open
+            </a>
+          )}
+          {item.kind === "notice" && (
+            <SpecularButton
+              size="sm"
+              className={btn}
+              disabled={busy}
+              aria-label="Dismiss"
+              onClick={() => void send("dismiss")}
+            >
+              Dismiss
+            </SpecularButton>
+          )}
+          {(item.kind === "notice" ? [] : (item.options ?? [])).map((o, i) => (
             <SpecularButton
               key={`${i}:${o.label}`}
               size="sm"

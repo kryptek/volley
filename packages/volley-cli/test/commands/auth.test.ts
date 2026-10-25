@@ -96,6 +96,82 @@ describe("volley auth", () => {
       expect(r.stdout).toContain("brew services restart mosquitto");
     });
 
+    describe("the snap layout's auth dir", () => {
+      const snapDeps = (invoker: ReturnType<TestDeps["invokingUser"]>) => {
+        layout = { ...layout, name: "snap" };
+        const deps = fakeDeps(fake, layout);
+        deps.invokingUser = () => invoker;
+        return deps;
+      };
+      const authFiles = () => [
+        authDir,
+        join(authDir, "admin.json"),
+        join(authDir, "coordinator.json"),
+      ];
+
+      it("under sudo: the dir, admin.json and coordinator.json go to the invoking user", async () => {
+        const deps = snapDeps({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+        const r = await run(["init", "--coordinator-file"], deps);
+        expect(r.code).toBe(0);
+        for (const p of authFiles()) expect(deps.chowns).toContainEqual([p, 1234, 5678]);
+        // mosquitto's own file stays root's.
+        expect(deps.chowns.map((c) => c[0])).not.toContain(layout.stateFile);
+        expect(statSync(authDir).mode & 0o777).toBe(0o700);
+        expect(statSync(join(authDir, "coordinator.json")).mode & 0o777).toBe(0o600);
+      });
+
+      it("under sudo: an account command hands back the registries it rewrote", async () => {
+        const deps = snapDeps({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+        expect((await run(["init"], deps)).code).toBe(0);
+        deps.chowns.length = 0;
+        expect((await run(["add", "tablet", "--role", "watch"], deps)).code).toBe(0);
+        expect(deps.chowns).toContainEqual([authDir, 1234, 5678]);
+        expect(deps.chowns).toContainEqual([join(authDir, "accounts.json"), 1234, 5678]);
+      });
+
+      it("under sudo: an auth dir that holds mosquitto's own files is not handed over", async () => {
+        const deps = snapDeps({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+        const env = { VOLLEYD_HOME: join(dir, "volleyd-home"), VOLLEY_AUTH_DIR: dir };
+        expect((await run(["init"], deps, env)).code).toBe(0);
+        const chowned = deps.chowns.map((c) => c[0]);
+        expect(chowned).not.toContain(layout.config);
+        expect(chowned).not.toContain(layout.stateFile);
+        expect(chowned).not.toContain(dir);
+      });
+
+      it("under sudo: a handover that fails warns and keeps the command's exit code", async () => {
+        const deps = snapDeps({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+        expect((await run(["init"], deps)).code).toBe(0);
+        deps.chown = (path) => {
+          if (path.endsWith("accounts.json")) throw new Error(`EPERM: chown '${path}'`);
+        };
+        const r = await run(["add", "tablet", "--role", "watch"], deps);
+        expect(r.code).toBe(0);
+        expect(r.stderr).toContain("could not give");
+        expect(r.stderr).toContain("EPERM");
+      });
+
+      it.each([
+        ["as root with no sudo user", "root"],
+        ["without sudo", null],
+      ] as const)("%s: they stay as written", async (_label, invoker) => {
+        const deps = snapDeps(invoker);
+        const r = await run(["init", "--coordinator-file"], deps);
+        expect(r.code).toBe(0);
+        const chowned = deps.chowns.map((c) => c[0]);
+        for (const p of authFiles()) expect(chowned).not.toContain(p);
+      });
+
+      it("another layout under sudo keeps its auth dir root's", async () => {
+        const deps = fakeDeps(fake, layout);
+        deps.invokingUser = () => ({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+        const r = await run(["init", "--coordinator-file"], deps);
+        expect(r.code).toBe(0);
+        const chowned = deps.chowns.map((c) => c[0]);
+        for (const p of authFiles()) expect(chowned).not.toContain(p);
+      });
+    });
+
     it("keeps the WebSocket listener open to the LAN when `volley setup --lan` opened it", async () => {
       const lan = generateConfig({
         ...layout,
@@ -709,6 +785,47 @@ describe("volley auth", () => {
         const r = await run(["token"], deps);
         expect(r.stdout).toContain(`http://localhost:5288/#signin=${TOKEN}`);
         expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
+      });
+
+      it("with the Desk on the private network, token and signin-link print its HTTPS link first", async () => {
+        const deps = await initDeps();
+        const home = join(dir, "volleyd-home");
+        mkdirSync(home, { recursive: true });
+        writeFileSync(
+          join(home, "setup.json"),
+          JSON.stringify({
+            layout: "etc",
+            config: "/c/mosquitto.conf",
+            state_file: "/c/dynsec.json",
+            auth_dir: authDir,
+            desk_host: "192.0.2.7",
+            desk_port: 5288,
+            desk_private_url: "https://studio.example.ts.net",
+          }),
+        );
+        const r = await run(["token"], deps);
+        const lines = r.stdout.split("\n");
+        const at = (s: string) => lines.findIndex((l) => l.includes(s));
+        expect(r.stdout).toContain(
+          `On your private network: https://studio.example.ts.net/#signin=${TOKEN}`,
+        );
+        expect(at("On your private network")).toBeLessThan(at("on this machine"));
+        expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
+        const s = await run(["signin-link", "--role", "steer", "--label", "phone"], deps);
+        const token = /vly_signin_[0-9a-f]{8}_[0-9a-f]{32}/.exec(s.stdout)?.[0] as string;
+        const url = `https://studio.example.ts.net/#signin=${token}`;
+        expect(s.stdout).toContain(`  ${url}\n`);
+        expect(s.stdout).toContain(renderQr(encodeQr(url)));
+        expect(s.stdout).toContain(`On your LAN: http://192.0.2.7:5288/#signin=${token}`);
+        // Without a recorded LAN address there is no LAN link to give (never localhost as "LAN").
+        const { desk_host: _lan, ...rec } = JSON.parse(
+          readFileSync(join(home, "setup.json"), "utf-8"),
+        );
+        writeFileSync(join(home, "setup.json"), JSON.stringify(rec));
+        const t = await run(["signin-link", "--role", "steer", "--label", "tablet"], deps);
+        expect(t.stdout).toContain("  https://studio.example.ts.net/#signin=vly_signin_");
+        expect(t.stdout).not.toContain("On your LAN");
+        expect(t.stdout).not.toContain("localhost");
       });
 
       it("signin-link prints the ready-to-open link on setup's LAN address, and its QR code", async () => {

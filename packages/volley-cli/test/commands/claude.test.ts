@@ -749,7 +749,8 @@ describe("volley claude", () => {
     expect((await run(["add"])).exitCode).toBe(2);
     expect((await run(["frob"])).exitCode).toBe(2);
     const r = await run(["list"]);
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("volleyd is not running");
+    expect(r.exitCode).toBe(69);
+    expect(r.stderr).toContain("volley claude: supervisor unreachable (daemon_silent): ");
+    expect(r.stderr).toContain("volleyd is silent in namespace 'test'");
   });
 });

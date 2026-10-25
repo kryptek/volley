@@ -1,9 +1,10 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
 import { withoutLogin } from "../peer/profile-checks";
 import { parseBrokerHost } from "./desk-build";
+import { type NetworkKind, isNetworkKind } from "./network";
 import type { SetupContext, StepName } from "./step";
 import {
   type CmuxSocketMode,
@@ -107,6 +108,83 @@ export interface SetupInstall {
    * `volley desk serve --broker-host <it>` (set by `volley desk install --broker-host`).
    */
   broker_host?: string;
+  /**
+   * How this machine is reached from outside its network (the Network step): the kind, and for
+   * `tailscale` its MagicDNS name and tailnet IPv4 address, for `manual` the VPN's address.
+   */
+  network?: NetworkRecord;
+  /**
+   * The Desk's address on the private network (`https://<name>`, `tailscale serve`): where links
+   * and the roles record's `desk.url` point when it is set. `volley desk install --tailscale` and
+   * the Services step write it.
+   */
+  desk_private_url?: string;
+}
+
+/** An `https://` URL with a host and nothing after it, or null. */
+const privateUrlOf = (v: unknown): string | null =>
+  typeof v === "string" && /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(v) ? v : null;
+
+/** setup.json's `desk_private_url`, read on its own like `broker_host`; null when there is none. */
+export function readDeskPrivateUrl(volleydHome: string): string | null {
+  return privateUrlOf(rawInstall(volleydHome).desk_private_url);
+}
+
+/** The Desk's private address for `ctx`: the planner's (null: none), else the record's. */
+const deskPrivateUrl = (ctx: SetupContext): string | null =>
+  ctx.deskPrivateUrl !== undefined ? ctx.deskPrivateUrl : readDeskPrivateUrl(ctx.volleydHome);
+
+/** setup.json's `network` (SPEC §4.6.14 carries the same object in the machine record). */
+export interface NetworkRecord {
+  kind: NetworkKind;
+  name?: string;
+  address?: string;
+}
+
+/** A `network` object as setup.json has it, or null when it is not one. */
+export function parseNetworkRecord(v: unknown): NetworkRecord | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  if (!isNetworkKind(r.kind)) return null;
+  const str = (k: string) => (typeof r[k] === "string" && r[k] !== "" ? (r[k] as string) : null);
+  if (r.kind === "none") return { kind: "none" };
+  return {
+    kind: r.kind,
+    ...(str("name") !== null ? { name: str("name") as string } : {}),
+    ...(str("address") !== null ? { address: str("address") as string } : {}),
+  };
+}
+
+/**
+ * setup.json's `network`, read on its own like `broker_host`: a paired machine's setup.json holds
+ * little else (`volley setup --peer` writes no install record). Null when there is none.
+ */
+export function readNetworkRecord(volleydHome: string): NetworkRecord | null {
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as {
+      network?: unknown;
+    };
+    return parseNetworkRecord(v.network);
+  } catch {
+    return null;
+  }
+}
+
+/** Record `network` in setup.json, keeping every other key (a machine without one gets one). */
+export function recordNetwork(ctx: SetupContext, network: NetworkRecord): void {
+  saveInstall(ctx, { ...rawInstall(ctx.volleydHome), network });
+}
+
+/** setup.json as an object, whatever it holds; empty when there is none or it is unreadable. */
+function rawInstall(volleydHome: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as unknown;
+    if (typeof v === "object" && v !== null && !Array.isArray(v))
+      return v as Record<string, unknown>;
+  } catch {
+    // none yet, or unreadable
+  }
+  return {};
 }
 
 /** The namespace the coordinator's MCP server registers in. */
@@ -127,7 +205,10 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
   // And a run that skipped the Terminal step keeps its choice; and the coordinator's name.
   const terminal = ctx.terminal ?? prior?.terminal;
   const coordinator = ctx.coordinator ?? prior?.coordinator;
+  // The Network step's record, read on its own: it may be all a fresh run's setup.json holds yet.
+  const network = ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome);
   const brokerHost = deskBrokerHost(ctx);
+  const privateUrl = deskPrivateUrl(ctx);
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -149,8 +230,11 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
         ? { metrics: prior.metrics }
         : {}),
     ...(brokerHost !== null ? { broker_host: brokerHost } : {}),
+    ...(network !== null ? { network } : {}),
+    ...(privateUrl !== null ? { desk_private_url: privateUrl } : {}),
   };
   saveInstall(ctx, install);
+  recordRolesDesk(ctx, deskLanUrl(ctx, ctx.deskHost, ctx.deskPort), privateUrl);
 }
 
 /**
@@ -210,19 +294,88 @@ export function recordDeskInstall(
   ctx: SetupContext,
   desk: { port: number; brokerHost: string | null },
 ): void {
-  let prior: Record<string, unknown> = {};
-  try {
-    const v = JSON.parse(readFileSync(setupInstallFile(ctx.volleydHome), "utf-8")) as unknown;
-    if (typeof v === "object" && v !== null && !Array.isArray(v)) prior = v as typeof prior;
-  } catch {
-    // none yet, or unreadable: start a record
-  }
-  const { broker_host: _old, ...rest } = prior;
+  const { broker_host: _old, desk_private_url: _url, ...rest } = rawInstall(ctx.volleydHome);
+  const privateUrl = deskPrivateUrl(ctx);
   saveInstall(ctx, {
     ...rest,
     desk_port: desk.port,
     ...(desk.brokerHost !== null ? { broker_host: desk.brokerHost } : {}),
+    ...(privateUrl !== null ? { desk_private_url: privateUrl } : {}),
   });
+  const host = typeof rest.desk_host === "string" ? rest.desk_host : ctx.deps.lanHost();
+  recordRolesDesk(ctx, deskLanUrl(ctx, host, desk.port), privateUrl);
+}
+
+/** `volley desk uninstall`: setup.json without `desk_private_url`, the roles record back on the LAN. */
+export function forgetDeskPrivateUrl(ctx: SetupContext): void {
+  const { desk_private_url: url, ...rest } = rawInstall(ctx.volleydHome);
+  if (url === undefined) return;
+  saveInstall(ctx, rest);
+  const host = typeof rest.desk_host === "string" ? rest.desk_host : ctx.deps.lanHost();
+  const port = typeof rest.desk_port === "number" ? rest.desk_port : ctx.deskPort;
+  recordRolesDesk(ctx, deskLanUrl(ctx, host, port), null);
+}
+
+/** The Desk's LAN address: `http://<host>:<port>` (a wildcard host: this machine's LAN address). */
+function deskLanUrl(ctx: SetupContext, host: string, port: number): string {
+  const h = host === "0.0.0.0" || host === "::" ? ctx.deps.lanHost() : host;
+  return `http://${h.includes(":") && !h.startsWith("[") ? `[${h}]` : h}:${port}`;
+}
+
+/**
+ * The machine roles record's Desk (`$VOLLEYD_HOME/roles.json`, SPEC §4.6.24) when it is this
+ * Desk (its `url` or `lan_url` is `lanUrl`, or its `url` is `privateUrl`): `url` the private
+ * address with `lan_url` the LAN one, or back to the LAN address alone. One version on, written
+ * atomically; volleyd publishes it at its next start. A record, not a gate: no file (volleyd
+ * writes it on its first start, from setup.json), another machine's Desk, or an unreadable file
+ * is left alone.
+ */
+export function recordRolesDesk(
+  ctx: SetupContext,
+  lanUrl: string,
+  privateUrl: string | null,
+): void {
+  const file = join(ctx.volleydHome, "roles.json");
+  try {
+    const r = JSON.parse(readFileSync(file, "utf-8")) as {
+      desk?: { machine?: unknown; url?: unknown; lan_url?: unknown };
+      version?: unknown;
+    };
+    const d = r.desk;
+    if (typeof d !== "object" || d === null || typeof r.version !== "number") return;
+    const ours =
+      d.url === lanUrl || d.lan_url === lanUrl || (privateUrl !== null && d.url === privateUrl);
+    if (!ours) return;
+    const desk =
+      privateUrl !== null
+        ? { machine: d.machine, url: privateUrl, lan_url: lanUrl }
+        : { machine: d.machine, url: lanUrl };
+    if (d.url === desk.url && d.lan_url === (privateUrl !== null ? lanUrl : undefined)) return;
+    const tmp = `${file}.tmp`;
+    writeFileSync(
+      tmp,
+      `${JSON.stringify(
+        {
+          ...r,
+          desk,
+          version: r.version + 1,
+          updated_at: ctx.auth.io.now().toISOString(),
+          updated_by: "volley-cli",
+        },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+    renameSync(tmp, file);
+    // Under sudo it stays the invoking user's, like the rest of $VOLLEYD_HOME (volleyd writes it).
+    const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
+    if (typeof invoker === "object" && invoker !== null) {
+      ctx.auth.deps.chown(file, invoker.uid, invoker.gid);
+    }
+  } catch {
+    // A record, not a gate.
+  }
 }
 
 function saveInstall(ctx: SetupContext, install: SetupInstall | Record<string, unknown>): void {
@@ -276,6 +429,12 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
       ...(str("metrics") !== null ? { metrics: str("metrics") as string } : {}),
       ...(str("broker_host") !== null && parseBrokerHost(str("broker_host") as string) !== null
         ? { broker_host: parseBrokerHost(str("broker_host") as string) as string }
+        : {}),
+      ...(parseNetworkRecord(v.network) !== null
+        ? { network: parseNetworkRecord(v.network) as NetworkRecord }
+        : {}),
+      ...(privateUrlOf(v.desk_private_url) !== null
+        ? { desk_private_url: privateUrlOf(v.desk_private_url) as string }
         : {}),
     };
   } catch {

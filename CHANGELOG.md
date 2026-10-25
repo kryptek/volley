@@ -2,6 +2,91 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.13.0 — 2026-10-25
+
+### Added
+
+- **volley-desk: the Getting started wizard's art.** Seven vector cartoon scenes of Volley's otter
+  raft (the Welcome toss animated, reduced motion respected), behind an asset map
+  (`public/getting-started/art.json`) that can name raster files later without a code change. (#565)
+- **volley-cli, volleyd: the Network step.** `volley setup --network tailscale|manual|none` installs
+  Tailscale (the default), records this machine's private name and address in setup.json and the
+  machine record, adds the `network.private` doctor row, and runs as a Desk setup step
+  (`setup_plan`/`setup_apply`). Your own VPN is the `manual` option; nothing is ever exposed
+  publicly. `install.sh --network tailscale` installs the Tailscale package on Linux with the
+  other packages, and `volley peer list` shows each machine's kind. (#566)
+- **volleyd: the coordinator role.** volleyd keeps a `claude remote-control` server alive on the
+  machine `coordinator.machine` names (a paired machine through its tunnel, or this one), in a
+  fixed directory under a fence-sealed script, restarting it with backoff, publishing its state
+  and link on `volley/_system/federation/coordinator`; a laptop is refused by default;
+  `volley coordinator status|open|restart|stop`. (#567)
+- **volley-desk: Getting started.** A first-launch wizard (Welcome → This computer → Your machines → Repos → People → Access → You're good to go!) opens after the admin sign-in until it is finished or skipped, is re-runnable from Settings › Setup & Security, and shows what each step changes before applying it. (#568)
+- **volley-cli, volley-desk: the Desk on your private network.** `volley desk install --tailscale`
+  serves the Desk and the broker's WebSocket listener over HTTPS at the machine's Tailscale name
+  (two loopback-only `tailscale serve` targets, never Funnel; `volley desk uninstall` takes off
+  only those two), and `volley setup`'s Services step plans the same when the Network step
+  recorded Tailscale. `/desk-config.json` carries `ws_url` (`volley desk serve --ws-url`), which
+  the page opens over HTTPS; setup.json records `desk_private_url`, the roles record's `desk.url`
+  becomes the private address with the LAN one in `desk.lan_url`, and `volley setup`'s end,
+  `volley auth token`, `volley auth signin-link` and `volley role status` show it. volley-sim's
+  fake `tailscale` answers `serve`. The private network serves only this machine's broker, so
+  `--tailscale` refuses a Desk that names a broker on another machine (`--broker-host`), and
+  setup leaves that Desk on the LAN; Tailscale briefly not answering keeps the recorded private
+  address. (#569)
+- **volley-desk, volleyd: finding the coordinator.** An Open coordinator button in the Desk, a
+  Coordinator card in Settings › Machines (pick the machine, laptops refused by default, Restart),
+  an owner-only `notice` inbox item pushed to the phone when the coordinator's link changes or it
+  stops, and a handoff text volleyd puts into a fresh coordinator session's first turn (running
+  waves, open items, the previous session). (#570)
+- **volley-cli, volleyd: unreachable-supervisor diagnosis.** When the broker does not answer, every
+  command probes internet → private network → tunnel → broker → volleyd, prints the exact cause
+  and fix, submits nothing and exits 69 `SUPERVISOR_UNREACHABLE` (`--json` carries the reason; a
+  silent volleyd names the namespace asked, so a wrong `--namespace` shows); `volley peer doctor`
+  gains the reach rows; the `/volley-issues` skill relays the reason and asks instead of
+  switching. Supersedes #244. (#571)
+- **volley-desk: Getting started › This computer and Your machines.** Install checks and versions
+  from the machine record, the setup steps' plans with Apply, naming this computer
+  (`fleet.local_name`), the paired machines, and adding one by pairing code, SSH key or a username
+  and password that is exchanged for a key. (#572)
+- **volley-desk: Getting started › Repos and People.** GitHub sign-in status, adding a repository
+  from a slug or from a folder on a paired machine (validated by `repo_probe`), the people table,
+  and invite links by role (Superuser = admin token, Standard = steer link, Viewer = watch link).
+  (#573)
+- **volley-desk: Getting started › Access and You're good to go.** The private-network choice
+  (Tailscale, your own VPN, this network only) applied through setup's Network step, the
+  coordinator's always-on machine, the summary, and the two lines that add a computer with a
+  fresh pairing code. (#574)
+
+### Fixed
+
+- **install.sh: a fresh Ubuntu or Debian gets a broker.** snapd is detected when socket-activated
+  (fresh cloud images), snapd is installed with apt when the `snap` command is missing (Debian 13),
+  and the install stops with exit 1 and the exact fix, before cloning Volley, instead of saying
+  "Volley is installed" when no mosquitto 2.1 can be put on the machine (a `snap` command whose
+  snapd is not running is named, with `sudo systemctl enable --now snapd.socket`). A broker you
+  run in a container gets past the stop with `--broker container`: mosquitto is neither installed
+  nor checked, and `volley setup --layout container` runs. (#577)
+- **install tests: Layers 2 and 4 launch on a snap multipass.** VM names are valid instance names
+  (`volley-it-<id>-ubuntu-24-04`), the run's key and cloud-init live under `VM_OUT` (never `/tmp`),
+  a snap multipass refuses an unreadable `VM_OUT` up front, and the nightly's new `report` job
+  comments on the tracking issue when a job fails or never starts. (#577)
+- **volley-cli: setup finds the mosquitto snap's broker.** The snap's broker is a service with no
+  `/snap/bin/mosquitto`, so the Broker step reads its version from `snap list mosquitto` instead of
+  stopping at "no mosquitto found"; the snap layout runs `/snap/bin/mosquitto.ctrl` by its path
+  (under sudo on Debian `/snap/bin` is not on PATH). (#577)
+- **volley-cli: on the snap layout, `sudo volley setup` gives the Volley auth dir to you.**
+  `/var/snap/mosquitto/common/volley` (0700) and its files (`admin.json`, `coordinator.json`, the
+  account and token registries; 0600) go to the sudo user, as `~/.volley/volleyd/dynsec-admin.json` already does, so the documented
+  second run (`volley setup` as yourself) no longer blocks at Security and your CLIs read the
+  coordinator's login. mosquitto's `dynamic-security.json` and `mosquitto.conf` stay root's (an
+  auth dir that holds them is not handed over), and a handover that fails is a warning, not the
+  command's exit code. (#577)
+
+### Docs
+
+- docs: the v0.13 owner smoke (Getting started, reach from anywhere, the coordinator from a phone)
+  and the docs sweep for the Getting started wizard and the coordinator role. (#575)
+
 ## 0.12.1 — 2026-10-24
 
 ### Fixed

@@ -51,6 +51,46 @@ describe("setupFence", () => {
     expect(() => fence(argv)).toThrow(/volley setup does not run/);
   });
 
+  it.each([
+    [["tailscale", "version"]],
+    [["tailscale", "status", "--json"]],
+    [["tailscale", "ip", "-4"]],
+    [["tailscale", "up"]],
+    [["sudo", "tailscale", "up"]],
+    [["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json"]],
+    [["brew", "install", "--cask", "tailscale"]],
+    [["tailscale", "serve", "status", "--json"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:9001"]],
+    [["sudo", "tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5300"]],
+    [["tailscale", "serve", "--https=443", "off"]],
+    [["sudo", "tailscale", "serve", "--https=8443", "off"]],
+  ])("allows the Network step's and the Desk serve's %j", (argv) => {
+    expect(() => fence(argv)).not.toThrow();
+  });
+
+  it.each([
+    [["tailscale", "funnel", "443"]],
+    [["tailscale", "funnel", "--bg", "5199"]],
+    [["tailscale", "serve", "5199"]],
+    [["tailscale", "serve", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "serve", "reset"]],
+    [["sudo", "tailscale", "serve", "reset"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://0.0.0.0:5199"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://192.0.2.10:5199"]],
+    [["tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:1883"]],
+    [["tailscale", "funnel", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["sudo", "tailscale", "funnel", "--bg", "http://127.0.0.1:5199"]],
+    [["tailscale", "up", "--ssh"]],
+    [["sudo", "tailscale", "up", "--ssh"]],
+    [["sudo", "tailscale", "funnel", "443"]],
+    [["tailscale", "status"]],
+    [["/usr/local/bin/tailscale-evil", "up"]],
+    [["brew", "install", "--cask", "tailscale", "--force"]],
+  ])("refuses Tailscale's %j", (argv) => {
+    expect(() => fence(argv)).toThrow(/volley setup does not run/);
+  });
+
   it("allows nothing of the checkout's when there is none", () => {
     const bare = setupFence({
       restart: "sudo systemctl restart mosquitto",

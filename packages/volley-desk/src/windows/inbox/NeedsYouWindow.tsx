@@ -133,6 +133,12 @@ function usePins(present: readonly string[]) {
   return { list, pin };
 }
 
+/**
+ * One opening of an item: a notice's fixed id is opened again once answered (SPEC §4.6.18), and
+ * that is a new row, not the old one's answered state or Dismiss.
+ */
+const openingKey = (i: InboxItem) => `${i.id}@${i.opened_at}`;
+
 export function NeedsYouWindow(p: NeedsYouWindowProps) {
   usePanelSound();
   const id = useId();
@@ -146,9 +152,9 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
     ...leaving.map((item) => ({ item, leaving: true })),
   ].sort((a, b) => a.item.opened_at.localeCompare(b.item.opened_at));
   const shown = all.filter(
-    (r) => !dismissed.has(r.item.id) && matchesFilter(r.item, filter, tier(r.item)),
+    (r) => !dismissed.has(openingKey(r.item)) && matchesFilter(r.item, filter, tier(r.item)),
   );
-  const dismissedCount = p.items.filter((i) => dismissed.has(i.id)).length;
+  const dismissedCount = p.items.filter((i) => dismissed.has(openingKey(i))).length;
   const pins = usePins(all.map((r) => r.item.id));
   const pinned = new Set(pins.list.flat());
   const gone = new Set(leaving.map((i) => i.id));
@@ -206,7 +212,7 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
             <ul className="inbox-list">
               {groups.map(({ lead: item, members, leaving: gone }) => (
                 <InboxRow
-                  key={item.id}
+                  key={openingKey(item)}
                   item={item}
                   {...(members.length > 1 ? { members } : {})}
                   needsYou={members.some((m) => needsPerson(m, tier(m)))}
@@ -225,9 +231,7 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
                   onGoTo={p.onGoTo && (() => p.onGoTo?.(item))}
                   onShow={p.onShow && (() => p.onShow?.(item))}
                   onFanOut={() => pins.pin(members.map((m) => m.id))}
-                  onDismiss={() =>
-                    setDismissed((d) => new Set([...d, ...members.map((m) => m.id)]))
-                  }
+                  onDismiss={() => setDismissed((d) => new Set([...d, ...members.map(openingKey)]))}
                 />
               ))}
             </ul>

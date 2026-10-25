@@ -62,6 +62,10 @@ export interface MachineRecord {
   memory?: { total_mb: number; available_pct: number };
   disk?: { path: string; free_gb: number; free_pct: number };
   uptime_s?: number;
+  /** A battery is present (`isLaptop`): it sleeps and travels (SPEC §4.6.25). */
+  laptop?: boolean;
+  /** How the machine is reached from outside its network: its setup.json's record (SPEC §4.6.14). */
+  network?: { kind: "tailscale" | "manual" | "none"; name?: string; address?: string };
   versions?: {
     peer: string | null;
     volley: string | null;

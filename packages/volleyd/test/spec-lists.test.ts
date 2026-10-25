@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { INBOX_ID, INBOX_KINDS } from "../src/autopilot/inbox";
 import { DECISION_KINDS } from "../src/decisions";
 import { WAVE_EVENT_TYPES } from "../src/types";
 
@@ -20,6 +21,14 @@ describe("the daemon's enums match the schemas", () => {
   it("DECISION_KINDS is decision.schema.json's payload.kind enum", () => {
     const schema = json("decision.schema.json").allOf[1].properties.payload.properties.kind.enum;
     expect([...DECISION_KINDS].sort()).toEqual([...schema].sort());
+  });
+
+  it("INBOX_KINDS is inbox-item.schema.json's payload.kind enum; INBOX_ID its id pattern", () => {
+    const payload = json("inbox-item.schema.json").allOf[1].properties.payload.properties;
+    expect([...INBOX_KINDS].sort()).toEqual([...payload.kind.enum].sort());
+    expect(INBOX_ID.source).toBe(payload.id.pattern);
+    expect(INBOX_KINDS).toContain("notice");
+    expect(INBOX_ID.test("n-coordinator-link")).toBe(true);
   });
 });
 

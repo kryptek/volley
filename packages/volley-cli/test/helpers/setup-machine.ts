@@ -14,6 +14,7 @@ import { LAYOUTS, type Layout } from "../../src/auth/config";
 import type { AuthContext } from "../../src/auth/context";
 import { type BufferIO, makeBufferIO } from "../../src/io";
 import type { WaveView } from "../../src/setup/first-wave";
+import { TAILSCALE_APP_CLI } from "../../src/setup/network";
 import type {
   AnonymousProbe,
   ExecResult,
@@ -106,6 +107,23 @@ export interface FakeMachine {
   claudeJson: string;
   /** The test wave's world: GitHub's answers, the clone's origin, the wave states read in turn. */
   firstWave: FirstWaveWorld;
+  /**
+   * Tailscale on the fake machine: installed (`brew install --cask tailscale` installs it), its
+   * backend state, the MagicDNS name and addresses `status --json` reports, and what `up` prints.
+   * `tailscale up` signs it in (state Running) unless `upCode` is not 0.
+   */
+  tailscale: {
+    installed: boolean;
+    state: string;
+    name: string;
+    ips: string[];
+    url: string;
+    upCode: number;
+    /** `tailscale serve`'s config: each HTTPS port → its root proxy (`serve status --json`). */
+    serves: Map<number, string>;
+  };
+  /** The machine's interfaces (`deps.interfaces`). */
+  interfaces: Record<string, { address: string; family: "IPv4" | "IPv6"; internal: boolean }[]>;
   /** The fake clock (`deps.now`): `sleep` advances it. */
   clock: number;
 }
@@ -172,6 +190,19 @@ export function fakeMachine(
     keychain: new Map(),
     // tmux in /usr/bin: the Terminal step finds a terminal (a test deletes it to see it block).
     present: new Set(["/usr/bin/tmux"]),
+    tailscale: {
+      installed: false,
+      state: "NoState",
+      name: "studio.example.ts.net.",
+      ips: ["100.64.0.2", "fd7a:115c:a1e0::2"],
+      url: "https://login.tailscale.com/a/0123abcd",
+      upCode: 0,
+      serves: new Map(),
+    },
+    interfaces: {
+      lo0: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+      en0: [{ address: "192.0.2.10", family: "IPv4", internal: false }],
+    },
     claude: { installed: true, signedIn: true, plan: "max" },
     gh: { installed: true, signedIn: true, login: "octo-volley" },
     typed: [],
@@ -244,6 +275,64 @@ export function fakeMachine(
       );
     }
     if (a[0] === "bun" && a[1] === volleydCli && a[2] === "validate") return ok();
+    // Tailscale (setup/network.ts): the CLI on PATH, or the macOS app's, or `sudo` on Linux.
+    const ts = a[0] === "sudo" ? a.slice(1) : a;
+    if (ts[0] === "tailscale" || ts[0] === TAILSCALE_APP_CLI) {
+      const t = m.tailscale;
+      if (!t.installed) return { code: 127, stdout: "", stderr: `${ts[0]}: not found` };
+      const sub = ts.slice(1).join(" ");
+      if (sub === "version") return ok("1.76.1\n  tailscale commit: 0123456789\n");
+      if (sub === "status --json") {
+        return ok(
+          JSON.stringify({
+            BackendState: t.state,
+            Self: t.state === "Running" ? { DNSName: t.name, TailscaleIPs: t.ips } : {},
+          }),
+        );
+      }
+      if (sub === "ip -4") return ok(`${t.ips[0]}\n`);
+      // The Desk on the tailnet (setup/tailscale-serve.ts), as Tailscale 1.76 answers.
+      const name = t.name.replace(/\.$/, "");
+      if (sub === "serve status --json") {
+        if (t.serves.size === 0) return ok("{}\n");
+        return ok(
+          JSON.stringify({
+            TCP: Object.fromEntries([...t.serves.keys()].map((p) => [String(p), { HTTPS: true }])),
+            Web: Object.fromEntries(
+              [...t.serves].map(([p, proxy]) => [
+                `${name}:${p}`,
+                { Handlers: { "/": { Proxy: proxy } } },
+              ]),
+            ),
+          }),
+        );
+      }
+      const on = /^serve --bg --https=(\d+) (\S+)$/.exec(sub);
+      if (on !== null) {
+        t.serves.set(Number(on[1]), on[2] as string);
+        return ok(
+          `Available within your tailnet:\n\nhttps://${name}:${on[1]}/\n|-- proxy ${on[2]}\n`,
+        );
+      }
+      const off = /^serve --https=(\d+) off$/.exec(sub);
+      if (off !== null) {
+        t.serves.delete(Number(off[1]));
+        return ok();
+      }
+      if (sub === "up") {
+        if (t.upCode === 0) t.state = "Running";
+        return {
+          code: t.upCode,
+          stdout: "",
+          stderr: `\nTo authenticate, visit:\n\n\t${t.url}\n\n`,
+        };
+      }
+    }
+    if (line === "brew install --cask tailscale") {
+      m.tailscale.installed = true;
+      m.tailscale.state = "NeedsLogin";
+      return ok();
+    }
     if (a[0] === "bun" && a[1] === volleydCli && a[2] === "run") {
       // The daemon takes a second submit of a wave id as a new version of that wave, which an
       // ended wave refuses: the step must give every run its own id.
@@ -434,6 +523,8 @@ export function fakeMachine(
     repoRoot: repo,
     bun: "bun",
     exists: (p) => (p === dir || p.startsWith(`${dir}/`) ? existsSync(p) : m.present.has(p)),
+    interfaces: () => m.interfaces,
+    resolveHost: async (host) => (host === "vpn.example.net" ? ["198.51.100.7"] : []),
   };
   const authCtx: AuthContext = {
     dir: layout.authDir,

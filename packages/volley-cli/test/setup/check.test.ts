@@ -17,12 +17,14 @@ const READ_ONLY = (a: string[]) =>
   a[0] === "ss" ||
   (a[0] === "claude" && a[1] === "auth" && a[2] === "status") ||
   (a[0] === "gh" && a[1] === "auth" && a[2] === "status") ||
-  (a[0] === "gh" && a[1] === "api" && a[2] === "user");
+  (a[0] === "gh" && a[1] === "api" && a[2] === "user") ||
+  (a[0] === "tailscale" && (a[1] === "version" || a[1] === "status"));
 
 const STEP_NAMES = [
   "detect",
   "security",
   "accounts",
+  "network",
   "signin",
   "claude-code",
   "terminal",
@@ -82,12 +84,42 @@ describe("volley setup --check", () => {
     expect(() => readFileSync(join(m.ctx.volleydHome, "setup-metrics.json"))).toThrow();
   });
 
+  it("the Network row: none after --yes; pending, then done with tailscale: <name> (<address>)", async () => {
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    expect((await run(["--check"])).stdout).toMatch(/✓ Network +done\n {6}none\n/);
+    m.tailscale.installed = true;
+    m.tailscale.state = "Running";
+    const pending = await run(["--check", "--network", "tailscale"]);
+    expect(pending.stdout).toMatch(/→ Network +pending/);
+    expect(pending.stdout).toContain(
+      "      → Record this machine's private address in setup.json (tailscale: studio.example.ts.net, 100.64.0.2)",
+    );
+    const calls = m.execCalls.length;
+    expect((await run(["--yes", "--network", "tailscale", "--step", "network"])).code).toBe(0);
+    // Running already: nothing installed, nothing signed in.
+    expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
+    const done = await run(["--check"]);
+    expect(done.stdout).toMatch(
+      /✓ Network +done\n {6}tailscale: studio\.example\.ts\.net \(100\.64\.0\.2\)\n/,
+    );
+    // With the Tailscale record the Services step serves the Desk on the tailnet: pending until
+    // that step runs.
+    expect(done.stdout).toContain(
+      "      → Serve the Desk on your private network (https://studio.example.ts.net)",
+    );
+    expect(done.code).toBe(1);
+    expect((await run(["--yes", "--step", "services"])).code).toBe(0);
+    const served = await run(["--check"]);
+    expect(served.stdout).toContain("on your private network: https://studio.example.ts.net");
+    expect(served.code).toBe(0);
+  });
+
   it("after a --yes run every row is done and it exits 0", async () => {
     expect((await run(["--yes", "--lan"])).code).toBe(0);
     const calls = m.execCalls.length;
     const r = await run(["--check"]);
     expect(r.stdout).not.toContain("pending");
-    expect(r.stdout.match(/ done\n/g)).toHaveLength(9);
+    expect(r.stdout.match(/ done\n/g)).toHaveLength(10);
     expect(r.stdout).toContain("Nothing is missing.");
     expect(r.code).toBe(0);
     expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);

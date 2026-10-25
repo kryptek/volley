@@ -24,10 +24,12 @@
  *
  * **Setup ops** (SPEC §4.6.10, `setup-result.schema.json`). The wizard
  * mirrors `volley setup`'s five steps (detect → security → accounts →
- * services → phone), and volleyd runs setup's own planners for it. They are
+ * services → phone), and volleyd runs setup's own planners for it; volleyd
+ * plans a sixth, `network` (after accounts: `network: { planned, current }`),
+ * which this parser keeps and the wizard leaves to its Access step. They are
  * admin ops, so they travel the account-op topic:
- * - `setup_plan { lan?, repair? }` plans every step fresh: what it found, the
- *   changes it would make (a change only a terminal can make carries
+ * - `setup_plan { lan?, network?, network_address?, repair? }` plans every
+ *   step fresh: what it found, the changes it would make (a change only a terminal can make carries
  *   `terminal: { reason, command }`), blocked / skipped, and a `plan_id` per
  *   step. `lan` feeds the security plan the way `--lan` / `--no-lan` do, and
  *   the security step reports the choice it planned for (`lan: { planned,
@@ -94,6 +96,21 @@ export function parseToken(token: string): { kind: "admin" | "signin"; id: strin
 export function signinTokenFromHash(hash: string): string | null {
   const token = new URLSearchParams(hash.replace(/^#/, "")).get("signin");
   return token !== null && token !== "" ? token : null;
+}
+
+/** Whether the address bar asks for Getting started (`#getting-started`). */
+export function gettingStartedFromHash(hash: string): boolean {
+  return hash.replace(/^#/, "") === "getting-started";
+}
+
+/** Strip the fragment (a single-use token, `#getting-started`) from the address bar and history. */
+export function dropFragment(): void {
+  try {
+    const { pathname, search } = window.location;
+    window.history.replaceState(window.history.state, "", `${pathname}${search}`);
+  } catch {
+    // No history API: a token is burned on use anyway.
+  }
 }
 
 /** The link a sign-in token travels in: `<link_base>#signin=<token>` (SPEC §4.6.10). */
@@ -171,7 +188,10 @@ export function rememberRole(
 
 const FIRST_RUN_KEY = "volley-desk:first-run";
 
-/** An admin token was just redeemed: the Desk opens Settings › Setup & Security once. */
+/**
+ * An admin token was just redeemed: the Desk opens Getting started once (or, when this browser
+ * skipped it, Settings › Setup & Security).
+ */
 export function markFirstRun(storage: Pick<Storage, "setItem"> | null = session()): void {
   try {
     storage?.setItem(FIRST_RUN_KEY, "setup");
@@ -643,8 +663,15 @@ export function parseAccounts(result: unknown): BrokerAccount[] | null {
 
 // ----------------------------------------------------------------- setup ops
 
-/** `volley setup`'s five steps, in order (O3). */
-export const SETUP_STEPS = ["detect", "security", "accounts", "services", "phone"] as const;
+/** The steps volleyd plans, in order (O3; `network` after accounts, #566). */
+export const SETUP_STEPS = [
+  "detect",
+  "security",
+  "accounts",
+  "network",
+  "services",
+  "phone",
+] as const;
 export type SetupStepName = (typeof SETUP_STEPS)[number];
 
 /** A change volleyd will not make for the Desk, and the terminal command that makes it. */
@@ -682,7 +709,16 @@ export interface SetupStepPlan {
    * the layout leaves no choice (a container binds every interface).
    */
   lan?: { planned: boolean; current: boolean | null };
+  /**
+   * The network step's kind: what this plan was made for (`planned`) and setup.json's record
+   * now (`current`, null when there is none).
+   */
+  network?: { planned: NetworkKind; current: NetworkKind | null };
 }
+
+/** How a machine is reached from outside its network (`volley setup --network`). */
+export type NetworkKind = "tailscale" | "manual" | "none";
+const NETWORK_KINDS: readonly unknown[] = ["tailscale", "manual", "none"];
 
 export type AnonymousProbe = "refused" | "accepted" | "unreachable";
 
@@ -740,6 +776,7 @@ export function parseSetupPlan(result: unknown): SetupPlan | null {
           })
       : [];
     const lan = raw.lan as { planned?: unknown; current?: unknown } | undefined;
+    const network = raw.network as { planned?: unknown; current?: unknown } | undefined;
     const notes = strings(raw.notes).filter((n) => n !== "");
     steps.push({
       step: raw.step as SetupStepName,
@@ -755,6 +792,16 @@ export function parseSetupPlan(result: unknown): SetupPlan | null {
             lan: {
               planned: lan.planned,
               current: typeof lan.current === "boolean" ? lan.current : null,
+            },
+          }
+        : {}),
+      ...(NETWORK_KINDS.includes(network?.planned)
+        ? {
+            network: {
+              planned: network?.planned as NetworkKind,
+              current: NETWORK_KINDS.includes(network?.current)
+                ? (network?.current as NetworkKind)
+                : null,
             },
           }
         : {}),

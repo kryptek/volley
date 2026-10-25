@@ -55,6 +55,9 @@ import {
   useScreenSize,
   useViewport,
 } from "./canvas/useViewport";
+import { GettingStarted } from "./getting-started/GettingStarted";
+import { localStore, readProgress } from "./getting-started/state";
+import { decide, useGettingStarted } from "./getting-started/useGettingStarted";
 import {
   CGAP,
   type Cluster,
@@ -85,7 +88,11 @@ import { applyLookToDocument } from "./look/applyLook";
 import { progressBeat } from "./look/tetherPulses";
 import { themeById } from "./look/themes";
 import { useLook } from "./look/useLook";
-import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
+import {
+  type AttentionItem,
+  inboxNotification,
+  useNotifyOnAttention,
+} from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import {
   MOVE_ACCOUNT_TIMEOUT_MS,
@@ -97,6 +104,7 @@ import { agentsOnMachines, deskMovedTo, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
 import { ADMIN_ROLE, SettingsWindow } from "./settings/SettingsWindow";
+import { useAdminRole } from "./settings/Setup";
 import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import { type SectionKey, accountRole } from "./settings/sections";
@@ -119,7 +127,14 @@ import {
   resolveFields,
 } from "./store/claude";
 import { useDesk } from "./store/context";
-import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
+import {
+  createAuthOps,
+  deskUrl,
+  dropFragment,
+  gettingStartedFromHash,
+  readSessionRole,
+  takeFirstRun,
+} from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
 import {
   UNASSIGNED,
@@ -434,9 +449,23 @@ export default function App() {
   useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
   // main.tsx applied the stored theme before the first paint; a change applies live.
   useEffect(() => applyLookToDocument({ theme: look.theme, fx: look.fx }), [look.theme, look.fx]);
-  /** The Settings window's section while it is open; setup once after an admin token sign-in. */
+  /** An admin token was just redeemed (read once): Getting started, or Setup & Security, opens. */
+  const [firstRun] = useState(takeFirstRun);
+  /** `#getting-started` asked for Getting started (the fragment is dropped once read). */
+  const [gettingStartedHash] = useState(() => gettingStartedFromHash(window.location.hash));
+  useEffect(() => {
+    if (gettingStartedHash) dropFragment();
+  }, [gettingStartedHash]);
+  /**
+   * The Settings window's section while it is open. After an admin token sign-in it opens on
+   * Setup & Security when Getting started cannot open (demo) or this browser skipped it.
+   */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
-    takeFirstRun() ? "setup" : null,
+    firstRun &&
+    (demo ||
+      decide({ admin: true, firstRun, progress: readProgress(localStore()) }) === "settings-setup")
+      ? "setup"
+      : null,
   );
   /** The machine an agent window's machine chip asked Settings › Machines to show. */
   const [focusMachine, setFocusMachine] = useState<{ name: string; seq: number } | null>(null);
@@ -505,6 +534,21 @@ export default function App() {
     () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
     [authOps],
   );
+  /**
+   * A paired machine's Claude sign-in (volleyd's `primary@<name>`): on its card, in Add a
+   * machine's step 4 and in Getting started › Your machines.
+   */
+  const peerSignIn = control
+    ? (name: string) => (
+        <PeerSignin
+          machine={name}
+          signin={state.signins?.[peerAccount(name)]}
+          signedIn={state.machines?.[name]?.auth?.claude === "signed_in"}
+          control={control}
+          ops={peerOps}
+        />
+      )
+    : undefined;
   // The machine-role ops (SPEC §4.6.24): Move a role here… on a machine card.
   const roleOps = useMemo(() => (authOps ? createRoleOps(authOps) : null), [authOps]);
   // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
@@ -513,6 +557,20 @@ export default function App() {
     if (peerOps === null || authOps === null) return;
     return keepAdminSeen(peerOps, authOps);
   }, [peerOps, authOps]);
+  /**
+   * Getting started, the first-launch wizard: an admin Desk only (its steps need the admin
+   * channel), asked about only while this browser has not finished or skipped it.
+   */
+  const [gettingStartedWanted] = useState(
+    () => gettingStartedHash || readProgress(localStore()).done === undefined,
+  );
+  const { admin: guideAdmin } = useAdminRole(authOps, identity, !demo && gettingStartedWanted);
+  const canGuide = guideAdmin && authOps !== null && !demo;
+  const gettingStarted = useGettingStarted({
+    admin: canGuide,
+    firstRun,
+    hash: gettingStartedHash,
+  });
   /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
   const [preview, setPreview] = useState(false);
   /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */
@@ -1153,13 +1211,9 @@ export default function App() {
         title: `${purposeOf(a, state.waves[a.wave]).label} needs you`,
         body: agentAttn[a.id]?.reason ?? "",
       })),
-    // Owner-only inbox items push to the phone: only the owner answers them.
-    ...inboxItems.map((i) => ({
-      key: `inbox:${i.id}`,
-      tier: i.owner_only && i.answered === undefined ? ("you" as const) : ("none" as const),
-      title: `Needs you · ${i.title}`,
-      body: i.question,
-    })),
+    // Owner-only inbox items push to the phone: only the owner answers them. A notice's click
+    // opens its link (the coordinator's).
+    ...inboxItems.map(inboxNotification),
   ];
   useNotifyOnAttention(notify, items, { quiet: settling });
 
@@ -1217,6 +1271,7 @@ export default function App() {
     // Top first: the modal sheets and the Settings windows sit above the popout layer.
     closeTop: () => {
       if (preview) setPreview(false);
+      else if (gettingStarted.open !== null && canGuide) gettingStarted.close();
       else if (setupWizard !== null) closeSetupWizard();
       else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
@@ -1245,6 +1300,7 @@ export default function App() {
           <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
+              role={demo ? undefined : state.coordinatorRole}
               waves={waveList}
               coordinators={coordinators}
               needsYou={notWorking}
@@ -1692,6 +1748,8 @@ export default function App() {
             roles: state.roles,
             roleMoves: state.roleMoves ?? {},
             roleOps,
+            coordinatorRole: state.coordinatorRole ?? null,
+            coordinatorOps: authOps,
             localName: state.config?.fleet?.local_name,
             focus: focusMachine?.name,
             focusSeq: focusMachine?.seq,
@@ -1701,21 +1759,7 @@ export default function App() {
               Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
               (id) => isLiveAgent(state, id),
             ),
-            // A paired machine's Claude sign-in (volleyd's `primary@<name>`), on its card and in
-            // Add a machine's step 4.
-            ...(control
-              ? {
-                  signIn: (name: string) => (
-                    <PeerSignin
-                      machine={name}
-                      signin={state.signins?.[peerAccount(name)]}
-                      signedIn={state.machines?.[name]?.auth?.claude === "signed_in"}
-                      control={control}
-                      ops={peerOps}
-                    />
-                  ),
-                }
-              : {}),
+            ...(peerSignIn ? { signIn: peerSignIn } : {}),
           }}
           onboarding={{
             ops: authOps,
@@ -1730,6 +1774,17 @@ export default function App() {
               setDeskSettings(null);
               setSetupWizard({ repair });
             },
+            ...(canGuide
+              ? {
+                  gettingStarted: {
+                    done: gettingStarted.progress.done ?? null,
+                    onOpen: () => {
+                      setDeskSettings(null);
+                      gettingStarted.show();
+                    },
+                  },
+                }
+              : {}),
           }}
           onArrange={arrange}
           onResetLayout={() => {
@@ -1747,6 +1802,33 @@ export default function App() {
           deskUrl={deskUrl(window.location)}
           repair={setupWizard.repair}
           onClose={closeSetupWizard}
+        />
+      )}
+
+      {gettingStarted.open !== null && canGuide && authOps !== null && (
+        <GettingStarted
+          ctx={{
+            ops: authOps,
+            control,
+            state,
+            deskUrl: deskUrl(window.location),
+            identity,
+            openSettings: (section) => {
+              gettingStarted.close();
+              setDeskSettings(section);
+            },
+            config: configTransport,
+            peerOps,
+            sshHost: sshHost(brokerUrl),
+            ...(peerSignIn ? { signIn: peerSignIn } : {}),
+          }}
+          initial={gettingStarted.open}
+          summary={gettingStarted.progress.summary}
+          onStep={gettingStarted.setStep}
+          setSummary={gettingStarted.setSummary}
+          onClose={gettingStarted.close}
+          onSkip={gettingStarted.skip}
+          onFinish={gettingStarted.finish}
         />
       )}
 

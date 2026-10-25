@@ -25,6 +25,8 @@ import type { RolesRecord } from "./record";
 export interface DeskIssued {
   token?: string;
   url: string;
+  /** The LAN address beside a private `url` (a rollback to a Desk served on the tailnet). */
+  lan_url?: string;
 }
 
 /** The Desk's own service on the supervisor's machine: unloaded, kept, reloaded on a rollback. */
@@ -79,11 +81,18 @@ async function must(d: RoleDeps, where: string, argv: string[]): Promise<string>
   return lastLine({ ...r, stderr: "" });
 }
 
-/** The roles record with the Desk on `machine` at `url`, one version on. */
-export function withDesk(r: RolesRecord, machine: string, url: string, by: string, now: Date) {
+/** The roles record with the Desk on `machine` at `url` (and `lanUrl`), one version on. */
+export function withDesk(
+  r: RolesRecord,
+  machine: string,
+  url: string,
+  by: string,
+  now: Date,
+  lanUrl?: string,
+) {
   return {
     ...r,
-    desk: { machine, url },
+    desk: lanUrl !== undefined ? { machine, url, lan_url: lanUrl } : { machine, url },
     version: r.version + 1,
     updated_at: now.toISOString(),
     updated_by: by,
@@ -129,11 +138,12 @@ export function deskSteps(
       where: d.localName,
       detail: `desk: ${to} ${issued.url}`,
       run: async () => {
-        await d.writeRoles(withDesk(before, to, issued.url, o.by, d.now()));
+        await d.writeRoles(withDesk(before, to, issued.url, o.by, d.now(), issued.lan_url));
         return `the roles record names ${to} (${issued.url})`;
       },
       undo: async () => {
-        await d.writeRoles(withDesk(before, before.desk.machine, before.desk.url, o.by, d.now()));
+        const { machine, url, lan_url } = before.desk;
+        await d.writeRoles(withDesk(before, machine, url, o.by, d.now(), lan_url));
       },
     },
   ];
@@ -205,7 +215,14 @@ export async function planDesk(
   const blocked: Blocker[] = machineBlockers(d, to);
   if (!blocked.some((b) => b.why.startsWith(`${to} is down`)))
     blocked.push(...(await probes(d, to, port)));
-  const fromPort = deskPortOf(d.roles.desk.url);
+  // The Desk's own port: its LAN address names it (a private https address names 443).
+  const fromPort = deskPortOf(d.roles.desk.lan_url ?? d.roles.desk.url);
+  // The target's private address, when its Network step recorded Tailscale (its machine record).
+  const net = d.record(to)?.network;
+  const reach =
+    net?.kind === "tailscale" && net.name !== undefined
+      ? ` On ${to}'s private network it is https://${net.name} once \`volley desk install --tailscale\` runs there.`
+      : "";
   return {
     role: "desk",
     from,
@@ -215,7 +232,7 @@ export async function planDesk(
     warnings: [],
     terminal: [],
     after: [
-      `The Desk's address becomes ${issued.url}: every device signs in again there (the move's sign-in link, or Settings › Devices).`,
+      `The Desk's address becomes ${issued.url}: every device signs in again there (the move's sign-in link, or Settings › Devices).${reach}`,
     ],
     kept: { desk: d.roles.desk, port, from_port: fromPort },
   };
