@@ -9,15 +9,24 @@ export interface IssueData {
   url: string;
 }
 
+/** Where `gh` reads a repository's issues: in its checkout, or by its `owner/repo` name. */
+export type IssueWhere = { cwd: string } | { slug: string };
+
 /**
- * Fetch issue `issue` with `gh issue view` (run in the wave's repo, so gh picks its remote).
- * `issue` must come from the wave file: nothing else is trusted to name it. A reply for any other
- * number is refused with ISSUE_MISMATCH, so a wrong number can never reach an agent's brief.
+ * `gh issue view <issue> --json <fields>` (with `--repo` for a slug) and the parsed reply,
+ * refused with ISSUE_MISMATCH when it is for any other number.
  */
-export async function fetchIssue(exec: ExecFn, repo: string, issue: number): Promise<IssueData> {
-  const r = await exec(["gh", "issue", "view", String(issue), "--json", "number,title,body,url"], {
-    cwd: repo,
-  });
+async function viewIssue(
+  exec: ExecFn,
+  where: IssueWhere,
+  issue: number,
+  fields: string,
+): Promise<Record<string, unknown>> {
+  const repo = "slug" in where ? ["--repo", where.slug] : [];
+  const r = await exec(
+    ["gh", "issue", "view", String(issue), ...repo, "--json", fields],
+    "cwd" in where ? { cwd: where.cwd } : {},
+  );
   if (r.code !== 0) {
     throw new SpawnError(
       "ISSUE_FETCH_FAILED",
@@ -27,9 +36,9 @@ export async function fetchIssue(exec: ExecFn, repo: string, issue: number): Pro
       },
     );
   }
-  let data: Partial<IssueData>;
+  let data: Record<string, unknown>;
   try {
-    data = JSON.parse(r.stdout) as Partial<IssueData>;
+    data = JSON.parse(r.stdout) as Record<string, unknown>;
   } catch {
     throw new SpawnError("ISSUE_FETCH_FAILED", `gh issue view ${issue} printed no JSON`, { issue });
   }
@@ -37,14 +46,54 @@ export async function fetchIssue(exec: ExecFn, repo: string, issue: number): Pro
     throw new SpawnError(
       "ISSUE_MISMATCH",
       `asked gh for issue ${issue}, got ${String(data.number)}`,
-      { requested: issue, received: data.number ?? null },
+      { requested: issue, received: (data.number as number | undefined) ?? null },
     );
   }
+  return data;
+}
+
+const text = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** The fields of `fetchIssue`'s reply every view reads. */
+const issueData = (issue: number, data: Record<string, unknown>): IssueData => ({
+  number: issue,
+  title: text(data.title),
+  body: text(data.body),
+  url: text(data.url),
+});
+
+/**
+ * Fetch issue `issue` with `gh issue view` (run in the wave's repo, so gh picks its remote).
+ * `issue` must come from the wave file: nothing else is trusted to name it. A reply for any other
+ * number is refused with ISSUE_MISMATCH, so a wrong number can never reach an agent's brief.
+ */
+export async function fetchIssue(exec: ExecFn, repo: string, issue: number): Promise<IssueData> {
+  return issueData(issue, await viewIssue(exec, { cwd: repo }, issue, "number,title,body,url"));
+}
+
+/** An issue with its state (`OPEN`, `CLOSED`) and its label names. */
+export interface IssueFacts extends IssueData {
+  state: string;
+  labels: string[];
+}
+
+/**
+ * `fetchIssue` plus the issue's state and labels (`volleyd add`: is it closed, is it merged to
+ * the release), read in the repository's checkout or by its slug; the same mismatch check.
+ */
+export async function fetchIssueFacts(
+  exec: ExecFn,
+  where: IssueWhere,
+  issue: number,
+): Promise<IssueFacts> {
+  const data = await viewIssue(exec, where, issue, "number,title,body,url,state,labels");
+  const labels = Array.isArray(data.labels) ? data.labels : [];
   return {
-    number: issue,
-    title: typeof data.title === "string" ? data.title : "",
-    body: typeof data.body === "string" ? data.body : "",
-    url: typeof data.url === "string" ? data.url : "",
+    ...issueData(issue, data),
+    state: text(data.state),
+    labels: labels.flatMap((l) =>
+      typeof (l as { name?: unknown })?.name === "string" ? [(l as { name: string }).name] : [],
+    ),
   };
 }
 
