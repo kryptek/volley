@@ -345,7 +345,8 @@ describe("the repository's CI mode, read at submit beside the visibility (#602)"
   it("ci: none on a release branch with required checks is refused at submit, naming them", async () => {
     const r = await submit({ workflows: 1, required: ["build", "test"], ci: "none" });
     expect(r.exitCode).not.toBe(0);
-    expect(`${r.stdout}${r.stderr}`).toContain("ci: ");
+    expect(`${r.stdout}${r.stderr}`).toContain("ci: none cannot be honoured: release/");
+    expect(`${r.stdout}${r.stderr}`).not.toContain("ci: ci:");
     expect(`${r.stdout}${r.stderr}`).toContain("requires the checks build, test");
   });
 });

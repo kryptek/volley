@@ -76,6 +76,13 @@ describe("readCiFacts", () => {
       .on(BRANCH, { code: 124, timedOut: true })
       .on(RULES, noRules);
     expect(await readCiFacts(timedOut.exec, { cwd: "/repo" }, "release/w1")).toBeNull();
+    // A release branch not pushed yet answers 404: unreadable too, so `workflows` plus the alarm
+    // (safe: never `none`), not "unprotected".
+    const unpushed = fakeExec()
+      .on(WORKFLOWS, workflows())
+      .on(BRANCH, { code: 1, stderr: "gh: Branch not found (HTTP 404)" })
+      .on(RULES, noRules);
+    expect(await readCiFacts(unpushed.exec, { cwd: "/repo" }, "release/w1")).toBeNull();
     const empty = fakeExec();
     expect(await readCiFacts(empty.exec, { cwd: "/repo" }, "release/w1")).toBeNull();
   });

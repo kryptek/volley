@@ -12723,7 +12723,7 @@ export class Daemon {
           if (ci !== null && "refused" in ci)
             return {
               ok: false,
-              error: `ci: ${ci.refused}`,
+              error: ci.refused,
               errors: [{ path: "ci", reason: ci.refused }],
             };
           if (again.existing !== undefined)

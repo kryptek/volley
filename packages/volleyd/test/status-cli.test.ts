@@ -246,6 +246,9 @@ describe("volleyd status formatting", () => {
     expect(
       formatWave({ ...base, ci_mode: "required", ci_required_checks: ["build", "test"] }),
     ).toContain("\n  ci: required (build, test)\n");
+    expect(formatWave({ ...base, ci_mode: "required", ci_required_checks: [] })).toContain(
+      "\n  ci: required (no check named on the branch)\n",
+    );
     expect(formatWave({ ...base, ci_mode: "workflows", ci_workflows: null })).toContain(
       "\n  ci: workflows (not read)\n",
     );

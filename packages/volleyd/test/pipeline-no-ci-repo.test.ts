@@ -164,4 +164,19 @@ describe("ci_mode: workflows and required, with no run", () => {
     expect(d?.question).toContain("release/w1 requires the checks build, test");
     expect(d?.question).not.toContain("Accept");
   });
+
+  it("required by the wave file alone: the question says no check is named, not that none was read", async () => {
+    h = pipelineHarness({ ciMode: "required", requiredChecks: [] });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1 });
+    h.elapse(DAEMON_DEFAULTS.ci_none_grace_ms + DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "ci_failed", options: ["cancel"] });
+    expect(d?.question).toContain(
+      "release/w1 names no required check, but the wave file says `ci: required`",
+    );
+    expect(d?.question).not.toContain("not read");
+  });
 });

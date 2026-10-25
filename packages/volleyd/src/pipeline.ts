@@ -2555,7 +2555,7 @@ function noCiYet(
     const question = conflicting
       ? `The PR still conflicts with ${v.release_branch} at ${head.slice(0, 12)} after its branch-update step, so no CI has run for ${minutes} min. Resolve the conflict and push, then accept the head without CI, or cancel?`
       : required
-        ? `No CI run exists for ${head.slice(0, 12)} after ${minutes} min, and ${v.release_branch} requires the checks ${checks.length > 0 ? checks.join(", ") : "(names not read)"}. Push a change that runs them, or cancel?`
+        ? `No CI run exists for ${head.slice(0, 12)} after ${minutes} min, and ${v.release_branch} ${checks.length > 0 ? `requires the checks ${checks.join(", ")}` : "names no required check, but the wave file says `ci: required`"}. Push a change that runs CI, or cancel?`
         : `No CI run exists for ${head.slice(0, 12)} after ${minutes} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`;
     return [
       ...retireIfLive(run),
