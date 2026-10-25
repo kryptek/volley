@@ -328,8 +328,11 @@ describe("volley peer doctor: the volley checkout", () => {
       `/usr/bin/bun install --cwd ${m.volleyDir} --frozen-lockfile`,
     );
     expect(check(r, "volley.installed")?.detail).toBe(
-      `volley 0.4.0 in ${m.volleyDir}: dependencies not installed from its current bun.lock (changed since the last recorded install; reinstall with --frozen-lockfile)`,
+      `volley 0.4.0 in ${m.volleyDir}: bun.lock changed since the last recorded install (reinstall with --frozen-lockfile)`,
     );
+    // Details are cut at 200 characters: the text must leave room for a long checkout path.
+    const detail = check(r, "volley.installed")?.detail ?? "";
+    expect(detail.length - m.volleyDir.length).toBeLessThanOrEqual(110);
     m.calls.length = 0;
     const fixed = await run(m, { fix: true, yes: true });
     expect(MUTATING(m)).toEqual([
