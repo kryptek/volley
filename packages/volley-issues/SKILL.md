@@ -215,7 +215,7 @@ Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the us
 
 **What still reaches the owner.** Only what autopilot must not, or could not, answer:
 
-- **Owner-only decision kinds** (`autopilot.owner_only`, by default `plan_change`, `repo_untrusted`, `model_switch`, `release_go` and `stage_go`): never answered automatically.
+- **Owner-only decision kinds** (`autopilot.owner_only`, by default `plan_change`, `repo_untrusted`, `model_switch`, `release_go`, `stage_go` and `release_pr_ci_failed`): never answered automatically.
 - **Escalations**: a decision no policy rule answers (`no_policy`), one whose remediation budget is spent (`budget_exhausted`) or whose answer could not be applied (`unattended_safety`). Its question starts with `Autopilot could not resolve this (<why>): `.
 - **`release_go`**: when the repository has a release playbook (`.volley/release.yaml`), the release train's one go/no-go, asked once every prepare stage has verified and the release PR's CI is green; it names the version, the PR and the changelog's first bullets. `go` is the owner's authority for the whole release: volleyd squash-merges the release PR (deleting the release branch), closes the issues and runs the playbook's ship stages (tag, deploy) at the merge commit; `hold` asks again. A red release PR asks `release_pr_ci_failed` (`retry` / `hold`) instead. Each owner-gated stage's `stage_go` still comes before it runs. Nothing after `release_go` runs without the `go`.
 - With `merge: manual`, every gated PR's merge: the owner merges each `merge_ready` gate by hand (as in **Driving a wave by hand**), and volleyd admits dependents once it sees the merge.

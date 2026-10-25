@@ -85,7 +85,7 @@ briefs forbid it and the fence enforces it for volleyd itself.
 ## What still asks you
 
 - **Owner-only decisions** (`autopilot.owner_only`; by default `plan_change`, `repo_untrusted`,
-  `model_switch`, `release_go` and `stage_go`). Autopilot never answers these. Production is
+  `model_switch`, `release_go`, `stage_go` and `release_pr_ci_failed`). Autopilot never answers these. Production is
   always yours: nothing after `release_go` runs without your `go`, which covers exactly the
   ship stages the playbook declares; a stage that deploys a customer's production also says
   `gate: owner` and asks its own `stage_go`. An agent that hits its usage limit asks you for a `model_switch` only when no

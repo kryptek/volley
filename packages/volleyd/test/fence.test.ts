@@ -1603,6 +1603,9 @@ describe("release token (the release PR, SPEC §4.6.19)", () => {
 
   it("is denied with a MergeToken, a TrainToken, no token, another PR or another head", () => {
     expect(() => assertAllowed(MERGE)).toThrow(/FENCE_DENIED: gh pr merge/);
+    // Another PR and head: a MergeToken for PR 12 at H would allow this argv (the gate's squash
+    // accepts --delete-branch), but MergeTokens are minted only for gated task PRs, never the
+    // release PR.
     const merge = mintMergeToken({ wave: "w", task: "T1", pr: 13, head: H2, release_branch: "x" });
     expect(() => assertAllowed(MERGE, { merge })).toThrow(FenceError);
     const train = mintTrainToken({
