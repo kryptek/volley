@@ -594,6 +594,8 @@ export interface AskFlags {
   username?: string | undefined;
   password?: string | undefined;
   "broker-url"?: string | undefined;
+  /** A failure to reach the supervisor prints the `SUPERVISOR_UNREACHABLE` object too. */
+  json?: boolean | undefined;
 }
 
 /**
@@ -635,12 +637,13 @@ export async function askVolleyd(
     if (refused !== null) return refused;
   }
   const brokerUrl = resolveBrokerUrl(v["broker-url"], env);
-  const broker = await connectToSupervisor(brokerUrl, io, auth, { command: cmd, env });
+  const reach = { command: cmd, json: v.json === true, env };
+  const broker = await connectToSupervisor(brokerUrl, io, auth, reach);
   if (typeof broker === "number") return broker;
   try {
     const status = await broker.queryRetained(buildTopic(namespace, "volleyd", "status"), PROBE_MS);
     if (status === null || !LIVE.has(parseEnvelope(status)?.type ?? "")) {
-      return reportDaemonSilent(io, brokerUrl, { command: cmd, env });
+      return reportDaemonSilent(io, brokerUrl, namespace, reach);
     }
     const answer =
       admin && auth !== null

@@ -125,7 +125,7 @@ describe("volleyd daemon + control channel", () => {
     expect(Date.now() - started).toBeLessThan(2000);
     expect(r.exitCode).toBe(69);
     expect(r.stderr).toContain(
-      "volleyd status: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent",
+      "volleyd status: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent in namespace '",
     );
     expect(r.stderr).toContain("\n  fix: on the supervisor's machine: ");
   });
@@ -136,7 +136,7 @@ describe("volleyd daemon + control channel", () => {
     expect(JSON.parse(r.stdout)).toMatchObject({
       error: "SUPERVISOR_UNREACHABLE",
       reason: "daemon_silent",
-      where: { kind: "other", brokerUrl: t.broker.url },
+      where: { kind: "other", brokerUrl: t.broker.url, namespace: expect.any(String) },
       probes: { broker: "up", daemon: "silent" },
     });
   });

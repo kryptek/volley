@@ -35,6 +35,8 @@ export interface Where {
   tunnelPort?: number;
   /** setup.json's `network` record. */
   network?: { kind: string; name?: string; address?: string };
+  /** The namespace the command addressed (its volleyd status topic is `volley/<ns>/volleyd/status`). */
+  namespace?: string;
 }
 
 export interface DiagnoseInput {
@@ -54,7 +56,22 @@ export interface Diagnosis {
   fix: string;
 }
 
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+/** A broker on this machine's own loopback (a URL's hostname may be bracketed, `[::1]`). */
+export const LOOPBACK: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+
+const RESTART_VOLLEYD =
+  "on the supervisor's machine run `launchctl kickstart -k gui/$UID/systems.volley.volleyd` (or `systemctl --user restart volleyd`) or `volley deploy --latest`";
+
+/** How to bring the private network up, by setup.json's network record. */
+function networkUp(kind: string | undefined): { cause: string; fix: string } {
+  if (kind === "tailscale")
+    return { cause: "Tailscale is not running: `tailscale up`", fix: "`tailscale up`" };
+  if (kind === "manual") return { cause: "connect your VPN", fix: "connect your VPN" };
+  return {
+    cause: "Tailscale is not running: `tailscale up`; or connect your VPN",
+    fix: "`tailscale up` (or connect your VPN)",
+  };
+}
 
 function hostOf(url: string): string | null {
   try {
@@ -72,13 +89,14 @@ function diagnosis(reason: Reason, where: Where): Diagnosis {
         cause: "You are offline. Nothing can reach the supervisor until you are online.",
         fix: "get online, then re-run",
       };
-    case "network_down":
+    case "network_down": {
+      const how = networkUp(where.network?.kind);
       return {
         reason,
-        cause:
-          "The private network is not up on this machine (Tailscale is not running: `tailscale up`; or connect your VPN), then re-run.",
-        fix: "`tailscale up` (or connect your VPN), then re-run",
+        cause: `The private network is not up on this machine (${how.cause}).`,
+        fix: `${how.fix}, then re-run`,
       };
+    }
     case "tunnel_down": {
       const port = where.tunnelPort ?? Number(new URL(where.brokerUrl).port);
       return {
@@ -93,13 +111,17 @@ function diagnosis(reason: Reason, where: Where): Diagnosis {
         cause: `The broker at ${where.brokerUrl} does not answer. On the supervisor's machine: \`volley setup --check\`; from elsewhere: check that machine is up.`,
         fix: "on the supervisor's machine: `volley setup --check`; from elsewhere: check that machine is up",
       };
-    case "daemon_silent":
+    case "daemon_silent": {
+      const ns =
+        where.namespace === undefined
+          ? ""
+          : ` in namespace '${where.namespace}' (no live status at \`volley/${where.namespace}/volleyd/status\`; check --namespace / $VOLLEY_NAMESPACE)`;
       return {
         reason,
-        cause:
-          "The broker answers but volleyd is silent: on the supervisor's machine run `launchctl kickstart -k gui/$UID/systems.volley.volleyd` (or `systemctl --user restart volleyd`) or `volley deploy --latest`.",
+        cause: `The broker answers but volleyd is silent${ns}: ${RESTART_VOLLEYD}.`,
         fix: "on the supervisor's machine: `launchctl kickstart -k gui/$UID/systems.volley.volleyd` (or `systemctl --user restart volleyd`) or `volley deploy --latest`",
       };
+    }
     case "no_broker_here":
       return {
         reason,
@@ -124,6 +146,16 @@ export function diagnose(input: DiagnoseInput): Diagnosis | null {
   return null;
 }
 
+/** A command that reached the broker but found no live volleyd: the earlier rungs passed. */
+export const silentInput = (where: Where): DiagnoseInput => ({
+  internet: true,
+  network: "unknown",
+  tunnel: where.tunnelPort !== undefined ? "up" : "none",
+  broker: "up",
+  daemon: "silent",
+  where,
+});
+
 /** The stderr form: `<command>: supervisor unreachable (<reason>): <cause>` and the fix line. */
 export const unreachableText = (command: string, d: Diagnosis): string =>
   `${command}: supervisor unreachable (${d.reason}): ${d.cause}\n  fix: ${d.fix}\n`;
@@ -139,4 +171,22 @@ export function unreachableJson(d: Diagnosis, input: DiagnoseInput) {
     where,
     probes,
   };
+}
+
+/**
+ * Print `input`'s diagnosis as `command` (stderr; with `json`, the object on stdout too). False when
+ * every rung answered: nothing printed, the caller reports its own error. Both CLIs (volley,
+ * volleyd) print through this, so their output stays the same.
+ */
+export function printUnreachable(
+  io: { stdout(s: string): void; stderr(s: string): void },
+  command: string,
+  json: boolean,
+  input: DiagnoseInput,
+): boolean {
+  const d = diagnose(input);
+  if (d === null) return false;
+  if (json) io.stdout(`${JSON.stringify(unreachableJson(d, input), null, 2)}\n`);
+  io.stderr(unreachableText(command, d));
+  return true;
 }

@@ -1303,8 +1303,18 @@ describe("volley peer on the supervisor's machine", () => {
     const r = await run(["list"], deps(fakeExec(() => ({})).exec));
     expect(r.exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
     expect(r.stderr).toContain(
-      "volley peer list: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent",
+      `volley peer list: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent in namespace '${NS}'`,
     );
+  });
+
+  it("--json with volleyd down: the SUPERVISOR_UNREACHABLE object on stdout", async () => {
+    const r = await run(["list", "--json"], deps(fakeExec(() => ({})).exec));
+    expect(r.exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      error: "SUPERVISOR_UNREACHABLE",
+      reason: "daemon_silent",
+      where: { namespace: NS },
+    });
   });
 });
 

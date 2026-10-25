@@ -259,7 +259,7 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
   try {
     const status = await broker.queryRetained(buildTopic(namespace, "volleyd", "status"), PROBE_MS);
     const live = status !== null && LIVE.has(parseEnvelope(status)?.type ?? "");
-    if (!live) return reportDaemonSilent(io, brokerUrl, reach);
+    if (!live) return reportDaemonSilent(io, brokerUrl, namespace, reach);
     if (verb === "code")
       return await sendEntry(io, broker, namespace, pos[0] as string, pos[1] as string, timeoutMs);
     if (v.code !== undefined)

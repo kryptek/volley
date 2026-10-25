@@ -7,9 +7,8 @@ import type { IO } from "./io";
 import {
   type DiagnoseInput,
   MOSQUITTO_INSTALL_HINT,
-  diagnose,
-  unreachableJson,
-  unreachableText,
+  printUnreachable,
+  silentInput,
 } from "./supervisor/diagnose";
 import { type Probes, climb, connectFailed, realProbes, whereHere } from "./supervisor/probes";
 
@@ -117,29 +116,24 @@ export async function reportUnreachable(
 }
 
 /**
- * A command that reached the broker but found no live volleyd: `daemon_silent`, 69. (The broker
- * answered, so the earlier rungs passed.)
+ * A command that reached the broker but found no live volleyd in `namespace`: `daemon_silent`,
+ * 69. (The broker answered, so the earlier rungs passed.)
  */
-export function reportDaemonSilent(io: IO, brokerUrl: string, reach: Reach): ExitCode {
-  const where = whereHere(reach.env, brokerUrl);
-  return printDiagnosis(io, reach, {
-    internet: true,
-    network: "unknown",
-    tunnel: where.tunnelPort !== undefined ? "up" : "none",
-    broker: "up",
-    daemon: "silent",
-    where,
-  });
+export function reportDaemonSilent(
+  io: IO,
+  brokerUrl: string,
+  namespace: string,
+  reach: Reach,
+): ExitCode {
+  const where = { ...whereHere(reach.env, brokerUrl), namespace };
+  return printDiagnosis(io, reach, silentInput(where));
 }
 
 function printDiagnosis(io: IO, reach: Reach, input: DiagnoseInput, e?: unknown): ExitCode {
-  const d = diagnose(input);
-  if (d === null) {
+  if (!printUnreachable(io, reach.command, reach.json === true, input)) {
     reportConnectError(io, e);
     return EXIT.ERROR;
   }
-  if (reach.json === true) io.stdout(`${JSON.stringify(unreachableJson(d, input), null, 2)}\n`);
-  io.stderr(unreachableText(reach.command, d));
   return EXIT.SUPERVISOR_UNREACHABLE;
 }
 

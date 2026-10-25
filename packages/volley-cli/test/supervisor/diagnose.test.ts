@@ -4,6 +4,8 @@ import {
   MOSQUITTO_INSTALL_HINT,
   REASONS,
   diagnose,
+  printUnreachable,
+  silentInput,
   unreachableJson,
   unreachableText,
 } from "../../src/supervisor/diagnose";
@@ -47,13 +49,23 @@ describe("diagnose: the reasons and their texts", () => {
     expect(d?.fix).toMatch(/online/);
   });
 
-  it("network_down", () => {
+  it("network_down words its cause by setup.json's network record", () => {
     const d = diagnose(at(PEER, { network: "down" }));
     expect(d?.reason).toBe("network_down");
     expect(d?.cause).toBe(
-      "The private network is not up on this machine (Tailscale is not running: `tailscale up`; or connect your VPN), then re-run.",
+      "The private network is not up on this machine (Tailscale is not running: `tailscale up`; or connect your VPN).",
     );
     expect(d?.fix).toContain("tailscale up");
+    const ts = diagnose(at(COORDINATOR, { network: "down" }));
+    expect(ts?.cause).toBe(
+      "The private network is not up on this machine (Tailscale is not running: `tailscale up`).",
+    );
+    expect(ts?.fix).toBe("`tailscale up`, then re-run");
+    const manual = diagnose(
+      at({ ...COORDINATOR, network: { kind: "manual", address: "10.0.0.2" } }, { network: "down" }),
+    );
+    expect(manual?.cause).toBe("The private network is not up on this machine (connect your VPN).");
+    expect(manual?.fix).toBe("connect your VPN, then re-run");
   });
 
   it("tunnel_down names the tunnel's port", () => {
@@ -81,6 +93,38 @@ describe("diagnose: the reasons and their texts", () => {
       "The broker answers but volleyd is silent: on the supervisor's machine run `launchctl kickstart -k gui/$UID/systems.volley.volleyd` (or `systemctl --user restart volleyd`) or `volley deploy --latest`.",
     );
     expect(d?.fix).toContain("volley deploy --latest");
+  });
+
+  it("daemon_silent names the namespace and the topic it probed", () => {
+    const d = diagnose(silentInput({ ...SUPERVISOR, namespace: "team" }));
+    expect(d?.reason).toBe("daemon_silent");
+    expect(d?.cause).toBe(
+      "The broker answers but volleyd is silent in namespace 'team' (no live status at `volley/team/volleyd/status`; check --namespace / $VOLLEY_NAMESPACE): on the supervisor's machine run `launchctl kickstart -k gui/$UID/systems.volley.volleyd` (or `systemctl --user restart volleyd`) or `volley deploy --latest`.",
+    );
+  });
+
+  it("silentInput: the broker answered, the tunnel (if any) is up, volleyd is silent", () => {
+    expect(silentInput(PEER)).toEqual({
+      internet: true,
+      network: "unknown",
+      tunnel: "up",
+      broker: "up",
+      daemon: "silent",
+      where: PEER,
+    });
+    expect(silentInput(SUPERVISOR).tunnel).toBe("none");
+  });
+
+  it("printUnreachable: the stderr lines, the JSON object only with json, false when all is up", () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const io = { stdout: (s: string) => out.push(s), stderr: (s: string) => err.push(s) };
+    expect(printUnreachable(io, "volley x", false, silentInput(SUPERVISOR))).toBe(true);
+    expect(out).toEqual([]);
+    expect(err.join("")).toContain("volley x: supervisor unreachable (daemon_silent): ");
+    expect(printUnreachable(io, "volley x", true, silentInput(SUPERVISOR))).toBe(true);
+    expect(JSON.parse(out.join(""))).toMatchObject({ reason: "daemon_silent" });
+    expect(printUnreachable(io, "volley x", true, at(PEER))).toBe(false);
   });
 
   it("no_broker_here: a machine with no setup and no broker on its own loopback keeps the install hint", () => {

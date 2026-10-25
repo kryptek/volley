@@ -1,10 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  type DiagnoseInput,
-  diagnose,
-  unreachableJson,
-  unreachableText,
-} from "volley-cli/supervisor/diagnose";
+import { printUnreachable, silentInput } from "volley-cli/supervisor/diagnose";
 import {
   type Probes,
   climb,
@@ -345,24 +340,6 @@ export function resolveControlTarget(
 }
 
 /**
- * The supervisor does not answer: print the diagnosis (`<prefix>: supervisor unreachable
- * (<reason>): <cause>` and its fix line; with `--json`, the `SUPERVISOR_UNREACHABLE` object on
- * stdout too) and exit 69. Null when the ladder found every rung up (the caller reports `e`).
- */
-function reportUnreachable(
-  target: ControlTarget,
-  io: IO,
-  prefix: string,
-  input: DiagnoseInput,
-): ExitCode | null {
-  const d = diagnose(input);
-  if (d === null) return null;
-  if (target.json === true) io.stdout(`${JSON.stringify(unreachableJson(d, input), null, 2)}\n`);
-  io.stderr(unreachableText(prefix, d));
-  return EXIT.SUPERVISOR_UNREACHABLE;
-}
-
-/**
  * Connect a control client, run `fn`, always disconnect. Maps the failure modes to the CLI exit
  * table: broker down / daemon not running → 69 with the diagnosis (volley-cli's
  * supervisor/diagnose.ts; nothing is sent), no answer → 124, anything else → 1. `prefix` is e.g.
@@ -380,10 +357,11 @@ export async function withClient(
   } catch (e) {
     if (e instanceof VolleyError && e.code === "BROKER_DOWN") {
       const env = target.env ?? process.env;
-      const where = whereHere(env, target.brokerUrl);
-      const input = await climb(where, target.probes ?? realProbes(env));
-      const code = reportUnreachable(target, io, prefix, connectFailed(input));
-      if (code !== null) return code;
+      const where = { ...whereHere(env, target.brokerUrl), namespace: target.namespace };
+      const input = connectFailed(await climb(where, target.probes ?? realProbes(env)));
+      if (printUnreachable(io, prefix, target.json === true, input)) {
+        return EXIT.SUPERVISOR_UNREACHABLE;
+      }
     }
     io.stderr(`${prefix}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
@@ -393,16 +371,13 @@ export async function withClient(
   } catch (e) {
     if (e instanceof NotRunningError) {
       // The broker answered, so the earlier rungs passed: volleyd is silent.
-      const where = whereHere(target.env ?? process.env, target.brokerUrl);
-      const code = reportUnreachable(target, io, prefix, {
-        internet: true,
-        network: "unknown",
-        tunnel: where.tunnelPort !== undefined ? "up" : "none",
-        broker: "up",
-        daemon: "silent",
-        where,
-      });
-      if (code !== null) return code;
+      const where = {
+        ...whereHere(target.env ?? process.env, target.brokerUrl),
+        namespace: target.namespace,
+      };
+      if (printUnreachable(io, prefix, target.json === true, silentInput(where))) {
+        return EXIT.SUPERVISOR_UNREACHABLE;
+      }
     }
     io.stderr(`${prefix}: ${e instanceof Error ? e.message : String(e)}\n`);
     return e instanceof ControlTimeoutError ? EXIT.TIMEOUT : EXIT.ERROR;

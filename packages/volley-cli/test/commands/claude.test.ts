@@ -751,5 +751,6 @@ describe("volley claude", () => {
     const r = await run(["list"]);
     expect(r.exitCode).toBe(69);
     expect(r.stderr).toContain("volley claude: supervisor unreachable (daemon_silent): ");
+    expect(r.stderr).toContain("volleyd is silent in namespace 'test'");
   });
 });

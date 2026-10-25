@@ -10,7 +10,7 @@ import { randomSuffix } from "volley-mcp/util";
 import { volleydHome } from "../auth/context";
 import { type NetworkRecord, readNetworkRecord, readSetupInstall } from "../setup/journal";
 import { parseTailscaleStatus } from "../setup/network";
-import { type DiagnoseInput, type Where, diagnose } from "./diagnose";
+import { type DiagnoseInput, LOOPBACK, type Where, diagnose } from "./diagnose";
 
 /**
  * The probes behind diagnose.ts's ladder, each bounded and injectable. They run only after a
@@ -275,13 +275,12 @@ export function realProbes(env: Record<string, string | undefined>): Probes {
   };
 }
 
-const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1"]);
-
 /**
  * Climb the ladder for `where`, stopping at the first rung that fails; the rungs not reached read
  * as passing (`up`, `unknown`). A broker on this machine's own loopback with no tunnel (the
  * supervisor's own machine) needs neither the internet nor the private network: those rungs are
- * skipped. `daemon` is asked only when `askDaemon` (volleyd's commands; volley's need no daemon).
+ * skipped. `daemon` is asked only when `askDaemon`; the CLIs leave it unset (a command that reached
+ * the broker asks the daemon itself and reports `silentInput`).
  */
 export async function climb(
   where: Where,
