@@ -1,6 +1,6 @@
 {
   "name": "volley-skill",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "private": true,
   "description": "Volley Claude Code skill — the /volley slash command",
   "license": "Apache-2.0",
