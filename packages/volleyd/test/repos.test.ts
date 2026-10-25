@@ -203,7 +203,12 @@ describe("repos: a paired machine's clone (#596)", () => {
   it("reportedClone: the record's existing clone of the slug, case-insensitively", () => {
     const repos = [
       { slug: "o/r", path: "/path/to/box-home/.volley/repos/o/r", exists: true, managed: true },
-      { slug: "o/gone", path: "/path/to/box-home/.volley/repos/o/gone", exists: false, managed: true },
+      {
+        slug: "o/gone",
+        path: "/path/to/box-home/.volley/repos/o/gone",
+        exists: false,
+        managed: true,
+      },
     ];
     expect(reportedClone({ repos }, "O/R")).toBe("/path/to/box-home/.volley/repos/o/r");
     expect(reportedClone({ repos }, "o/gone")).toBeUndefined();
@@ -238,13 +243,23 @@ describe("repos: a paired machine's clone (#596)", () => {
       m === "box"
         ? {
             repos: [
-              { slug: "o/r", path: "/path/to/box-home/.volley/repos/o/r", exists: true, managed: true },
+              {
+                slug: "o/r",
+                path: "/path/to/box-home/.volley/repos/o/r",
+                exists: true,
+                managed: true,
+              },
             ],
           }
         : m === "b3"
           ? {
               repos: [
-                { slug: "x/y", path: "/path/to/b3-home/.volley/repos/x/y", exists: true, managed: true },
+                {
+                  slug: "x/y",
+                  path: "/path/to/b3-home/.volley/repos/x/y",
+                  exists: true,
+                  managed: true,
+                },
               ],
             }
           : undefined;
