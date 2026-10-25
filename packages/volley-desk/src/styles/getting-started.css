@@ -262,6 +262,171 @@
   gap: 8px;
 }
 
+/* ------------------------------------------- This computer / Your machines (steps/) */
+.gs-checks {
+  display: grid;
+  gap: 0;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.gs-check {
+  display: grid;
+  grid-template-columns: 18px 150px 1fr;
+  column-gap: 10px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.gs-check:last-child {
+  border-bottom: 0;
+}
+.gs-check-glyph {
+  font-weight: 700;
+  text-align: center;
+}
+.gs-check--ok .gs-check-glyph {
+  color: var(--ok-ink);
+}
+.gs-check--missing .gs-check-glyph,
+.gs-check--missing .gs-check-value {
+  color: var(--bad-ink);
+}
+.gs-check--pending .gs-check-glyph,
+.gs-check--pending .gs-check-value {
+  color: var(--dim);
+}
+.gs-check-label {
+  color: var(--dim);
+}
+.gs-check-value {
+  overflow-wrap: anywhere;
+}
+.gs-check-fix {
+  grid-column: 3;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-name {
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+}
+.gs-name input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+.gs-name label {
+  font-size: 12px;
+  font-weight: 600;
+}
+.gs-name p {
+  margin: 0;
+}
+.gs-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-plan h3 {
+  margin: 0 0 8px;
+  font: 600 13px / 1.2 var(--f-display);
+}
+.gs-machines {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.gs-machine {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--win1) 60%, transparent);
+  font-size: 12px;
+}
+.gs-machine-name {
+  font-size: 13px;
+}
+.gs-machine--add {
+  align-items: center;
+  justify-content: center;
+  min-height: 74px;
+  border-style: dashed;
+  color: var(--dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  background: transparent;
+}
+.gs-machine--add:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--acc);
+}
+.gs-machine--add:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.gs-connect {
+  display: grid;
+  gap: 8px;
+}
+.gs-connect .gs-card-title {
+  margin-bottom: 2px;
+}
+.gs-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.gs-choice--on {
+  border-color: var(--acc);
+  background: color-mix(in oklab, var(--acc) 8%, transparent);
+}
+.gs-choice input {
+  margin-top: 2px;
+  accent-color: var(--acc);
+}
+.gs-choice-text {
+  display: grid;
+  gap: 2px;
+  font-size: 13px;
+}
+.gs-choice-text b {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gs-tag {
+  font-size: 11px;
+  font-weight: 500;
+}
+.gs-add-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gs-add .m-add-form {
+  margin-top: 8px;
+}
+
 /* ------------------------------------------------------- repos and people */
 .gs-ok {
   margin: 0;
@@ -461,5 +626,12 @@
   .gs-summary-row {
     grid-template-columns: 1fr;
     gap: 2px;
+  }
+  .gs-check {
+    grid-template-columns: 18px 1fr;
+  }
+  .gs-check-value,
+  .gs-check-fix {
+    grid-column: 2;
   }
 }

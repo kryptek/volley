@@ -4,10 +4,12 @@
  * no step logic; a step that changes something does it through volleyd's existing ops, showing
  * what it will change before it applies it.
  */
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
+import type { ConfigTransport } from "../settings/configTransport";
 import type { SectionKey } from "../settings/sections";
 import type { SteerTransport } from "../steer/transport";
 import type { AuthOps } from "../store/control";
+import type { PeerOps } from "../store/peerOps";
 import type { DeskState } from "../store/types";
 import type { SceneId } from "./art/ids";
 import type { Summary } from "./state";
@@ -33,6 +35,16 @@ export interface WizardContext {
   identity: string | null;
   /** Pause Getting started and open a Settings section. */
   openSettings(section: SectionKey): void;
+  /** volleyd's config channel (`config_set`); absent: the name is read-only. */
+  config?: ConfigTransport | null;
+  /** The pairing ops (`createPeerOps`); absent: made over `ops`. */
+  peerOps?: PeerOps | null;
+  /** This machine's host as the Desk reaches it (`sshHost`), for the ssh address's placeholder. */
+  sshHost?: string;
+  /** A paired machine's remote Claude sign-in button, as Settings › Machines has it. */
+  signIn?: (machine: string) => ReactNode;
+  /** Clock override (tests). */
+  now?: number;
 }
 
 export interface StepProps {
@@ -67,8 +79,8 @@ export const STEPS: readonly StepDef[] = [
     id: "this-computer",
     title: "This computer",
     subtitle: "Install and check",
-    heading: "Check this computer.",
-    lede: "Volley looks at what runs here (the broker, volleyd, the Desk) and shows what it would change before it changes anything.",
+    heading: "Setting up this computer.",
+    lede: "What the install found and installed here, and the setup it still has to apply: Volley shows each change before it makes it.",
     Body: ThisComputer,
   },
   {
