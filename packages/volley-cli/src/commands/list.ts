@@ -5,7 +5,7 @@ import { type Envelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
@@ -85,8 +85,12 @@ export async function list({ argv, env, io }: ListArgs): Promise<ExitCode> {
     return EXIT.USAGE;
   }
 
-  const broker = await connectAsClient(brokerUrl, io, auth);
-  if (broker === null) return EXIT.ERROR; // connectAsClient already printed the diagnostic.
+  const broker = await connectToSupervisor(brokerUrl, io, auth, {
+    command: "volley list",
+    json: asJson,
+    env,
+  });
+  if (typeof broker === "number") return broker; // already diagnosed and printed.
   try {
     // Subscribe to all retained registry entries. There is no max; collect for the
     // full timeout window — retained deliveries arrive within ~milliseconds of subscribe,

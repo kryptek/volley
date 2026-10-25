@@ -134,6 +134,20 @@ describe("the Desk move (#466, SPEC §4.6.24)", () => {
     );
   });
 
+  it("`after` names the target's private address when its machine record has a Tailscale network, the LAN one otherwise", async () => {
+    const lan = await plan();
+    expect(lan.after.join(" ")).not.toContain("https://");
+    await fleet.beat({
+      network: { kind: "tailscale", name: "box.example.ts.net", address: "100.64.0.9" },
+    });
+    const tailnet = await plan();
+    expect(tailnet.after.join(" ")).toContain(
+      `On ${PEER}'s private network it is https://box.example.ts.net once \`volley desk install --tailscale\` runs there.`,
+    );
+    await fleet.beat({ network: { kind: "manual", address: "10.0.0.9" } });
+    expect((await plan()).after.join(" ")).not.toContain("https://");
+  });
+
   it("a non-admin is refused up front", async () => {
     const a = await fleet.adminOp({ op: "role_plan", role: "desk", to: PEER }, PEER);
     expect(a?.ok).toBe(false);

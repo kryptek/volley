@@ -1,4 +1,5 @@
 import { DAEMON_AGENT_ID } from "../control";
+import type { NoticeSpec } from "../coordinator/notices";
 import { type DecisionKind, type DecisionPayload, type Held, validateAnswer } from "../decisions";
 import type { AutopilotConfig, JournalEvent, NewEvent, TaskId, WaveId } from "../types";
 
@@ -10,7 +11,7 @@ import type { AutopilotConfig, JournalEvent, NewEvent, TaskId, WaveId } from "..
  * journals the events these build and publishes the records.
  */
 
-export const INBOX_KINDS = ["decision", "picker", "handoff", "release"] as const;
+export const INBOX_KINDS = ["decision", "picker", "handoff", "release", "notice"] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 
 export const WHERE_KINDS = ["desk", "terminal", "cli", "autopilot"] as const;
@@ -280,7 +281,7 @@ export function foldInbox(
 }
 
 /** An item id (inbox-item.schema.json `id`): a tool use id is mixed-case. */
-export const INBOX_ID = /^[dphr]-[A-Za-z0-9_-]{1,200}$/;
+export const INBOX_ID = /^[dphrn]-[A-Za-z0-9_-]{1,200}$/;
 
 /** The id of the item for picker `toolUseId` in `agentId`'s session. */
 export const pickerItemId = (agentId: string, toolUseId: string) => `p-${agentId}-${toolUseId}`;
@@ -419,4 +420,27 @@ export function pickerAnswerText(answers: unknown): string | null {
   if (entries.length === 0) return null;
   if (entries.length === 1) return (entries[0] as [string, string])[1];
   return entries.map(([q, a]) => `${q} → ${a}`).join("\n");
+}
+
+/** A notice's answers (SPEC §4.6.18): `open` acknowledges it (the link was opened), `dismiss`. */
+export const NOTICE_ANSWERS = ["open", "dismiss"] as const;
+
+/**
+ * The item for an owner-only notice (`n-<notice>`, SPEC §4.6.25): volleyd's own, never blocking a
+ * wave, its link in `pointers.link`. `version` continues an answered notice reopened at its id.
+ */
+export function itemForNotice(spec: NoticeSpec, openedAt: string, version = 1): InboxItem {
+  return {
+    id: `n-${spec.notice}`,
+    kind: "notice",
+    version,
+    owner_only: true,
+    agent_id: DAEMON_AGENT_ID,
+    title: spec.title,
+    question: spec.question,
+    options: NOTICE_ANSWERS.map((label) => ({ label })),
+    pointers: spec.link !== undefined ? { link: spec.link } : {},
+    opened_at: openedAt,
+    source: { notice: spec.notice, machine: spec.machine, name: spec.name },
+  };
 }

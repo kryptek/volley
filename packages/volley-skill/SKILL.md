@@ -365,6 +365,8 @@ Validate the resolved namespace against `^[a-z0-9][a-z0-9_-]{0,62}$` per SPEC §
 2. Print: `  → volley setup --check   (volley setup --repair fixes what it finds)`
 3. Stop. Do NOT retry, do NOT auto-start the broker yourself.
 
+A `volley` or `volleyd` command that cannot reach the supervisor gives exit 69 (`SUPERVISOR_UNREACHABLE`) with its reason, cause and fix: relay them to the user verbatim and ask, as `/volley-issues`' **Choosing a dispatch path** says (never switch brokers or modes yourself).
+
 **Reserved-namespace writes refused** (`pub`-style writes are not in this skill, but `msg` writes to mailboxes). If a write tool returns `{ code: "RESERVED_TOPIC_WRITE" }`, that's a bug in this skill — surface the error verbatim and link the user to the SKILL.md.
 
 **Schema-version mismatch.** If an incoming envelope's `schema_version` major is not `0`, surface a single line: `(envelope schema_version "<v>" not understood — Volley v0.1 implementation)` and continue with the next message. Don't silently swallow. (Applies to `watch`, `tap`, `inspect` — the subcommands that surface raw envelopes; `list` and `msg` don't show envelope payloads.)

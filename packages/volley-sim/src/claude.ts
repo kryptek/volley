@@ -11,7 +11,9 @@ import { appendUnknown, withWorld } from "./world";
  * kept in the world file), `mcp add-json | list | get | remove` (kept in the profile's
  * `.claude.json` the way Claude Code keeps them and `volley peer`'s provision.ts reads them), and
  * the agent launch volleyd's `.volley/launch.sh` makes — in a worktree holding
- * `.volley/agent.json` — which runs the simulated agent (agent.ts). Any other argv exits 1 with
+ * `.volley/agent.json` — which runs the simulated agent (agent.ts), and the coordinator role's
+ * `remote-control` (the server's banner, then it serves until killed; `--continue` finds nothing
+ * recorded and exits 1, as Claude Code does in a directory it never served). Any other argv exits 1 with
  * `unknown argv` and is appended to `$VOLLEY_SIM_HOME/unknown.jsonl`.
  */
 
@@ -252,18 +254,77 @@ function auth(rest: string[], ctx: Ctx): Out | null {
   }
 }
 
+/** The session id the fake server's link carries (never a real one). */
+export const REMOTE_CONTROL_SESSION = "session_01FAKEFAKEFAKEFAKEFAKE0000";
+
+/** What Claude Code 2.1.310 prints for `remote-control --continue` with nothing recorded. */
+export const REMOTE_CONTROL_NOTHING_RECORDED =
+  "Error: No recent session found in this directory or its worktrees. Run `claude remote-control` to start a new one.";
+
+/**
+ * The server's banner (volleyd's test/fixtures/remote-control-banner.txt for `coord-test`):
+ * Claude Code's own lines, then its settings and the session link the runner reads.
+ */
+export function remoteControlBanner(o: {
+  name: string;
+  spawn: string;
+  capacity: string;
+  permissionMode: string;
+}): string {
+  return [
+    `Remote Control · ${o.name}`,
+    "",
+    "Take this session with you and pick up right where you left off on any device.",
+    "Open the Code tab in the Claude mobile app, visit claude.ai/code in a browser,",
+    "or ask Claude to work in this folder from one of your projects on claude.ai.",
+    "The session keeps running on this machine. Use your other devices as a remote",
+    "control. Press Ctrl+C to stop.",
+    "",
+    `  Spawn mode: ${o.spawn} · capacity ${o.capacity} · permission mode ${o.permissionMode}`,
+    `  Session: https://claude.ai/code/${REMOTE_CONTROL_SESSION}`,
+    "",
+    "Waiting for connections…",
+    "",
+  ].join("\n");
+}
+
+/** `claude remote-control …`: `serve` when the process then stays up until it is killed. */
+function remoteControl(args: string[]): (Out & { serve?: true }) | null {
+  if (args.length === 1 && (args[0] === "--continue" || args[0] === "-c"))
+    return fail(REMOTE_CONTROL_NOTHING_RECORDED);
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < args.length; i += 2) {
+    const [k, val] = [args[i], args[i + 1]];
+    if (k === undefined || !k.startsWith("--") || val === undefined) return null;
+    flags[k.slice(2)] = val;
+  }
+  if (flags.name === undefined) return null;
+  return {
+    ...ok(
+      remoteControlBanner({
+        name: flags.name,
+        spawn: flags.spawn ?? "same-dir",
+        capacity: flags.capacity ?? "32",
+        permissionMode: flags["permission-mode"] ?? "default",
+      }),
+    ),
+    serve: true,
+  };
+}
+
 /** Answer one `claude` argv (without `claude`); an agent launch runs the simulated agent. */
-export async function runClaude(argv: string[], ctx: Ctx): Promise<Out> {
+export async function runClaude(argv: string[], ctx: Ctx): Promise<Out & { serve?: true }> {
   const unknown = (): Out => {
     appendUnknown(simHome(ctx.env), ["claude", ...argv], ctx.cwd);
     return fail(`unknown argv: claude ${argv.join(" ")}`);
   };
   const [first, ...rest] = argv;
-  let r: Out | null = null;
+  let r: (Out & { serve?: true }) | null = null;
   if (argv.length === 1 && (first === "--version" || first === "-v"))
     r = ok(`${CLAUDE_VERSION} (Claude Code)\n`);
   else if (first === "auth") r = auth(rest, ctx);
   else if (first === "mcp") r = mcp(rest, ctx);
+  else if (first === "remote-control") r = remoteControl(rest);
   else if (existsSync(join(ctx.cwd, ".volley", "agent.json"))) {
     const code = await runAgent({
       cwd: ctx.cwd,
@@ -282,5 +343,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const r = await runClaude(argv, { cwd: process.cwd(), env: process.env });
   if (r.stdout !== "") process.stdout.write(r.stdout);
   if (r.stderr !== "") process.stderr.write(r.stderr);
+  // The coordinator's server: up until its tmux session is killed (SIGHUP / SIGTERM).
+  if (r.serve === true) await new Promise(() => {});
   return r.code;
 }

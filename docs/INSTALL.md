@@ -146,7 +146,14 @@ you set up once, never a public listener, a relay or Tailscale Funnel:
   tailscale`) installs Tailscale and signs this machine in through a link it prints. Do the same
   on every machine you pair (`install.sh --peer --network tailscale`), and install the Tailscale
   app on your phone, signed in to the same account. Setup records this machine's Tailscale name
-  and address and prints the Desk's address on it: `on your private network: http://<address>:5199`.
+  and address, then its Services step serves the Desk on your tailnet with `tailscale serve`:
+  HTTPS at the machine's name, with a certificate Tailscale issues (turn on HTTPS certificates in
+  the Tailscale admin console, DNS › HTTPS Certificates, once). The end prints both addresses,
+  `Desk: http://<lan>:5199 · https://<name>.<tailnet>.ts.net`, and sign-in links use the private
+  one. Two loopback-only targets are added, the Desk (`https://<name>` → `127.0.0.1:5199`) and
+  the broker's WebSocket listener (`https://<name>:8443` → `127.0.0.1:9001`); nothing is public
+  (never Funnel) and your other serves are left alone. On Linux `tailscale serve` needs `sudo`.
+  A machine that serves only the Desk does the same with `volley desk install --tailscale`.
 - **Your own VPN**: `volley setup --network manual --network-address <host-or-ip>`, the address
   your VPN gives this machine (it must be one of this machine's addresses). Nothing is installed.
 - **Neither**: `--network none` (what `--yes` alone means) keeps the Desk on this network.

@@ -5,9 +5,11 @@ import { normalizeOrigin } from "volley-cli/peer/repo";
 import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import type { ProbeLogin } from "../claude/usage";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
+import { COORDINATOR_COMMAND } from "../coordinator/role";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
   type ConsentToken,
+  type CoordinatorToken,
   FenceError,
   REMOTE_CLAUDE_JSON,
   REMOTE_CLAUDE_JSON_TMP,
@@ -285,6 +287,7 @@ export type RemoteRunOptions = Pick<
   | "wake"
   | "profileRemove"
   | "signinEntry"
+  | "coordinator"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -399,6 +402,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
         ...(opts.profileRemove !== undefined ? { profileRemove: opts.profileRemove } : {}),
         ...(opts.signinEntry !== undefined ? { signinEntry: opts.signinEntry } : {}),
+        ...(opts.coordinator !== undefined ? { coordinator: opts.coordinator } : {}),
       },
     );
   }
@@ -639,6 +643,7 @@ export class SshTmuxHost implements RemoteHost {
   private async launchNow(spec: LaunchSpec): Promise<{ workspace: string }> {
     const fail = (msg: string, detail: Record<string, unknown> = {}) =>
       new SpawnError("LAUNCH_FAILED", msg, { host: this.name, outcome: "refused", ...detail });
+    if (spec.coordinator !== undefined) return this.launchCoordinator(spec, spec.coordinator);
     if (spec.command.trim() !== TMUX_LAUNCH_COMMAND) {
       throw fail(`a remote session runs only '${TMUX_LAUNCH_COMMAND}'`);
     }
@@ -682,6 +687,38 @@ export class SshTmuxHost implements RemoteHost {
     }
     this.launchSizes.set(session, size);
     return { workspace: session };
+  }
+
+  /**
+   * The coordinator's session (SPEC §4.6.25): exactly `new-session -d -s <name> -c <dir> 'bash
+   * .volley/coordinator.sh'`, under its token; the name is the role's own, never a fallback.
+   */
+  private async launchCoordinator(
+    spec: LaunchSpec,
+    coordinator: CoordinatorToken,
+  ): Promise<{ workspace: string }> {
+    if (spec.command.trim() !== COORDINATOR_COMMAND)
+      throw new SpawnError("LAUNCH_FAILED", `the coordinator runs only '${COORDINATOR_COMMAND}'`, {
+        host: this.name,
+        outcome: "refused",
+      });
+    await this.syncTmuxPath();
+    const r = await this.run(
+      [
+        {
+          argv: ["tmux", "new-session", "-d", "-s", spec.name, "-c", spec.cwd, COORDINATOR_COMMAND],
+        },
+      ],
+      { coordinator },
+    );
+    if (r.code !== 0) {
+      throw new SpawnError(
+        "LAUNCH_FAILED",
+        `tmux new-session failed on ${this.spec.target}: ${r.timedOut ? "timed out" : r.stderr.trim()}`,
+        { host: this.name, exit: r.code, outcome: transportFailed(r) ? "unknown" : "refused" },
+      );
+    }
+    return { workspace: spec.name };
   }
 
   /** Each session's size at launch, what `resize(…, "launch")` returns it to. */

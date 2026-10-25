@@ -91,9 +91,23 @@ describe("volley setup", () => {
       "Record this machine's private address in setup.json (tailscale: studio.example.ts.net, 100.64.0.2)",
     ]);
     expect(m.execCalls.some((a) => a.includes("up") || a.includes("--cask"))).toBe(false);
-    expect(r.stdout).toContain(
-      "Desk: http://desk.example:5199 · on your private network: http://100.64.0.2:5199",
+    // The Services step serves the Desk on the tailnet: two loopback-only serves, never Funnel.
+    expect(
+      journal()
+        .filter((e) => e.step === "services" && e.event === "applied")
+        .map((e) => e.summary),
+    ).toContain("Serve the Desk on your private network (https://studio.example.ts.net)");
+    expect(m.tailscale.serves).toEqual(
+      new Map([
+        [443, "http://127.0.0.1:5199"],
+        [8443, "http://127.0.0.1:9001"],
+      ]),
     );
+    expect(m.execCalls.some((a) => a.includes("funnel"))).toBe(false);
+    expect(readSetupInstall(m.ctx.volleydHome)?.desk_private_url).toBe(
+      "https://studio.example.ts.net",
+    );
+    expect(r.stdout).toContain("Desk: http://desk.example:5199 · https://studio.example.ts.net");
     // A rerun without the flag keeps the record and changes nothing there.
     const again = await run(["--yes", "--step", "network"]);
     expect(again.stdout).toContain("already done");
@@ -695,6 +709,53 @@ describe("volley setup", () => {
       const r = await run(["--peer", "--check"]);
       expect(r.stdout).not.toMatch(HUB_ONLY);
       expect(m.loaded.size).toBe(0);
+    });
+
+    it("--check on a paired machine prints the reach rows under its Network row", async () => {
+      mkdirSync(join(m.ctx.home, ".volley"), { recursive: true });
+      writeFileSync(
+        peerJson(),
+        JSON.stringify({
+          name: "box-a",
+          host: "me@hub",
+          username: "peer-box-a",
+          password: "pw",
+          remote_port: 21883,
+          broker: {},
+        }),
+      );
+      const asked: string[] = [];
+      m.deps.reach = {
+        internetUp: async () => {
+          asked.push("internet");
+          return true;
+        },
+        tunnelUp: async (port) => {
+          asked.push(`tunnel:${port}`);
+          return false;
+        },
+        daemonLive: async () => {
+          asked.push("daemon");
+          return true;
+        },
+      };
+      try {
+        const r = await run(["--peer", "--check"]);
+        const lines = r.stdout.split("\n");
+        const at = lines.findIndex((l) => /^ {2}\S Network\b/.test(l));
+        expect(at).toBeGreaterThan(-1);
+        const after = lines.slice(at + 1).join("\n");
+        expect(after).toContain("      ✓ network.internet: online");
+        expect(after).toContain("      ! tunnel.up: 127.0.0.1:21883 refuses");
+        expect(after).toContain("        fix: `volley peer doctor`");
+        expect(after).toContain("      ! supervisor.live: not reached (see above)");
+        expect(asked).toEqual(["internet", "tunnel:21883"]);
+        // --json carries exactly the steps (no reach rows).
+        const j = await run(["--peer", "--check", "--json"]);
+        expect(j.stdout).not.toContain("tunnel.up");
+      } finally {
+        Reflect.deleteProperty(m.deps, "reach");
+      }
     });
 
     it("refuses the hub's flags and steps", async () => {

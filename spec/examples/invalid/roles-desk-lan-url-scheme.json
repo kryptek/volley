@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-25T09:00:00.000Z",
+  "channel": "_system/roles",
+  "type": "roles",
+  "correlation_id": null,
+  "payload": {
+    "broker": {
+      "machine": "mac",
+      "address": {
+        "ssh": null,
+        "mqtt_port": 1883,
+        "ws_port": 9001
+      },
+      "lan": true
+    },
+    "supervisor": {
+      "machine": "mac"
+    },
+    "desk": {
+      "machine": "mac",
+      "url": "https://mac.example.ts.net",
+      "lan_url": "ftp://192.0.2.20:5199"
+    },
+    "version": 2,
+    "updated_at": "2026-10-25T09:00:00.000Z",
+    "updated_by": "volley-cli"
+  }
+}

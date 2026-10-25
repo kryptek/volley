@@ -8,13 +8,18 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requestNotificationPermission } from "../src/notify/notify-permission";
-import { type AttentionItem, useNotifyOnAttention } from "../src/notify/use-notify-on-attention";
+import {
+  type AttentionItem,
+  inboxNotification,
+  useNotifyOnAttention,
+} from "../src/notify/use-notify-on-attention";
 import {
   NOTIFY_STORAGE_KEY,
   type NotifyOptions,
   useNotifySettings,
 } from "../src/notify/use-notify-settings";
 import { onSound } from "../src/sounds/emit";
+import type { InboxItem } from "../src/store/types";
 
 const on: NotifyOptions = { enabled: true, sound: true, on: ["blocked", "failed", "reaped"] };
 
@@ -220,5 +225,65 @@ describe("requestNotificationPermission", () => {
     await expect(requestNotificationPermission()).resolves.toBe("granted");
     (globalThis as { Notification?: unknown }).Notification = undefined;
     await expect(requestNotificationPermission()).resolves.toBe("denied");
+  });
+});
+
+describe("an owner-only notice's notification (SPEC §4.6.18)", () => {
+  const LINK = "https://claude.ai/code/session_fake01";
+  const notice: InboxItem = {
+    id: "n-coordinator-link",
+    kind: "notice",
+    version: 1,
+    owner_only: true,
+    agent_id: "volleyd",
+    title: "Coordinator on box-a: open it",
+    question: LINK,
+    pointers: { link: LINK },
+    opened_at: "2026-10-25T12:00:00.000Z",
+    source: { notice: "coordinator-link" },
+  };
+
+  it("carries the title and the link; an answered one is not pushed", () => {
+    expect(inboxNotification(notice)).toEqual({
+      key: "inbox:n-coordinator-link@2026-10-25T12:00:00.000Z",
+      tier: "you",
+      title: "Needs you · Coordinator on box-a: open it",
+      body: LINK,
+      link: LINK,
+    });
+    const answered = {
+      ...notice,
+      answered: { answer: "dismiss", by: "desk", where: { kind: "desk" as const }, at: "x" },
+    };
+    expect(inboxNotification(answered).tier).toBe("none");
+  });
+
+  it("a click on it opens the link", () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const { rerender } = setup(on);
+    rerender({ items: [inboxNotification(notice)], s: on });
+    expect(notificationCtor).toHaveBeenCalledTimes(1);
+    expect(notificationCtor.mock.calls[0]?.[0]).toContain("Coordinator on box-a: open it");
+    const n = notificationCtor.mock.instances[0] as { onclick: (() => void) | null };
+    n.onclick?.();
+    expect(open).toHaveBeenCalledWith(LINK, "_blank", "noopener");
+  });
+
+  it("a notice reopened with a new link in the same update pushes again", () => {
+    const { rerender } = setup(on);
+    rerender({ items: [inboxNotification(notice)], s: on });
+    expect(notificationCtor).toHaveBeenCalledTimes(1);
+    // superseded and reopened on the same retained topic: the store delivers only the new opening
+    const NEW = "https://claude.ai/code/session_fake02";
+    const reopened: InboxItem = {
+      ...notice,
+      version: 3,
+      question: NEW,
+      pointers: { link: NEW },
+      opened_at: "2026-10-25T12:05:00.000Z",
+    };
+    rerender({ items: [inboxNotification(reopened)], s: on });
+    expect(notificationCtor).toHaveBeenCalledTimes(2);
+    expect(notificationCtor.mock.calls[1]?.[1]).toMatchObject({ body: NEW });
   });
 });

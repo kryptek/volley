@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-24T12:00:05.000Z",
+  "channel": "_system/federation",
+  "type": "coordinator",
+  "correlation_id": null,
+  "payload": {
+    "machine": "box-a",
+    "name": "coord-test",
+    "state": "waiting",
+    "since": "2026-10-24T12:00:05.000Z",
+    "restarts": 0,
+    "dir": "/path/to/home/.volley/coordinator"
+  }
+}

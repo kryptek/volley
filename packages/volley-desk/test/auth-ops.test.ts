@@ -313,6 +313,7 @@ describe("the repository ops (SPEC §4.6.21)", () => {
       ok: true,
       slug: "Example-Org/example-repo",
       url: "https://github.com/Example-Org/example-repo",
+      visibility: "private",
       machines: ["hub", "box-a"],
       status: ["hub: cloning (/path/to/repos/Example-Org/example-repo)"],
     });

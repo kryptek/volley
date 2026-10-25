@@ -266,6 +266,8 @@ export class ConfigStore {
   private updatedAt: string;
   private updatedBy: string;
   private readonly listeners: ((c: ConfigChange) => void)[] = [];
+  /** A refusal that needs what only the daemon knows (setGuard): the laptop rule. */
+  private guard: ((next: Tunables, patch: TunablesPatch) => PathError[]) | undefined;
   /** The machine's host name, from which `fleet.local_name: null` derives the machine name. */
   private readonly hostname: string;
 
@@ -426,8 +428,18 @@ export class ConfigStore {
     const nextLayer = merge(this.fileLayer, patch);
     const nextGlobal = merge(this.defaults, nextLayer);
     if (rejected.length === 0) rejected.push(...tunablesErrors(nextGlobal, this.hostname));
+    if (rejected.length === 0 && this.guard !== undefined)
+      rejected.push(...this.guard(nextGlobal, patch));
     if (rejected.length > 0) return { applied: false, rejected };
     return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
+  }
+
+  /**
+   * A check `applyPatch` runs on the config a patch would make, after the schema's: the daemon's
+   * machine records decide some (SPEC §4.6.25: `coordinator.machine` naming a laptop).
+   */
+  setGuard(guard: (next: Tunables, patch: TunablesPatch) => PathError[]): void {
+    this.guard = guard;
   }
 
   /**

@@ -5,9 +5,10 @@
  * live agent of a task, parallel reviewers included; interactive sessions are
  * not agents and are counted apart, `· N sessions`), the supervisor's health
  * pill (`volleyd · working · 4s`, red when it is not running or absent), and
- * the `N need you` pill (click → go to the first). On the right: the
- * coordinators window toggle and the notification and chime switches
- * (volley-dash's settings).
+ * the `N need you` pill (click → go to the first). On the right: **Open
+ * coordinator** (`coordinatorLink`: the coordinator role's link in a new tab,
+ * else disabled with why; not in demo), the coordinators window toggle and
+ * the notification and chime switches (volley-dash's settings).
  */
 import {
   Notification01Icon,
@@ -23,6 +24,7 @@ import { noun } from "../lib/plural";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import { useNotifyToggle } from "../notify/use-notify-toggle";
 import type { Connection } from "../store/context";
+import { coordinatorLink } from "../store/coordinatorLink";
 import { sessionCount, supervisorHealth, supervisorList, workingCount } from "../store/reducer";
 import type { DeskState, SupervisorView } from "../store/types";
 import { age } from "../windows/agent/AgentWindow";
@@ -91,6 +93,31 @@ function leaseSummary(state: DeskState): string {
   return Object.values(state.leases)
     .map((p) => `${p.pool} ${p.held.length}/${p.capacity}`)
     .join(" · ");
+}
+
+/** The coordinator role's link in a new tab, or a disabled button saying why there is none. */
+export function OpenCoordinator({
+  state,
+  compact = false,
+}: { state: DeskState; compact?: boolean }) {
+  const link = coordinatorLink(state);
+  if ("href" in link)
+    return (
+      <a className="chip open-coord" href={link.href} target="_blank" rel="noreferrer noopener">
+        Open coordinator
+      </a>
+    );
+  return (
+    <button
+      type="button"
+      className="chip open-coord open-coord--off"
+      disabled
+      title={link.disabled}
+      aria-label={`Open coordinator: ${link.disabled}`}
+    >
+      {compact ? "Coordinator" : link.disabled}
+    </button>
+  );
 }
 
 function Toggle(p: {
@@ -167,6 +194,7 @@ export function TopBar(p: TopBarProps) {
         </button>
       )}
       <div className="topbar-tools">
+        {!p.demo && <OpenCoordinator state={p.state} compact={p.compact === true} />}
         <Toggle
           label="Wave coordinators"
           on={p.coordsOpen}

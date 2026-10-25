@@ -624,9 +624,12 @@ describe("Layer 4: vm-pair.sh", () => {
     expect(read(w, "summary.md")).toContain("| `pair_ready_ms` |");
   });
 
+  // The readiness poll runs out here, busy for the whole cap: a 1 s cap and a longer timeout keep
+  // it inside a slow CI runner's budget.
   test("a peer that never gets ready fails with the verdict's reasons; both VMs are deleted", () => {
     const w = world();
     const r = run(w, "vm-pair.sh", [], {
+      env: { VM_MAX_WAIT_S: "1" },
       rules: [
         [
           "machines/peer/readiness",
@@ -641,7 +644,7 @@ describe("Layer 4: vm-pair.sh", () => {
     expect(r.out).toContain("peer is not ready (Claude is not signed in)");
     expect(r.out).toContain("FAIL: the peer was not ready within 10 min");
     expect(vmsLeft(w)).toEqual([]);
-  });
+  }, 15_000);
 
   // Two polls run out here (the wave's placement, the service's stop), each busy for the whole cap:
   // a 1 s cap and a longer timeout keep it inside a slow CI runner's budget.

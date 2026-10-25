@@ -8,6 +8,7 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { deskStamp, parseBrokerHost, readBundleVersion, readDeskStamp } from "../setup/desk-build";
 import type { SetupDeps } from "../setup/step";
+import { WS_HTTPS_PORT, privateDeskUrl } from "../setup/tailscale-serve";
 import { findRepoRoot } from "./dash";
 
 /**
@@ -26,6 +27,12 @@ import { findRepoRoot } from "./dash";
  * `{ broker: { host, ws_port } }`, never cached: the page connects to that broker instead of the
  * host it came from, so the broker can live on another machine than the Desk. Without the flag
  * the route is a 404 and the page uses its own host. Only a host, never a URL or a login.
+ *
+ * `--ws-url <ws(s)://host[:port]>` adds `ws_url`, the full URL the page opens (preferred over
+ * `broker` when the page can use it): `volley desk install --tailscale` passes
+ * `wss://<name>:8443`, the broker's WebSocket listener behind `tailscale serve`, because a page
+ * served over HTTPS may not open `ws://`. Without `--broker-host` the route's `broker` is that
+ * URL's host and port. Never a login, a path or a query.
  */
 
 export const DESK_PORT = 5199;
@@ -69,6 +76,28 @@ export const BROKER_WS_PORT = 9001;
 /** What `/desk-config.json` serves. */
 export interface DeskConfig {
   broker: { host: string; ws_port: number };
+  /** The full URL the page opens (`ws://` or `wss://`), when `--ws-url` names one. */
+  ws_url?: string;
+}
+
+/**
+ * A `--ws-url` as served: `ws://` or `wss://`, a host and maybe a port, nothing else (no login,
+ * path, query or fragment); with its host and port. Null when it is not one.
+ */
+export function parseWsUrl(text: string): { url: string; host: string; port: number } | null {
+  let u: URL;
+  try {
+    u = new URL(text);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "ws:" && u.protocol !== "wss:") return null;
+  if (u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "") return null;
+  if (u.pathname !== "/" && u.pathname !== "") return null;
+  if (/[?#]/.test(text) || !/^wss?:\/\/[^/]+\/?$/.test(text) || u.hostname === "") return null;
+  const port = u.port !== "" ? Number(u.port) : u.protocol === "wss:" ? 443 : 80;
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, -1) : u.hostname;
+  return { url: `${u.protocol}//${u.host}`, host, port };
 }
 
 /** volleyd's wave id grammar (SPEC §4.6.1). */
@@ -169,13 +198,18 @@ export async function startDeskServer(opts: {
   evidence?: string;
   /** The broker the page connects to: served at `/desk-config.json` (a 404 when absent). */
   broker?: DeskConfig["broker"];
+  /** The full URL the page opens, served beside `broker` as `ws_url`. */
+  wsUrl?: string;
 }): Promise<DeskServer> {
   const index = join(opts.root, "index.html");
   const config =
     opts.broker === undefined
       ? null
       : Buffer.from(
-          JSON.stringify({ broker: { host: opts.broker.host, ws_port: opts.broker.ws_port } }),
+          JSON.stringify({
+            broker: { host: opts.broker.host, ws_port: opts.broker.ws_port },
+            ...(opts.wsUrl !== undefined ? { ws_url: opts.wsUrl } : {}),
+          }),
         );
   const server: Server = createServer((req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -315,6 +349,7 @@ async function serve({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode>
         evidence: { type: "string" },
         "broker-host": { type: "string" },
         "broker-ws-port": { type: "string" },
+        "ws-url": { type: "string" },
         quiet: { type: "boolean", short: "q" },
         help: { type: "boolean", short: "h" },
       },
@@ -357,6 +392,20 @@ async function serve({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode>
     io.stderr("volley desk serve: --broker-ws-port must be a port number (1..65535)\n");
     return EXIT.USAGE;
   }
+  const wsUrlText = parsed.values["ws-url"] as string | undefined;
+  const wsUrl = wsUrlText === undefined ? undefined : parseWsUrl(wsUrlText);
+  if (wsUrl === null) {
+    io.stderr(
+      `volley desk serve: --ws-url must be a ws:// or wss:// URL with a host and maybe a port (no login, path or query), got ${JSON.stringify(wsUrlText)}\n`,
+    );
+    return EXIT.USAGE;
+  }
+  const broker =
+    brokerHost !== undefined
+      ? { host: brokerHost, ws_port: wsPort }
+      : wsUrl !== undefined
+        ? { host: wsUrl.host, ws_port: wsUrl.port }
+        : undefined;
   const host = (parsed.values.host as string | undefined) ?? "127.0.0.1";
   const root = (parsed.values.root as string | undefined) ?? defaultDeskRoot();
   if (root === null || !existsSync(join(root, "index.html"))) {
@@ -385,14 +434,23 @@ async function serve({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode>
       host,
       port,
       ...(evidence !== undefined ? { evidence } : {}),
-      ...(brokerHost !== undefined ? { broker: { host: brokerHost, ws_port: wsPort } } : {}),
+      ...(broker !== undefined ? { broker } : {}),
+      ...(wsUrl !== undefined ? { wsUrl: wsUrl.url } : {}),
     });
   } catch (e) {
     io.stderr(`volley desk serve: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
   io.stdout(`Serving the Desk from ${root} on ${server.url} (sign-in required)\n`);
-  if (brokerHost !== undefined) {
+  if (wsUrl !== undefined) {
+    io.stdout(`The page connects to the broker at ${wsUrl.url} (/desk-config.json)\n`);
+    // `volley desk install --tailscale`'s shape: the Desk itself is HTTPS at the same name.
+    if (wsUrl.url.startsWith("wss://") && wsUrl.port === WS_HTTPS_PORT) {
+      io.stdout(
+        `On your private network: ${privateDeskUrl(wsUrl.url.slice("wss://".length).replace(/:\d+$/, ""))} (tailscale serve)\n`,
+      );
+    }
+  } else if (brokerHost !== undefined) {
     const shown = brokerHost.includes(":") ? `[${brokerHost}]` : brokerHost;
     io.stdout(`The page connects to the broker ${shown}:${wsPort} (/desk-config.json)\n`);
   }
@@ -410,8 +468,8 @@ async function serve({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode>
 }
 
 export const DESK_HELP = `Usage: volley desk serve [--host <addr>] [--port <n>] [--root <dir>] [--evidence <dir>]
-                         [--broker-host <host> [--broker-ws-port <n>]] [--quiet]
-       volley desk install [--port <n>] [--broker-host <host>] [--root <checkout>]
+                         [--broker-host <host> [--broker-ws-port <n>]] [--ws-url <url>] [--quiet]
+       volley desk install [--port <n>] [--broker-host <host>] [--root <checkout>] [--tailscale]
        volley desk uninstall
        volley desk check --url <http://host:port> --version <v>
 
@@ -439,6 +497,9 @@ Options:
                   or an IP address), never a URL or a login. Without it the route is a 404.
   --broker-ws-port <n>
                   The broker's WebSocket port for --broker-host (default 9001)
+  --ws-url <url>  The full ws:// or wss:// URL the page opens, served beside the broker at
+                  /desk-config.json as "ws_url" (without --broker-host, the broker is its
+                  host and port). A page served over HTTPS may only open wss://.
   -q, --quiet     No stale-build warnings
   -h, --help      Show this help and exit
 
@@ -446,7 +507,12 @@ install builds the Desk in the checkout (--root, default this one) without the
 VITE_VOLLEY_BROKER_* variables, stamps the build, and installs \`volley desk serve --host
 0.0.0.0 --port <n> [--broker-host <host>]\` as this platform's service (launchd or systemd
 --user); it records the port and the broker host in $VOLLEYD_HOME/setup.json, so a later
-\`volley setup\` keeps them. A second run changes nothing. uninstall stops and removes the
-service and keeps the build. check exits 0 when <url>/ answers 200 and <url>/version.json
+\`volley setup\` keeps them. A second run changes nothing. With --tailscale (on a machine
+whose Network step recorded Tailscale) it also serves the Desk on your private network:
+\`tailscale serve\` at https://<name> → http://127.0.0.1:<port> and https://<name>:8443 →
+http://127.0.0.1:9001 (the broker's WebSocket listener; never Funnel), the service gets
+--ws-url wss://<name>:8443, and setup.json and the roles record get the HTTPS address.
+uninstall stops and removes the service, takes off those two serves (nothing else), and
+keeps the build. check exits 0 when <url>/ answers 200 and <url>/version.json
 is <v>, else 1: the health check a machine runs on itself.
 `;

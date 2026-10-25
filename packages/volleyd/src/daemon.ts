@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -30,11 +31,12 @@ import { realAuthDeps } from "volley-cli/auth/context";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { defaultAuthDir } from "volley-cli/commands/auth";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
+import { PMSET_BATT_ARGV, POWER_SUPPLY_DIR, isLaptop } from "volley-cli/machine/laptop";
 import { countLiveAgents, probeAnonymous } from "volley-cli/setup/broker";
 import { readNetworkRecord, readSetupInstall } from "volley-cli/setup/journal";
 import { cmuxInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
-import type { BrokerAuth } from "volley-mcp/config";
+import { type BrokerAuth, coordinatorAuthPath } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, isValidAgentId, registryTopic } from "volley-mcp/topics";
 import pkg from "../package.json";
@@ -106,6 +108,7 @@ import {
   type InboxItem,
   type InboxKind,
   type InboxWhere,
+  NOTICE_ANSWERS,
   type SessionSurface,
   answerEvent,
   decisionAnswerRefusal,
@@ -115,6 +118,7 @@ import {
   inboxTopic,
   itemForDecision,
   itemForHandoff,
+  itemForNotice,
   itemForPicker,
   openedEvent,
   parsePickerQuestions,
@@ -240,6 +244,8 @@ import {
   ARCHIVE_TOPIC,
   BAD_ANSWER,
   CONFIG_TOPIC,
+  COORDINATOR_CHANNEL,
+  COORDINATOR_TOPIC,
   type ControlResponse,
   DAEMON_AGENT_ID,
   LEASE_REQUESTS_FILTER,
@@ -262,6 +268,11 @@ import {
   runningAgents,
   steerTarget,
 } from "./controls";
+import { renderHandoff } from "./coordinator/handoff";
+import { noticesFor } from "./coordinator/notices";
+import { type CoordinatorTarget, localTarget, remoteTarget } from "./coordinator/prepare";
+import type { CoordinatorRolePayload } from "./coordinator/role";
+import { CoordinatorRunner } from "./coordinator/runner";
 import { CredentialSweeper, recounted } from "./credential-sweep";
 import {
   type DecisionInput,
@@ -755,7 +766,19 @@ export interface DaemonOptions {
       loadavg: () => number[];
       freemem: () => number;
       totalmem: () => number;
+      /** Whether this machine is a laptop (default: a battery, `isLaptop`). */
+      laptop: () => Promise<boolean>;
     }>;
+  };
+  /**
+   * The coordinator role (SPEC §4.6.25): the exec its local tmux runs through and this machine's
+   * home (tests; default the fenced exec and `$HOME`), and the coordinator login's text (default:
+   * `coordinator.json` in the auth dir).
+   */
+  coordinator?: {
+    exec?: ExecFn;
+    home?: string;
+    login?: () => string | null;
   };
   /**
    * Claude account profiles (src/claude/): the profiles root (default `claudeRoot()`), the
@@ -904,6 +927,23 @@ const SLOT_OF: Record<string, DecisionSlot> = {
 };
 
 const secondsMs = (s: number) => s * 1000;
+
+/** Why `coordinator.machine` cannot name a laptop (SPEC §4.6.25). */
+export const laptopRefusal = (name: string) =>
+  `${name} is a laptop: it sleeps and travels; set coordinator.allow_laptop: true to host the coordinator there anyway`;
+
+/** `$VOLLEYD_HOME/<this>`: the owner stopped the coordinator role (`coordinator_stop`). */
+const COORDINATOR_STOPPED = "coordinator-stopped";
+/** `$VOLLEYD_HOME/<this>`: the coordinator sessions volleyd sent the handoff text, newest last. */
+const COORDINATOR_SESSIONS = "coordinator-sessions.json";
+/** How many greeted coordinator sessions `COORDINATOR_SESSIONS` keeps. */
+const COORDINATOR_SESSIONS_KEPT = 50;
+/** The coordinator role's admin ops (SPEC §4.6.25), answered on the account-op topic. */
+const COORDINATOR_OPS: ReadonlySet<string> = new Set([
+  "coordinator_restart",
+  "coordinator_stop",
+  "coordinator_status",
+]);
 /**
  * An account op answered after a long run outside the daemon's queue (`peer_doctor`): `later`
  * resolves to the answer and the `_system` record to journal with it.
@@ -1323,6 +1363,14 @@ export class Daemon {
   readonly inboxHandlers = new Map<InboxKind, InboxHandler>([
     ["picker", (item, req) => this.carryInboxAnswer(item, req, carryPicker)],
     ["handoff", (item, req) => this.carryInboxAnswer(item, req, carryHandoff)],
+    // A notice (SPEC §4.6.18) only records its answer: `open` acknowledges it, `dismiss`.
+    [
+      "notice",
+      async (_item, req) =>
+        (NOTICE_ANSWERS as readonly string[]).includes(req.answer)
+          ? null
+          : `a notice is answered open or dismiss, not '${req.answer}'`,
+    ],
   ]);
   /** Archived waves (archive.ts): out of the live set, kept for `status --all` and the index. */
   private readonly archived = new Map<WaveId, WaveLog>();
@@ -1575,6 +1623,10 @@ export class Daemon {
   private readonly version: string;
   /** The supervisor's own machine record, as last published (and when). */
   private ownRecord: MachineRecord | undefined;
+  /** Whether the own machine is a laptop (read once: a battery does not come and go). */
+  private ownLaptop: Promise<boolean> | undefined;
+  /** The coordinator role's supervisor (SPEC §4.6.25). */
+  private readonly coordinator: CoordinatorRunner;
   private ownRecordAt: number | null = null;
   /**
    * The supervisor's own doctor (#436: one run per running wave's clone, folded): its last report,
@@ -1859,6 +1911,37 @@ export class Daemon {
         ),
       clear: (id) => this.clearRetained(moveTopic(id)),
       journal: (ev) => this.appendSystem(ev),
+      log: this.log,
+    });
+    // SPEC §4.6.25: a laptop sleeps and travels, so it hosts the coordinator only when allowed.
+    this.config.setGuard((next, patch) => {
+      const c = next.coordinator;
+      if (patch.coordinator === undefined || c.machine === null || c.allow_laptop) return [];
+      const record = this.isLocalMachine(c.machine)
+        ? this.ownRecord
+        : this.machines.record(c.machine);
+      return record?.laptop === true
+        ? [{ path: "coordinator.machine", reason: laptopRefusal(c.machine) }]
+        : [];
+    });
+    this.coordinator = new CoordinatorRunner({
+      now: this.now,
+      config: () => this.config.effective().coordinator,
+      name: () => readSetupInstall(this.opts.home)?.coordinator ?? null,
+      namespace: this.opts.namespace,
+      target: (m) => this.coordinatorTarget(m),
+      up: (m) => this.coordinatorUp(m),
+      login: () => this.coordinatorLogin(),
+      repos: (m, home) => this.coordinatorRepos(m, home),
+      publish: (p) => this.publishCoordinator(p),
+      stopped: {
+        get: () => existsSync(join(this.opts.home, COORDINATOR_STOPPED)),
+        set: (v) => {
+          const f = join(this.opts.home, COORDINATOR_STOPPED);
+          if (v) writeFileSync(f, `${dateOf(this.time).toISOString()}\n`);
+          else rmSync(f, { force: true });
+        },
+      },
       log: this.log,
     });
     this.roleOps = new RoleOps({
@@ -2490,13 +2573,14 @@ export class Daemon {
       await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
         const id = m.topic.split("/")[3] ?? "";
         const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        let hooks = false;
         if (entry?.agent_id === id) {
           const env = parseEnvelope(m.payload);
           // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
           const modelSource = (env?.payload as { model_source?: unknown } | undefined)
             ?.model_source;
           // Only the hooks' entry shows the session got past its screen.
-          const hooks = modelSource !== undefined;
+          hooks = modelSource !== undefined;
           if (env !== null) this.heard(id, this.sentAt(env.wall_time), !hooks, hooks);
         }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
@@ -2522,6 +2606,10 @@ export class Daemon {
         for (const name of new Set([before, entry?.coordinator])) {
           if (name !== undefined) void this.enqueue(() => this.rebind(name));
         }
+        // The hooks' entry (published once their mailbox session exists, so the mail is kept):
+        // a fresh coordinator session gets the handoff text (SPEC §4.6.25).
+        if (entry?.agent_id === id && entry.coordinator !== undefined && hooks)
+          void this.enqueue(() => this.greetCoordinator(entry));
       }),
     );
   }
@@ -3183,6 +3271,11 @@ export class Daemon {
     await this.machineDownPass();
     await this.removalSweep();
     await this.fleetTick();
+    // The coordinator role: its ssh steps run beside the queue (a pass in flight is not repeated).
+    if (this.running)
+      void this.track(
+        this.coordinator.tick().catch((e: unknown) => this.log(`coordinator: ${String(e)}`)),
+      );
     await this.warnPeerIdle();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
@@ -4368,6 +4461,9 @@ export class Daemon {
         wsPort: DAEMON_DEFAULTS.ws_default_port,
         lan: setup?.lan ?? false,
         deskUrl: `http://${deskHost.includes(":") && !deskHost.startsWith("[") ? `[${deskHost}]` : deskHost}:${setup?.desk_port ?? DESK_PORT}`,
+        ...(setup?.desk_private_url !== undefined
+          ? { deskPrivateUrl: setup.desk_private_url }
+          : {}),
         now: dateOf(this.time).toISOString(),
       },
     );
@@ -5787,6 +5883,7 @@ export class Daemon {
       agents: this.placedOn(name),
       ...(memory !== undefined ? { memory } : {}),
       uptime_s: Math.floor(uptime()),
+      ...((await this.isOwnLaptop()) ? { laptop: true } : {}),
       ...(network !== null ? { network } : {}),
       last_seen: dateOf(this.time).toISOString(),
     };
@@ -5811,6 +5908,229 @@ export class Daemon {
     this.machines.observe(record);
     await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
     if (this.foldLogins(record, LOCAL_MACHINE)) await this.usagePass();
+  }
+
+  /**
+   * Whether this machine has a battery (`isLaptop`): Linux reads /sys/class/power_supply, macOS
+   * runs `pmset -g batt` through the fence. Read once; an unreadable answer is not a laptop.
+   */
+  private isOwnLaptop(): Promise<boolean> {
+    this.ownLaptop ??= (async () => {
+      const own = this.opts.fleet?.os?.laptop;
+      if (own !== undefined) return own();
+      const os = (this.opts.fleet?.os?.platform ?? platform)();
+      if (os === "darwin") {
+        const r = await realExec([...PMSET_BATT_ARGV]).catch(() => null);
+        return isLaptop({ platform: os, ...(r?.code === 0 ? { pmsetOutput: r.stdout } : {}) });
+      }
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(POWER_SUPPLY_DIR);
+      } catch {}
+      return isLaptop({ platform: os, powerSupplies: entries });
+    })().catch(() => false);
+    return this.ownLaptop;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The coordinator role (SPEC §4.6.25, coordinator/): what the runner reads and does
+  // -------------------------------------------------------------------------------------------
+
+  /** `local` (or the own machine's name) is this machine; any other name a paired machine. */
+  private isLocalMachine(m: string): boolean {
+    return m === LOCAL_MACHINE || m === this.config.localName();
+  }
+
+  private coordinatorTarget(m: string): CoordinatorTarget | string {
+    if (this.isLocalMachine(m)) {
+      this.coordinatorLocal ??= localTarget({
+        exec: this.opts.coordinator?.exec ?? realExec,
+        brokerPort: brokerAddress(this.opts.brokerUrl).port,
+        claudeJsonPath: this.claudeJsonPath,
+        ...(this.opts.coordinator?.home !== undefined ? { home: this.opts.coordinator.home } : {}),
+        ...(this.opts.spawner?.hooksDir !== undefined
+          ? { hooksDir: this.opts.spawner.hooksDir }
+          : {}),
+        ...(this.opts.spawner?.mcpEntry !== undefined
+          ? { mcpEntry: this.opts.spawner.mcpEntry }
+          : {}),
+      });
+      return this.coordinatorLocal;
+    }
+    if (!Object.hasOwn(this.config.effective().hosts, m)) return `${m} is not a paired machine`;
+    const host = this.remoteFor(m);
+    return typeof host === "string" ? host : remoteTarget(host);
+  }
+  private coordinatorLocal: CoordinatorTarget | undefined;
+
+  /** This machine always; a paired machine while its record is in and its tunnel not down. */
+  private coordinatorUp(m: string): boolean {
+    if (this.isLocalMachine(m)) return true;
+    const r = this.machines.record(m);
+    return r !== undefined && r.tunnel !== "down";
+  }
+
+  /** The coordinator login the supervisor holds: `coordinator.json` in the auth dir. */
+  private coordinatorLogin(): string | null {
+    const own = this.opts.coordinator?.login;
+    if (own !== undefined) return own();
+    const dir =
+      process.env.VOLLEY_AUTH_DIR ??
+      readSetupInstall(this.opts.home)?.auth_dir ??
+      defaultAuthDir(realAuthDeps.layout());
+    const path = coordinatorAuthPath({ VOLLEY_AUTH_DIR: dir });
+    try {
+      return path !== null ? readFileSync(path, "utf-8") : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The repositories `m` holds a clone of (assigned or adopted), each at its path there. */
+  private coordinatorRepos(m: string, home: string): { slug: string; target: string }[] {
+    const eff = this.config.effective();
+    const machine = this.isLocalMachine(m) ? this.config.localName() : m;
+    return assignedSlugs(eff, machine).flatMap((slug) => {
+      const path = cloneFor(eff, machine, slug, { home });
+      const target = path?.startsWith("~/") ? join(home, path.slice(2)) : path;
+      return target?.startsWith("/") === true ? [{ slug, target }] : [];
+    });
+  }
+
+  /**
+   * `volley/_system/federation/coordinator`, retained; null clears it. Each change then opens
+   * or supersedes the owner-only notices (`noticesFor`), on the queue: the runner publishes
+   * beside it, and a `coordinator_restart` on the queue waits for its pass.
+   */
+  private async publishCoordinator(p: CoordinatorRolePayload | null): Promise<void> {
+    if (!this.running) return;
+    if (p === null) await this.clearRetained(COORDINATOR_TOPIC);
+    else
+      await this.publish(
+        COORDINATOR_TOPIC,
+        this.envelope(COORDINATOR_CHANNEL, "coordinator", p),
+        true,
+      );
+    const prev = this.coordinatorShown;
+    this.coordinatorShown = p;
+    void this.enqueue(() => this.coordinatorNotices(prev, p));
+  }
+  /** The role's payload as last published (the notices compare the next one with it). */
+  private coordinatorShown: CoordinatorRolePayload | null = null;
+
+  /** Supersede and open the coordinator notices `prev` → `next` calls for (SPEC §4.6.25). */
+  private async coordinatorNotices(
+    prev: CoordinatorRolePayload | null,
+    next: CoordinatorRolePayload | null,
+  ): Promise<void> {
+    const notices = [...this.inbox.values()].filter((i) => i.kind === "notice");
+    const actions = noticesFor(prev, next, notices);
+    for (const id of actions.supersede) {
+      const item = this.inbox.get(id);
+      if (item === undefined || item.answered !== undefined) continue;
+      await this.recordInboxAnswer(item, {
+        version: item.version,
+        answer: "superseded",
+        by: DAEMON_AGENT_ID,
+        where: { kind: "autopilot" },
+      });
+    }
+    for (const spec of actions.open) {
+      // A notice's id is fixed: an answered one is reopened at its next version.
+      const prior = this.inbox.get(`n-${spec.notice}`);
+      if (prior !== undefined && prior.answered === undefined) continue;
+      const item = itemForNotice(
+        spec,
+        dateOf(this.time).toISOString(),
+        prior !== undefined ? prior.version + 1 : 1,
+      );
+      this.inbox.set(item.id, item);
+      await this.journalInbox(item, openedEvent(item));
+      await this.publishInboxItem(item);
+      this.log(`inbox ${item.id}: ${item.title}`);
+    }
+  }
+
+  private get coordinatorSessionsFile(): string {
+    return join(this.opts.home, COORDINATOR_SESSIONS);
+  }
+
+  /** The coordinator sessions already sent the handoff text, newest last. */
+  private coordinatorSessions(): string[] {
+    try {
+      const v = JSON.parse(readFileSync(this.coordinatorSessionsFile, "utf-8")) as {
+        sessions?: unknown;
+      };
+      return Array.isArray(v.sessions)
+        ? v.sessions.filter((s): s is string => typeof s === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * A coordinator session's registry entry: the role's own (its name, its cwd under the role's
+   * directory) and not greeted before gets the handoff text once, as a mailbox `steering`
+   * message its hooks show at its next prompt; the previous greeted session is named in it.
+   */
+  private async greetCoordinator(entry: RegistryEntry): Promise<void> {
+    const role = this.coordinator.status();
+    if (role === null || role.dir === undefined || entry.cwd === undefined) return;
+    if (role.state !== "starting" && role.state !== "running") return;
+    if (entry.coordinator !== role.name) return;
+    const dir = role.dir.replace(/\/+$/, "");
+    if (entry.cwd !== dir && !entry.cwd.startsWith(`${dir}/`)) return;
+    const sessions = this.coordinatorSessions();
+    if (sessions.includes(entry.agent_id)) return;
+    const previous = sessions.at(-1);
+    const text = renderHandoff({
+      name: role.name,
+      machine: role.machine,
+      dir,
+      waves: this.runningWaves().map(([wave, log]) => {
+        const tasks = log.record.state?.tasks ?? [];
+        return {
+          id: wave,
+          repo: log.record.state?.repo ?? "",
+          done: tasks.filter((t) => t.stage === "done").length,
+          total: tasks.length,
+        };
+      }),
+      inbox: [...this.inbox.values()]
+        .filter((i) => i.answered === undefined)
+        .map((i) => ({ id: i.id, title: i.title })),
+      ...(previous !== undefined ? { previousSessionId: previous } : {}),
+    });
+    await this.publish(
+      buildTopic(entry.namespace ?? this.opts.namespace, entry.agent_id, "mailbox"),
+      this.envelope(
+        "mailbox",
+        "steering",
+        { text, from_agent_id: DAEMON_AGENT_ID, seq: 1 },
+        randomUUID(),
+      ),
+      false,
+    );
+    writeFileAtomic(
+      this.coordinatorSessionsFile,
+      `${JSON.stringify({ sessions: [...sessions, entry.agent_id].slice(-COORDINATOR_SESSIONS_KEPT) })}\n`,
+    );
+    this.log(`coordinator: handoff text sent to ${entry.agent_id}`);
+  }
+
+  /** `coordinator_restart` / `coordinator_stop` / `coordinator_status` (an admin's, or the read). */
+  private async coordinatorOp(
+    op: string,
+  ): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+    if (op === "coordinator_status") return { ok: true, result: this.coordinator.status() };
+    if (this.config.effective().coordinator.machine === null)
+      return { ok: false, error: "the coordinator role is off: set coordinator.machine first" };
+    const result =
+      op === "coordinator_restart"
+        ? await this.coordinator.restart()
+        : await this.coordinator.stop();
+    return { ok: true, result };
   }
 
   /**
@@ -11119,12 +11439,20 @@ export class Daemon {
   }
 
   /**
-   * null when `by` may answer a picker or handoff; else the refusal. A coordinator session's own
-   * (`owner_only`) is answered only by that session's owner: its agent id, or the coordinator
-   * name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   * null when `by` may answer a picker, handoff or notice; else the refusal. A coordinator
+   * session's own (`owner_only`) is answered only by that session's owner: its agent id, or the
+   * coordinator name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   * A notice is the owner's (SPEC §4.6.18): its coordinator name (`source.name`) or the agent
+   * bound to it; a Desk login never gets here.
    */
   private guardSessionAnswer(item: InboxItem, by: string): string | null {
-    if (!item.owner_only || (item.kind !== "picker" && item.kind !== "handoff")) return null;
+    if (!item.owner_only) return null;
+    if (item.kind === "notice") {
+      const owner = typeof item.source.name === "string" ? item.source.name : DAEMON_AGENT_ID;
+      if (this.actsAs(by, owner)) return null;
+      return `inbox item '${item.id}' is ${owner}'s own: only its owner answers it, not ${by}`;
+    }
+    if (item.kind !== "picker" && item.kind !== "handoff") return null;
     if (this.actsAs(item.agent_id, by)) return null;
     return `inbox item '${item.id}' is ${item.agent_id}'s own: only its owner answers it, not ${by}`;
   }
@@ -11652,13 +11980,15 @@ export class Daemon {
             ? await this.roleOp(exec, sender, payload)
             : PEER_ADMIN_OPS.has(payload.op as string)
               ? await this.peerAdminOp(exec, sender, payload, progress)
-              : await accountOp(
-                  exec,
-                  sender,
-                  payload,
-                  lastSeen,
-                  new Date(this.startedAt).toISOString(),
-                );
+              : COORDINATOR_OPS.has(payload.op as string)
+                ? await this.coordinatorAdminOp(exec, sender, payload)
+                : await accountOp(
+                    exec,
+                    sender,
+                    payload,
+                    lastSeen,
+                    new Date(this.startedAt).toISOString(),
+                  );
       }
     } catch (e) {
       out = failed(e);
@@ -11800,6 +12130,20 @@ export class Daemon {
       await this.evict(p.name as string, sender);
     const { rejected: _r, ...answer } = r;
     return { reply: authReply(op, answer) };
+  }
+
+  /** The coordinator role's ops from `sender` (SPEC §4.6.25): the account ops' admin check first. */
+  private async coordinatorAdminOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome | DeferredAuth> {
+    const op = p.op as string;
+    const accounts = await listAccounts(exec);
+    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    // A start runs ssh steps for seconds: answered outside the queue.
+    return { later: async () => ({ reply: authReply(op, await this.coordinatorOp(op)) }) };
   }
 
   /**
@@ -12176,6 +12520,9 @@ export class Daemon {
             ],
             ...(this.killSwitch ? { kill_switch: true } : {}),
             ceiling: { live: this.ceilingCount().live, max: this.config.effective().hard_ceiling },
+            ...(this.coordinator.status() !== null
+              ? { coordinator: this.coordinator.status() }
+              : {}),
             // The cached count: status never waits on the broker's control connection.
             ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
             // The own machine's local_agents mode, as its last verdict said (SPEC §4.6.15),
@@ -12232,6 +12579,9 @@ export class Daemon {
         return this.peers.join(p, by);
       case "peers":
         return this.peers.list();
+      // The coordinator role (SPEC §4.6.25): its state is a read; restart and stop are admin ops.
+      case "coordinator_status":
+        return { ok: true, result: this.coordinator.status() };
       // Repositories (SPEC §4.6.21): reads anyone who steers may make; add / remove are admin ops.
       case "repo_list":
         return this.repoList();
@@ -12285,6 +12635,8 @@ export class Daemon {
       case "repo_add":
       case "repo_remove":
       case "repo_probe":
+      case "coordinator_restart":
+      case "coordinator_stop":
       // Machine roles (SPEC §4.6.24): admin ops, never on the mailbox.
       case "role_plan":
       case "role_move":

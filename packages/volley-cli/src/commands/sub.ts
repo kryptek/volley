@@ -4,7 +4,7 @@ import { parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { isValidTopicFilter } from "volley-mcp/topics";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
@@ -73,8 +73,8 @@ export async function sub({ argv, env, io }: SubArgs): Promise<ExitCode> {
     return EXIT.USAGE;
   }
 
-  const broker = await connectAsClient(brokerUrl, io, auth);
-  if (broker === null) return EXIT.ERROR;
+  const broker = await connectToSupervisor(brokerUrl, io, auth, { command: "volley sub", env });
+  if (typeof broker === "number") return broker;
   try {
     const collected = await broker.subscribeCollect(pattern, max, timeoutSec * 1000);
     for (const { topic, payload } of collected) {

@@ -27,10 +27,13 @@
           "properties": {
             "id": {
               "type": "string",
-              "pattern": "^[dphr]-[A-Za-z0-9_-]{1,200}$",
-              "description": "d-<wave>-<decision_id>, p-<agent_id>-<tool_use_id>, h-<agent_id>-<seq> or r-<wave>-<stage|go>, by kind."
+              "pattern": "^[dphrn]-[A-Za-z0-9_-]{1,200}$",
+              "description": "d-<wave>-<decision_id>, p-<agent_id>-<tool_use_id>, h-<agent_id>-<seq>, r-<wave>-<stage|go> or n-<notice>, by kind."
             },
-            "kind": { "enum": ["decision", "picker", "handoff", "release"] },
+            "kind": {
+              "enum": ["decision", "picker", "handoff", "release", "notice"],
+              "description": "notice: an owner-only notice from the supervisor (its link in pointers.link), answered open or dismiss; it never blocks a wave."
+            },
             "version": {
               "type": "integer",
               "minimum": 1,

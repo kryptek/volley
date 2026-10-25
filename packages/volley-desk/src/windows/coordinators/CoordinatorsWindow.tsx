@@ -18,7 +18,8 @@
  * events`: it wakes on the wave's events, nobody has to answer. Hidden waves keep
  * running and still count towards the top-bar pill and notifications. The
  * first row is the supervisor (`volleyd`) with the top-bar pill's health: it
- * runs the waves, but it is not an agent and has no window of its own.
+ * runs the waves, but it is not an agent and has no window of its own. Under it, the coordinator
+ * role's row (SPEC §4.6.25) names the machine the coordinator runs on, its state and its link.
  */
 import {
   ArrowDown01Icon,
@@ -36,9 +37,16 @@ import type { Rect } from "../../canvas/useViewport";
 import { githubOf } from "../../lib/github";
 import { noun, plural } from "../../lib/plural";
 import { RepoChip } from "../../look/RepoChip";
+import { coordinatorStateLine } from "../../settings/CoordinatorCard";
 import { usePanelSound } from "../../sounds/usePanelSound";
 import { supervisorHealth } from "../../store/reducer";
-import type { CoordinatorState, GitHubRepo, SupervisorView, WaveView } from "../../store/types";
+import type {
+  CoordinatorRolePayload,
+  CoordinatorState,
+  GitHubRepo,
+  SupervisorView,
+  WaveView,
+} from "../../store/types";
 import { age } from "../agent/AgentWindow";
 import { Clawd } from "../wave/Clawd";
 import { IconBtn, dagNodes, isMine } from "../wave/WaveWindow";
@@ -172,6 +180,8 @@ export interface CoordinatorsWindowProps {
   supervisors?: readonly SupervisorView[];
   /** Clock for the supervisor's age (the App's attention tick). */
   now?: number;
+  /** The coordinator role's state (`volley/_system/federation/coordinator`): its row, when set. */
+  role?: CoordinatorRolePayload | null | undefined;
 }
 
 /** The distinct repositories (`github`, by slug, in wave order) of these waves. */
@@ -239,6 +249,41 @@ function SupervisorRow({
             <span className="coord-repos">
               <RepoChips repos={repos} />
             </span>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+/** The coordinator role: its name, the machine it runs on, its state and its link. */
+function RoleRow({ role }: { role: CoordinatorRolePayload }) {
+  const up = role.state === "running";
+  return (
+    <li
+      aria-label={`Coordinator ${role.name} on ${role.machine}`}
+      className={`coord coord--sup st-${up ? "working" : "gone"}`}
+    >
+      <span className="coord-dot coord-dot--neutral" />
+      <div className="coord-main">
+        <div className="coord-name">
+          Coordinator <span className="mono">{role.name}</span>{" "}
+          <Chip
+            kind={up ? "working" : role.state === "failed" ? "failed" : "stopped"}
+            label={role.state}
+          />
+        </div>
+        <div className="coord-sub">
+          <span className="coord-state">
+            on {role.machine} · {coordinatorStateLine(role)}
+          </span>
+          {up && role.session_url && (
+            <>
+              {" · "}
+              <a href={role.session_url} target="_blank" rel="noreferrer noopener">
+                Open
+              </a>
+            </>
           )}
         </div>
       </div>
@@ -353,6 +398,7 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
         {p.supervisors?.map((s) => (
           <SupervisorRow key={s.id} sup={s} now={p.now ?? Date.now()} repos={repos} />
         ))}
+        {p.role && <RoleRow role={p.role} />}
         {active.map((w) => {
           const c = p.coordinators[w.id] ?? { id: null, state: "gone" as const };
           const hidden = p.hidden.has(w.id);

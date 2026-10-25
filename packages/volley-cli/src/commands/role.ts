@@ -5,7 +5,7 @@ import type { BrokerAuth } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { isPlanSheet, renderSheet } from "volleyd/roles/sheet";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
-import { connectAsClient, openClient, reportConnectError } from "../connect";
+import { connectToSupervisor, openClient, reportConnectError, reportUnreachable } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type Answer, type AskFlags, adminRefusal, askVolleyd, replyKeyPair, unseal } from "./peer";
@@ -81,7 +81,7 @@ export interface RoleArgs {
 interface RolesPayload {
   broker: { machine: string };
   supervisor: { machine: string };
-  desk: { machine: string; url: string };
+  desk: { machine: string; url: string; lan_url?: string };
 }
 
 export interface RoleDeps {
@@ -167,8 +167,12 @@ export async function runRole({ argv, env, io }: RoleArgs, deps: RoleDeps): Prom
     return EXIT.USAGE;
   }
 
-  const broker = await connectAsClient(brokerUrl, io, auth);
-  if (broker === null) return EXIT.ERROR; // connectAsClient already printed the diagnostic.
+  const broker = await connectToSupervisor(brokerUrl, io, auth, {
+    command: "volley role",
+    json: parsed.values.json === true,
+    env,
+  });
+  if (typeof broker === "number") return broker; // already diagnosed and printed.
   try {
     const raw = await broker.queryRetained(ROLES_TOPIC, timeoutSec * 1000);
     const envelope = raw === null || raw === "" ? null : parseEnvelope(raw);
@@ -190,7 +194,7 @@ export async function runRole({ argv, env, io }: RoleArgs, deps: RoleDeps): Prom
       [
         `broker      on ${record.broker.machine}`,
         `supervisor  on ${record.supervisor.machine}`,
-        `desk        on ${record.desk.machine} (${record.desk.url})`,
+        `desk        on ${record.desk.machine} (${record.desk.url}${typeof record.desk.lan_url === "string" ? ` · LAN ${record.desk.lan_url}` : ""})`,
         "",
       ].join("\n"),
     );
@@ -497,10 +501,14 @@ async function streamed(
   try {
     url = resolveBrokerUrl(v["broker-url"], env);
     auth = resolveAuth({ username: v.username, password: v.password }, env);
-    broker = await openClient(url, auth);
   } catch (e) {
     reportConnectError(io, e);
     return EXIT.ERROR;
+  }
+  try {
+    broker = await openClient(url, auth);
+  } catch (e) {
+    return reportUnreachable(io, e, url, { command: cmd, env });
   }
   const deadline = Date.now() + timeoutS * 1000;
   /** One retained topic's envelope over a connection of its own; null when there is none (yet). */
