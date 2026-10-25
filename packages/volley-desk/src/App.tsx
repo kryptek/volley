@@ -1599,6 +1599,7 @@ export default function App() {
                 key={p.id}
                 task={p.task}
                 wave={id}
+                ciMode={state.waves[id]?.state?.ci_mode}
                 accent={accentOf(id)}
                 frame={place(p.id)}
               />

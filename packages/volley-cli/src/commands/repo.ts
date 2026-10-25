@@ -187,11 +187,20 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
         visibility?: string;
         machines?: string[];
         status?: string[];
+        ci?: { workflows?: number };
       };
       const added = r.slug ?? slug;
       io.stdout(
         `Added ${added}${r.visibility !== undefined ? ` (${r.visibility})` : ""} to ${(r.machines ?? []).join(", ")}.\n`,
       );
+      // Its GitHub Actions workflows, when volleyd read them (SPEC §4.6.8's CI mode, at a wave).
+      const workflows = r.ci?.workflows;
+      if (workflows === 0)
+        io.stdout(
+          "CI: none — no GitHub Actions workflows; in a wave the two reviewers and the gate are the check\n",
+        );
+      else if (typeof workflows === "number")
+        io.stdout(`CI: ${workflows} workflow${workflows === 1 ? "" : "s"}\n`);
       if (v.wait !== true) {
         for (const l of r.status ?? []) io.stdout(`  ${l}\n`);
         io.stdout(`Follow it with: volley repo status ${added}\n`);

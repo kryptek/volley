@@ -313,6 +313,16 @@ describe("placement (SPEC §4.6.15)", () => {
     heavy: true
 `;
 
+  it("ci: auto | none | required parse onto the wave; absent is undefined; anything else is refused at ci", () => {
+    const TASK = "tasks:\n  T1: { issue: 1 }\n";
+    for (const ci of ["auto", "none", "required"] as const)
+      expect(parseWaveFile(`${HEADER}ci: ${ci}\n${TASK}`).ci).toBe(ci);
+    expect(parseWaveFile(`${HEADER}${TASK}`).ci).toBeUndefined();
+    const errors = errorsOf(`${HEADER}ci: sometimes\n${TASK}`);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/^ci: /);
+  });
+
   it("placement: auto makes every task without a host auto; a named host stays", () => {
     const w = parseWaveFile(
       `${HEADER}placement: auto\nplacement_prefer: [box-a]\nplacement_avoid: [box-b]\nheavy_pools: [backend-it]\n${TASKS}`,

@@ -17,6 +17,7 @@ import { AUTO_HOST } from "./placement";
 import { type RepoConfig, cloneFor, holdersOf, isSlug } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
+  CiOverride,
   Footprint,
   MergeMode,
   PipelineStage,
@@ -80,6 +81,7 @@ interface RawWave {
   placement_prefer?: string[];
   placement_avoid?: string[];
   merge?: MergeMode;
+  ci?: CiOverride;
   playbook?: string;
 }
 
@@ -349,6 +351,7 @@ function normalise(w: RawWave, placement: "auto" | "local"): Wave {
     ...(w.placement_prefer !== undefined ? { placement_prefer: w.placement_prefer } : {}),
     ...(w.placement_avoid !== undefined ? { placement_avoid: w.placement_avoid } : {}),
     ...(w.merge !== undefined ? { merge: w.merge } : {}),
+    ...(w.ci !== undefined ? { ci: w.ci } : {}),
     ...(w.playbook !== undefined ? { playbook: w.playbook } : {}),
   };
   // The file's own overlap plan, as written: the Desk and `validate` read it before any run.

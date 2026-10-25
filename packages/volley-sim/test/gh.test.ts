@@ -55,6 +55,15 @@ describe("gh api (volleyd's reads)", () => {
     expect(json(r)).toEqual({ total_count: 0, workflow_runs: [] });
   });
 
+  it("the CI mode reads (#602): one active workflow, an unprotected branch, no rulesets", () => {
+    const w = gh(["api", "repos/{owner}/{repo}/actions/workflows?per_page=100"]);
+    expect(w.code).toBe(0);
+    expect(json(w).workflows.map((x: { state: string }) => x.state)).toEqual(["active"]);
+    const b = gh(["api", "repos/{owner}/{repo}/branches/release/w1"]);
+    expect(json(b)).toEqual({ name: "release/w1", protected: false });
+    expect(json(gh(["api", "repos/{owner}/{repo}/rules/branches/release/w1"]))).toEqual([]);
+  });
+
   it("tags: `git/matching-refs/tags/<prefix> --paginate --slurp` pages, `git/tags/<sha>` the tagged commit", () => {
     const head = git(work, "rev-parse", "HEAD");
     git(work, "tag", "v1.0.0");

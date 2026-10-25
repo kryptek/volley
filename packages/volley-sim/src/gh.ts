@@ -392,6 +392,16 @@ const COMMANDS: Record<string, Spec> = {
       // The CI queue (pressure/ci-queue.ts): a simulated run is done when it is first read.
       if (runs !== null && new URLSearchParams(runs[2]).get("status") === "queued")
         return reply({ total_count: 0, workflow_runs: [] });
+      // The CI mode volleyd reads at admission (#602): one active workflow, no branch protection
+      // and no rulesets, so a simulated wave stays on `workflows`.
+      if (/^repos\/[^/]+\/[^/]+\/actions\/workflows(\?.*)?$/.test(endpoint))
+        return reply({
+          total_count: 1,
+          workflows: [{ id: 1, name: "ci", path: ".github/workflows/ci.yml", state: "active" }],
+        });
+      const branch = /^repos\/[^/]+\/[^/]+\/branches\/(.+)$/.exec(endpoint);
+      if (branch !== null) return reply({ name: branch[1], protected: false });
+      if (/^repos\/[^/]+\/[^/]+\/rules\/branches\/.+$/.test(endpoint)) return reply([]);
       const slurp = a.bools.has("--slurp");
       if (slurp && !a.bools.has("--paginate")) throw new Unknown();
       // The release train's tag check: refs from the bare origin; --slurp is an array of pages.

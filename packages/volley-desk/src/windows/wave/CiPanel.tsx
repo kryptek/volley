@@ -5,7 +5,9 @@
  * window's CI row), the jobs still running, the failed ones in red, and a link to the PR's
  * checks. A hold with no readable jobs (`CI pending on …`, `CI unreadable …`, `CI infra
  * incident …`) shows its `why_waiting` sentence instead of the bar. Everything comes from the
- * wave state: the wave state has no per-run URL, so the link is the PR's checks tab.
+ * wave state: the wave state has no per-run URL, so the link is the PR's checks tab. In a wave
+ * on a repository with no CI (`ci_mode: none`, #602), a task verified without CI says so instead:
+ * no bar and no checks link (there are no checks).
  */
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import { prHref } from "../../lib/github";
@@ -18,12 +20,17 @@ export function etaLabel(eta_s?: number): string {
   return eta_s < 60 ? "<1 min left" : `~${Math.round(eta_s / 60)} min left`;
 }
 
+/** What stands in for CI in a repository with none (`ci_mode: none`, SPEC §4.6.8). */
+export const NO_CI_CHECK = "the reviewers and the gate are the check";
+
 /** The panel's window id: `<wave>/ci/<task>`. */
 export const ciPanelId = (wave: string, task: string) => `${wave}/ci/${task}`;
 
 export interface CiPanelProps {
   task: WaveTask;
   wave: string;
+  /** The wave's `ci_mode` (absent: an older supervisor, read as `workflows`). */
+  ciMode?: string | undefined;
   accent: string;
   frame: Omit<
     FrameProps,
@@ -31,8 +38,9 @@ export interface CiPanelProps {
   >;
 }
 
-export function CiPanel({ task, wave, accent, frame }: CiPanelProps) {
+export function CiPanel({ task, wave, ciMode, accent, frame }: CiPanelProps) {
   const pr = task.pr;
+  const noCi = ciMode === "none" && pr?.ci === "none";
   const jobs = pr?.jobs && pr.jobs.total > 0 ? pr.jobs : undefined;
   const href = prHref(task);
   const eta = etaLabel(pr?.eta_s);
@@ -44,14 +52,16 @@ export function CiPanel({ task, wave, accent, frame }: CiPanelProps) {
       title={
         <>
           <span className="t-name">{pr ? `${task.id} · #${pr.number}` : task.id}</span>
-          <span className="chip chip--ci">waiting for CI</span>
+          <span className="chip chip--ci">{noCi ? "no CI" : "waiting for CI"}</span>
         </>
       }
       accent={accent}
       width={AGENT_WIDTH}
     >
       <div className="ci-panel">
-        {jobs ? (
+        {noCi ? (
+          <p className="ci-none">{`no CI · ${NO_CI_CHECK}`}</p>
+        ) : jobs ? (
           <>
             {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is read, not operated; it takes no focus */}
             <div
@@ -102,7 +112,7 @@ export function CiPanel({ task, wave, accent, frame }: CiPanelProps) {
         ) : (
           <p className="ci-why">{task.why_waiting}</p>
         )}
-        {href && pr && (
+        {href && pr && !noCi && (
           <a className="ci-link" href={`${href}/checks`} target="_blank" rel="noreferrer">
             Checks for PR #{pr.number} on GitHub
           </a>

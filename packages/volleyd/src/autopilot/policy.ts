@@ -380,9 +380,10 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
   {
     policy: "ci_failed/owner",
     kinds: ["ci_failed"],
-    condition: "otherwise (ci_none included)",
+    condition: "otherwise (a repository with workflows whose run never came included)",
     answer: null,
-    rationale: "a red head no rule routes and a repository without workflows are the owner's",
+    rationale:
+      "a red head no rule routes, and a workflow-bearing repository whose run never arrived, are the owner's",
   },
   {
     policy: "merge_conflict/drop-from-train",

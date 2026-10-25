@@ -248,6 +248,8 @@ export const DAEMON_DEFAULTS = {
   tree_read_ms: 15_000,
   /** How long the daemon waits for `gh repo view --json visibility` (at submit, under `auto`). */
   repo_visibility_ms: 15_000,
+  /** How long the daemon waits for each `gh api` read of the repo's workflows and required checks. */
+  ci_mode_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
   registry_scan_ms: 250,
   /** Kill a `volley auth` account command (accounts.ts) after this long. */

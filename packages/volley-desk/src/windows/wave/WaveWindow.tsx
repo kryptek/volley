@@ -78,6 +78,7 @@ import type {
   WaveView,
 } from "../../store/types";
 import { Feed } from "../agent/Feed";
+import { NO_CI_CHECK } from "./CiPanel";
 import { Clawd } from "./Clawd";
 import { Clusters } from "./Clusters";
 import { Dag, type DagNode, HostChips, fixerLabel, stageState } from "./Dag";
@@ -475,6 +476,14 @@ export function WaveWindow(p: WaveWindowProps) {
         </span>
       )}
       <RepoChip github={s?.github} />
+      {s?.ci_mode === "none" && (
+        <span
+          className="chip chip--noci"
+          title={`No GitHub Actions workflows and no required checks: ${NO_CI_CHECK}`}
+        >
+          no CI
+        </span>
+      )}
       {ended && <span className="chip chip--ended">{ended}</span>}
       {s?.autopilot && (
         // Never ellipsized: the full sentence, or its tokens in a compact window (desk.css).

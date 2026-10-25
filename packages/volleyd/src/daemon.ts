@@ -184,6 +184,7 @@ import {
   requestOf,
 } from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
+import { type CiModeResult, readCiFacts, resolveCiMode } from "./ci-mode";
 import { InFlightLedger } from "./claude/in-flight";
 import { lastAccountMove, moveAgentAccount, moveRespawn } from "./claude/move";
 import {
@@ -6805,10 +6806,13 @@ export class Daemon {
           this.applyRepoAdd(view.slug, machines, paths as Record<string, string>, sender),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
+        // Its workflows (no release branch yet to read required checks on): absent if unreadable.
+        const facts = await readCiFacts(this.host.exec, { slug: view.slug }, null);
+        const ci = facts !== null ? { ci: { workflows: facts.workflows } } : {};
         return {
           reply: authReply("repo_add", {
             ok: true,
-            result: { ...r, url: view.url, visibility: view.visibility },
+            result: { ...r, url: view.url, visibility: view.visibility, ...ci },
           }),
         };
       },
@@ -12688,8 +12692,16 @@ export class Daemon {
     if (!readsTree && !this.readsRepo()) {
       const visibility = await this.repoVisibility(first.wave);
       return first.existing !== undefined
-        ? this.resubmit(first.existing, first.wave, text, preface, visibility, null)
-        : this.commitSubmit(first.wave, first.owner, NO_FOOTPRINTS, text, preface, visibility);
+        ? this.resubmit(first.existing, first.wave, text, preface, visibility, null, null)
+        : this.commitSubmit(
+            first.wave,
+            first.owner,
+            NO_FOOTPRINTS,
+            text,
+            preface,
+            visibility,
+            null,
+          );
     }
     // Fetching issue bodies, the tree and the repo's visibility can take seconds: do it off the
     // serial queue (control ops and ticks, the kill switch included, keep running), then commit
@@ -12700,15 +12712,31 @@ export class Daemon {
       defer: Promise.all([
         this.fetchFootprints(first.wave, fetchFiles, readsTree),
         this.repoVisibility(first.wave),
-      ]).then(([read, visibility]) =>
+        this.ciMode(first.wave),
+      ]).then(([read, visibility, ci]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
+          // `ci: none` the release branch's required checks make impossible (SPEC §4.6.8).
+          if (ci !== null && "refused" in ci)
+            return {
+              ok: false,
+              error: ci.refused,
+              errors: [{ path: "ci", reason: ci.refused }],
+            };
           if (again.existing !== undefined)
-            return this.resubmit(again.existing, again.wave, text, preface, visibility, read.tree);
-          return this.commitSubmit(again.wave, again.owner, read, text, preface, visibility);
+            return this.resubmit(
+              again.existing,
+              again.wave,
+              text,
+              preface,
+              visibility,
+              read.tree,
+              ci,
+            );
+          return this.commitSubmit(again.wave, again.owner, read, text, preface, visibility, ci);
         }),
       ),
     };
@@ -12743,6 +12771,28 @@ export class Daemon {
     if (mode !== "auto")
       return { visibility: null, source: "config", public_hygiene: mode, ...github };
     return { visibility: view.visibility, source: "gh", public_hygiene: mode, ...github };
+  }
+
+  /**
+   * The wave version's CI mode (SPEC §4.6.8): its `ci:` override over the repository's active
+   * workflows and the release branch's required checks, read with `gh api`; or the refusal of a
+   * `ci: none` those checks make impossible. Null: not read (a daemon without a spawner); the
+   * pipeline then reads `workflows`.
+   */
+  private async ciMode(wave: Wave): Promise<CiModeResult | { refused: string } | null> {
+    if (!this.readsRepo()) return null;
+    const where = isSlugRepo(wave) ? { slug: wave.repo } : { cwd: expandHome(wave.repo) };
+    const facts = await readCiFacts(this.host.exec, where, wave.release_branch);
+    return resolveCiMode(wave.ci, facts, wave.release_branch);
+  }
+
+  /** Journal a wave version's CI mode, and the alarm when the repository could not be read. */
+  private async journalCiMode(wave: WaveId, ci: CiModeResult | null): Promise<void> {
+    if (ci === null) return;
+    const { unknown, ...data } = ci;
+    await this.append(wave, { type: "ci_mode_detected", data: { ...data } });
+    if (unknown === true)
+      await this.append(wave, { type: "alarm_raised", data: { alarm: "ci_mode_unknown" } });
   }
 
   /** Journal a wave version's visibility, and the alarm when it could not be read. */
@@ -12932,6 +12982,7 @@ export class Daemon {
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
     visibility: VisibilityFacts | null,
+    ci: CiModeResult | null,
   ): Promise<Reply> {
     const wave: Wave = { ...submitted, version: 1 };
     const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
@@ -12949,6 +13000,7 @@ export class Daemon {
       data: { wave, owner, brief_preface: preface.info },
     });
     await this.journalVisibility(wave.wave, visibility);
+    await this.journalCiMode(wave.wave, ci);
     if (preface.info === null) {
       await this.append(wave.wave, {
         type: "alarm_raised",
@@ -14648,6 +14700,7 @@ export class Daemon {
     preface: { info: BriefPrefaceInfo | null; path: string },
     visibility: VisibilityFacts | null,
     tree: Tree | null,
+    ci: CiModeResult | null,
   ): Promise<Reply> {
     const rec = log.record;
     const state = rec.state;
@@ -14707,6 +14760,7 @@ export class Daemon {
       await this.append(wave.wave, { type: "wave_planned", data: { clusters } });
     }
     await this.journalVisibility(wave.wave, visibility);
+    await this.journalCiMode(wave.wave, ci);
     // plan_change decisions go through the decision store: journal + retained decision topic.
     for (const d of res.decisions) {
       if (d.op === "resolve") {

@@ -97,6 +97,7 @@
             "peer_doctor_run",
             "peer_drain_started",
             "repo_visibility_detected",
+            "ci_mode_detected",
             "decision_auto_resolved",
             "decision_escalated",
             "decision_held",
@@ -168,6 +169,31 @@
     },
     {
       "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "ci_mode_detected" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "description": "The repository's CI mode for a wave version (spec section 4.6.8), read once at admission: none (no active workflow and no required check), workflows or required; source wave_file when the wave file's ci: set it.",
+                    "required": ["mode", "workflows", "required_checks", "source"],
+                    "properties": {
+                      "mode": { "enum": ["none", "workflows", "required"] },
+                      "workflows": {
+                        "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+                      },
+                      "required_checks": { "type": "array", "items": { "type": "string" } },
+                      "source": { "enum": ["gh", "wave_file"] }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         {
           "if": { "properties": { "type": { "const": "account_chosen" } }, "required": ["type"] },
           "then": {
