@@ -224,12 +224,18 @@ describe("volleyd add", () => {
 
   it("no answer to the submit keeps the file as submitted and names volleyd diff", async () => {
     const w = await world();
-    // The daemon's check of the release branch outlasts the submit's wait: no answer in time.
+    // The daemon's check of the release branch outlasts the submit's wait: it is held until the
+    // add has given up, so no answer arrives in time.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
     w.s.host.fake.on(["git", "-C", w.s.repo, "rev-parse", "--verify"], async () => {
-      await new Promise((r) => setTimeout(r, 1000));
+      await held;
       return { stdout: "abc\n" };
     });
     const r = await w.add(["w1", "602", "--by", OWNER], { submitTimeoutMs: 300 });
+    release();
     expect(r.exitCode).toBe(124);
     expect(r.stderr).toContain(
       `no answer to the submit; ${w.file} is kept as submitted: check it with volleyd diff w1 ${w.file}`,
