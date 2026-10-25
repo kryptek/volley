@@ -412,6 +412,28 @@ describe("Linux prerequisites", () => {
     expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(false);
   });
 
+  test("a snap command whose snapd is not running: the stop names the cause and the fix", () => {
+    const w = world("ubuntu", ["curl"]);
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(has(r, "sudo snap")).toEqual([]);
+    expect(r.out).toContain("snapd is installed but not running");
+    expect(r.out).toContain("sudo systemctl enable --now snapd.socket");
+    expect(r.out).not.toContain("see the output above");
+    expect(has(r, "git clone")).toEqual([]);
+  });
+
+  test("an apt failure that is not snapd's is reported as apt's before the broker stop", () => {
+    const w = world("debian", ["curl"], { STUB_APT_FAIL: "git" });
+    without(w, "snap");
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    const apt = r.out.indexOf("apt-get install -y git tmux ca-certificates unzip snapd failed.");
+    expect(apt).toBeGreaterThanOrEqual(0);
+    expect(r.out.indexOf("mosquitto 2.1 or newer could not be installed")).toBeGreaterThan(apt);
+    expect(has(r, "git clone")).toEqual([]);
+  });
+
   test("the snap's broker is a service (no mosquitto on PATH): snapd's version counts", () => {
     const w = world(
       "ubuntu",
@@ -781,6 +803,64 @@ describe("--peer: a machine that joins a supervisor's fleet (no broker, no Desk)
     expect(r.code).toBe(0);
     expect(existsSync(unit)).toBe(false);
     expect(r.out).toContain("Removed volley-peer.service");
+  });
+});
+
+describe("--broker container: the broker runs in a container, set up later", () => {
+  const LINUX_NO_BROKER = LINUX_ALL.filter((t) => t !== "mosquitto");
+
+  test("a fresh Ubuntu: no mosquitto from snap, Volley installed, setup names the container layout", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "socket" });
+    const r = run(w, ["--broker", "container", "--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "sudo snap")).toEqual([]);
+    expect(r.out).not.toContain("snap install mosquitto");
+    expect(has(r, "git clone")).toHaveLength(1);
+    expect(r.out).toContain("Next: ~/.volley/bin/volley setup --layout container");
+  });
+
+  test("a machine where no mosquitto 2.1 can land installs past the stop", () => {
+    const w = world("ubuntu", ["curl"]);
+    const r = run(w, ["--broker=container", "--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
+  });
+
+  test("the stop without it names the flag", () => {
+    const w = world("ubuntu", LINUX_ALL, { STUB_MOSQUITTO_VERSION: "2.0.18" });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("sh -s -- --broker container");
+  });
+
+  test("a fresh Mac: brew installs no mosquitto, and the tap (which brings one) is not used", () => {
+    const w = world("macos-arm64", ["curl", "git"], { STUB_BREW_TAP: "1" });
+    const r = run(w, ["--broker", "container", "--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "brew info")).toEqual([]);
+    expect(has(r, "brew install")).toEqual(["brew install oven-sh/bun/bun gh tmux"]);
+  });
+
+  test("--check does not count mosquitto", () => {
+    const w = world("ubuntu", [...LINUX_NO_BROKER]);
+    const r = run(w, ["--broker", "container", "--check"]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("mosquitto");
+  });
+
+  test("setup runs with --layout container", () => {
+    const w = world("ubuntu", LINUX_NO_BROKER, { VOLLEY_INSTALL_TTY: "/dev/null" });
+    const r = run(w, ["--broker", "container"]);
+    expect(r.code).toBe(0);
+    expect(r.calls.at(-1)).toBe(`bun ${cli(src(w), "volley-cli")} setup --layout container`);
+    expect(has(r, "env VOLLEY_BROKER")).toEqual([]);
+  });
+
+  test("another kind, or with --peer, is a usage error", () => {
+    const w = world("ubuntu", LINUX_ALL);
+    expect(run(w, ["--broker", "snap"]).code).toBe(2);
+    expect(run(w, ["--broker"]).code).toBe(2);
+    expect(run(w, ["--broker", "container", "--peer"]).code).toBe(2);
   });
 });
 

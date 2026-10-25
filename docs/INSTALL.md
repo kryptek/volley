@@ -125,6 +125,7 @@ curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
 | `--version vX.Y.Z` | Install this release tag (default: `$VOLLEY_VERSION`, else the latest tag). A rerun with another tag moves `~/.volley/src` to it |
 | `--source <dir>` | Use this Volley checkout instead of cloning one (CI tests its own) |
 | `--peer` | This machine joins a supervisor's fleet: no broker (mosquitto is neither installed nor checked), no Homebrew tap; runs `volley setup --peer` ([Add a bare machine](#add-a-bare-machine)) |
+| `--broker container` | The broker runs in a container you start (`docker run eclipse-mosquitto:2.1-alpine`, see `examples/mosquitto-auth/`): mosquitto is neither installed nor checked, no Homebrew tap; runs `volley setup --layout container` |
 | `--network <kind>` | `tailscale`, `manual` or `none`, passed to `volley setup --network` ([Reach it from outside your network](#reach-it-from-outside-your-network)). `tailscale` also installs Tailscale: on Linux from Tailscale's apt repository (`pkgs.tailscale.com`), under the same `sudo` as the other packages; on macOS `brew install --cask tailscale`. `--check` then lists `tailscale` too |
 | `--network-address <host-or-ip>` | With `--network manual`: this machine's address on your own VPN, passed to `volley setup` |
 | `--no-setup` | Stop before `volley setup`; it prints the command to run |
@@ -210,11 +211,15 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
   installer, its `--check` and `volley setup` read its version from `snap list mosquitto`. When no mosquitto 2.1 can be put on the machine (an older one on `PATH`,
   snapd that cannot be installed, a failed snap install), the install **stops with exit 1
   before cloning Volley** and prints the fix; it never says "Volley is installed" without a
-  broker. Fix it and rerun the one command; or run the broker in a container:
+  broker. When the snap command is there but snapd is not running, it says so and names the fix
+  (`sudo systemctl enable --now snapd.socket`). Fix it and rerun the one command; or run the
+  broker in a container and install with `--broker container`, which neither installs nor
+  checks mosquitto and runs `volley setup --layout container`:
 
   ```sh
   sudo apt-get remove mosquitto               # an older mosquitto holds 1883 and shadows the snap
-  docker run eclipse-mosquitto:2.1-alpine     # then volley setup --layout container (examples/mosquitto-auth/)
+  docker run eclipse-mosquitto:2.1-alpine     # examples/mosquitto-auth/
+  curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --broker container
   ```
 
   `--peer` installs no broker and is unaffected.
