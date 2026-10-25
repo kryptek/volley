@@ -405,6 +405,8 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(read(w, "summary.md")).toContain("services is pending");
   });
 
+  // Two whole runs (Layer 2, then Layer 4's two VMs): a longer timeout keeps it inside a slow CI
+  // runner's budget.
   test("--no-lan on a VM with a LAN address: a skipped phone row passes, Layers 2 and 4", () => {
     const skipped = readFileSync(join(FIXTURES, "check-phone-skipped.json"), "utf8");
     for (const [script, args] of [
@@ -416,7 +418,7 @@ describe("Layer 2: vm-linux.sh", () => {
       expect(read(w, "summary.md")).toContain("skipped (allowed: phone)");
       expect(r.out).not.toContain("a target was missed");
     }
-  });
+  }, 15_000);
 
   test("a usage error exits 2 and touches nothing", () => {
     const w = world();
