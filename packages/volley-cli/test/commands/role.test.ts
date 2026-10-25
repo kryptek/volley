@@ -68,6 +68,22 @@ describe("volley role status", () => {
     );
   });
 
+  it("names the Desk's private address first, its LAN one beside it", async () => {
+    await publishRoles("volleyd", {
+      ...RECORD,
+      desk: {
+        machine: "mac",
+        url: "https://mac.example.ts.net",
+        lan_url: "http://192.0.2.20:5199",
+      },
+    });
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "desk        on mac (https://mac.example.ts.net · LAN http://192.0.2.20:5199)",
+    );
+  });
+
   it("--json prints the record's payload", async () => {
     await publishRoles();
     const r = await run("--json");

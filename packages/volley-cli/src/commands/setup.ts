@@ -21,6 +21,7 @@ import { ghRepoDeleteLine } from "../setup/first-wave-repo";
 import {
   appendSetupLog,
   readDeskPort,
+  readDeskPrivateUrl,
   readNetworkRecord,
   readSetupInstall,
   setupLogFile,
@@ -628,7 +629,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     [
       "",
       finished,
-      privateDeskLine(ctx.deskHost, ctx.deskPort, reach) ??
+      privateDeskLine(ctx.deskHost, ctx.deskPort, reach, readDeskPrivateUrl(ctx.volleydHome)) ??
         `Desk: http://${ctx.deskHost.includes(":") ? `[${ctx.deskHost}]` : ctx.deskHost}:${ctx.deskPort}`,
       ...(ctx.firstWaveScratch !== undefined
         ? [

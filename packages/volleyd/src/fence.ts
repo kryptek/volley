@@ -2,7 +2,9 @@ import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, posix, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
+import { PMSET_BATT_ARGV } from "volley-cli/machine/laptop";
 import { isTailscaleCommand } from "volley-cli/setup/network";
+import { isTailscaleServeCommand } from "volley-cli/setup/tailscale-serve";
 import { COMPACT_MAX, COMPACT_MIN } from "./claude/context-window";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
 import { parseSigninEntry } from "./claude/signin-entry";
@@ -16,6 +18,17 @@ import {
 } from "./claude/signin-script";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { volleydHome } from "./config-store";
+import {
+  COORDINATOR_COMMAND,
+  COORDINATOR_FILES,
+  COORDINATOR_SETTINGS,
+  type CoordinatorScriptVars,
+  PERMISSION_MODES,
+  type PermissionMode,
+  coordinatorSession,
+  renderCoordinatorMcp,
+  renderCoordinatorScript,
+} from "./coordinator/role";
 import {
   LAUNCH_COMMAND,
   isMcpServerEntry,
@@ -125,6 +138,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     agent's claude by `process.kill`, never by a spawned `kill`)
  *   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
  *     retains no $SYS/broker/version)
+ *   pmset -g batt   (exactly, on macOS: whether this machine has a battery, its record's
+ *     `laptop`, SPEC §4.6.25)
  *   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
  *   volley auth add <agent_id> --role ROLE [--kind KIND] --json
  *   volley auth signin-link --role steer|watch --label LABEL --ttl <seconds> --json
@@ -166,6 +181,24 @@ import { AGENT_BRANCH } from "./worktree";
  *   REMOTE steps: volley broker probe · volley broker receive <abs>/.volley/roles/broker/bundle.tgz
  *   --lan|--no-lan|--check · volley broker tunnel --show.
  *
+ * COORDINATOR (SPEC §4.6.25, coordinator/; with a CoordinatorToken, checked by identity, and only
+ *   on the session `volley-coordinator-<name>`, which is never an agent's): volleyd starts
+ *   `claude remote-control` only from `<dir>/.volley/coordinator.sh`, exactly
+ *   `renderCoordinatorScript` (`sealCoordinatorScript`: `--continue` alone, then `--name <name>
+ *   --remote-control-session-name-prefix <name> --spawn same-dir --capacity <n> --permission-mode
+ *   <mode>`, nothing else; never as a direct argv), and, locally and as REMOTE steps:
+ *     tmux new-session -d -s volley-coordinator-<name> -c <dir> 'bash .volley/coordinator.sh'
+ *       (the script token for <dir> and <name>; on a paired machine its broker port the host's) ·
+ *     has-session -t =<it> · capture-pane -p [-J] -t =<it>: -S-<n> ·
+ *     kill-session -t =<it> (the kill token `mintCoordinatorKill(name)`: no consent, the session
+ *       holds no agent's work) — nothing is ever typed into it
+ *   and as REMOTE steps with the script token, its directory's files: base64 -d (whole, never
+ *   appended) to `<dir>/.volley/coordinator.sh` (the sealed text), `<dir>/.volley/auth/
+ *   coordinator.json` (a JSON object of string username and password: the coordinator login),
+ *   `<dir>/.mcp.json` (exactly `renderCoordinatorMcp` of an absolute volley-mcp entry) and
+ *   `<dir>/.claude/settings.json` (exactly COORDINATOR_SETTINGS); chmod on those;
+ *   ln -sfn <abs> <dir>/repos/<owner>/<name> (a repository's link)
+ *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
  *
@@ -186,7 +219,10 @@ import { AGENT_BRANCH } from "./worktree";
  *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
  *     tailscale (on PATH, or /Applications/Tailscale.app/Contents/MacOS/Tailscale) version |
  *       status --json | ip -4 | up · brew install --cask tailscale (the Network step; never
- *       `tailscale funnel`, `tailscale serve`, an `up` flag, or `sudo tailscale up`)
+ *       `tailscale funnel`, an `up` flag, or `sudo tailscale up`) · tailscale serve
+ *       status --json | --bg --https=443 http://127.0.0.1:<desk port> | --bg --https=8443
+ *       http://127.0.0.1:9001 (the Desk on the tailnet, macOS; Linux's needs sudo, a
+ *       terminal's; never `serve reset` or a target off loopback)
  *   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
  *   sudo, or the keychain (the logged-in session's): those stay terminal-only.
  *
@@ -750,6 +786,261 @@ function remoteSigninFile(path: string): { name: string; contents: string[] } | 
   return null;
 }
 
+// ---------------------------------------------------------------------------------------------
+// COORDINATOR (SPEC §4.6.25, coordinator/): the Remote Control server volleyd keeps alive
+// ---------------------------------------------------------------------------------------------
+
+const coordinators = new WeakSet<object>();
+
+/**
+ * Proof for the coordinator role, checked by identity: `script`, that the
+ * `<dir>/.volley/coordinator.sh` volleyd writes is exactly `renderCoordinatorScript` of `vars`
+ * (`sealCoordinatorScript`), which starts the coordinator's tmux session and writes its
+ * directory's files; `kill`, the coordinator's own session ended (`mintCoordinatorKill`: it holds
+ * no agent's work, so no consent).
+ */
+export type CoordinatorToken =
+  | {
+      readonly kind: "script";
+      readonly dir: string;
+      readonly session: string;
+      readonly script: string;
+      readonly vars: CoordinatorScriptVars;
+    }
+  | { readonly kind: "kill"; readonly session: string };
+
+/** A coordinator name: the §2.2 agent-id grammar `volley setup` records it in. */
+const COORDINATOR_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+/** `volley-coordinator-<name>`: never an agent's session (isAgentSession excludes it). */
+const COORDINATOR_SESSION = new RegExp(`^volley-coordinator-${COORDINATOR_NAME.source.slice(1)}`);
+const COORDINATOR_EXPORT = (name: string) => new RegExp(`^export ${name}=(${SHQ})$`, "m");
+const COORDINATOR_PATH = () => new RegExp(`^export PATH=(${SHQ}):"\\$PATH"$`, "m");
+const COORDINATOR_GRACE = /^\[ \$\(\(SECONDS - started\)\) -lt ([1-9][0-9]{0,3}) \] \|\| exit 1$/m;
+const COORDINATOR_EXEC = () =>
+  new RegExp(`^exec .* '--capacity' '([1-9][0-9]{0,2})' '--permission-mode' (${SHQ})$`, "m");
+const COORDINATOR_BROKER = /^mqtt:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/;
+
+/**
+ * Seal the coordinator script volleyd is about to write to `<dir>/.volley/coordinator.sh`: throws
+ * `FenceError` unless `dir` is a clean absolute path and `text` is exactly what
+ * `renderCoordinatorScript` renders for that dir and valid values (a coordinator name, a
+ * namespace, a loopback broker port, absolute hooks and bin dirs, a capacity, a `--permission-mode`
+ * of the help's enum): so its `claude remote-control` carries exactly the pinned flags.
+ */
+export function sealCoordinatorScript(dir: string, text: string): CoordinatorToken {
+  const refuse = () =>
+    new FenceError("coordinator.sh", "only a script renderCoordinatorScript renders for this dir");
+  if (!absPath(dir)) throw new FenceError("coordinator.sh", "the dir is not a clean absolute path");
+  const word = (re: RegExp) => {
+    const m = re.exec(text);
+    return m !== null ? unshq(m[1] as string) : null;
+  };
+  const name = word(COORDINATOR_EXPORT("VOLLEY_COORDINATOR"));
+  const namespace = word(COORDINATOR_EXPORT("VOLLEY_NAMESPACE"));
+  const broker = COORDINATOR_BROKER.exec(word(COORDINATOR_EXPORT("VOLLEY_BROKER_URL")) ?? "");
+  const hooksDir = word(COORDINATOR_EXPORT("VOLLEY_HOOKS_DIR"));
+  const binDir = word(COORDINATOR_PATH());
+  const grace = COORDINATOR_GRACE.exec(text);
+  const exec = COORDINATOR_EXEC().exec(text);
+  const mode = exec !== null ? unshq(exec[2] as string) : "";
+  const port = Number(broker?.[1] ?? 0);
+  if (
+    name === null ||
+    !COORDINATOR_NAME.test(name) ||
+    namespace === null ||
+    !AGENT_ID.test(namespace) ||
+    port < 1 ||
+    port > 65535 ||
+    hooksDir === null ||
+    !absPath(hooksDir) ||
+    binDir === null ||
+    !absPath(binDir) ||
+    grace === null ||
+    exec === null ||
+    !(PERMISSION_MODES as readonly string[]).includes(mode)
+  )
+    throw refuse();
+  const vars: CoordinatorScriptVars = {
+    dir,
+    name,
+    namespace,
+    brokerPort: port,
+    hooksDir,
+    binDir,
+    capacity: Number(exec[1]),
+    permissionMode: mode as PermissionMode,
+    continueGraceS: Number(grace[1]),
+  };
+  if (renderCoordinatorScript(vars) !== text) throw refuse();
+  const token = Object.freeze({
+    kind: "script" as const,
+    dir,
+    session: coordinatorSession(name),
+    script: text,
+    vars: Object.freeze(vars),
+  });
+  coordinators.add(token);
+  return token;
+}
+
+/** Permission to end the coordinator's session for `name` (a restart, a stop, a machine change). */
+export function mintCoordinatorKill(name: string): CoordinatorToken {
+  if (!COORDINATOR_NAME.test(name))
+    throw new FenceError("coordinator kill", "not a coordinator name");
+  const token = Object.freeze({ kind: "kill" as const, session: coordinatorSession(name) });
+  coordinators.add(token);
+  return token;
+}
+
+/** The sealed script token in `opts`, if volleyd minted it. */
+function coordinatorScript(
+  opts: FenceOptions,
+): Extract<CoordinatorToken, { kind: "script" }> | null {
+  const t = opts.coordinator;
+  return t !== undefined && coordinators.has(t) && t.kind === "script" ? t : null;
+}
+
+/**
+ * tmux on the coordinator's session (`volley-coordinator-<name>`), locally and as a REMOTE step,
+ * in exactly the shapes the runner sends; null when the command does not name one:
+ *   new-session -d -s <it> -c <dir> 'bash .volley/coordinator.sh'   (the script token for <dir>
+ *     and <it>; on a paired machine its broker port the host's) ·
+ *   has-session -t =<it> · capture-pane -p [-J] -t =<it>: -S-<n> ·
+ *   kill-session -t =<it>   (the kill token for <it>)
+ * Nothing is ever typed into it.
+ */
+function coordinatorTmux(
+  sub: string | undefined,
+  rest: readonly string[],
+  opts: FenceOptions,
+): Verdict | null {
+  const named = (t: string | undefined, suffix = "") =>
+    t?.startsWith("=") && t.endsWith(suffix)
+      ? COORDINATOR_SESSION.test(t.slice(1, t.length - suffix.length))
+      : false;
+  const verb = `tmux ${sub ?? ""} (the coordinator's session)`;
+  if (sub === "new-session") {
+    const [d, s, session, c, cwd, cmd, ...more] = rest;
+    if (cmd !== COORDINATOR_COMMAND && !COORDINATOR_SESSION.test(session ?? "")) return null;
+    const t = coordinatorScript(opts);
+    const port = opts.remote?.host?.broker_port;
+    return d === "-d" &&
+      s === "-s" &&
+      c === "-c" &&
+      cmd === COORDINATOR_COMMAND &&
+      more.length === 0 &&
+      t !== null &&
+      t.session === session &&
+      t.dir === cwd &&
+      (port === undefined || t.vars.brokerPort === port)
+      ? ALLOW
+      : deny("tmux new-session (only the sealed coordinator script, in its own session and dir)");
+  }
+  if (!rest.some((a) => named(a) || named(a, ":"))) return null;
+  switch (sub) {
+    case "has-session":
+      return rest.length === 2 && rest[0] === "-t" && named(rest[1]) ? ALLOW : deny(verb);
+    case "capture-pane": {
+      const j = rest[1] === "-J" ? 1 : 0;
+      const [p, t, target, start, ...more] = [rest[0], ...rest.slice(1 + j)];
+      return p === "-p" &&
+        t === "-t" &&
+        named(target, ":") &&
+        CAPTURE_START.test(start ?? "") &&
+        more.length === 0
+        ? ALLOW
+        : deny(verb);
+    }
+    case "kill-session": {
+      const k = opts.coordinator;
+      return rest.length === 2 &&
+        rest[0] === "-t" &&
+        named(rest[1]) &&
+        k !== undefined &&
+        coordinators.has(k) &&
+        k.kind === "kill" &&
+        `=${k.session}` === rest[1]
+        ? ALLOW
+        : deny("tmux kill-session (the coordinator's session, only with its kill token)");
+    }
+    default:
+      return deny(verb);
+  }
+}
+
+/**
+ * A file of the coordinator directory and whether `content` is what volleyd writes there, with
+ * the script token for that directory: `.volley/coordinator.sh` (the sealed text),
+ * `.volley/auth/coordinator.json` (the coordinator login: a JSON object of string `username` and
+ * `password`, the file the supervisor holds), `.mcp.json` (`renderCoordinatorMcp` of an absolute
+ * `…/packages/volley-mcp/src/index.ts` and the token's vars) and `.claude/settings.json`
+ * (COORDINATOR_SETTINGS). Null: not a coordinator file (or no token).
+ */
+function coordinatorFile(
+  path: string,
+  opts: FenceOptions,
+): { name: string; ok: (content: string) => boolean } | null {
+  const t = coordinatorScript(opts);
+  if (t === null || !absPath(path) || !path.startsWith(`${t.dir}/`)) return null;
+  const rel = path.slice(t.dir.length + 1);
+  switch (rel) {
+    case COORDINATOR_FILES.script:
+      return { name: rel, ok: (c) => c === t.script };
+    case COORDINATOR_FILES.login:
+      return {
+        name: rel,
+        ok: (c) => {
+          try {
+            const j = JSON.parse(c) as Record<string, unknown>;
+            return (
+              typeof j === "object" &&
+              j !== null &&
+              typeof j.username === "string" &&
+              typeof j.password === "string"
+            );
+          } catch {
+            return false;
+          }
+        },
+      };
+    case COORDINATOR_FILES.mcp:
+      return {
+        name: rel,
+        ok: (c) => {
+          try {
+            const entry = (JSON.parse(c) as { mcpServers?: { volley?: { args?: unknown[] } } })
+              .mcpServers?.volley?.args?.[0];
+            return (
+              typeof entry === "string" &&
+              absPath(entry) &&
+              entry.endsWith(MCP_ENTRY_SUFFIX) &&
+              outsideVolley(entry) &&
+              c === renderCoordinatorMcp(entry, t.vars)
+            );
+          } catch {
+            return false;
+          }
+        },
+      };
+    case COORDINATOR_FILES.settings:
+      return { name: rel, ok: (c) => c === COORDINATOR_SETTINGS };
+    default:
+      return null;
+  }
+}
+
+/** `ln -sfn <abs target> <dir>/repos/<owner>/<name>`: a repository's link, with the script token. */
+function coordinatorLink(args: readonly string[], opts: FenceOptions): boolean {
+  const t = coordinatorScript(opts);
+  const [f, target, link, ...more] = args;
+  if (t === null || f !== "-sfn" || more.length > 0 || target === undefined || link === undefined)
+    return false;
+  const prefix = `${t.dir}/repos/`;
+  return (
+    absPath(target) && absPath(link) && link.startsWith(prefix) && isSlug(link.slice(prefix.length))
+  );
+}
+
 const forwards = new WeakSet<object>();
 
 /**
@@ -1065,7 +1356,8 @@ function setupVerdict(argv: readonly string[], t: SetupFenceInputs, cwd?: string
     (same(argv, [t.bun, "run", "build"]) &&
       t.repoRoot !== null &&
       cwd === repo("packages", "volley-desk")) ||
-    isTailscaleCommand(argv, { sudo: false });
+    isTailscaleCommand(argv, { sudo: false }) ||
+    isTailscaleServeCommand(argv, { sudo: false });
   return ok ? ALLOW : deny(`${line.slice(0, 60)} (not a setup command volleyd runs for the Desk)`);
 }
 
@@ -1151,6 +1443,8 @@ export interface FenceOptions {
   wake?: WakeToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
+  /** The coordinator role's script (its session, its directory's files) or kill token. */
+  coordinator?: CoordinatorToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
   forward?: SigninForwardToken;
   /** For a remote `rm -rf <home>/.volley/claude/<acct>`: the removal's token for that dir. */
@@ -1673,6 +1967,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return volley(args);
     case "mosquitto":
       return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
+    case "pmset":
+      return exactly(argv, [PMSET_BATT_ARGV]);
     case "launchctl":
       return launchctl(args);
     case "systemctl":
@@ -2816,6 +3112,15 @@ function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
     const b64 = step.stdin !== undefined && BASE64.test(step.stdin);
     if (isTrustCompare(step.argv) && step.stdout === undefined && step.append !== true)
       return b64 ? ALLOW : deny("remote cmp (base64 text on stdin only)");
+    const coordinator = step.stdout !== undefined ? coordinatorFile(step.stdout, opts) : null;
+    if (coordinator !== null) {
+      return sameArgv(step.argv, ["base64", "-d"]) &&
+        b64 &&
+        step.append !== true &&
+        coordinator.ok(Buffer.from(step.stdin ?? "", "base64").toString("utf-8"))
+        ? ALLOW
+        : deny(`remote ${coordinator.name} write (only what volleyd renders for the coordinator)`);
+    }
     const signin = step.stdout !== undefined ? remoteSigninFile(step.stdout) : null;
     if (signin !== null) {
       return sameArgv(step.argv, ["base64", "-d"]) &&
@@ -2907,6 +3212,7 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
             (a) =>
               writablePath(a) ||
               isSigninScriptFile(a) ||
+              coordinatorFile(a, opts) !== null ||
               (args[0] === "700" && isRemoteProfileDir(a)),
           )
         ? ALLOW
@@ -2920,6 +3226,10 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         ? ALLOW
         : deny("rm -rf (only <home>/.volley/claude/<acct>, with its removal token)");
     }
+    case "ln":
+      return coordinatorLink(args, opts)
+        ? ALLOW
+        : deny("ln (only -sfn <abs> <coordinator dir>/repos/<owner>/<name>, with its token)");
     case "printenv":
       // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch), and
       // its HOME, where a sign-in's dir is (remote-signin.ts).
@@ -2984,6 +3294,8 @@ const TMUX_SPECS: Record<string, OptSpec> = {
 function tmux(args: string[], opts: FenceOptions): Verdict {
   const [sub, ...rest] = args;
   if (sub === undefined || sub.startsWith("-")) return deny(`tmux ${sub ?? ""}`.trim());
+  const coordinator = coordinatorTmux(sub, rest, opts);
+  if (coordinator !== null) return coordinator;
   if (sub === "kill-session") {
     // A sign-in session holds no agent's work (as locally): no consent.
     if (rest.length === 2 && rest[0] === "-t" && SIGNIN_SESSION.test(rest[1] ?? "")) return ALLOW;
@@ -3043,11 +3355,16 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
 /**
  * A local agent's tmux session (hosts/local-tmux.ts `localSessionName`):
  * `volley-<wave>-<task>-<role>[-<n>]`, at least three words after `volley-`. A sign-in's
- * `volley-signin-*` never is one, so a wave named `signin` cannot run in local tmux.
+ * `volley-signin-*` and the coordinator's `volley-coordinator-*` never are one, so a wave named
+ * `signin`, `coordinator` or `coordinator-…` cannot run in local tmux.
  */
 const AGENT_SESSION = /^volley-[a-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9_]+-[A-Za-z0-9_]+$/;
 const isAgentSession = (s: string | undefined): s is string =>
-  s !== undefined && s.length <= 200 && AGENT_SESSION.test(s) && !s.startsWith("volley-signin-");
+  s !== undefined &&
+  s.length <= 200 &&
+  AGENT_SESSION.test(s) &&
+  !s.startsWith("volley-signin-") &&
+  !s.startsWith("volley-coordinator-");
 /** `capture-pane -S-<n>`: the last n lines (hosts/local-tmux.ts readScreen). */
 const CAPTURE_START = /^-S-[1-9][0-9]{0,4}$/;
 
@@ -3058,6 +3375,8 @@ const CAPTURE_START = /^-S-[1-9][0-9]{0,4}$/;
  */
 function localTmux(args: string[], opts: FenceOptions): Verdict {
   const [sub, ...rest] = args;
+  const coordinator = coordinatorTmux(sub, rest, opts);
+  if (coordinator !== null) return coordinator;
   const agent = localAgentTmux(sub, rest, opts);
   if (agent !== null) return agent;
   const target = (flag: string, a: readonly string[]) => {

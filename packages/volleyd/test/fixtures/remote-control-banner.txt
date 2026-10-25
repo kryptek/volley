@@ -1,0 +1,12 @@
+Remote Control · coord-test
+
+Take this session with you and pick up right where you left off on any device.
+Open the Code tab in the Claude mobile app, visit claude.ai/code in a browser,
+or ask Claude to work in this folder from one of your projects on claude.ai.
+The session keeps running on this machine. Use your other devices as a remote
+control. Press Ctrl+C to stop.
+
+  Spawn mode: same-dir · capacity 4 · permission mode acceptEdits
+  Session: https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE0000
+
+Waiting for connections…
