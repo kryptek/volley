@@ -98,6 +98,21 @@ export function signinTokenFromHash(hash: string): string | null {
   return token !== null && token !== "" ? token : null;
 }
 
+/** Whether the address bar asks for Getting started (`#getting-started`). */
+export function gettingStartedFromHash(hash: string): boolean {
+  return hash.replace(/^#/, "") === "getting-started";
+}
+
+/** Strip the fragment (a single-use token, `#getting-started`) from the address bar and history. */
+export function dropFragment(): void {
+  try {
+    const { pathname, search } = window.location;
+    window.history.replaceState(window.history.state, "", `${pathname}${search}`);
+  } catch {
+    // No history API: a token is burned on use anyway.
+  }
+}
+
 /** The link a sign-in token travels in: `<link_base>#signin=<token>` (SPEC §4.6.10). */
 export const signinLink = (linkBase: string, token: string) => `${linkBase}#signin=${token}`;
 
@@ -173,7 +188,10 @@ export function rememberRole(
 
 const FIRST_RUN_KEY = "volley-desk:first-run";
 
-/** An admin token was just redeemed: the Desk opens Settings › Setup & Security once. */
+/**
+ * An admin token was just redeemed: the Desk opens Getting started once (or, when this browser
+ * skipped it, Settings › Setup & Security).
+ */
 export function markFirstRun(storage: Pick<Storage, "setItem"> | null = session()): void {
   try {
     storage?.setItem(FIRST_RUN_KEY, "setup");

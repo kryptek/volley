@@ -55,6 +55,9 @@ import {
   useScreenSize,
   useViewport,
 } from "./canvas/useViewport";
+import { GettingStarted } from "./getting-started/GettingStarted";
+import { localStore, readProgress } from "./getting-started/state";
+import { decide, useGettingStarted } from "./getting-started/useGettingStarted";
 import {
   CGAP,
   type Cluster,
@@ -97,6 +100,7 @@ import { agentsOnMachines, deskMovedTo, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
 import { ADMIN_ROLE, SettingsWindow } from "./settings/SettingsWindow";
+import { useAdminRole } from "./settings/Setup";
 import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import { type SectionKey, accountRole } from "./settings/sections";
@@ -119,7 +123,14 @@ import {
   resolveFields,
 } from "./store/claude";
 import { useDesk } from "./store/context";
-import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
+import {
+  createAuthOps,
+  deskUrl,
+  dropFragment,
+  gettingStartedFromHash,
+  readSessionRole,
+  takeFirstRun,
+} from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
 import {
   UNASSIGNED,
@@ -434,9 +445,23 @@ export default function App() {
   useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
   // main.tsx applied the stored theme before the first paint; a change applies live.
   useEffect(() => applyLookToDocument({ theme: look.theme, fx: look.fx }), [look.theme, look.fx]);
-  /** The Settings window's section while it is open; setup once after an admin token sign-in. */
+  /** An admin token was just redeemed (read once): Getting started, or Setup & Security, opens. */
+  const [firstRun] = useState(takeFirstRun);
+  /** `#getting-started` asked for Getting started (the fragment is dropped once read). */
+  const [gettingStartedHash] = useState(() => gettingStartedFromHash(window.location.hash));
+  useEffect(() => {
+    if (gettingStartedHash) dropFragment();
+  }, [gettingStartedHash]);
+  /**
+   * The Settings window's section while it is open. After an admin token sign-in it opens on
+   * Setup & Security when Getting started cannot open (demo) or this browser skipped it.
+   */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
-    takeFirstRun() ? "setup" : null,
+    firstRun &&
+    (demo ||
+      decide({ admin: true, firstRun, progress: readProgress(localStore()) }) === "settings-setup")
+      ? "setup"
+      : null,
   );
   /** The machine an agent window's machine chip asked Settings › Machines to show. */
   const [focusMachine, setFocusMachine] = useState<{ name: string; seq: number } | null>(null);
@@ -513,6 +538,20 @@ export default function App() {
     if (peerOps === null || authOps === null) return;
     return keepAdminSeen(peerOps, authOps);
   }, [peerOps, authOps]);
+  /**
+   * Getting started, the first-launch wizard: an admin Desk only (its steps need the admin
+   * channel), asked about only while this browser has not finished or skipped it.
+   */
+  const [gettingStartedWanted] = useState(
+    () => gettingStartedHash || readProgress(localStore()).done === undefined,
+  );
+  const { admin: guideAdmin } = useAdminRole(authOps, identity, !demo && gettingStartedWanted);
+  const canGuide = guideAdmin && authOps !== null && !demo;
+  const gettingStarted = useGettingStarted({
+    admin: canGuide,
+    firstRun,
+    hash: gettingStartedHash,
+  });
   /** Settings › Setup & Security › Preview: the sign-in screen, until closed. */
   const [preview, setPreview] = useState(false);
   /** Settings › Setup & Security › Open setup…: the wizard's own modal (`repair` for Run setup again). */
@@ -1217,6 +1256,7 @@ export default function App() {
     // Top first: the modal sheets and the Settings windows sit above the popout layer.
     closeTop: () => {
       if (preview) setPreview(false);
+      else if (gettingStarted.open !== null && canGuide) gettingStarted.close();
       else if (setupWizard !== null) closeSetupWizard();
       else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
@@ -1730,6 +1770,17 @@ export default function App() {
               setDeskSettings(null);
               setSetupWizard({ repair });
             },
+            ...(canGuide
+              ? {
+                  gettingStarted: {
+                    done: gettingStarted.progress.done ?? null,
+                    onOpen: () => {
+                      setDeskSettings(null);
+                      gettingStarted.show();
+                    },
+                  },
+                }
+              : {}),
           }}
           onArrange={arrange}
           onResetLayout={() => {
@@ -1747,6 +1798,29 @@ export default function App() {
           deskUrl={deskUrl(window.location)}
           repair={setupWizard.repair}
           onClose={closeSetupWizard}
+        />
+      )}
+
+      {gettingStarted.open !== null && canGuide && authOps !== null && (
+        <GettingStarted
+          ctx={{
+            ops: authOps,
+            control,
+            state,
+            deskUrl: deskUrl(window.location),
+            identity,
+            openSettings: (section) => {
+              gettingStarted.close();
+              setDeskSettings(section);
+            },
+          }}
+          initial={gettingStarted.open}
+          summary={gettingStarted.progress.summary}
+          onStep={gettingStarted.setStep}
+          setSummary={gettingStarted.setSummary}
+          onClose={gettingStarted.close}
+          onSkip={gettingStarted.skip}
+          onFinish={gettingStarted.finish}
         />
       )}
 
