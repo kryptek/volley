@@ -173,7 +173,7 @@ The same choice, wherever you make it:
 | --- | --- | --- | --- |
 | The installer | `--network tailscale` (also installs Tailscale) | `--network manual --network-address <host-or-ip>` | `--network none` |
 | `volley setup` | `--network tailscale` | `--network manual --network-address <host-or-ip>` | `--network none` |
-| The Desk | Getting started › Access › **Tailscale** | **I'll VPN in to the network <machine> is on** | **This network only** |
+| The Desk | Getting started › Access › **Tailscale** | **I'll VPN in to the network `<machine>` is on** | **This network only** |
 | A Desk-only machine | `volley desk install --tailscale` | | |
 
 `volley setup --step network` reruns only that step. Once the private network is up, pick an

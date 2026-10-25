@@ -84,8 +84,10 @@ describe("docs/SMOKE-v0.13.md", () => {
 describe("the reach-from-anywhere docs", () => {
   test("the Quickstart's last step is Getting started in the Desk", () => {
     const qs = section(read("README.md"), "## Quickstart");
-    const steps = section(qs, "**When it finishes**") || qs;
-    expect(steps).toContain("Getting started");
+    const steps = section(qs, "**When it finishes**");
+    expect(steps.length).toBeGreaterThan(0);
+    const bullets = [...steps.matchAll(/^- \*\*([^*]+)\*\*/gm)].map((m) => m[1]);
+    expect(bullets.at(-1)).toBe("Getting started.");
   });
 
   test("the README's Reach it from anywhere links INSTALL, the Desk and the coordinator role", () => {

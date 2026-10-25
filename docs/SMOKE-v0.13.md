@@ -213,8 +213,9 @@ warning.
 ### B4. Notifications allowed on the phone
 
 - [ ] On the phone's Desk (signed in by B3's link), turn on browser notifications (Settings ›
-  General, or the top bar's bell) and allow them when the browser asks. The page is a secure context over HTTPS, so
-  the browser offers the permission (over plain `http://` on the LAN it does not).
+  General, or the top bar's bell) and allow them when the browser asks. The page is a secure
+  context over HTTPS, so the browser offers the permission (over plain `http://` on the LAN it
+  does not).
 - [ ] Leave the Desk open in the phone's browser for Part C: the coordinator's first link is an
   owner-only notice, and C2 checks it arrives as a notification.
 
