@@ -98,6 +98,9 @@ broker_restart() {
 # What both platforms check.
 
 SETUP_FLAGS=''
+# install.sh's `--network` (Linux: the Tailscale package from its apt repository; setup then
+# signs in through volley-sim's fake tailscale, first on PATH), and `--check` with it.
+NETWORK_FLAGS=''
 TRANSCRIPT=''
 # A step this platform's setup skips by design (`--no-lan` on a Mac: the phone cannot reach the
 # broker), allowed to be skipped rather than done.
@@ -139,8 +142,10 @@ common_checks() {
   volley setup --check --json >"$OUT/check.json" 2>>"$TRANSCRIPT" ||
     fail "volley setup --check exited non-zero (check.json)"
 
-  say "install.sh --check"
-  sh "$REPO/install.sh" --check >>"$TRANSCRIPT" 2>&1 || fail "install.sh --check found something missing"
+  say "install.sh --check $NETWORK_FLAGS"
+  # shellcheck disable=SC2086 # one word per flag
+  sh "$REPO/install.sh" --check $NETWORK_FLAGS >>"$TRANSCRIPT" 2>&1 ||
+    fail "install.sh --check found something missing"
 
   say "The Desk answers /version.json"
   curl -fsS "http://127.0.0.1:${DESK_PORT:-5199}/version.json" >"$OUT/version.json" 2>>"$TRANSCRIPT" ||
@@ -219,15 +224,17 @@ linux_inside() {
   SRC="$HOME/volley"
   REPO=$SRC
   AUTH_DIR=/mosquitto/config/volley
-  SETUP_FLAGS='--layout container'
+  NETWORK_FLAGS='--network tailscale'
+  SETUP_FLAGS="--layout container $NETWORK_FLAGS"
   mkdir -p "$OUT"
   TRANSCRIPT="$OUT/transcript.raw"
   : >"$TRANSCRIPT"
   broker_start || finish
 
   t0=$(date +%s%3N)
-  say "install.sh --source $SRC --no-setup"
-  sh "$SRC/install.sh" --source "$SRC" --no-setup >>"$TRANSCRIPT" 2>&1 || {
+  say "install.sh --source $SRC --no-setup $NETWORK_FLAGS"
+  # shellcheck disable=SC2086 # one word per flag
+  sh "$SRC/install.sh" --source "$SRC" --no-setup $NETWORK_FLAGS >>"$TRANSCRIPT" 2>&1 || {
     fail "install.sh exited non-zero"
     cp "$TRANSCRIPT" "$OUT/transcript.log"
     finish
@@ -236,7 +243,7 @@ linux_inside() {
   export PATH="$HOME/.volley/bin:$HOME/.bun/bin:$HOME/.local/bin:$PATH"
   eval "$(volley sim env)"
 
-  say "volley setup --yes --no-lan --layout container --simulated"
+  say "volley setup --yes --no-lan $SETUP_FLAGS --simulated"
   if setup_run; then
     SETUP_OK=1
   elif grep -q 'restart your container yourself' "$TRANSCRIPT"; then

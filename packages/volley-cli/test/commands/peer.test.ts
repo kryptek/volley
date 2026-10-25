@@ -30,6 +30,7 @@ import {
   defaultName,
   hostKeyHint,
   localNotAdmin,
+  machineEnvelope,
   machineTopic,
   peerDoctorStamp,
   peerFile,
@@ -1154,6 +1155,7 @@ describe("volley peer on the supervisor's machine", () => {
             reason: "heartbeat_timeout",
             load: [1, 0.5, 0.25],
             agents: 2,
+            network: { kind: "tailscale", name: "box-a.example.ts.net", address: "100.64.0.2" },
             last_seen: "2026-10-19T09:00:00.000Z",
           },
         ],
@@ -1164,6 +1166,7 @@ describe("volley peer on the supervisor's machine", () => {
     await v.b.disconnect();
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("box-a\ttunnel down (heartbeat_timeout)");
+    expect(r.stdout).toContain("\tnetwork tailscale (box-a.example.ts.net)\n");
     expect(r.stdout).toContain("box-b\tno heartbeat yet");
   });
 
@@ -1718,6 +1721,19 @@ describe("volley peer run (the service)", () => {
     const env = parseEnvelope((await reader.queryRetained(machineTopic("box-a"), 500)) ?? "");
     await reader.disconnect();
     expect(env?.payload).toMatchObject({ name: "box-a", tunnel: "down", reason: "disconnect" });
+  });
+
+  it("the record carries setup.json's network record, and none without one", async () => {
+    const d = deps(fakeExec(() => ({})).exec);
+    const payload = async () =>
+      (JSON.parse(await machineEnvelope(d, cfg, "up")) as { payload: Record<string, unknown> })
+        .payload;
+    rmSync(join(home, ".volley", "volleyd", "setup.json"), { force: true });
+    expect((await payload()).network).toBeUndefined();
+    mkdirSync(join(home, ".volley", "volleyd"), { recursive: true });
+    const network = { kind: "tailscale", name: "box-a.example.ts.net", address: "100.64.0.2" };
+    writeFileSync(join(home, ".volley", "volleyd", "setup.json"), JSON.stringify({ network }));
+    expect((await payload()).network).toEqual(network);
   });
 
   it("stops (exit 0, tunnel killed) once the broker refuses the revoked peer account", async () => {

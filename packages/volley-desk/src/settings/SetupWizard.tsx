@@ -52,6 +52,7 @@ import {
   type AuthOps,
   PHONE_LABEL,
   SETUP_APPLY_TIMEOUT_MS,
+  SETUP_STEPS,
   type SetupApplied,
   type SetupPlan,
   type SetupStepName,
@@ -208,8 +209,10 @@ export function SetupWizard({ ops, deskUrl, repair = false, onClose }: SetupWiza
     steps
       .find((s) => s.step === STEPS[n - 1]?.step)
       ?.changes.some((c) => c.terminal !== undefined) === true;
+  // In setup's own order: a step volleyd plans that this wizard does not show (network) still
+  // blocks the later ones.
   const blockedBefore = steps.find(
-    (s) => s.blocked !== undefined && STEPS.findIndex((x) => x.step === s.step) < current - 1,
+    (s) => s.blocked !== undefined && SETUP_STEPS.indexOf(s.step) < SETUP_STEPS.indexOf(at.step),
   );
 
   const finished = (r: AuthAnswer, lanChoice: boolean | null) => {

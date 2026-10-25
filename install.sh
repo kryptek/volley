@@ -28,6 +28,12 @@ Options:
   --peer             This machine joins a supervisor's fleet: no broker (mosquitto is neither
                      installed nor checked), no Homebrew tap; `volley setup --peer` runs with
                      VOLLEY_BROKER=skip
+  --network <kind>   tailscale | manual | none, passed to `volley setup --network`: how this
+                     machine is reached from outside your network. tailscale also installs
+                     Tailscale (Linux: from Tailscale's apt repository, with the other packages;
+                     macOS: brew install --cask tailscale); --check then lists it
+  --network-address <host-or-ip>
+                     With --network manual: this machine's address on your own VPN
   --no-setup         Stop before `volley setup`; it prints the command to run
   --check            Print each prerequisite as found or missing; exit 1 if any is missing.
                      Changes nothing
@@ -158,17 +164,26 @@ mosquitto_ok() {
   [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 1 ]; }
 }
 
-# The prerequisites for this platform (a peer runs no broker).
+# The prerequisites for this platform (a peer runs no broker; `--network tailscale` adds Tailscale).
 platform_tools() {
   if [ "$PLATFORM" = macos ]; then tools=$MAC_TOOLS; else tools=$LINUX_TOOLS; fi
   if [ -n "$PEER" ]; then tools=$(printf '%s' "$tools" | sed 's/ *mosquitto//'); fi
+  if [ "$NETWORK" = tailscale ]; then tools="$tools tailscale"; fi
   printf '%s' "$tools"
+}
+
+# The macOS app's CLI (App Store or `brew install --cask tailscale`), when tailscale is not on PATH.
+TAILSCALE_APP_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+
+tailscale_ok() {
+  have tailscale || { [ "$PLATFORM" = macos ] && [ -x "$TAILSCALE_APP_CLI" ]; }
 }
 
 present() {
   case "$1" in
     ca-certificates) dpkg -s ca-certificates >/dev/null 2>&1 ;;
     mosquitto) mosquitto_ok ;;
+    tailscale) tailscale_ok ;;
     *) have "$1" ;;
   esac
 }
@@ -179,6 +194,7 @@ check() {
   for t in $(platform_tools); do
     if present "$t"; then
       where=$(command -v "$t" 2>/dev/null || true)
+      [ "$t" = tailscale ] && [ -z "$where" ] && where=$TAILSCALE_APP_CLI
       [ "$t" = mosquitto ] && where="$(mosquitto_version), $where"
       [ "$t" = ca-certificates ] && where="(dpkg)"
       printf '  found    %-16s %s\n' "$t" "$(tildify "$where")"
@@ -267,7 +283,7 @@ install_macos() {
   fi
   formulas=''
   for t in $(platform_tools); do
-    case "$t" in brew | claude) continue ;; esac
+    case "$t" in brew | claude | tailscale) continue ;; esac
     have "$t" || formulas="$formulas $(brew_formula "$t")"
   done
   if [ -n "$formulas" ]; then
@@ -275,7 +291,43 @@ install_macos() {
     # shellcheck disable=SC2086 # one word per formula
     brew install $formulas
   fi
+  install_tailscale_macos
   install_claude
+}
+
+# `--network tailscale` on macOS: the app (its CLI comes with it), unless one is there.
+install_tailscale_macos() {
+  [ "$NETWORK" = tailscale ] || return 0
+  tailscale_ok && return 0
+  say "brew install --cask tailscale"
+  brew install --cask tailscale || die "brew install --cask tailscale failed; rerun once it is fixed."
+}
+
+# Tailscale's apt repository for this distribution: `<ubuntu|debian>/<codename>` (a derivative
+# reads as the distribution it is like).
+tailscale_dist() {
+  id=$(os_field ID)
+  like=$(os_field ID_LIKE)
+  case " $id $like " in
+    " ubuntu "* | *" ubuntu "*)
+      code=$(os_field UBUNTU_CODENAME)
+      [ -n "$code" ] || code=$(os_field VERSION_CODENAME)
+      printf 'ubuntu/%s' "$code"
+      ;;
+    *) printf 'debian/%s' "$(os_field VERSION_CODENAME)" ;;
+  esac
+}
+
+# Download $1 whole to $2 (as root), or stop: a broken keyring or list would fail every later
+# `apt-get update`.
+fetch_as_root() {
+  tmp=$(mktemp "${TMPDIR:-/tmp}/volley-install.XXXXXX")
+  if ! curl -fsSL "$1" -o "$tmp" || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    die "could not download $1"
+  fi
+  as_root tee "$2" <"$tmp" >/dev/null
+  rm -f "$tmp"
 }
 
 SUDO_OK=''
@@ -310,11 +362,14 @@ install_linux() {
   if ! have bun && ! have unzip; then apt_pkgs="$apt_pkgs unzip"; fi
   need_gh=''
   have gh || need_gh=1
+  # `--network tailscale`: Tailscale's own apt repository, while sudo is held for the rest.
+  need_ts=''
+  if [ "$NETWORK" = tailscale ] && ! tailscale_ok; then need_ts=1; fi
   # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883.
   need_snap=''
   if [ -z "$PEER" ] && ! have mosquitto && snapd_active; then need_snap=1; fi
 
-  if [ -n "$apt_pkgs$need_gh$need_snap" ] && [ "$(id -u)" != 0 ]; then
+  if [ -n "$apt_pkgs$need_gh$need_snap$need_ts" ] && [ "$(id -u)" != 0 ]; then
     have sudo || die "sudo is needed to install the missing packages, and it is not installed."
     reasons=''
     [ -n "$apt_pkgs" ] && reasons="$reasons
@@ -323,6 +378,8 @@ install_linux() {
   - add GitHub's apt repository (cli.github.com) and install gh"
     [ -n "$need_snap" ] && reasons="$reasons
   - snap install mosquitto"
+    [ -n "$need_ts" ] && reasons="$reasons
+  - add Tailscale's apt repository (pkgs.tailscale.com) and install tailscale"
     say "sudo is needed to:$reasons"
     sudo -v || die "sudo failed; rerun when you can sudo."
     SUDO_OK=1
@@ -360,6 +417,18 @@ install_linux() {
       as_root tee /etc/apt/sources.list.d/github-cli.list >/dev/null
     as_root apt-get update
     as_root apt-get install -y gh
+  fi
+
+  if [ -n "$need_ts" ]; then
+    dist=$(tailscale_dist)
+    say "Installing tailscale from Tailscale's apt repository ($dist)..."
+    as_root mkdir -p -m 755 /usr/share/keyrings
+    fetch_as_root "https://pkgs.tailscale.com/stable/$dist.noarmor.gpg" \
+      /usr/share/keyrings/tailscale-archive-keyring.gpg
+    fetch_as_root "https://pkgs.tailscale.com/stable/$dist.tailscale-keyring.list" \
+      /etc/apt/sources.list.d/tailscale.list
+    as_root apt-get update
+    as_root apt-get install -y tailscale
   fi
 
   if [ -n "$PEER" ] || mosquitto_ok; then
@@ -495,6 +564,8 @@ chain_setup() {
   shown=$(tildify "$cmd")
   set -- setup
   [ -n "$PEER" ] && set -- "$@" --peer
+  [ -n "$NETWORK" ] && set -- "$@" --network "$NETWORK"
+  [ -n "$NETWORK_ADDRESS" ] && set -- "$@" --network-address "$NETWORK_ADDRESS"
   if [ -z "$SETUP" ]; then
     say "Volley is installed. Next: $shown $*"
   elif tty_ok; then
@@ -584,7 +655,7 @@ uninstall() {
 # ---------------------------------------------------------------------------------------------
 
 main() {
-  MODE=install SETUP=1 PEER='' PURGE='' SOURCE=''
+  MODE=install SETUP=1 PEER='' PURGE='' SOURCE='' NETWORK='' NETWORK_ADDRESS=''
   VERSION="${VOLLEY_VERSION:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -593,6 +664,18 @@ main() {
       --purge) PURGE=1 ;;
       --peer) PEER=1 ;;
       --no-setup) SETUP='' ;;
+      --network)
+        [ $# -ge 2 ] || usage_error "--network needs a kind (tailscale, manual or none)"
+        NETWORK=$2
+        shift
+        ;;
+      --network=*) NETWORK=${1#*=} ;;
+      --network-address)
+        [ $# -ge 2 ] || usage_error "--network-address needs a host or IP"
+        NETWORK_ADDRESS=$2
+        shift
+        ;;
+      --network-address=*) NETWORK_ADDRESS=${1#*=} ;;
       --source)
         [ $# -ge 2 ] || usage_error "--source needs a directory"
         SOURCE=$2
@@ -614,6 +697,12 @@ main() {
     shift
   done
   [ -n "$PURGE" ] && [ "$MODE" != uninstall ] && usage_error "--purge goes with --uninstall"
+  case "$NETWORK" in
+    '' | tailscale | manual | none) ;;
+    *) usage_error "--network must be tailscale, manual or none (got $NETWORK)" ;;
+  esac
+  [ -n "$NETWORK_ADDRESS" ] && [ "$NETWORK" != manual ] &&
+    usage_error "--network-address goes with --network manual"
 
   detect_platform
   path_add_known
