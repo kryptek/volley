@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 
-import './LightPillar.css';
+import "./LightPillar.css";
 
 export interface LightPillarProps {
   topColor?: string;
@@ -23,8 +23,8 @@ export interface LightPillarProps {
   noiseIntensity?: number;
   fade?: number;
   intro?: boolean;
-  mixBlendMode?: CSSProperties['mixBlendMode'];
-  quality?: 'low' | 'medium' | 'high';
+  mixBlendMode?: CSSProperties["mixBlendMode"];
+  quality?: "low" | "medium" | "high";
   resolution?: number;
   lightMode?: boolean;
   paused?: boolean;
@@ -274,7 +274,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -286,14 +286,14 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 const LightPillar = ({
-  topColor = '#5227FF',
-  bottomColor = '#FF9FFC',
+  topColor = "#5227FF",
+  bottomColor = "#FF9FFC",
   intensity = 1.0,
   rotationSpeed = 0.3,
   flow = 1,
@@ -309,13 +309,13 @@ const LightPillar = ({
   noiseIntensity = 0.5,
   fade = 0,
   intro = true,
-  mixBlendMode = 'screen',
-  quality = 'high',
+  mixBlendMode = "screen",
+  quality = "high",
   resolution,
   lightMode = false,
   paused = false,
-  className = '',
-  style
+  className = "",
+  style,
 }: LightPillarProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -342,23 +342,23 @@ const LightPillar = ({
     intro,
     scale: clamp(resolution ?? QUALITY[quality] ?? QUALITY.high, MIN_SCALE, 2),
     lightMode,
-    paused
+    paused,
   };
 
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'high-performance'
+      powerPreference: "high-performance",
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
+    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
     const marchProgram = link(gl, MARCH);
     const compositeProgram = link(gl, COMPOSITE);
     if (!marchProgram || !compositeProgram) return undefined;
@@ -366,9 +366,9 @@ const LightPillar = ({
     const onContextLost = (event: Event) => {
       event.preventDefault();
     };
-    const onContextRestored = () => setGeneration(value => value + 1);
-    canvas.addEventListener('webglcontextlost', onContextLost);
-    canvas.addEventListener('webglcontextrestored', onContextRestored);
+    const onContextRestored = () => setGeneration((value) => value + 1);
+    canvas.addEventListener("webglcontextlost", onContextLost);
+    canvas.addEventListener("webglcontextrestored", onContextRestored);
 
     const buffer = gl.createBuffer();
     const vao = gl.createVertexArray();
@@ -398,14 +398,14 @@ const LightPillar = ({
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
     };
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const colorCache = new Map<string, number[]>();
     const toRgb = (value: string): number[] => {
       if (colorCache.has(value)) return colorCache.get(value) as number[];
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#ffffff';
+        probe.fillStyle = "#ffffff";
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -415,7 +415,7 @@ const LightPillar = ({
       return rgb;
     };
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const view = { width: 1, height: 1, ratio: 1 };
     const pointer = { x: 0, y: 0, inside: false };
     const pulses: Pulse[] = [];
@@ -429,7 +429,7 @@ const LightPillar = ({
       shift: 0,
       governor: 1,
       slow: 0,
-      quick: 0
+      quick: 0,
     };
     let raf = 0;
     let last = 0;
@@ -480,7 +480,10 @@ const LightPillar = ({
 
       pulseData.fill(0);
       pulses.forEach((pulse, index) => {
-        pulseData.set([pulse.axis + pulse.age * 1.7, Math.exp(-pulse.age / (PULSE_LIFE * 0.45)), 0, 0], index * 4);
+        pulseData.set(
+          [pulse.axis + pulse.age * 1.7, Math.exp(-pulse.age / (PULSE_LIFE * 0.45)), 0, 0],
+          index * 4,
+        );
       });
 
       const c = compositeProgram.uniforms;
@@ -505,7 +508,10 @@ const LightPillar = ({
       gl.uniform1f(c.uFade, s.fade);
       const span = view.width / view.height + 1.2;
       gl.uniform1f(c.uReveal, state.intro >= 1 ? 1e4 : -span + rise * (span * 2 + 1.2));
-      gl.uniform1f(c.uFlare, state.intro >= 1 ? 0 : (1 - rise) * 1.3 * Math.min(1, state.intro * 8));
+      gl.uniform1f(
+        c.uFlare,
+        state.intro >= 1 ? 0 : (1 - rise) * 1.3 * Math.min(1, state.intro * 8),
+      );
       gl.uniform4fv(c.uPulses, pulseData);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
@@ -618,18 +624,18 @@ const LightPillar = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     wakeRef.current = () => {
@@ -640,21 +646,21 @@ const LightPillar = ({
     return () => {
       cancelAnimationFrame(raf);
       wakeRef.current = null;
-      canvas.removeEventListener('webglcontextlost', onContextLost);
-      canvas.removeEventListener('webglcontextrestored', onContextRestored);
+      canvas.removeEventListener("webglcontextlost", onContextLost);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored);
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       if (texture) gl.deleteTexture(texture);
       gl.deleteFramebuffer(framebuffer);
       gl.deleteProgram(marchProgram.program);
       gl.deleteProgram(compositeProgram.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      if (!gl.isContextLost()) gl.getExtension('WEBGL_lose_context')?.loseContext();
+      if (!gl.isContextLost()) gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, [generation]);
 
@@ -665,7 +671,7 @@ const LightPillar = ({
   return (
     <div
       ref={containerRef}
-      className={`light-pillar-container${className ? ` ${className}` : ''}`}
+      className={`light-pillar-container${className ? ` ${className}` : ""}`}
       style={{ mixBlendMode, ...style }}
     >
       <canvas ref={canvasRef} className="light-pillar-canvas" aria-hidden="true" />

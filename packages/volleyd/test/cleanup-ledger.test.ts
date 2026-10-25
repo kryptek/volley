@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ledgerOf } from "../src/commands/cleanup";
+import { ledgerOf, summaryLine } from "../src/commands/cleanup";
 import { replay } from "../src/reducer";
 import type { JournalEvent, WaveState } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -213,5 +213,30 @@ describe("ledgerOf", () => {
       "worktree:T1",
     ]);
     expect(l.borrowed).toEqual([]);
+  });
+});
+
+describe("summaryLine", () => {
+  const counts = {
+    worktrees: 3,
+    sessions: 2,
+    processes: 1,
+    branches: 3,
+    logins: 0,
+    repos: 0,
+    accounts: 0,
+    clones: 0,
+  };
+  it("names each kind removed, zeros omitted, the machines, and what was kept", () => {
+    expect(summaryLine("w1", counts, 1)).toBe(
+      "cleaned w1: 3 worktrees, 2 sessions, 1 process, 3 branches; kept 1",
+    );
+    expect(summaryLine("w1", { ...counts, logins: 2 }, 0, { worktrees_on: { box: 1 } })).toBe(
+      "cleaned w1: 3 worktrees (1 on box), 2 sessions, 1 process, 3 branches, 2 logins",
+    );
+    const none = { ...counts, worktrees: 0, sessions: 0, processes: 0, branches: 0 };
+    expect(summaryLine("w1", none, 0)).toBe("nothing to clean");
+    expect(summaryLine("w1", none, 2)).toBe("nothing to clean; kept 2");
+    expect(summaryLine("w1", counts, 0, { dry: true })).toMatch(/^would clean w1: /);
   });
 });

@@ -155,6 +155,44 @@ describe("volleyd config set argument parsing", () => {
 });
 
 describe("volleyd status formatting", () => {
+  it("prints the last cleanup run under hygiene, and nothing when there is none (#612)", () => {
+    const base = {
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "complete" as const,
+      tasks: [],
+      open_decisions: [],
+      gates: [],
+      hygiene_level: "p3" as const,
+      repo_visibility: "private" as const,
+      updated_at: "2026-10-18T12:00:00.000Z",
+    };
+    const summary = "cleaned w1: 3 worktrees, 2 sessions, 1 process, 3 branches; kept 1";
+    const out = formatWave({
+      ...base,
+      cleanup: {
+        at: "2026-10-18T12:00:00.000Z",
+        removed: {
+          worktrees: 3,
+          sessions: 2,
+          processes: 1,
+          branches: 3,
+          logins: 0,
+          repos: 0,
+          accounts: 0,
+          clones: 0,
+        },
+        kept: [{ kind: "release_branch", host: "local", what: "release/w1", why: "x" }],
+        summary,
+      },
+    });
+    expect(out).toContain(`  hygiene: P3 (private)\n  cleanup: ${summary}\n`);
+    expect(formatWave(base)).not.toContain("cleanup:");
+  });
+
   it("prints a header and one row per task", () => {
     const out = formatWave({
       wave: "w1",

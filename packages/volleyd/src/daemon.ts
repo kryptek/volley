@@ -55,6 +55,7 @@ import {
   isValidCorrelationId,
   listAccounts,
   redeemToken,
+  revokeAccount,
   tokenReplyTopic,
 } from "./accounts";
 import { type ActivityEvidence, newestWrite } from "./activity-evidence";
@@ -238,6 +239,16 @@ import {
   waveAccount,
   waveAccountMoves,
 } from "./claude/usage";
+import {
+  type CleanupRun,
+  type LedgerOptions,
+  cleanedEvent,
+  summaryLine as cleanupSummary,
+  keptUnreachable,
+  ledgerOf,
+  runCleanup,
+  withTaskRuns,
+} from "./commands/cleanup";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { ConfigStore, resolveLocalTerminal } from "./config-store";
 import {
@@ -350,6 +361,7 @@ import {
   tunnelKey,
 } from "./hosts/tunnel";
 import { type AgentCredentials, type CredentialStore, agentIdFor } from "./identity";
+import { makeBufferIO } from "./io";
 import { Journal, WaveLog, writeFileAtomic } from "./journal";
 import {
   HOLDER_GONE,
@@ -443,6 +455,7 @@ import {
   homeFromClones,
   isSlug,
   legacyOrigin,
+  managedClonePath,
   pendingRepoRuns,
   remoteRepoRoot,
   repoStateLine,
@@ -1379,6 +1392,17 @@ export class Daemon {
   ]);
   /** Archived waves (archive.ts): out of the live set, kept for `status --all` and the index. */
   private readonly archived = new Map<WaveId, WaveLog>();
+  /** Waves whose cleanup runs now (SPEC §4.6.26): one run per wave at a time. */
+  private readonly cleaning = new Set<WaveId>();
+  /**
+   * Per wave, what the auto-cleanup did (read from the journal once): the tasks it cleaned, and
+   * whether the whole-wave pass ran since the wave ended. `retryAt`: a run that kept an
+   * unreachable machine's items runs again after it.
+   */
+  private readonly cleanupDone = new Map<
+    WaveId,
+    { tasks: Set<string>; whole: boolean; retryAt: number }
+  >();
   /** When each legacy ended wave ended, read once from its journal (records before `ended_at`). */
   private readonly legacyEndedAt = new Map<WaveId, string | null>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
@@ -3313,6 +3337,7 @@ export class Daemon {
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
+    this.cleanupPass();
     await this.archivePass();
     let live = this.ceilingCount().live;
     for (const [wave, log] of this.waves) {
@@ -4418,7 +4443,13 @@ export class Daemon {
       return this.legacyEndedAt.get(wave) ?? null;
     });
     const verdict = archivable(facts, this.now(), this.config.effective(wave));
-    if (verdict.ok) await this.archiveWave(wave, DAEMON_AGENT_ID, verdict.reason);
+    if (!verdict.ok) return;
+    // The last cleanup pass comes first (SPEC §4.6.26): archived on a tick after it ran.
+    if (this.config.effective(wave).cleanup_on_end && !this.cleanedWhole(wave)) {
+      this.startCleanup(wave);
+      return;
+    }
+    await this.archiveWave(wave, DAEMON_AGENT_ID, verdict.reason);
   }
 
   /** The tick's auto-archive pass over every live wave. */
@@ -4456,9 +4487,263 @@ export class Daemon {
         },
       };
     }
-    const r = await this.archiveWave(wave, by, reason);
-    if ("error" in r) return { ok: false, error: r.error };
-    return { ok: true, result: { wave, status: "archived", closed: r.closed } };
+    const busy = archiveRefusal(log.record) ?? this.archiveBusy(wave);
+    if (busy !== null) return { ok: false, error: busy };
+    // One last cleanup pass beside the queue (SPEC §4.6.26), then the archive; the answer
+    // repeats what cleanup kept.
+    const archiveNow = async (): Promise<Reply> => {
+      const r = await this.enqueue(() => this.archiveWave(wave, by, reason));
+      if (r === undefined || "error" in r)
+        return { ok: false, error: r?.error ?? "archive failed" };
+      const kept = this.archived.get(wave)?.record.state?.cleanup?.kept ?? [];
+      return { ok: true, result: { wave, status: "archived", closed: r.closed, kept } };
+    };
+    if (!this.config.effective(wave).cleanup_on_end || this.cleaning.has(wave))
+      return { ok: true, defer: archiveNow() };
+    this.cleaning.add(wave);
+    const done = this.cleanNow(wave, { by, dry: false })
+      .catch((e: unknown) => this.log(`cleanup ${wave}: ${String(e)}`))
+      .finally(() => this.cleaning.delete(wave));
+    return { ok: true, defer: this.track(done.then(archiveNow)) };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Wave cleanup (commands/cleanup.ts, SPEC §4.6.26): everything Volley made for a wave goes,
+  // on every machine; what it keeps is named. Runs beside the serial queue (ssh steps).
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Can a registration or account be made for `id` (`--for-wave`)? A wave id that is live or not
+   * submitted yet; never an archived wave's, which no cleanup runs for again.
+   */
+  private isWaveFor(id: string): boolean {
+    return /^[a-z0-9][a-z0-9_-]{0,62}$/.test(id) && !this.archived.has(id);
+  }
+
+  /** What the auto-cleanup has done for `wave`, read from its journal the first time. */
+  private cleanupState(wave: WaveId): { tasks: Set<string>; whole: boolean; retryAt: number } {
+    let st = this.cleanupDone.get(wave);
+    if (st !== undefined) return st;
+    st = { tasks: new Set(), whole: false, retryAt: 0 };
+    const log = this.waves.get(wave);
+    for (const e of log?.journal.readAll() ?? []) {
+      if (e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed")
+        st.whole = false;
+      if (e.type !== "wave_cleaned" || e.data.dry_run === true) continue;
+      const unreachable = keptUnreachable(e.data.kept);
+      if (typeof e.data.task === "string") {
+        if (!unreachable) st.tasks.add(e.data.task);
+      } else if (!unreachable) st.whole = true;
+    }
+    this.cleanupDone.set(wave, st);
+    return st;
+  }
+
+  /** Has the whole-wave pass run since `wave` ended (and reached every machine)? */
+  private cleanedWhole(wave: WaveId): boolean {
+    return this.cleanupState(wave).whole;
+  }
+
+  /**
+   * The tick's auto-cleanup (`cleanup_on_end`, SPEC §4.6.26): a task's items once it is done or
+   * cancelled and no agent of it is live; the whole wave's once it ended and none is. A run that
+   * kept an unreachable machine's items runs again later; a task held unfinished (merge_ready)
+   * is cleaned when it ends, by nobody.
+   */
+  private cleanupPass(): void {
+    if (!this.running) return;
+    for (const [wave, log] of this.waves) {
+      if (!this.config.effective(wave).cleanup_on_end || this.cleaning.has(wave)) continue;
+      const state = log.record.state;
+      if (state == null) continue;
+      const st = this.cleanupState(wave);
+      if (st.retryAt > this.time.now()) continue;
+      const ended = state.status === "complete" || state.status === "stopped";
+      if (ended && !st.whole && this.archiveBusy(wave) === null) {
+        this.startCleanup(wave);
+        continue;
+      }
+      const live = new Set(
+        [...this.supervised.values()].filter((a) => a.wave === wave).map((a) => a.task),
+      );
+      const task = state.tasks.find(
+        (t) =>
+          (t.stage === "done" || t.stage === "cancelled") && !st.tasks.has(t.id) && !live.has(t.id),
+      );
+      if (task !== undefined) this.startCleanup(wave, task.id);
+    }
+  }
+
+  /** Start one auto-cleanup run of `wave` (or of one task) beside the queue. */
+  private startCleanup(wave: WaveId, task?: string): void {
+    if (this.cleaning.has(wave)) return;
+    this.cleaning.add(wave);
+    void this.track(
+      this.cleanNow(wave, {
+        by: DAEMON_AGENT_ID,
+        dry: false,
+        ...(task !== undefined ? { task } : {}),
+      })
+        .then((run) => {
+          const st = this.cleanupState(wave);
+          if (run === null) return;
+          if (keptUnreachable(run.kept)) {
+            st.retryAt = this.time.now() + DAEMON_DEFAULTS.cleanup_retry_ms;
+            return;
+          }
+          if (task !== undefined) st.tasks.add(task);
+          else st.whole = true;
+        })
+        .catch((e: unknown) =>
+          this.log(`cleanup ${wave}: ${e instanceof Error ? e.message : String(e)}`),
+        )
+        .finally(() => this.cleaning.delete(wave)),
+    );
+  }
+
+  /**
+   * Clean `wave` (or one task of it) now, beside the queue: the ledger, the run, `wave_cleaned`.
+   * A whole-wave run's counts include the task runs since the last whole-wave run, so the state's
+   * summary sums the wave up. Returns the run, or null for an unknown wave.
+   */
+  private async cleanNow(
+    wave: WaveId,
+    o: {
+      by: string;
+      dry: boolean;
+      task?: string;
+      force?: boolean;
+      all?: boolean;
+      lines?: string[];
+    },
+  ): Promise<CleanupRun | null> {
+    const log = this.waves.get(wave) ?? this.archived.get(wave);
+    const state = log?.record.state;
+    if (log === undefined || state == null) return null;
+    const events = log.journal.readAll();
+    const eff = this.config.effective(wave);
+    const localName = this.config.localName();
+    const ledgerOpts: LedgerOptions = {
+      ...(o.task !== undefined ? { task: o.task } : {}),
+      ...(o.all === true ? { all: true } : {}),
+    };
+    const ledger = ledgerOf(
+      {
+        state,
+        events,
+        system: this.system.readAll(),
+        otherWaves: [...this.waves]
+          .filter(([w]) => w !== wave)
+          .map(([w, l]) => ({ wave: w, repo: l.record.wave?.repo ?? "" })),
+        clones: { repo_root: eff.fleet.repo_root, localName, localHome: homedir() },
+        ...(isSlug(state.repo)
+          ? { localRepo: managedClonePath(eff.fleet.repo_root, state.repo, homedir()) }
+          : {}),
+      },
+      ledgerOpts,
+    );
+    const io = makeBufferIO();
+    const run = await runCleanup(
+      wave,
+      ledger,
+      {
+        exec: this.host.exec,
+        ...(o.dry ? {} : { consent: mintConsentToken(`volleyd cleanup ${wave} --yes`) }),
+        ...(o.force === true ? { force: true } : {}),
+        hosts: eff.hosts,
+        localName,
+        deleteBranchAtMerge: eff.autopilot.delete_branch === true,
+        revokeLogin: (agentId, task) =>
+          reapAndRevoke(
+            agentId,
+            this.agentNamespace(wave, agentId),
+            this.reapDeps((ev) => this.enqueue(() => this.append(wave, ev))),
+            task,
+          ),
+        removeRepo: (slug, machines) => this.removeRepoFor(slug, machines),
+        revokeAccount: async (name) => {
+          const why = await revokeAccount(this.host.exec, name);
+          if (why === null)
+            await this.enqueue(() =>
+              this.appendSystem({ type: "account_revoked", data: { by: DAEMON_AGENT_ID, name } }),
+            );
+          return why;
+        },
+        journalSystem: (ev) => this.enqueue(() => this.appendSystem(ev)),
+        remoteHost: (r) => {
+          const h = eff.hosts[r.host];
+          return this.remoteBySpec({
+            name: r.host,
+            target: r.target,
+            repo: r.repo,
+            worktree_root: r.worktree_root,
+            volley_dir: h?.volley_dir ?? "",
+            tunnel: {
+              remote_port: h?.tunnel?.remote_port ?? REMOTE_HOST_DEFAULTS.remote_port,
+              supervise: h?.tunnel?.supervise ?? false,
+            },
+          });
+        },
+      },
+      io,
+    );
+    o.lines?.push(
+      ...io
+        .readStdout()
+        .split("\n")
+        .filter((l: string) => l !== ""),
+    );
+    for (const l of io.readStderr().split("\n")) if (l !== "") this.log(`cleanup ${wave}: ${l}`);
+    // A whole-wave run sums up the task runs since the last whole-wave one.
+    const total = o.task === undefined && !o.dry ? withTaskRuns(run, events) : run;
+    const summary =
+      total === run
+        ? run.summary
+        : cleanupSummary(wave, total.removed, run.kept.length, {
+            worktrees_on: total.worktrees_on,
+          });
+    await this.enqueue(() =>
+      this.append(wave, cleanedEvent(o.by, { ...total, summary }, o.dry, o.task)),
+    );
+    if (!o.dry) this.log(`cleanup ${wave}${o.task !== undefined ? ` ${o.task}` : ""}: ${summary}`);
+    return { ...total, summary };
+  }
+
+  /** `repo_remove` of a wave-owned registration (SPEC §4.6.26): null, or why not. */
+  private async removeRepoFor(slug: string, machines?: string[]): Promise<string | null> {
+    const out = await this.enqueue(async () =>
+      this.repoRemove({ slug, ...(machines !== undefined ? { machines } : {}) }, DAEMON_AGENT_ID),
+    );
+    if (out === undefined) return "repo_remove failed";
+    const answer = "later" in out ? await out.later() : out;
+    const r = answer.reply as { ok?: boolean; error?: string };
+    return r.ok === true ? null : (r.error ?? "repo_remove refused");
+  }
+
+  /** `cleanup { wave, dry_run, force, all }` (the owner): the run beside the queue, its lines. */
+  private cleanupOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    const log = this.waves.get(wave) ?? this.archived.get(wave);
+    if (log === undefined) return { ok: false, error: `unknown wave '${wave}'` };
+    const refused = guardMutation(log.record.state as WaveState, by, "cleanup");
+    if (refused !== null) return { ok: false, error: refused };
+    if (this.cleaning.has(wave))
+      return { ok: false, error: `wave '${wave}' is being cleaned now; try again shortly` };
+    this.cleaning.add(wave);
+    const lines: string[] = [];
+    const run = this.cleanNow(wave, {
+      by,
+      dry: p.dry_run !== false,
+      force: p.force === true,
+      all: p.all === true,
+      lines,
+    }).finally(() => this.cleaning.delete(wave));
+    return {
+      ok: true,
+      defer: this.track(
+        run.then((r) => ({ ok: true, result: { wave, lines, failed: r?.failed ?? 0 } })),
+      ),
+    };
   }
 
   /** An archived wave as `status --all` shows it: its last state, and when, by whom and why. */
@@ -6944,6 +7229,11 @@ export class Daemon {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw))
       return refuse("paths must be an object of machine: absolute path");
     const paths = raw as Record<string, unknown>;
+    // Made for one wave (`volley repo add --for-wave`, SPEC §4.6.26): that wave's cleanup removes
+    // it. The wave may not be submitted yet (setup's first wave registers its repository first).
+    const wave = p.wave;
+    if (wave !== undefined && (typeof wave !== "string" || !this.isWaveFor(wave)))
+      return refuse("wave: not a wave id, or an archived wave's");
     const local = this.config.localName();
     const hosts = this.config.effective().hosts;
     for (const [m, path] of Object.entries(paths)) {
@@ -6960,7 +7250,13 @@ export class Daemon {
         const view = await readSlugView(this.host.exec, slug);
         if (typeof view === "string") return refuse(view);
         const r = await this.enqueue(() =>
-          this.applyRepoAdd(view.slug, machines, paths as Record<string, string>, sender),
+          this.applyRepoAdd(
+            view.slug,
+            machines,
+            paths as Record<string, string>,
+            sender,
+            typeof wave === "string" ? wave : undefined,
+          ),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
         // Its workflows (no release branch yet to read required checks on): absent if unreadable.
@@ -7017,6 +7313,7 @@ export class Daemon {
     machines: RepoMachines,
     paths: Record<string, string>,
     by: string,
+    wave?: string,
   ): Promise<{ slug: string; machines: string[]; status: string[] } | string> {
     const cfg = this.config.effective();
     const key = slugKey(cfg.repos, slug);
@@ -7037,7 +7334,13 @@ export class Daemon {
     const spelled = slugKey(this.config.effective().repos, slug) ?? slug;
     await this.appendSystem({
       type: "repo_added",
-      data: { by, slug: spelled, machines, ...(Object.keys(paths).length > 0 ? { paths } : {}) },
+      data: {
+        by,
+        slug: spelled,
+        machines,
+        ...(Object.keys(paths).length > 0 ? { paths } : {}),
+        ...(wave !== undefined ? { wave } : {}),
+      },
     });
     const names = this.namedMachines(machines);
     for (const m of names) {
@@ -12215,6 +12518,7 @@ export class Daemon {
                     payload,
                     lastSeen,
                     new Date(this.startedAt).toISOString(),
+                    (id) => this.isWaveFor(id),
                   );
       }
     } catch (e) {
@@ -12343,10 +12647,14 @@ export class Daemon {
     if (op === "repo_probe") return this.repoProbe(p);
     if (op === "archive") {
       const wave = typeof p.wave === "string" ? p.wave : "";
-      const r = this.archived.has(wave)
+      const r: HandlerResult = this.archived.has(wave)
         ? { ok: false, error: `wave '${wave}' is archived already` }
         : await this.archiveAs(wave, sender, ADMIN_REASON, p.dry_run === true);
-      return { reply: authReply(op, r) };
+      // Its last cleanup pass runs beside the queue: the answer waits for it, outside it.
+      const { defer, ...now } = r;
+      if (defer !== undefined)
+        return { later: async () => ({ reply: authReply(op, await defer) }) };
+      return { reply: authReply(op, now) };
     }
     const r =
       op === "peer_invite"
@@ -12718,6 +13026,8 @@ export class Daemon {
         return this.waveControl(op, p, by);
       case "archive":
         return this.archiveOp(p, by);
+      case "cleanup":
+        return this.cleanupOp(p, by);
       case "steer":
         return this.steer(p, by);
       case "terminal_resize":

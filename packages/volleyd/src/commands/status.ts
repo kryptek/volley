@@ -250,6 +250,8 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  // The last cleanup run (SPEC §4.6.26), under hygiene: absent until the wave was cleaned.
+  const cleanup = s.cleanup !== undefined ? `  ${formatCleanup(s.cleanup)}\n` : "";
   const ci = s.ci_mode !== undefined ? `  ${formatCiMode(s)}\n` : "";
   const github = s.github !== undefined ? `  github: ${s.github.slug}\n` : "";
   // What autopilot did in the wave (absent: a state from before autopilot).
@@ -324,6 +326,7 @@ export function formatWave(
     autopilot +
     preface +
     hygiene +
+    cleanup +
     ci +
     github +
     rows.join("") +
@@ -372,6 +375,11 @@ export function formatCiMode(s: WaveState): string {
  * `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)` (the visibility could not be read),
  * `P1 (forced)` (`public_hygiene: on`) or `off`: what the wave's reviewers flag.
  */
+/** `cleanup: cleaned w1: 3 worktrees, 2 sessions; kept 1`: the wave's last cleanup run. Pure. */
+export function formatCleanup(c: NonNullable<WaveState["cleanup"]>): string {
+  return `cleanup: ${c.summary}`;
+}
+
 function formatHygiene(s: WaveState): string {
   if (s.hygiene_level === "off") return "hygiene: off";
   return `hygiene: ${s.hygiene_level === "p3" ? "P3" : "P1"} (${s.repo_visibility ?? "forced"})`;

@@ -1,12 +1,12 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties, type HTMLAttributes } from 'react';
-import './Grainient.css';
+import { type CSSProperties, type HTMLAttributes, useEffect, useRef } from "react";
+import "./Grainient.css";
 
-export type GrainientType = 'linear' | 'radial';
+export type GrainientType = "linear" | "radial";
 
-export interface GrainientProps extends Omit<HTMLAttributes<HTMLDivElement>, 'style'> {
+export interface GrainientProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
   colors?: string[];
   type?: GrainientType;
   angle?: number;
@@ -55,7 +55,15 @@ type Settings = {
   dpr?: number;
 };
 
-type Sample = { x: number; y: number; vx: number; vy: number; age: number; grow: number; done: boolean };
+type Sample = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  age: number;
+  grow: number;
+  done: boolean;
+};
 
 type Spin = { x: number; y: number; age: number; direction: number };
 
@@ -68,7 +76,7 @@ const STIR_LIFE = 1.3;
 const STIR_STEP = 0.06;
 const TWIRL_LIFE = 2.6;
 const INTRO_SECONDS = 1.6;
-const DEFAULT_COLORS = ['#120f17', '#2a0f0a', '#9a3412', '#f97316', '#fed7aa'];
+const DEFAULT_COLORS = ["#120f17", "#2a0f0a", "#9a3412", "#f97316", "#fed7aa"];
 const TYPES: Record<string, number> = { linear: 0, radial: 1 };
 const LIFT = 0.2;
 
@@ -259,7 +267,8 @@ void main() {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-const toLinear = (value: number) => (value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+const toLinear = (value: number) =>
+  value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
 
 const toLab = ([r, g, b]: number[]): number[] => {
   const lr = toLinear(r);
@@ -271,7 +280,7 @@ const toLab = ([r, g, b]: number[]): number[] => {
   return [
     0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
     1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
-    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
   ];
 };
 
@@ -304,7 +313,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
     if (!info) continue;
-    const name = info.name.replace(/\[0\]$/, '');
+    const name = info.name.replace(/\[0\]$/, "");
     uniforms[name] = gl.getUniformLocation(program, name);
   }
   return { program, uniforms };
@@ -312,7 +321,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
 
 const Grainient = ({
   colors = DEFAULT_COLORS,
-  type = 'linear',
+  type = "linear",
   angle = 55,
   bands = 1,
   speed = 1,
@@ -332,14 +341,17 @@ const Grainient = ({
   intro = true,
   lightMode = false,
   dpr,
-  className = '',
+  className = "",
   style,
   ...rest
 }: GrainientProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
-  const palette = (Array.isArray(colors) && colors.length ? colors : DEFAULT_COLORS).slice(0, MAX_COLORS);
+  const palette = (Array.isArray(colors) && colors.length ? colors : DEFAULT_COLORS).slice(
+    0,
+    MAX_COLORS,
+  );
   const settings: Settings = {
     colors: palette.length > 1 ? palette : [palette[0], palette[0]],
     type: TYPES[type] ?? 0,
@@ -361,7 +373,7 @@ const Grainient = ({
     clickSwirl,
     intro,
     lightMode,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -369,11 +381,11 @@ const Grainient = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: false,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -392,7 +404,7 @@ const Grainient = ({
     const buffer = gl.createFramebuffer();
     const fieldSize = { width: 0, height: 0 };
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const colorCache = new Map<string, number[]>();
     const parse = (value: string): number[] => {
       const key = String(value);
@@ -401,7 +413,7 @@ const Grainient = ({
       let rgb = [0, 0, 0];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = key;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -411,7 +423,7 @@ const Grainient = ({
       return rgb;
     };
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const view = { width: 1, height: 1, ratio: 1 };
     const ramp = new Float32Array(MAX_COLORS * 3);
     const stirs = new Float32Array(MAX_STIRS * 4);
@@ -420,7 +432,7 @@ const Grainient = ({
     const trail: Sample[] = [];
     const spins: Spin[] = [];
     const pointer = { x: 0.5, y: 0.5, sx: 0.5, sy: 0.5, vx: 0, inside: false, fresh: true };
-    let paletteKey = '';
+    let paletteKey = "";
     let time = 0;
     let introClock = settingsRef.current.intro && !reduce ? 0 : 1;
     let frameSeed = 0;
@@ -431,10 +443,10 @@ const Grainient = ({
 
     const syncPalette = () => {
       const s = settingsRef.current;
-      const key = `${s.colors.join(',')}|${s.lightMode}`;
+      const key = `${s.colors.join(",")}|${s.lightMode}`;
       if (key === paletteKey) return;
       paletteKey = key;
-      const labs = s.colors.map(color => toLab(parse(color)));
+      const labs = s.colors.map((color) => toLab(parse(color)));
       if (!s.lightMode) {
         labs.forEach((lab, i) => ramp.set(lab, i * 3));
       } else {
@@ -503,7 +515,17 @@ const Grainient = ({
         fieldSize.width = width;
         fieldSize.height = height;
         gl.bindTexture(gl.TEXTURE_2D, target);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA8,
+          width,
+          height,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          null,
+        );
         gl.bindFramebuffer(gl.FRAMEBUFFER, buffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -523,7 +545,7 @@ const Grainient = ({
       const vy = (pointer.sy - py) / dt;
       pointer.vx = vx;
       const head = trail[0];
-      trail.forEach(sample => {
+      trail.forEach((sample) => {
         if (sample.done) sample.age += dt;
       });
       if (s.interactive && pointer.inside && Math.hypot(vx, vy) > 0.02 && !reduce) {
@@ -553,7 +575,7 @@ const Grainient = ({
         stirs.set([sample.x, sample.y, sample.vx * cap, sample.vy * cap], i * 4);
         stirWeights[i] = fade * fade * sample.grow * s.stir * 0.05;
       }
-      spins.forEach(spin => {
+      spins.forEach((spin) => {
         spin.age += dt;
       });
       while (spins.length && spins[spins.length - 1].age > TWIRL_LIFE) spins.pop();
@@ -565,7 +587,15 @@ const Grainient = ({
         }
         const k = spin.age / TWIRL_LIFE;
         const envelope = Math.min(1, spin.age / 0.18) * (1 - k) * (1 - k);
-        twirls.set([spin.x, spin.y, spin.direction * 2.4 * envelope, 0.16 + 0.1 * Math.min(1, spin.age / 0.5)], i * 4);
+        twirls.set(
+          [
+            spin.x,
+            spin.y,
+            spin.direction * 2.4 * envelope,
+            0.16 + 0.1 * Math.min(1, spin.age / 0.5),
+          ],
+          i * 4,
+        );
       }
     };
 
@@ -585,7 +615,10 @@ const Grainient = ({
       updateTouches(dt, view.width / view.height);
       draw();
       const busy =
-        (!reduce && (s.speed > 0 || s.grainAnimated)) || introClock < 1 || trail.length > 0 || spins.length > 0;
+        (!reduce && (s.speed > 0 || s.grainAnimated)) ||
+        introClock < 1 ||
+        trail.length > 0 ||
+        spins.length > 0;
       if (busy) raf = requestAnimationFrame(frame);
       else last = 0;
     };
@@ -621,7 +654,7 @@ const Grainient = ({
         x: (pointer.x - 0.5) * (view.width / view.height),
         y: pointer.y - 0.5,
         age: 0,
-        direction: pointer.vx < 0 ? 1 : -1
+        direction: pointer.vx < 0 ? 1 : -1,
       });
       if (spins.length > MAX_TWIRLS) spins.pop();
       wake();
@@ -638,18 +671,18 @@ const Grainient = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
     wakeRef.current = wake;
 
@@ -658,16 +691,16 @@ const Grainient = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       gl.deleteTexture(target);
       gl.deleteFramebuffer(buffer);
       gl.deleteVertexArray(vao);
       gl.deleteProgram(field.program);
       gl.deleteProgram(composite.program);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -678,7 +711,7 @@ const Grainient = ({
   return (
     <div
       ref={containerRef}
-      className={`grainient-container${className ? ` ${className}` : ''}`}
+      className={`grainient-container${className ? ` ${className}` : ""}`}
       style={style}
       {...rest}
     >

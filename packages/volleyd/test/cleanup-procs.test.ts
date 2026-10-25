@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanupPlan, cleanupWave, readWave } from "../src/commands/cleanup";
@@ -112,6 +113,37 @@ describe("cleanup stops retired agents' processes", () => {
     expect(out).not.toContain(`stopped ${launching} `);
     expect(alive(launching)).toBe(true);
   });
+
+  /** A dev server the agent started: no `--mcp-config=` in its argv, its cwd in the worktree. */
+  const devServer = (cwd: string): number => {
+    mkdirSync(cwd, { recursive: true });
+    const c = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", cwd });
+    children.push(c);
+    return c.pid as number;
+  };
+
+  it.skipIf(process.platform !== "linux")(
+    "a process counted only by its cwd is stopped by --yes and listed by the dry run (#612 D3)",
+    async () => {
+      const { home, root } = setup();
+      const dev = devServer(join(root, "w1", "T1-implementer", "web"));
+      const liveDev = devServer(join(root, "w1", "T3-implementer"));
+      // real process: let the fresh children reach their working directory
+      await new Promise((r) => setTimeout(r, 100));
+      const dry = makeBufferIO();
+      await cleanupWave(home, "w1", { yes: false, force: false }, dry);
+      expect(dry.readStdout()).toContain(`would stop ${dev} (w1-t1-implementer-1)\n`);
+      expect(dry.readStdout()).not.toContain(`would stop ${liveDev} `);
+      const io = makeBufferIO();
+      await cleanupWave(home, "w1", { yes: true, force: false, reap: { graceMs: 2000 } }, io);
+      expect(io.readStdout()).toContain(`stopped ${dev} (w1-t1-implementer-1)\n`);
+      for (let i = 0; i < 50 && alive(dev); i++)
+        // real process: the stopped child is reaped by this test's own process
+        await new Promise((r) => setTimeout(r, 20));
+      expect(alive(dev)).toBe(false);
+      expect(alive(liveDev)).toBe(true);
+    },
+  );
 
   it("the dry run only says what it would stop", async () => {
     const { home, root } = setup();

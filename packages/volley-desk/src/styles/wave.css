@@ -232,6 +232,11 @@ a.dag-issue-link {
   color: var(--mute);
   border-color: rgba(163, 171, 192, 0.4);
 }
+/* The wave was cleaned (SPEC §4.6.26): its title is the summary line. */
+.chip--cleaned {
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
 .chip--noci {
   color: var(--mute);
   border-color: color-mix(in srgb, var(--mute) 45%, transparent);
@@ -337,6 +342,17 @@ a.dag-issue-link {
   font: 11.5px var(--f-mono);
 }
 .wave-train,
+/* What cleanup kept, one line each with why (SPEC §4.6.26). */
+  .wave-kept {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .wave-fixers {
   list-style: none;
   margin: 8px 0 0;

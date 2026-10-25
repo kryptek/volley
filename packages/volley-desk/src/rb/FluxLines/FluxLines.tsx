@@ -1,10 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties, type HTMLAttributes } from 'react';
-import './FluxLines.css';
+import { type CSSProperties, type HTMLAttributes, useEffect, useRef } from "react";
+import "./FluxLines.css";
 
-export type FluxLinesFlow = 'up' | 'down' | 'left' | 'right';
+export type FluxLinesFlow = "up" | "down" | "left" | "right";
 
 export interface FluxLinesProps extends HTMLAttributes<HTMLDivElement> {
   colors?: string[];
@@ -30,7 +30,7 @@ export interface FluxLinesProps extends HTMLAttributes<HTMLDivElement> {
   backgroundColor?: string;
   paused?: boolean;
   dpr?: number;
-  mixBlendMode?: CSSProperties['mixBlendMode'];
+  mixBlendMode?: CSSProperties["mixBlendMode"];
 }
 
 type Settings = {
@@ -224,7 +224,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -236,13 +236,13 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 const FluxLines = ({
-  colors = ['#ffffff', '#ffffff', '#ffffff'],
+  colors = ["#ffffff", "#ffffff", "#ffffff"],
   speed = 0.5,
   scale = 1.6,
   turbulence = 1,
@@ -252,7 +252,7 @@ const FluxLines = ({
   shimmer = 1.5,
   glow = 2,
   lineWidth = 1,
-  flowDirection = 'down',
+  flowDirection = "down",
   opacity = 1,
   mouseInteraction = true,
   mouseStrength = 1,
@@ -266,7 +266,7 @@ const FluxLines = ({
   paused = false,
   dpr,
   mixBlendMode,
-  className = '',
+  className = "",
   style,
   ...rest
 }: FluxLinesProps) => {
@@ -274,7 +274,7 @@ const FluxLines = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const settings: Settings = {
-    colors: Array.isArray(colors) && colors.length ? colors.slice(0, MAX_COLORS) : ['#ffffff'],
+    colors: Array.isArray(colors) && colors.length ? colors.slice(0, MAX_COLORS) : ["#ffffff"],
     speed,
     scale: Math.max(0.05, scale),
     turbulence,
@@ -296,7 +296,7 @@ const FluxLines = ({
     transparent,
     backgroundColor,
     paused,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -304,12 +304,12 @@ const FluxLines = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -325,7 +325,7 @@ const FluxLines = ({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const cache = new Map<string, number[]>();
     const parse = (value: string | undefined, fallback: number[]): number[] => {
       if (!value) return fallback;
@@ -335,7 +335,7 @@ const FluxLines = ({
       let rgb = fallback;
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = key;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -346,7 +346,7 @@ const FluxLines = ({
     };
     const palette = new Float32Array(MAX_COLORS * 3);
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const pointer = { x: 0, y: 0, inside: false };
     const magnet = { x: 0, y: 0, active: 0 };
     const swirl = { x: 0, y: 0, age: 10 };
@@ -382,11 +382,20 @@ const FluxLines = ({
       gl.uniform4f(u.uMagnet, magnet.x, magnet.y, magnet.active * s.mouseStrength, s.mouseRadius);
       const age = swirl.age;
       const twist = 1.9 * Math.min(1, age / 0.23) * Math.exp(-Math.max(0, age - 0.23) * 1.1);
-      gl.uniform4f(u.uSwirl, swirl.x, swirl.y, canvas.height * 0.22 * (1 + age * 0.5), age < 6 ? twist : 0);
+      gl.uniform4f(
+        u.uSwirl,
+        swirl.x,
+        swirl.y,
+        canvas.height * 0.22 * (1 + age * 0.5),
+        age < 6 ? twist : 0,
+      );
       gl.uniform1f(u.uReveal, intro * intro * (3 - 2 * intro));
       gl.uniform1f(u.uLight, s.lightMode ? 1 : 0);
       gl.uniform1f(u.uOpaque, s.transparent ? 0 : 1);
-      gl.uniform3fv(u.uBackground, parse(s.backgroundColor, s.lightMode ? [1, 1, 1] : [0.0706, 0.0588, 0.0902]));
+      gl.uniform3fv(
+        u.uBackground,
+        parse(s.backgroundColor, s.lightMode ? [1, 1, 1] : [0.0706, 0.0588, 0.0902]),
+      );
       gl.uniform1f(u.uOpacity, s.opacity);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
@@ -464,7 +473,7 @@ const FluxLines = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== 'mouse') pointer.inside = false;
+      if (event.pointerType !== "mouse") pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -478,20 +487,20 @@ const FluxLines = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -511,16 +520,16 @@ const FluxLines = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       gl.deleteProgram(program.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -531,7 +540,7 @@ const FluxLines = ({
   return (
     <div
       ref={containerRef}
-      className={`flux-lines-container${className ? ` ${className}` : ''}`}
+      className={`flux-lines-container${className ? ` ${className}` : ""}`}
       style={mixBlendMode ? { ...style, mixBlendMode } : style}
       {...rest}
     >

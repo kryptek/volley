@@ -237,6 +237,8 @@ export async function accountOp(
   p: Fields,
   lastSeen: (name: string) => string | undefined = () => undefined,
   seenSince?: string,
+  /** May an account be made for wave `id` (`account_create { wave }`, SPEC §4.6.26)? Absent: no. */
+  isWave: (id: string) => boolean = () => false,
 ): Promise<AuthOutcome> {
   const op = typeof p.op === "string" ? p.op : "";
   const accounts = await listAccounts(exec);
@@ -282,6 +284,11 @@ export async function accountOp(
     if (p.kind !== undefined && !(ACCOUNT_KINDS as readonly unknown[]).includes(p.kind)) {
       return refuse(op, `kind must be one of ${ACCOUNT_KINDS.join(", ")}`);
     }
+    // Made for one wave (`volley auth add --for-wave`): that wave's cleanup revokes it. Never
+    // passed down to the `volley auth add` below, which would send this op again.
+    if (p.wave !== undefined && (typeof p.wave !== "string" || !isWave(p.wave))) {
+      return refuse(op, "wave: not a wave id, or an archived wave's");
+    }
     args.push("add", name, "--role", p.role as string);
     if (p.kind !== undefined) args.push("--kind", p.kind as string);
   } else {
@@ -318,10 +325,21 @@ export async function accountOp(
               name,
               role: p.role,
               ...(p.kind !== undefined ? { kind: p.kind } : {}),
+              ...(typeof p.wave === "string" ? { wave: p.wave } : {}),
             },
           }
         : { type: "account_rotated", data: { by: sender, name } },
   };
+}
+
+/**
+ * Revoke a wave-owned account (cleanup of its wave, SPEC §4.6.26): null, or why not. The caller
+ * journals `account_revoked { by, name }` as the op does.
+ */
+export async function revokeAccount(exec: ExecFn, name: string): Promise<string | null> {
+  if (!isValidAgentId(name)) return "name must match [a-z0-9][a-z0-9_-]{0,62}";
+  const r = await volleyAuth(exec, ["revoke", name]);
+  return r.ok ? null : r.error;
 }
 
 function credentials(out: Fields | null): { username: string; password: string } | null {

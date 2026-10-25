@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import './Antigravity.css';
+import { type CSSProperties, useEffect, useRef, useState } from "react";
+import "./Antigravity.css";
 
-type Shape = 'capsule' | 'sphere' | 'box' | 'tetrahedron';
-type ColorMode = 'conic' | 'radial' | 'random';
+type Shape = "capsule" | "sphere" | "box" | "tetrahedron";
+type ColorMode = "conic" | "radial" | "random";
 
 export interface AntigravityProps {
   count?: number;
@@ -94,7 +94,7 @@ interface Field {
 const PIXEL_BUDGET = 2.4e6;
 const WORLD_HEIGHT = 31.5;
 const PALETTE_SIZE = 256;
-const DEFAULT_COLORS = ['#5227FF', '#FF9FFC', '#B497CF'];
+const DEFAULT_COLORS = ["#5227FF", "#FF9FFC", "#B497CF"];
 const SHAPES: Record<Shape, number> = { capsule: 0, sphere: 1, box: 2, tetrahedron: 3 };
 const COLOR_MODES: Record<ColorMode, number> = { conic: 0, radial: 1, random: 2 };
 
@@ -210,18 +210,20 @@ void main() {
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const parseColor = (value: string): number[] | null => {
-  const text = String(value || '').trim();
+  const text = String(value || "").trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
-    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
+    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
+  if (rgb)
+    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
   return null;
 };
 
-const toLinear = (channel: number) => (channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4));
+const toLinear = (channel: number) =>
+  channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
 const toSrgb = (channel: number) =>
   channel <= 0.0031308 ? channel * 12.92 : 1.055 * Math.pow(Math.max(channel, 0), 1 / 2.4) - 0.055;
 
@@ -233,7 +235,7 @@ const toOklab = (color: number[]): number[] => {
   return [
     0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
     1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
-    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
   ];
 };
 
@@ -244,13 +246,13 @@ const fromOklab = ([L, a, b]: number[]): number[] => {
   return [
     4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
     -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s
-  ].map(channel => clamp(toSrgb(channel), 0, 1));
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ].map((channel) => clamp(toSrgb(channel), 0, 1));
 };
 
 const buildPalette = (colors: string[], light: boolean) => {
   const stops: number[][] = [];
-  colors.forEach(color => {
+  colors.forEach((color) => {
     const parsed = parseColor(color);
     if (!parsed) return;
     const lab = toOklab(parsed);
@@ -275,7 +277,8 @@ const buildPalette = (colors: string[], light: boolean) => {
       const eased = k * k * (3 - 2 * k);
       const start = row[from];
       const end = row[from + 1];
-      const chroma = Math.hypot(start[1], start[2]) * (1 - eased) + Math.hypot(end[1], end[2]) * eased;
+      const chroma =
+        Math.hypot(start[1], start[2]) * (1 - eased) + Math.hypot(end[1], end[2]) * eased;
       const a = start[1] + (end[1] - start[1]) * eased;
       const b = start[2] + (end[2] - start[2]) * eased;
       const length = Math.hypot(a, b);
@@ -330,7 +333,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program['uniforms'] = {};
+  const uniforms: Program["uniforms"] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
@@ -350,14 +353,14 @@ const Antigravity = ({
   lerpSpeed = 0.05,
   color,
   colors = DEFAULT_COLORS,
-  colorMode = 'conic',
+  colorMode = "conic",
   colorSpeed = 0.05,
   autoAnimate = true,
   particleVariance = 1,
   rotationSpeed = 0,
   depthFactor = 1,
   pulseSpeed = 3,
-  particleShape = 'capsule',
+  particleShape = "capsule",
   fieldStrength = 10,
   ambient = 0.25,
   interactive = true,
@@ -366,14 +369,18 @@ const Antigravity = ({
   lightMode = false,
   opacity = 1,
   maxDevicePixelRatio = 2,
-  className = '',
-  style
+  className = "",
+  style,
 }: AntigravityProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const [generation, setGeneration] = useState(0);
-  const palette = color ? [color] : Array.isArray(colors) && colors.length ? colors : DEFAULT_COLORS;
+  const palette = color
+    ? [color]
+    : Array.isArray(colors) && colors.length
+      ? colors
+      : DEFAULT_COLORS;
 
   const settings: Settings = {
     count: clamp(Math.round(count), 1, 20000),
@@ -385,7 +392,7 @@ const Antigravity = ({
     size: Math.max(0, particleSize),
     follow: clamp(lerpSpeed, 0.001, 1),
     palette,
-    paletteKey: `${palette.join(',')}|${lightMode}`,
+    paletteKey: `${palette.join(",")}|${lightMode}`,
     colorMode: COLOR_MODES[colorMode] ?? COLOR_MODES.conic,
     colorSpeed,
     autoAnimate,
@@ -401,7 +408,7 @@ const Antigravity = ({
     intro,
     light: lightMode,
     opacity: clamp(opacity, 0, 1),
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -415,18 +422,18 @@ const Antigravity = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext('webgl2', {
+    const gl = canvas.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'high-performance'
+      powerPreference: "high-performance",
     });
     const shader = gl ? link(gl) : null;
     if (!gl || !shader) return;
 
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
     const cornerBuffer = gl.createBuffer();
@@ -454,17 +461,18 @@ const Antigravity = ({
 
     const size = { width: 1, height: 1, ratio: 1 };
     const cursor = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0, ready: false };
-    const pointer = { x: 0, y: 0, inside: false, down: false, moved: -Infinity };
+    const pointer = { x: 0, y: 0, inside: false, down: false, moved: Number.NEGATIVE_INFINITY };
     let field: Field | null = null;
-    let paletteKey = '';
+    let paletteKey = "";
     let time = 0;
     let hue = 0;
     let charge = 0;
-    let introClock = settingsRef.current.intro && !reduced && generation === 0 ? 0 : Infinity;
+    let introClock =
+      settingsRef.current.intro && !reduced && generation === 0 ? 0 : Number.POSITIVE_INFINITY;
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== 'hidden';
+    let pageVisible = document.visibilityState !== "hidden";
     let lost = false;
 
     const updatePalette = (s: Settings) => {
@@ -480,11 +488,16 @@ const Antigravity = ({
         0,
         gl.RGBA,
         gl.UNSIGNED_BYTE,
-        buildPalette(s.palette, s.light)
+        buildPalette(s.palette, s.light),
       );
     };
 
-    const buildField = (total: number, width: number, height: number, previous: Field | null): Field => {
+    const buildField = (
+      total: number,
+      width: number,
+      height: number,
+      previous: Field | null,
+    ): Field => {
       const rand = random(1337);
       const margin = 0.06;
       const spanX = width * (1 + margin * 2);
@@ -513,12 +526,14 @@ const Antigravity = ({
         vx: new Float32Array(total),
         vy: new Float32Array(total),
         particles: new Float32Array(total * 4),
-        seeds: new Float32Array(total * 4)
+        seeds: new Float32Array(total * 4),
       };
       for (let index = 0; index < total; index++) {
         const cell = cells[index];
         const hx = -width * margin + (((cell % cols) + 0.5 + (rand() - 0.5) * 0.85) / cols) * spanX;
-        const hy = -height * margin + ((Math.floor(cell / cols) + 0.5 + (rand() - 0.5) * 0.85) / rows) * spanY;
+        const hy =
+          -height * margin +
+          ((Math.floor(cell / cols) + 0.5 + (rand() - 0.5) * 0.85) / rows) * spanY;
         next.homeX[index] = hx;
         next.homeY[index] = hy;
         next.band[index] = rand() * 2 - 1;
@@ -555,7 +570,7 @@ const Antigravity = ({
       const ratio = Math.min(
         window.devicePixelRatio || 1,
         s.maxRatio,
-        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight))
+        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight)),
       );
       const width = Math.max(1, Math.round(cssWidth * ratio));
       const height = Math.max(1, Math.round(cssHeight * ratio));
@@ -593,13 +608,29 @@ const Antigravity = ({
       const centerX = size.width / 2;
       const centerY = size.height / 2;
       const edge = magnetPx * 0.18;
-      const { homeX, homeY, band, phase, agility, delay, orbit, x, y, vx, vy, particles, seeds, total } = field;
+      const {
+        homeX,
+        homeY,
+        band,
+        phase,
+        agility,
+        delay,
+        orbit,
+        x,
+        y,
+        vx,
+        vy,
+        particles,
+        seeds,
+        total,
+      } = field;
       for (let index = 0; index < total; index++) {
         const parallax = 1 - seeds[index * 4] * 0.12 * s.depth;
         const cx = centerX + (cursor.x - centerX) * parallax;
         const cy = centerY + (cursor.y - centerY) * parallax;
         const hx = homeX[index];
-        const hy = homeY[index] + Math.sin(time * 0.7 + phase[index]) * unit * 0.12 * s.waveAmplitude;
+        const hy =
+          homeY[index] + Math.sin(time * 0.7 + phase[index]) * unit * 0.12 * s.waveAmplitude;
         const dx = hx - cx;
         const dy = hy - cy;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -738,7 +769,7 @@ const Antigravity = ({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom
+          event.clientY <= rect.bottom,
       };
     };
 
@@ -763,17 +794,17 @@ const Antigravity = ({
     const onPointerUp = (event: PointerEvent) => {
       if (pointer.down) burst(settingsRef.current, 0.45 + charge);
       pointer.down = false;
-      if (event.pointerType !== 'mouse') pointer.inside = false;
+      if (event.pointerType !== "mouse") pointer.inside = false;
     };
     const onLeave = () => {
       pointer.inside = false;
       pointer.down = false;
     };
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onLeave);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -781,9 +812,9 @@ const Antigravity = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration(value => value + 1);
-    canvas.addEventListener('webglcontextlost', onLost);
-    canvas.addEventListener('webglcontextrestored', onRestored);
+    const onRestored = () => setGeneration((value) => value + 1);
+    canvas.addEventListener("webglcontextlost", onLost);
+    canvas.addEventListener("webglcontextrestored", onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -791,17 +822,17 @@ const Antigravity = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== 'hidden';
+      pageVisible = document.visibilityState !== "hidden";
       wake();
     };
-    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener("visibilitychange", onVisibility);
 
     resize();
     wake();
@@ -811,14 +842,14 @@ const Antigravity = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
-      canvas.removeEventListener('webglcontextlost', onLost);
-      canvas.removeEventListener('webglcontextrestored', onRestored);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
+      canvas.removeEventListener("webglcontextlost", onLost);
+      canvas.removeEventListener("webglcontextrestored", onRestored);
       if (!gl.isContextLost()) {
         gl.deleteBuffer(cornerBuffer);
         gl.deleteBuffer(particleBuffer);
@@ -831,7 +862,11 @@ const Antigravity = ({
   }, [generation]);
 
   return (
-    <div ref={containerRef} className={`antigravity${className ? ` ${className}` : ''}`} style={style}>
+    <div
+      ref={containerRef}
+      className={`antigravity${className ? ` ${className}` : ""}`}
+      style={style}
+    >
       <canvas ref={canvasRef} className="antigravity__canvas" aria-hidden="true" />
     </div>
   );

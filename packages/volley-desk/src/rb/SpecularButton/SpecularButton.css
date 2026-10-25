@@ -75,9 +75,8 @@
 /* Volley Desk (#417): without a WebGL context (over the page's budget, lost, or the lite surface) the
    rim is a static tinted hairline over the same fill, so a row mixing both reads as one set. */
 .specular-button--flat {
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--sb-tint) 28%, transparent),
-    0 10px 24px -14px rgba(0, 0, 0, 0.45);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sb-tint) 28%, transparent), 0 10px 24px -14px
+    rgba(0, 0, 0, 0.45);
 }
 
 .specular-button--flat .specular-button__light {

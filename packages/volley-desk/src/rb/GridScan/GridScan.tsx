@@ -1,16 +1,16 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type HTMLAttributes } from 'react';
-import './GridScan.css';
+import { type CSSProperties, type HTMLAttributes, useEffect, useRef, useState } from "react";
+import "./GridScan.css";
 
-export type GridScanLineStyle = 'solid' | 'dashed' | 'dotted';
+export type GridScanLineStyle = "solid" | "dashed" | "dotted";
 
-export type GridScanDirection = 'forward' | 'backward' | 'pingpong';
+export type GridScanDirection = "forward" | "backward" | "pingpong";
 
-export type GridScanClickEffect = 'ping' | 'scan' | 'none';
+export type GridScanClickEffect = "ping" | "scan" | "none";
 
-export interface GridScanProps extends Omit<HTMLAttributes<HTMLDivElement>, 'style'> {
+export interface GridScanProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
   linesColor?: string;
   scanColor?: string;
   cells?: number;
@@ -74,16 +74,20 @@ type Target = { texture: WebGLTexture | null; width: number; height: number };
 
 type Ping = { x: number; y: number; z: number; age: number };
 
-type Head = { active: boolean; move: (nx: number, ny: number, near: number) => void; release: () => void };
+type Head = {
+  active: boolean;
+  move: (nx: number, ny: number, near: number) => void;
+  release: () => void;
+};
 
-type Status = 'loading' | 'searching' | 'tracking' | 'blocked';
+type Status = "loading" | "searching" | "tracking" | "blocked";
 
 type FaceApi = {
   nets: { tinyFaceDetector: { loadFromUri: (url: string) => Promise<void> } };
   TinyFaceDetectorOptions: new (options: { inputSize: number; scoreThreshold: number }) => unknown;
   detectSingleFace: (
     input: HTMLVideoElement,
-    options: unknown
+    options: unknown,
   ) => PromiseLike<{ box: { x: number; y: number; width: number; height: number } } | undefined>;
 };
 
@@ -93,8 +97,8 @@ const MAX_PINGS = 4;
 const PING_LIFE = 2.4;
 const INTRO_SECONDS = 2.2;
 const EYE_DISTANCE = 1.25;
-const FACE_API_URL = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
-const MODELS_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+const FACE_API_URL = "https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js";
+const MODELS_URL = "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights";
 const STYLES: Record<string, number> = { solid: 0, dashed: 1, dotted: 2 };
 
 const VERTEX = `#version 300 es
@@ -458,7 +462,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
     if (!info) continue;
-    const name = info.name.replace(/\[0\]$/, '');
+    const name = info.name.replace(/\[0\]$/, "");
     uniforms[name] = gl.getUniformLocation(program, name);
   }
   return { program, uniforms };
@@ -489,13 +493,14 @@ const loadFaceApi = () => {
   if (scope.faceapi) return Promise.resolve(scope.faceapi);
   if (!faceApiLoader) {
     faceApiLoader = new Promise<FaceApi>((resolve, reject) => {
-      const script = document.createElement('script');
+      const script = document.createElement("script");
       script.src = FACE_API_URL;
       script.async = true;
-      script.onload = () => (scope.faceapi ? resolve(scope.faceapi) : reject(new Error('face-api.js')));
+      script.onload = () =>
+        scope.faceapi ? resolve(scope.faceapi) : reject(new Error("face-api.js"));
       script.onerror = () => {
         faceApiLoader = null;
-        reject(new Error('face-api.js'));
+        reject(new Error("face-api.js"));
       };
       document.head.appendChild(script);
     });
@@ -504,10 +509,10 @@ const loadFaceApi = () => {
 };
 
 const STATUS_LABELS: Record<Status, string> = {
-  loading: 'Loading face tracking',
-  searching: 'Looking for a face',
-  tracking: 'Tracking',
-  blocked: 'Camera unavailable'
+  loading: "Loading face tracking",
+  searching: "Looking for a face",
+  tracking: "Tracking",
+  blocked: "Camera unavailable",
 };
 
 export const GridScan = ({
@@ -515,14 +520,14 @@ export const GridScan = ({
   scanColor,
   cells = 8,
   lineThickness = 1,
-  lineStyle = 'solid',
+  lineStyle = "solid",
   depth = 3,
   depthFade = 0.6,
   parallax = 1,
   points = true,
   reflection = 0.35,
   shading = 0.7,
-  scanDirection = 'forward',
+  scanDirection = "forward",
   scanDuration = 2.4,
   scanDelay = 1.6,
   scanWidth = 1,
@@ -530,7 +535,7 @@ export const GridScan = ({
   glow = 0.6,
   autoScan = true,
   interactive = true,
-  clickEffect = 'ping',
+  clickEffect = "ping",
   enableWebcam = false,
   showPreview = false,
   modelsPath = MODELS_URL,
@@ -538,7 +543,7 @@ export const GridScan = ({
   intro = true,
   lightMode = false,
   dpr,
-  className = '',
+  className = "",
   style,
   ...rest
 }: GridScanProps) => {
@@ -547,10 +552,10 @@ export const GridScan = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const headRef = useRef<Head | null>(null);
-  const [status, setStatus] = useState<Status>('loading');
+  const [status, setStatus] = useState<Status>("loading");
   const settings: Settings = {
-    linesColor: linesColor ?? (lightMode ? '#d4d4d8' : '#4d4757'),
-    scanColor: scanColor ?? (lightMode ? '#0284c7' : '#7dd3fc'),
+    linesColor: linesColor ?? (lightMode ? "#d4d4d8" : "#4d4757"),
+    scanColor: scanColor ?? (lightMode ? "#0284c7" : "#7dd3fc"),
     cells: clamp(cells, 2, 40),
     thickness: clamp(lineThickness, 0.5, 4),
     style: STYLES[lineStyle] ?? 0,
@@ -572,7 +577,7 @@ export const GridScan = ({
     enableGyro,
     intro,
     lightMode,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -580,12 +585,12 @@ export const GridScan = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -603,7 +608,7 @@ export const GridScan = ({
     const bloomBufferA = gl.createFramebuffer();
     const bloomBufferB = gl.createFramebuffer();
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const colorCache = new Map<string, number[]>();
     const parse = (value: string): number[] => {
       const key = String(value);
@@ -612,7 +617,7 @@ export const GridScan = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = key;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -622,9 +627,19 @@ export const GridScan = ({
       return rgb;
     };
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const view = { width: 1, height: 1, ratio: 1 };
-    const eye = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0, f: EYE_DISTANCE, vf: 0, tf: EYE_DISTANCE };
+    const eye = {
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      tx: 0,
+      ty: 0,
+      f: EYE_DISTANCE,
+      vf: 0,
+      tf: EYE_DISTANCE,
+    };
     const pointer = { x: 0, y: 0, inside: false };
     const look = { x: 0, y: 0, held: false };
     const tilt = { gamma: 0, beta: 0, ready: false, asked: false };
@@ -665,7 +680,10 @@ export const GridScan = ({
     };
 
     const startSweep = (s: Settings) => {
-      scan.dir = s.direction === 'backward' || (s.direction === 'pingpong' && scan.sweeps % 2 === 1) ? -1 : 1;
+      scan.dir =
+        s.direction === "backward" || (s.direction === "pingpong" && scan.sweeps % 2 === 1)
+          ? -1
+          : 1;
       scan.start = time;
       scan.waiting = false;
       scan.sweeps += 1;
@@ -723,7 +741,9 @@ export const GridScan = ({
     const aimEye = (s: Settings) => {
       const aspect = view.width / view.height;
       const drift = reduce ? 0 : 1;
-      const nx = look.held ? look.x : (Math.sin(time * 0.21) * 0.2 + Math.sin(time * 0.083 + 1.3) * 0.12) * drift;
+      const nx = look.held
+        ? look.x
+        : (Math.sin(time * 0.21) * 0.2 + Math.sin(time * 0.083 + 1.3) * 0.12) * drift;
       const ny = look.held ? look.y : Math.sin(time * 0.17 + 2.1) * 0.16 * drift;
       eye.tx = nx * s.parallax * 0.22 * aspect;
       eye.ty = ny * s.parallax * 0.22;
@@ -739,16 +759,40 @@ export const GridScan = ({
       sizeTarget(gl, scene, canvas.width, canvas.height);
       sizeTarget(gl, light, canvas.width, canvas.height);
       gl.bindFramebuffer(gl.FRAMEBUFFER, sceneBuffer);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, scene.texture, 0);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, light.texture, 0);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        scene.texture,
+        0,
+      );
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT1,
+        gl.TEXTURE_2D,
+        light.texture,
+        0,
+      );
       const bw = Math.max(1, Math.round(canvas.width / 4));
       const bh = Math.max(1, Math.round(canvas.height / 4));
       sizeTarget(gl, bloomA, bw, bh);
       sizeTarget(gl, bloomB, bw, bh);
       gl.bindFramebuffer(gl.FRAMEBUFFER, bloomBufferA);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloomA.texture, 0);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        bloomA.texture,
+        0,
+      );
       gl.bindFramebuffer(gl.FRAMEBUFFER, bloomBufferB);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloomB.texture, 0);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        bloomB.texture,
+        0,
+      );
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       draw();
       wake();
@@ -759,7 +803,7 @@ export const GridScan = ({
       const { aspect, cx, cy, roomDepth } = roomSize();
       const lineRgb = parse(s.linesColor);
       const scanRgb = parse(s.scanColor);
-      const coreRgb = s.lightMode ? scanRgb : scanRgb.map(c => c + (1 - c) * 0.65);
+      const coreRgb = s.lightMode ? scanRgb : scanRgb.map((c) => c + (1 - c) * 0.65);
       const ru = room.uniforms;
       gl.bindVertexArray(vao);
       gl.disable(gl.BLEND);
@@ -912,7 +956,8 @@ export const GridScan = ({
       if (inside) {
         window.clearTimeout(leaveTimer);
         leaveTimer = 0;
-        if (!headRef.current?.active && s.interactive && !reduce) setLook(u * 2 - 1, v * 2 - 1, true);
+        if (!headRef.current?.active && s.interactive && !reduce)
+          setLook(u * 2 - 1, v * 2 - 1, true);
         wake();
       } else if (was && !leaveTimer) {
         leaveTimer = window.setTimeout(() => {
@@ -927,8 +972,8 @@ export const GridScan = ({
     const onPointerDown = (event: PointerEvent) => {
       const s = settingsRef.current;
       const { u, v, inside } = locate(event);
-      if (!inside || reduce || s.clickEffect === 'none') return;
-      if (s.clickEffect === 'scan') {
+      if (!inside || reduce || s.clickEffect === "none") return;
+      if (s.clickEffect === "scan") {
         if (introClock >= 1) startSweep(s);
       } else {
         const hit = castRay(u, v);
@@ -946,7 +991,14 @@ export const GridScan = ({
 
     const onOrientation = (event: DeviceOrientationEvent) => {
       const s = settingsRef.current;
-      if (!s.enableGyro || headRef.current?.active || reduce || event.gamma === null || event.beta === null) return;
+      if (
+        !s.enableGyro ||
+        headRef.current?.active ||
+        reduce ||
+        event.gamma === null ||
+        event.beta === null
+      )
+        return;
       if (!tilt.ready) Object.assign(tilt, { gamma: event.gamma, beta: event.beta, ready: true });
       setLook((event.gamma - tilt.gamma) / 25, (event.beta - tilt.beta) / -25, true);
       wake();
@@ -955,9 +1007,11 @@ export const GridScan = ({
     const onClick = () => {
       const s = settingsRef.current;
       const request = (
-        window.DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> } | undefined
+        window.DeviceOrientationEvent as unknown as
+          | { requestPermission?: () => Promise<string> }
+          | undefined
       )?.requestPermission;
-      if (!s.enableGyro || tilt.asked || typeof request !== 'function') return;
+      if (!s.enableGyro || tilt.asked || typeof request !== "function") return;
       tilt.asked = true;
       request.call(window.DeviceOrientationEvent).catch(() => {});
     };
@@ -969,20 +1023,20 @@ export const GridScan = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('deviceorientation', onOrientation);
-    window.addEventListener('click', onClick);
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("deviceorientation", onOrientation);
+    window.addEventListener("click", onClick);
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     headRef.current = {
       active: false,
       move: (nx, ny, near) => {
@@ -995,7 +1049,7 @@ export const GridScan = ({
         eye.tf = EYE_DISTANCE;
         look.held = false;
         wake();
-      }
+      },
     };
     resize();
     wakeRef.current = wake;
@@ -1007,17 +1061,17 @@ export const GridScan = ({
       headRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('deviceorientation', onOrientation);
-      window.removeEventListener('click', onClick);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
-      [scene, light, bloomA, bloomB].forEach(target => gl.deleteTexture(target.texture));
-      [sceneBuffer, bloomBufferA, bloomBufferB].forEach(buffer => gl.deleteFramebuffer(buffer));
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("deviceorientation", onOrientation);
+      window.removeEventListener("click", onClick);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
+      [scene, light, bloomA, bloomB].forEach((target) => gl.deleteTexture(target.texture));
+      [sceneBuffer, bloomBufferA, bloomBufferB].forEach((buffer) => gl.deleteFramebuffer(buffer));
       gl.deleteVertexArray(vao);
-      [room, down, blur, composite].forEach(item => gl.deleteProgram(item.program));
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      [room, down, blur, composite].forEach((item) => gl.deleteProgram(item.program));
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -1034,7 +1088,7 @@ export const GridScan = ({
     let timer = 0;
     let lost = 0;
     const smooth = { x: 0, y: 0, near: 1, ready: false };
-    setStatus('loading');
+    setStatus("loading");
 
     const run = async () => {
       try {
@@ -1042,17 +1096,20 @@ export const GridScan = ({
         await faceapi.nets.tinyFaceDetector.loadFromUri(modelsPath);
         if (stopped) return;
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false
+          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
         });
         if (stopped) {
-          stream.getTracks().forEach(track => track.stop());
+          stream.getTracks().forEach((track) => track.stop());
           return;
         }
         video.srcObject = stream;
         await video.play();
-        setStatus('searching');
-        const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.45 });
+        setStatus("searching");
+        const options = new faceapi.TinyFaceDetectorOptions({
+          inputSize: 224,
+          scoreThreshold: 0.45,
+        });
         const detect = async () => {
           if (stopped) return;
           let result = null;
@@ -1078,18 +1135,18 @@ export const GridScan = ({
             lost = 0;
             head.active = true;
             head.move(smooth.x, smooth.y, smooth.near);
-            setStatus('tracking');
+            setStatus("tracking");
           } else if (head && ++lost > 12 && head.active) {
             head.active = false;
             smooth.ready = false;
             head.release();
-            setStatus('searching');
+            setStatus("searching");
           }
           timer = window.setTimeout(detect, 40);
         };
         detect();
       } catch {
-        if (!stopped) setStatus('blocked');
+        if (!stopped) setStatus("blocked");
       }
     };
     run();
@@ -1097,7 +1154,7 @@ export const GridScan = ({
     return () => {
       stopped = true;
       window.clearTimeout(timer);
-      stream?.getTracks().forEach(track => track.stop());
+      stream?.getTracks().forEach((track) => track.stop());
       video.srcObject = null;
       const head = headRef.current;
       if (head?.active) {
@@ -1108,10 +1165,15 @@ export const GridScan = ({
   }, [enableWebcam, modelsPath]);
 
   return (
-    <div ref={containerRef} className={`grid-scan${className ? ` ${className}` : ''}`} style={style} {...rest}>
+    <div
+      ref={containerRef}
+      className={`grid-scan${className ? ` ${className}` : ""}`}
+      style={style}
+      {...rest}
+    >
       <canvas ref={canvasRef} className="grid-scan-canvas" aria-hidden="true" />
       {enableWebcam && (
-        <div className={showPreview ? 'grid-scan-preview' : 'grid-scan-hidden'}>
+        <div className={showPreview ? "grid-scan-preview" : "grid-scan-hidden"}>
           <video ref={videoRef} className="grid-scan-video" muted playsInline />
           {showPreview && <span className="grid-scan-status">{STATUS_LABELS[status]}</span>}
         </div>

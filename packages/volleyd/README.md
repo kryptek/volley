@@ -195,7 +195,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
 | `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, what the hard ceiling counts (`ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1`), every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
-| `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove retired agents' cmux workspaces and worktrees of tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. Branches are kept. |
+| `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove everything the wave made, on every machine: its retired agents' workspaces or sessions, worktrees, locks and processes (by argv or working directory), its merged agent branches, leftover agent logins, and `--for-wave` registrations, accounts and managed clones; one `kept <kind> <what>: <why>` line per item it keeps, then the summary (`cleaned <wave>: …; kept <k>`), journaled `wave_cleaned`. Only tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. With `cleanup_on_end` on, the daemon runs it itself (see "Retire and cleanup"). |
 
 The mutating commands (`resolve`, `pause`, `resume`, `stop`, `archive`, `steer`, `claim`) act as the caller's
 agent id: `--by <id>`, else `VOLLEY_AGENT_ID`, else the top-level session registered for the
@@ -2883,9 +2883,11 @@ another id (a reused worktree) is ignored.
 **Ending the session.** With `retire_close_session` on (the default) the retire then closes the
 agent's workspace (its cmux workspace, bounded by a 15 s timeout, or its tmux session on an ssh
 host) and, on this machine, stops whatever process still runs under the agent's worktree: a
-closed cmux workspace does not always end its `claude`. A process counts only by its argv (the
-launch script's `--mcp-config=<worktree>/.volley/mcp.json`; volleyd lists processes with the
-fenced `ps -axo pid=,command=` and signals them itself: SIGTERM, a 5 s grace, SIGKILL). It is
+closed cmux workspace does not always end its `claude`. A process counts by its argv (the
+launch script's `--mcp-config=<worktree>/.volley/mcp.json`) or by its working directory (a dev
+server, watcher or REPL the agent started in the worktree: `/proc/<pid>/cwd` on Linux, the fenced
+`lsof -a -d cwd -F pn` on macOS); volleyd lists processes with the fenced `ps -axo pid=,command=`
+and signals them itself: SIGTERM, a 5 s grace, SIGKILL. It is
 journaled `agent_session_closed { agent_id, workspace, how, pids }` (`how`: `close-workspace`,
 `kill-session`, `signal` when only a process was stopped, or `none`) before
 `agent_retired { workspace, workspace_closed }`. An agent retired after a daemon restart has
@@ -2896,14 +2898,46 @@ worktree. A worktree or title another live agent of the wave now holds (a relaun
 worktree) is left alone. With `retire_close_session: false` finished sessions stay open for
 inspection (`workspace_closed: false`; the marker is still written).
 
-Nothing on disk is deleted: `volleyd cleanup <wave>
---yes` closes any workspace a retire could not close, runs `git worktree remove` with the fence's
-consent token (`--force` for dirty worktrees), and stops the retired agents' processes still
-running on this machine: every process whose `--mcp-config=` lies inside the worktree of a
-target whose every agent is retired, never one under any other worktree (an agent not yet
-retired, or one the daemon is launching and has not journaled yet) (`stopped <pid> (<agent
-id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
-deleted. Only tasks that are `done` or `cancelled` are cleaned up: an unfinished task (a
+**Cleanup (SPEC §4.6.26).** A retire deletes nothing on disk; cleanup removes what the wave
+made, on every machine, from one list derived from the journals (the *ledger*: `ledgerOf` in
+`src/commands/cleanup.ts`). Owned items go: the workspaces and sessions a retire could not close,
+the worktrees (`git worktree remove` with the fence's consent token; `--force` for dirty ones),
+their spawn locks, and every process under them by argv or working directory (`stopped <pid>
+(<agent id>)`; never one under a worktree the ledger does not name, such as an agent the daemon
+is launching and has not journaled yet, nor one under a live agent's); each agent branch whose
+PR the journal shows merged (`merged_by_supervisor`, `merged_by_operator`, a train member's, or
+a release stage's `release_stage_verified`) **at the branch's current tip** (`git rev-parse`),
+deleted with `git -C <repo> branch -D <branch>` under a per-branch `BranchDeleteToken` (a commit
+after the merge keeps it: `kept branch <b>: 1 commit after the merged head`; a cancelled or
+failed task's is `unmerged`); the agent logins a crash left (through the delete path above); and
+a registration or account made with `--for-wave <wave>`, with the managed clones volleyd's own
+clone run made for that registration (`repo_clone_run { cloned: true }` at
+`<fleet.repo_root>/<owner>/<name>`). A clone is deleted (`rm -rf` under a per-path
+`CloneRemoveToken`, journaled `repo_clone_removed`) only when its work tree is clean, it has no
+stash and every local branch is pushed (or a branch this run proved merged); otherwise `kept
+clone <path>: 2 unpushed commits on <b>` / `dirty work tree` / `stash`. Borrowed items are kept
+and named: the owner's registration (`kept repo <owner/name>: added by <account> (not for a
+wave) — volley repo remove <owner/name>`, only when no other wave uses it), the release branch
+(`… merged into main — git push origin --delete <b>` when GitHub reads it fully merged, else
+how many commits are not on the default branch), and every human account. The run ends with one
+line, `cleaned <wave>: 3 worktrees (1 on box), 2 sessions, 1 process, 3 branches, 2 logins; kept
+1` (`nothing to clean` when nothing was removed), and journals `wave_cleaned { by, removed, kept,
+summary, dry_run, task? }`; `volleyd status` prints its summary as `cleanup: …` and the Desk shows
+a `cleaned` chip with the kept items. A paired machine that cannot be reached keeps its items
+(`kept … (<machine> unreachable; cleanup runs again next tick)`) and the command still exits 0.
+
+**It runs itself.** With `cleanup_on_end: true` (the default) the daemon cleans a task's items
+on the tick after it is `done` or `cancelled` with no agent of it live (`wave_cleaned { task }`),
+and the whole ledger once the wave is `complete` or `stopped` and none of its agents is live; a
+task held unfinished (`merge_ready`) is cleaned when it ends; a run that kept an unreachable
+machine's items runs again a minute later. Archiving waits for that pass, and `volleyd archive`
+runs one last one and answers with the kept items. `volleyd cleanup <wave> [--yes]` is the
+manual path: with the daemon up it is the daemon's `cleanup` op (the owner only), and while the
+daemon is down it reads `$VOLLEYD_HOME` directly and leaves logins, registrations and accounts
+for the daemon (`kept …: daemon down`). `cleanup_on_end: false` is the old behaviour: nothing is
+cleaned until you run it.
+
+Only tasks that are `done` or `cancelled` are cleaned up: an unfinished task (a
 `merge_ready` task's agents are all retired while its merge waits) prints `skip <task>: <stage>`
 and keeps its worktrees, unless `--all` is given (on an unfinished task that runs on a remote
 host, `--all` leaves its git checks failing: the repo-root fallback below is the supervisor's
@@ -3163,7 +3197,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 | Screen | `tmux capture-pane -p -t =<session>: -S-<lines>`; keys via `tmux send-keys`; screen tails publish `source: "tmux"` |
 | Terminal size | `terminal_resize` (the Desk's Terminal popout) runs `tmux resize-window -t =<session>: -x <cols> -y <rows>`; `reset: true` returns the session to its launch size. A local (cmux) agent's terminal is not resized: the op answers `resized: false`. The size is clamped to 20..500 cells, so a popout shorter than about 21 lines asks for 20 rows and its last lines sit below the fold until scrolled. `resize-window` sets the window's `window-size` to `manual` (tmux ≥ 3.1), so once a popout has resized it the session no longer follows the size of a client attached over ssh |
 | Verify / retire | identical: the hook signals arrive over the tunnel; retire revokes the credentials and clears the topics |
-| Cleanup | `volleyd cleanup --yes` kills the tmux session and runs `git worktree remove` on the box, both with the consent token; its lines end in `on <target>`, and a worktree already gone from the box is reported `gone`, so a re-run is a no-op |
+| Cleanup | `volleyd cleanup --yes` (or the daemon's own pass) checks the box answers, kills the tmux session, reads each agent branch's tip there (`git rev-parse`), stops the processes under its worktrees (`volley peer cleanup --json --worktree <abs>… --yes` in the box's checkout), runs `git worktree remove`, then has the box delete the proven-merged branches and re-check and remove its owned clones (`peer cleanup --repo <abs> --branch <b>… --clone <abs>… --yes`), all with the consent token; its lines end in `on <target>`, a worktree already gone from the box is reported `gone`, so a re-run is a no-op, and an unreachable box keeps its items for the next run |
 
 **Trust on the box.** A remote clone is trusted in the box's own `~/.claude.json`, never the
 daemon machine's, and its `repo_untrusted` decision id is keyed by target, Claude profile and root

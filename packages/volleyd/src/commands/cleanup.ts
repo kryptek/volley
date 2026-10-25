@@ -16,7 +16,7 @@ import {
 import type { Host } from "../hosts/host";
 import { LocalCmuxHost } from "../hosts/local-cmux";
 import { LocalTmuxHost } from "../hosts/local-tmux";
-import { SshTmuxHost } from "../hosts/ssh-tmux";
+import { type RemoteHost, SshTmuxHost } from "../hosts/ssh-tmux";
 import { type CommandArgs, EXIT, type ExitCode, type IO } from "../io";
 import { Journal, readJournalFile } from "../journal";
 import { type StopOptions, listProcessesUnder, stopProcesses } from "../procs";
@@ -35,7 +35,7 @@ import { expandHome } from "../worktree";
 
 const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force] [--all]
 
-Remove everything Volley made for a wave, on every machine (SPEC §4.6.26): its agents'
+Remove everything Volley made for a wave, on every machine (SPEC "Wave cleanup"): its agents'
 workspaces or tmux sessions, git worktrees and locks; every process under those worktrees (by
 --mcp-config= or by working directory: a dev server an agent started dies with it; SIGTERM, a
 grace, then SIGKILL; on a paired machine through \`volley peer cleanup\` there); the agent branches
@@ -377,8 +377,13 @@ export interface CleanupDeps {
   revokeAccount?: (name: string) => Promise<string | null>;
   /** Journal in `_system` (repo_clone_removed). */
   journalSystem?: (ev: NewEvent) => Promise<unknown> | unknown;
-  /** Build the remote host a worktree or clone lives on (tests inject one). */
-  remoteHost?: (r: { host: string; target: string; repo: string }) => SshTmuxHost;
+  /** Build the remote host a worktree or clone lives on (the daemon's, tests' fakes). */
+  remoteHost?: (r: {
+    host: string;
+    target: string;
+    repo: string;
+    worktree_root: string;
+  }) => RemoteHost;
 }
 
 export interface CleanupRun {
@@ -468,8 +473,8 @@ function remoteHostOf(
   r: { host: string; target: string; repo: string },
   worktreeRoot: string,
   deps: CleanupDeps,
-): SshTmuxHost {
-  if (deps.remoteHost !== undefined) return deps.remoteHost(r);
+): RemoteHost {
+  if (deps.remoteHost !== undefined) return deps.remoteHost({ ...r, worktree_root: worktreeRoot });
   return new SshTmuxHost(
     {
       name: r.host,
@@ -976,12 +981,11 @@ async function cleanRemote(
     acc.proven.add(b.branch);
     deleteNow.push(b);
   }
-  const volleyDir = host.spec.volley_dir;
-  const peerStep = volleyDir !== "";
+  const peerStep = host.spec.volley_dir !== "" && host.runCleanup !== undefined;
   // The processes under its worktrees, before the worktrees go.
   if (retired.length > 0 && peerStep) {
     try {
-      const report = await host.runCleanup({
+      const report = await (host.runCleanup as NonNullable<RemoteHost["runCleanup"]>).call(host, {
         worktrees: retired.map((t) => t.worktree),
         ...(deps.consent !== undefined ? { consent: deps.consent } : {}),
       });
@@ -1080,7 +1084,7 @@ async function cleanRemote(
   if (deleteNow.length === 0 && cloneTokens.length === 0) return failed;
   const repo = deleteNow[0]?.repo;
   try {
-    const report = await host.runCleanup({
+    const report = await (host.runCleanup as NonNullable<RemoteHost["runCleanup"]>).call(host, {
       ...(repo !== undefined ? { repo, branches: deleteNow.map((b) => b.branch) } : {}),
       clones: cloneTokens.map((c) => c.token),
       consent: deps.consent as ConsentToken,
@@ -1198,7 +1202,8 @@ function otherWavesOf(home: string, wave: string): { wave: string; repo: string 
 /**
  * Run (or with `yes: false`, print) the cleanup from `$VOLLEYD_HOME` directly, while the daemon is
  * down: logins, registrations and accounts are left for the daemon (`kept …: daemon down`). The
- * run is journaled `wave_cleaned` in the wave's journal. Returns the number of failed removals.
+ * run is journaled `wave_cleaned` in the wave's journal (not while a daemon holds the home: the
+ * journal has one writer). Returns the number of failed removals.
  */
 export async function cleanupWave(
   home: string,
@@ -1244,7 +1249,9 @@ export async function cleanupWave(
     },
     io,
   );
-  Journal.open(join(home, "waves", wave)).append(cleanedEvent("volleyd cleanup", run, !opts.yes));
+  // Only one writer per journal: a daemon that holds the home journals its own runs.
+  if (!daemonUp(home))
+    Journal.open(join(home, "waves", wave)).append(cleanedEvent("volleyd cleanup", run, !opts.yes));
   return run.failed;
 }
 
@@ -1354,4 +1361,39 @@ export function cleanupPlan(
 ): { repo: string; targets: Target[]; held: { task: string; stage: string }[] } {
   const l = ledgerOf({ state, events, system: [] }, o);
   return { repo: l.repo, targets: l.targets, held: l.held };
+}
+
+/** Does a kept list hold an item kept because its machine was unreachable (a run to repeat)? */
+export function keptUnreachable(kept: unknown): boolean {
+  return (
+    Array.isArray(kept) &&
+    kept.some(
+      (r) =>
+        typeof (r as Resource)?.why === "string" &&
+        (r as Resource).why?.includes("unreachable; cleanup runs again"),
+    )
+  );
+}
+
+/**
+ * A whole-wave run with the per-task runs since the last whole-wave run folded in (their counts
+ * and remote worktrees), so the wave's summary covers everything its cleanup removed. Pure.
+ */
+export function withTaskRuns(run: CleanupRun, events: readonly JournalEvent[]): CleanupRun {
+  const removed = { ...run.removed };
+  const on = { ...run.worktrees_on };
+  let start = 0;
+  events.forEach((e, i) => {
+    if (e.type === "wave_cleaned" && e.data.dry_run !== true && e.data.task === undefined)
+      start = i + 1;
+  });
+  for (const e of events.slice(start)) {
+    if (e.type !== "wave_cleaned" || e.data.dry_run === true || typeof e.data.task !== "string")
+      continue;
+    for (const [k, v] of Object.entries((e.data.removed ?? {}) as Record<string, unknown>))
+      if (typeof v === "number" && k in removed) removed[k as keyof CleanupCounts] += v;
+    for (const [m, v] of Object.entries((e.data.worktrees_on ?? {}) as Record<string, unknown>))
+      if (typeof v === "number") on[m] = (on[m] ?? 0) + v;
+  }
+  return { ...run, removed, worktrees_on: on };
 }

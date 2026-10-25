@@ -1,10 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type HTMLAttributes } from 'react';
-import './Galaxy.css';
+import { type HTMLAttributes, useEffect, useRef } from "react";
+import "./Galaxy.css";
 
-export type GalaxyDirection = 'forward' | 'backward';
+export type GalaxyDirection = "forward" | "backward";
 
 export interface GalaxyProps extends HTMLAttributes<HTMLDivElement> {
   focal?: [number, number];
@@ -271,21 +271,22 @@ void main() {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-const keyOf = (palette: boolean, repel: boolean, warp: boolean) => (palette ? 4 : 0) + (repel ? 2 : 0) + (warp ? 1 : 0);
+const keyOf = (palette: boolean, repel: boolean, warp: boolean) =>
+  (palette ? 4 : 0) + (repel ? 2 : 0) + (warp ? 1 : 0);
 
 const start = (gl: WebGL2RenderingContext, palette: boolean, repel: boolean, warp: boolean) => {
-  const defines = `${palette ? '#define PALETTE\n' : ''}${repel ? '#define REPEL\n' : ''}${warp ? '#define WARP\n' : ''}`;
+  const defines = `${palette ? "#define PALETTE\n" : ""}${repel ? "#define REPEL\n" : ""}${warp ? "#define WARP\n" : ""}`;
   const program = gl.createProgram();
   const vertex = gl.createShader(gl.VERTEX_SHADER);
   const fragment = gl.createShader(gl.FRAGMENT_SHADER);
   if (!program || !vertex || !fragment) return null;
   gl.shaderSource(vertex, VERTEX);
-  gl.shaderSource(fragment, FRAGMENT.replace('\n', `\n${defines}`));
+  gl.shaderSource(fragment, FRAGMENT.replace("\n", `\n${defines}`));
   gl.compileShader(vertex);
   gl.compileShader(fragment);
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -298,7 +299,7 @@ const finish = (gl: WebGL2RenderingContext, program: WebGLProgram): Program | nu
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -325,13 +326,13 @@ const Galaxy = ({
   starSize = 1,
   flareIntensity = 1,
   layers = 4,
-  direction = 'forward',
+  direction = "forward",
   clickWarp = true,
   intro = true,
   backgroundColor,
   opacity = 1,
   dpr,
-  className = '',
+  className = "",
   style,
   ...rest
 }: GalaxyProps) => {
@@ -361,12 +362,12 @@ const Galaxy = ({
     starSize: Math.max(0, starSize),
     flareIntensity: Math.max(0, flareIntensity),
     layers: clamp(Math.round(layers), 2, MAX_LAYERS),
-    reverse: direction === 'backward',
+    reverse: direction === "backward",
     clickWarp,
     intro,
     backgroundColor,
     opacity: clamp(opacity, 0, 1),
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -374,16 +375,16 @@ const Galaxy = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const parallel = gl.getExtension('KHR_parallel_shader_compile');
+    const parallel = gl.getExtension("KHR_parallel_shader_compile");
     const programs = new Map<number, Variant>();
     const entry = (palette: boolean, repel: boolean, warp: boolean) => {
       const key = keyOf(palette, repel, warp);
@@ -397,7 +398,12 @@ const Galaxy = ({
     const variant = (palette: boolean, repel: boolean, warp: boolean, wait: boolean) => {
       const found = entry(palette, repel, warp);
       if (!found.done && found.program) {
-        if (!wait && parallel && !gl.getProgramParameter(found.program, parallel.COMPLETION_STATUS_KHR)) return null;
+        if (
+          !wait &&
+          parallel &&
+          !gl.getProgramParameter(found.program, parallel.COMPLETION_STATUS_KHR)
+        )
+          return null;
         found.linked = finish(gl, found.program);
         found.done = true;
       }
@@ -405,7 +411,7 @@ const Galaxy = ({
     };
     const initial = settingsRef.current;
     if (!variant(initial.palette.length > 0, false, false, true)) {
-      programs.forEach(found => found.program && gl.deleteProgram(found.program));
+      programs.forEach((found) => found.program && gl.deleteProgram(found.program));
       return undefined;
     }
 
@@ -417,8 +423,8 @@ const Galaxy = ({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const cache = new Map<string, number[]>();
     const parse = (value: string | undefined, fallback: number[]): number[] => {
       if (!value) return fallback;
@@ -428,7 +434,7 @@ const Galaxy = ({
       let rgb = fallback;
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = key;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -449,7 +455,7 @@ const Galaxy = ({
       my: 0.5,
       active: 0,
       boost: 0,
-      reveal: settingsRef.current.intro && !reduce ? 0 : 1
+      reveal: settingsRef.current.intro && !reduce ? 0 : 1,
     };
     let raf = 0;
     let last = 0;
@@ -462,7 +468,9 @@ const Galaxy = ({
       const background = parse(s.backgroundColor, s.lightMode ? [1, 1, 1] : [0, 0, 0]);
       const reveal = state.reveal;
       const palette = s.palette.length > 0;
-      const repel = s.autoCenterRepulsion > 0 || (s.mouseRepulsion && s.repulsionStrength > 0 && state.active > 0);
+      const repel =
+        s.autoCenterRepulsion > 0 ||
+        (s.mouseRepulsion && s.repulsionStrength > 0 && state.active > 0);
       const warp = state.boost > 0;
       const base = variant(palette, false, false, true);
       if (!base) return;
@@ -579,7 +587,7 @@ const Galaxy = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== 'mouse') pointer.inside = false;
+      if (event.pointerType !== "mouse") pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -593,23 +601,24 @@ const Galaxy = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
-    const repelling = initial.autoCenterRepulsion > 0 || (initial.mouseInteraction && initial.mouseRepulsion);
+    const repelling =
+      initial.autoCenterRepulsion > 0 || (initial.mouseInteraction && initial.mouseRepulsion);
     const tinted = initial.palette.length > 0;
     if (initial.clickWarp || initial.intro) entry(tinted, false, true);
     if (repelling) entry(tinted, true, false);
@@ -632,16 +641,16 @@ const Galaxy = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
-      programs.forEach(found => found.program && gl.deleteProgram(found.program));
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
+      programs.forEach((found) => found.program && gl.deleteProgram(found.program));
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -650,7 +659,12 @@ const Galaxy = ({
   });
 
   return (
-    <div ref={containerRef} className={`galaxy-container${className ? ` ${className}` : ''}`} style={style} {...rest}>
+    <div
+      ref={containerRef}
+      className={`galaxy-container${className ? ` ${className}` : ""}`}
+      style={style}
+      {...rest}
+    >
       <canvas ref={canvasRef} className="galaxy-canvas" aria-hidden="true" />
     </div>
   );

@@ -268,6 +268,25 @@ export interface WaveRelease {
   stages: { name: string; state: "pending" | "awaiting_go" | "running" | "verified" | "failed" }[];
 }
 
+/** One thing a wave's cleanup kept, and why (SPEC §4.6.26). */
+export interface CleanupKept {
+  kind: string;
+  /** `local` (the supervisor) or a paired machine's name. */
+  host: string;
+  what: string;
+  task?: string;
+  why?: string;
+}
+
+/** `WaveStatePayload.cleanup`. */
+export interface WaveCleanup {
+  at: string;
+  removed: Record<string, number>;
+  kept: CleanupKept[];
+  summary: string;
+  task?: string;
+}
+
 export interface WaveStatePayload {
   wave: string;
   version: number;
@@ -298,6 +317,11 @@ export interface WaveStatePayload {
   ci_mode?: "none" | "workflows" | "required";
   /** Absent from a supervisor that predates autopilot. */
   autopilot?: WaveAutopilot;
+  /**
+   * The wave's last cleanup run (`wave_cleaned`, SPEC §4.6.26): what it removed, what it kept
+   * and why, its summary line; `task`: that run cleaned one task only. Absent: never cleaned.
+   */
+  cleanup?: WaveCleanup;
   /** Absent while the queue is empty. */
   merge_queue?: MergeQueueEntry[];
   /** Absent for a wave without a release train. */

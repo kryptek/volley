@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import './MagicRings.css';
+import { type CSSProperties, useEffect, useRef, useState } from "react";
+import "./MagicRings.css";
 
-type Motion = 'pulse' | 'ripple' | 'breathe';
-type Pass = 'glow' | 'compose' | 'line';
+type Motion = "pulse" | "ripple" | "breathe";
+type Pass = "glow" | "compose" | "line";
 type Matrix = number[];
 
 export interface MagicRingsProps {
@@ -33,7 +33,7 @@ export interface MagicRingsProps {
   parallax?: number;
   clickBurst?: boolean;
   intro?: boolean;
-  theme?: 'dark' | 'light';
+  theme?: "dark" | "light";
   maxDevicePixelRatio?: number;
   className?: string;
   style?: CSSProperties;
@@ -328,16 +328,16 @@ void main() {
 
 const shaderSource = (body: string, flags: string[]) =>
   [
-    '#version 300 es',
-    'precision highp float;',
+    "#version 300 es",
+    "precision highp float;",
     `#define SLOTS ${SLOTS}`,
-    ...flags.map(flag => `#define ${flag}`),
-    body
-  ].join('\n');
+    ...flags.map((flag) => `#define ${flag}`),
+    body,
+  ].join("\n");
 
 const FRAGMENTS: Record<Pass, string> = { glow: GLOW, compose: COMPOSE, line: LINE };
 
-const MOTIONS: Motion[] = ['pulse', 'ripple', 'breathe'];
+const MOTIONS: Motion[] = ["pulse", "ripple", "breathe"];
 const CYCLE = 3.45;
 const STAGGER = 0.5;
 const DEPTH = 2.6;
@@ -353,24 +353,26 @@ const smoothstep = (from: number, to: number, value: number) => {
 
 const pulseLife = (t: number) => Math.min(smoothstep(0, 0.7, t), 1 - smoothstep(0.5, 3.25, t));
 
-const toLinear = (channel: number) => (channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4));
+const toLinear = (channel: number) =>
+  channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
 
 const parseColor = (value: string): number[] => {
-  const text = String(value || '').trim();
+  const text = String(value || "").trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
-    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
+    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
-  if (typeof document !== 'undefined') {
-    const context = document.createElement('canvas').getContext('2d');
+  if (rgb)
+    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (typeof document !== "undefined") {
+    const context = document.createElement("canvas").getContext("2d");
     if (context) {
-      context.fillStyle = '#000000';
+      context.fillStyle = "#000000";
       context.fillStyle = text;
       const normal = String(context.fillStyle);
-      if (normal !== '#000000' || /^(#0{3}|#0{6}|black)$/i.test(text)) return parseColor(normal);
+      if (normal !== "#000000" || /^(#0{3}|#0{6}|black)$/i.test(text)) return parseColor(normal);
     }
   }
   return [0.66, 0.33, 0.97];
@@ -389,7 +391,11 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
   return shader;
 };
 
-const link = (gl: WebGL2RenderingContext, vertexSource: string, fragmentSource: string): Program | null => {
+const link = (
+  gl: WebGL2RenderingContext,
+  vertexSource: string,
+  fragmentSource: string,
+): Program | null => {
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
   const program = vertex && fragment ? gl.createProgram() : null;
@@ -408,11 +414,11 @@ const link = (gl: WebGL2RenderingContext, vertexSource: string, fragmentSource: 
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program['uniforms'] = {};
+  const uniforms: Program["uniforms"] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
-    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -423,9 +429,17 @@ const invert = (m: Matrix): Matrix => {
   const B = f * g - d * i;
   const C = d * h - e * g;
   const det = a * A + b * B + c * C;
-  return [A, c * h - b * i, b * f - c * e, B, a * i - c * g, c * d - a * f, C, b * g - a * h, a * e - b * d].map(
-    value => value / det
-  );
+  return [
+    A,
+    c * h - b * i,
+    b * f - c * e,
+    B,
+    a * i - c * g,
+    c * d - a * f,
+    C,
+    b * g - a * h,
+    a * e - b * d,
+  ].map((value) => value / det);
 };
 
 const planeFor = (tiltX: number, tiltY: number) => {
@@ -445,10 +459,10 @@ const project = (m: Matrix, x: number, y: number) => {
 };
 
 const MagicRings = ({
-  color = '#A855F7',
-  colorTwo = '#6366F1',
+  color = "#A855F7",
+  colorTwo = "#6366F1",
   ringCount = 6,
-  motion = 'pulse',
+  motion = "pulse",
   speed = 1,
   lineThickness = 2,
   glow = 1,
@@ -469,24 +483,24 @@ const MagicRings = ({
   parallax = 0.05,
   clickBurst = true,
   intro = true,
-  theme = 'dark',
+  theme = "dark",
   maxDevicePixelRatio = 2,
-  className = '',
-  style
+  className = "",
+  style,
 }: MagicRingsProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const [generation, setGeneration] = useState(0);
 
-  const light = theme === 'light';
+  const light = theme === "light";
   const first = parseColor(color);
   const second = parseColor(colorTwo);
   const settings: Settings = {
     color: light ? first : first.map(toLinear),
     colorTwo: light ? second : second.map(toLinear),
     ringCount: clamp(Math.round(ringCount), 1, MAX_RINGS),
-    motion: MOTIONS.includes(motion) ? motion : 'pulse',
+    motion: MOTIONS.includes(motion) ? motion : "pulse",
     speed: Math.max(0, speed),
     lineThickness: Math.max(0.25, lineThickness),
     glow: clamp(glow, 0, 3),
@@ -508,7 +522,7 @@ const MagicRings = ({
     clickBurst,
     intro,
     light,
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -522,27 +536,27 @@ const MagicRings = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext('webgl2', {
+    const gl = canvas.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'default'
+      powerPreference: "default",
     });
     if (!gl) return;
     const programs = new Map<string, Program | null>();
     const programFor = (name: Pass, flags: string[]) => {
-      const key = `${name}|${flags.join(',')}`;
+      const key = `${name}|${flags.join(",")}`;
       if (!programs.has(key)) {
-        const vertex = shaderSource(name === 'line' ? STRIP : FULLSCREEN, flags);
+        const vertex = shaderSource(name === "line" ? STRIP : FULLSCREEN, flags);
         programs.set(key, link(gl, vertex, shaderSource(`${COMMON}${FRAGMENTS[name]}`, flags)));
       }
       return programs.get(key);
     };
-    if (!programFor('glow', []) || !programFor('compose', []) || !programFor('line', [])) return;
+    if (!programFor("glow", []) || !programFor("compose", []) || !programFor("line", [])) return;
 
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const vao = gl.createVertexArray();
     const stripVao = gl.createVertexArray();
     const stripBuffer = gl.createBuffer();
@@ -559,7 +573,7 @@ const MagicRings = ({
     const glowTexture = gl.createTexture();
     const glowBuffer = gl.createFramebuffer();
     const glowSize = { width: 0, height: 0 };
-    let floatGlow = Boolean(gl.getExtension('EXT_color_buffer_float'));
+    let floatGlow = Boolean(gl.getExtension("EXT_color_buffer_float"));
     const shape = new Float32Array(SLOTS * 4);
     const frameData = new Float32Array(SLOTS * 4);
     const tints = new Float32Array(SLOTS * 4);
@@ -567,13 +581,14 @@ const MagicRings = ({
     const pointer = { x: 0, y: 0, inside: false, touch: false };
     const spring = { x: 0, y: 0, vx: 0, vy: 0, hover: 0, hoverVelocity: 0 };
     const bursts: Burst[] = [];
-    let introLive = settingsRef.current.intro && settingsRef.current.speed > 0 && !reduced && generation === 0;
+    let introLive =
+      settingsRef.current.intro && settingsRef.current.speed > 0 && !reduced && generation === 0;
     let time = introLive ? 0 : 1.6;
     let clock = 0;
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== 'hidden';
+    let pageVisible = document.visibilityState !== "hidden";
     let lost = false;
 
     const resize = () => {
@@ -602,14 +617,20 @@ const MagicRings = ({
           0,
           gl.RGBA,
           useFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE,
-          null
+          null,
         );
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.bindFramebuffer(gl.FRAMEBUFFER, glowBuffer);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, glowTexture, 0);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER,
+          gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D,
+          glowTexture,
+          0,
+        );
         const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         return complete;
@@ -622,7 +643,7 @@ const MagicRings = ({
 
     const ringState = (s: Settings, index: number, count: number): RingState => {
       const mix = count > 1 ? index / (count - 1) : 0;
-      if (s.motion === 'ripple') {
+      if (s.motion === "ripple") {
         const span = count * s.radiusStep + s.expansion;
         const period = CYCLE * Math.max(1, count) * 0.32;
         const phase = time / period + index / count;
@@ -630,9 +651,15 @@ const MagicRings = ({
         const born = time - progress * period >= -1e-4 || !introLive;
         const life = born ? smoothstep(0, 0.12, progress) * (1 - smoothstep(0.62, 1, progress)) : 0;
         const position = progress * Math.max(1, count - 1);
-        return { radius: s.baseRadius + progress * span, life, virtual: position, mix: progress, opening: 1 };
+        return {
+          radius: s.baseRadius + progress * span,
+          life,
+          virtual: position,
+          mix: progress,
+          opening: 1,
+        };
       }
-      if (s.motion === 'breathe') {
+      if (s.motion === "breathe") {
         const wave = Math.sin((time / 4) * Math.PI * 2 - index * 0.55);
         const rise = introLive ? smoothstep(index * 0.12, index * 0.12 + 0.9, time) : 1;
         return {
@@ -640,18 +667,19 @@ const MagicRings = ({
           life: (0.78 + 0.22 * wave) * rise,
           virtual: index,
           mix,
-          opening: 1
+          opening: 1,
         };
       }
       const local = time - index * STAGGER;
       const t = ((local % CYCLE) + CYCLE) % CYCLE;
       const life = introLive && local < 0 ? 0 : pulseLife(t);
       return {
-        radius: s.baseRadius + index * s.radiusStep + (1 - Math.pow(1 - t / CYCLE, 2)) * s.expansion,
+        radius:
+          s.baseRadius + index * s.radiusStep + (1 - Math.pow(1 - t / CYCLE, 2)) * s.expansion,
         life,
         virtual: index,
         mix,
-        opening: introLive && local < CYCLE ? smoothstep(0, 0.9, local) : 1
+        opening: introLive && local < CYCLE ? smoothstep(0, 0.9, local) : 1,
       };
     };
 
@@ -666,11 +694,13 @@ const MagicRings = ({
       const leanX = s.tilt - mouseY * s.parallax * 260;
       const leanY = mouseX * s.parallax * 260;
       const view = planeFor(leanX, leanY);
-      const center = s.followMouse ? [mouseX * s.mouseInfluence, mouseY * s.mouseInfluence] : [0, 0];
+      const center = s.followMouse
+        ? [mouseX * s.mouseInfluence, mouseY * s.mouseInfluence]
+        : [0, 0];
       const spinBase = s.spin * time * 0.6;
 
       let slots = 0;
-      let lowest = Infinity;
+      let lowest = Number.POSITIVE_INFINITY;
       let highest = 0;
       let shiftMax = 0;
       const place = (
@@ -681,7 +711,7 @@ const MagicRings = ({
         shiftX: number,
         shiftY: number,
         mix: number,
-        width: number
+        width: number,
       ) => {
         if (life <= 0.002) return;
         const gain = 10 * radius * cut * cut * cut;
@@ -692,9 +722,9 @@ const MagicRings = ({
             s.color[0] + (s.colorTwo[0] - s.color[0]) * mix,
             s.color[1] + (s.colorTwo[1] - s.color[1]) * mix,
             s.color[2] + (s.colorTwo[2] - s.color[2]) * mix,
-            width
+            width,
           ],
-          slots * 4
+          slots * 4,
         );
         lowest = Math.min(lowest, radius);
         highest = Math.max(highest, radius);
@@ -716,7 +746,16 @@ const MagicRings = ({
         }
         const cut = Math.pow(s.taper, state.virtual) / Math.max(0.08, state.opening);
         const angle = s.rotation + spinBase * (index % 2 ? -1 : 1) * (1 + index * 0.15);
-        place(radius, life, cut, angle, index * s.parallax * mouseX, index * s.parallax * mouseY, state.mix, 1);
+        place(
+          radius,
+          life,
+          cut,
+          angle,
+          index * s.parallax * mouseX,
+          index * s.parallax * mouseY,
+          state.mix,
+          1,
+        );
       }
       for (const burst of bursts) {
         const age = clock - burst.start;
@@ -732,12 +771,12 @@ const MagicRings = ({
       if (!slots) return;
 
       const flags: string[] = [];
-      if (s.light) flags.push('LIGHT');
-      if (s.dispersion > 0) flags.push('PRISM');
-      if (!floatGlow) flags.push('PACKED');
-      const glowProgram = programFor('glow', flags);
-      const composeProgram = programFor('compose', flags);
-      const lineProgram = programFor('line', flags);
+      if (s.light) flags.push("LIGHT");
+      if (s.dispersion > 0) flags.push("PRISM");
+      if (!floatGlow) flags.push("PACKED");
+      const glowProgram = programFor("glow", flags);
+      const composeProgram = programFor("compose", flags);
+      const lineProgram = programFor("line", flags);
       if (!glowProgram || !composeProgram || !lineProgram) return;
 
       const glowScale = (s.light ? 0.3 : 1) * (1 - s.dispersion * 0.45);
@@ -761,7 +800,13 @@ const MagicRings = ({
         gl.uniform4fv(u.uShape, shape);
         gl.uniform4fv(u.uFrame, frameData);
         gl.uniform4fv(u.uTint, tints);
-        gl.uniform4f(u.uHover, cursor[0] - center[0], cursor[1] - center[1], hover * s.hoverIntensity, 1 / 0.03);
+        gl.uniform4f(
+          u.uHover,
+          cursor[0] - center[0],
+          cursor[1] - center[1],
+          hover * s.hoverIntensity,
+          1 / 0.03,
+        );
         gl.uniform1f(u.uSplit, split);
         gl.uniform1f(u.uOpacity, s.opacity);
         return u;
@@ -772,7 +817,11 @@ const MagicRings = ({
       gl.viewport(0, 0, glowSize.width, glowSize.height);
       gl.clear(gl.COLOR_BUFFER_BIT);
       const glowUniforms = shared(glowProgram);
-      gl.uniform2f(glowUniforms.uScale, canvas.width / glowSize.width, canvas.height / glowSize.height);
+      gl.uniform2f(
+        glowUniforms.uScale,
+        canvas.width / glowSize.width,
+        canvas.height / glowSize.height,
+      );
       gl.uniformMatrix3fv(glowUniforms.uInverse, true, view.inverse);
       gl.uniform2f(glowUniforms.uBounds, Math.max(0, lowest - margin), highest + margin);
       gl.uniform4f(glowUniforms.uHalo, 0, 1 / outer, innerAmount, outerAmount);
@@ -823,7 +872,8 @@ const MagicRings = ({
         spring.x += spring.vx * h;
         spring.y += spring.vy * h;
         const hoverTarget = pointer.inside ? 1 : 0;
-        spring.hoverVelocity += (40 * (hoverTarget - spring.hover) - 2 * Math.sqrt(40) * spring.hoverVelocity) * h;
+        spring.hoverVelocity +=
+          (40 * (hoverTarget - spring.hover) - 2 * Math.sqrt(40) * spring.hoverVelocity) * h;
         spring.hover += spring.hoverVelocity * h;
       }
 
@@ -862,12 +912,12 @@ const MagicRings = ({
       return {
         x: (event.clientX - rect.left - rect.width / 2) / unit,
         y: (rect.top + rect.height / 2 - event.clientY) / unit,
-        inside
+        inside,
       };
     };
 
     const onPointerMove = (event: PointerEvent) => {
-      if (event.pointerType === 'touch' && !pointer.touch) return;
+      if (event.pointerType === "touch" && !pointer.touch) return;
       const spot = locate(event);
       pointer.x = spot.x;
       pointer.y = spot.y;
@@ -881,7 +931,7 @@ const MagicRings = ({
       pointer.x = spot.x;
       pointer.y = spot.y;
       pointer.inside = true;
-      pointer.touch = event.pointerType === 'touch';
+      pointer.touch = event.pointerType === "touch";
       const s = settingsRef.current;
       if (s.clickBurst && !reduced) {
         bursts.push({ start: clock, radius: Math.max(0.04, s.baseRadius * 0.45) });
@@ -891,7 +941,7 @@ const MagicRings = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== 'touch') return;
+      if (event.pointerType !== "touch") return;
       pointer.touch = false;
       pointer.inside = false;
       wake();
@@ -902,11 +952,11 @@ const MagicRings = ({
       wake();
     };
 
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onLeave);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -914,9 +964,9 @@ const MagicRings = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration(value => value + 1);
-    canvas.addEventListener('webglcontextlost', onLost);
-    canvas.addEventListener('webglcontextrestored', onRestored);
+    const onRestored = () => setGeneration((value) => value + 1);
+    canvas.addEventListener("webglcontextlost", onLost);
+    canvas.addEventListener("webglcontextrestored", onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -924,17 +974,17 @@ const MagicRings = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== 'hidden';
+      pageVisible = document.visibilityState !== "hidden";
       wake();
     };
-    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener("visibilitychange", onVisibility);
 
     resize();
     wake();
@@ -944,19 +994,19 @@ const MagicRings = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
-      canvas.removeEventListener('webglcontextlost', onLost);
-      canvas.removeEventListener('webglcontextrestored', onRestored);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
+      canvas.removeEventListener("webglcontextlost", onLost);
+      canvas.removeEventListener("webglcontextrestored", onRestored);
       if (!gl.isContextLost()) {
         gl.deleteVertexArray(vao);
         gl.deleteTexture(glowTexture);
         gl.deleteFramebuffer(glowBuffer);
-        programs.forEach(entry => entry && gl.deleteProgram(entry.program));
+        programs.forEach((entry) => entry && gl.deleteProgram(entry.program));
         gl.deleteVertexArray(stripVao);
         gl.deleteBuffer(stripBuffer);
       }
@@ -964,7 +1014,11 @@ const MagicRings = ({
   }, [generation]);
 
   return (
-    <div ref={containerRef} className={`magic-rings${className ? ` ${className}` : ''}`} style={style}>
+    <div
+      ref={containerRef}
+      className={`magic-rings${className ? ` ${className}` : ""}`}
+      style={style}
+    >
       <canvas ref={canvasRef} className="magic-rings__canvas" aria-hidden="true" />
     </div>
   );

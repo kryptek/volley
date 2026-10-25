@@ -185,3 +185,41 @@ describe("cleanup after retires that closed workspaces", () => {
     expect(plan.targets.find((t) => t.worktree === "/wt/b")?.workspaces).toEqual(["workspace:1"]);
   });
 });
+
+describe("a retire's session end stops what the agent started in its worktree (#612 D3)", () => {
+  it.skipIf(process.platform !== "linux")(
+    "agent_session_closed.pids includes a child counted only by its cwd",
+    async () => {
+      const { spawn } = await import("node:child_process");
+      const { mkdirSync } = await import("node:fs");
+      const { exec } = await import("../src/exec");
+      const { mintConsentToken } = await import("../src/fence");
+      const { LocalTmuxHost } = await import("../src/hosts/local-tmux");
+      const wt = join(tempDir("volleyd-retire-cwd-"), "w1", "T1-implementer");
+      mkdirSync(wt, { recursive: true });
+      const dev = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+        stdio: "ignore",
+        cwd: wt,
+      });
+      try {
+        // real process: let the child reach its working directory
+        await new Promise((r) => setTimeout(r, 100));
+        const host = new LocalTmuxHost(async (argv, opts) =>
+          argv[0] === "tmux"
+            ? { code: 0, stdout: "", stderr: "", timedOut: false }
+            : exec(argv, opts),
+        );
+        const end = await host.endSession(
+          "volley-w1-T1-implementer",
+          wt,
+          mintConsentToken("retire w1-t1-implementer-1"),
+        );
+        expect(end.pids).toContain(dev.pid);
+      } finally {
+        try {
+          process.kill(dev.pid as number, "SIGKILL");
+        } catch {}
+      }
+    },
+  );
+});

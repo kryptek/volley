@@ -336,7 +336,8 @@ describe("daemon spawn loop", () => {
       const io = makeBufferIO();
       const worktree = join(env.home, "wt", "w1", "T1-implementer");
       expect(await cleanupWave(env.home, "w1", { yes: false, force: false }, io)).toBe(0);
-      expect(io.readStdout()).toBe("skip T1: merge_ready\n");
+      expect(io.readStdout()).toMatch(/^skip T1: merge_ready\n/);
+      expect(io.readStdout()).not.toContain("would remove");
       expect(await cleanupWave(env.home, "w1", { yes: false, force: false, all: true }, io)).toBe(
         0,
       );
@@ -351,9 +352,11 @@ describe("daemon spawn loop", () => {
         ),
       ).toBe(0);
       expect(fx.argvs()).toEqual([
-        ["git", "-C", repo, "worktree", "remove", worktree],
-        // The wave's leftover claude processes are looked for (none here).
+        // The wave's leftover processes are looked for (none here), before the worktree goes.
         ["ps", "-axo", "pid=,command="],
+        ["git", "-C", repo, "worktree", "remove", worktree],
+        // The task's branch: unmerged (no merge on file), so it is kept.
+        ["git", "-C", repo, "rev-parse", "--verify", "--quiet", "w1/T1-implementer-1"],
       ]);
     });
   });

@@ -343,6 +343,8 @@ export const DAEMON_DEFAULTS = {
   lsof_timeout_ms: 15_000,
   /** How long `volleyd cleanup` waits for the daemon's run of it (every machine's steps). */
   cleanup_op_timeout_ms: 600_000,
+  /** A cleanup run that kept an unreachable machine's items runs again after this long. */
+  cleanup_retry_ms: 60_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
   /**

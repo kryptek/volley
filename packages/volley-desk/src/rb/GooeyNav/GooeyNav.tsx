@@ -4,25 +4,25 @@
 // own pixels, since the Desk's canvas is zoomed with a CSS transform; and WebGL made optional: `gl={false}`
 // draws the goo as a CSS clip-path pill, which is also the fallback once a context is lost, and the
 // context is released on unmount, since a page keeps only about 16 live WebGL contexts).
-'use client';
+"use client";
 
 import {
+  type CSSProperties,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
-  type KeyboardEvent,
-  type MouseEvent,
-  type ReactNode
-} from 'react';
+} from "react";
 
-import './GooeyNav.css';
+import "./GooeyNav.css";
 
-const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-type Palette = 'dark' | 'light';
-type Size = 'sm' | 'md' | 'lg';
+type Palette = "dark" | "light";
+type Size = "sm" | "md" | "lg";
 type Rgba = number[];
 
 export interface GooeyNavItem {
@@ -53,7 +53,7 @@ interface GooeyNavProps {
   style?: CSSProperties;
   // Desk: tab semantics.
   role?: string;
-  'aria-label'?: string;
+  "aria-label"?: string;
   onKeyDown?: (event: KeyboardEvent<HTMLElement>) => void;
   itemProps?: (index: number) => Record<string, unknown>;
   gl?: boolean; // Desk: false never opens a WebGL context.
@@ -86,7 +86,7 @@ interface Drop {
   leave: number;
   emerged: number;
   absorbed: number;
-  state: 'waiting' | 'flying' | 'absorbing';
+  state: "waiting" | "flying" | "absorbing";
   tint: Rgba | null;
   start?: number;
   duration?: number;
@@ -118,35 +118,40 @@ interface Pipeline {
 
 const THEMES: Record<Palette, Record<string, string>> = {
   dark: {
-    '--gn-frame': 'rgba(38, 35, 46, 0.66)',
-    '--gn-frame-edge': 'rgba(255, 255, 255, 0.08)',
-    '--gn-frame-highlight': 'rgba(255, 255, 255, 0.07)',
-    '--gn-frame-shadow': '0 22px 44px -20px rgba(0, 0, 0, 0.8), 0 6px 16px -8px rgba(0, 0, 0, 0.5)',
-    '--gn-ink': '#f4f4f5',
-    '--gn-muted': 'rgba(244, 244, 245, 0.62)'
+    "--gn-frame": "rgba(38, 35, 46, 0.66)",
+    "--gn-frame-edge": "rgba(255, 255, 255, 0.08)",
+    "--gn-frame-highlight": "rgba(255, 255, 255, 0.07)",
+    "--gn-frame-shadow": "0 22px 44px -20px rgba(0, 0, 0, 0.8), 0 6px 16px -8px rgba(0, 0, 0, 0.5)",
+    "--gn-ink": "#f4f4f5",
+    "--gn-muted": "rgba(244, 244, 245, 0.62)",
   },
   light: {
-    '--gn-frame': 'rgba(240, 240, 243, 0.8)',
-    '--gn-frame-edge': 'rgba(24, 24, 27, 0.07)',
-    '--gn-frame-highlight': 'rgba(255, 255, 255, 0.95)',
-    '--gn-frame-shadow': '0 22px 44px -22px rgba(24, 24, 27, 0.3), 0 6px 16px -10px rgba(24, 24, 27, 0.16)',
-    '--gn-ink': '#27272a',
-    '--gn-muted': 'rgba(39, 39, 42, 0.62)'
-  }
+    "--gn-frame": "rgba(240, 240, 243, 0.8)",
+    "--gn-frame-edge": "rgba(24, 24, 27, 0.07)",
+    "--gn-frame-highlight": "rgba(255, 255, 255, 0.95)",
+    "--gn-frame-shadow":
+      "0 22px 44px -22px rgba(24, 24, 27, 0.3), 0 6px 16px -10px rgba(24, 24, 27, 0.16)",
+    "--gn-ink": "#27272a",
+    "--gn-muted": "rgba(39, 39, 42, 0.62)",
+  },
 };
 
 const PILLS: Record<Palette, { color: string; hover: string; shadow: number }> = {
-  dark: { color: '#f4f4f5', hover: 'rgba(255, 255, 255, 0.08)', shadow: 0.4 },
-  light: { color: '#27272a', hover: 'rgba(24, 24, 27, 0.06)', shadow: 0.2 }
+  dark: { color: "#f4f4f5", hover: "rgba(255, 255, 255, 0.08)", shadow: 0.4 },
+  light: { color: "#27272a", hover: "rgba(24, 24, 27, 0.06)", shadow: 0.2 },
 };
 
-const SIZES: Record<Size, string> = { sm: 'gooey-nav--sm', md: 'gooey-nav--md', lg: 'gooey-nav--lg' };
+const SIZES: Record<Size, string> = {
+  sm: "gooey-nav--sm",
+  md: "gooey-nav--md",
+  lg: "gooey-nav--lg",
+};
 
 const DEFAULT_ITEMS: GooeyNavItem[] = [
-  { label: 'Home', href: '#' },
-  { label: 'Work', href: '#' },
-  { label: 'About', href: '#' },
-  { label: 'Contact', href: '#' }
+  { label: "Home", href: "#" },
+  { label: "Work", href: "#" },
+  { label: "About", href: "#" },
+  { label: "Contact", href: "#" },
 ];
 
 const MAX_DROPS = 32;
@@ -242,18 +247,21 @@ void main() {
 const parse = (value: string): Rgba => {
   const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(value).trim());
   if (match) {
-    const hex = match[1].length === 3 ? match[1].replace(/./g, digit => digit + digit) : match[1];
-    return [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255).concat(1);
+    const hex = match[1].length === 3 ? match[1].replace(/./g, (digit) => digit + digit) : match[1];
+    return [0, 2, 4]
+      .map((index) => Number.parseInt(hex.slice(index, index + 2), 16) / 255)
+      .concat(1);
   }
   const rgba = /rgba?\(([^)]+)\)/i.exec(String(value));
   if (rgba) {
-    const parts = rgba[1].split(',').map(part => parseFloat(part));
+    const parts = rgba[1].split(",").map((part) => Number.parseFloat(part));
     return [parts[0] / 255, parts[1] / 255, parts[2] / 255, parts[3] ?? 1];
   }
   return [1, 1, 1, 1];
 };
 
-const contrastInk = (rgb: Rgba) => (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 0.55 ? '#18161d' : '#ffffff');
+const contrastInk = (rgb: Rgba) =>
+  0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 0.55 ? "#18161d" : "#ffffff";
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
@@ -268,7 +276,7 @@ const bezier = (a: number, b: number, c: number, d: number, t: number) => {
 };
 
 const pillPath = (x: number, y: number, w: number, h: number) => {
-  if (w <= 0.5 || h <= 0.5) return '';
+  if (w <= 0.5 || h <= 0.5) return "";
   const r = Math.min(w, h) / 2;
   return `M${x + r},${y}H${x + w - r}A${r},${r} 0 0 1 ${x + w},${y + r}V${y + h - r}A${r},${r} 0 0 1 ${x + w - r},${y + h}H${x + r}A${r},${r} 0 0 1 ${x},${y + h - r}V${y + r}A${r},${r} 0 0 1 ${x + r},${y}Z`;
 };
@@ -281,18 +289,18 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
 };
 
 const UNIFORMS = [
-  'uSize',
-  'uRatio',
-  'uPills',
-  'uHover',
-  'uDrops',
-  'uTails',
-  'uTints',
-  'uCount',
-  'uSmooth',
-  'uPill',
-  'uHoverColor',
-  'uShadow'
+  "uSize",
+  "uRatio",
+  "uPills",
+  "uHover",
+  "uDrops",
+  "uTails",
+  "uTints",
+  "uCount",
+  "uSmooth",
+  "uPill",
+  "uHoverColor",
+  "uShadow",
 ];
 
 const build = (gl: WebGL2RenderingContext): Pipeline | null => {
@@ -304,11 +312,13 @@ const build = (gl: WebGL2RenderingContext): Pipeline | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms = Object.fromEntries(UNIFORMS.map(name => [name, gl.getUniformLocation(program, name)]));
+  const uniforms = Object.fromEntries(
+    UNIFORMS.map((name) => [name, gl.getUniformLocation(program, name)]),
+  );
   const buffer = gl.createBuffer() as WebGLBuffer;
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-  return { program, uniforms, buffer, position: gl.getAttribLocation(program, 'aPosition') };
+  return { program, uniforms, buffer, position: gl.getAttribLocation(program, "aPosition") };
 };
 
 const GooeyNav = ({
@@ -316,11 +326,11 @@ const GooeyNav = ({
   initialActiveIndex = 0,
   activeIndex,
   onChange,
-  theme = 'dark',
+  theme = "dark",
   color,
   activeTextColor,
   colors = [],
-  size = 'md',
+  size = "md",
   frame = true,
   animationTime = 600,
   particleCount = 15,
@@ -329,15 +339,15 @@ const GooeyNav = ({
   gooeyness = 0.5,
   wobble = 0.5,
   hoverEffect = true,
-  className = '',
+  className = "",
   style,
   role,
-  'aria-label': ariaLabel,
+  "aria-label": ariaLabel,
   onKeyDown,
   itemProps,
-  gl: useGL = true // Desk
+  gl: useGL = true, // Desk
 }: GooeyNavProps) => {
-  const presentational = role ? ('presentation' as const) : undefined; // Desk
+  const presentational = role ? ("presentation" as const) : undefined; // Desk
   const [innerIndex, setInnerIndex] = useState(initialActiveIndex);
   const current = Math.min(Math.max(0, activeIndex ?? innerIndex), Math.max(0, items.length - 1));
   const stageRef = useRef<HTMLDivElement>(null);
@@ -348,7 +358,7 @@ const GooeyNav = ({
   const engineRef = useRef<{ go: (index: number) => void; refresh: () => void } | null>(null);
   const indexRef = useRef(current);
   indexRef.current = current;
-  const palette = theme === 'light' ? 'light' : 'dark';
+  const palette = theme === "light" ? "light" : "dark";
   const pillColor = color || PILLS[palette].color;
   const pillRgb = parse(pillColor);
   const settings = {
@@ -362,7 +372,7 @@ const GooeyNav = ({
     pillRgb,
     tints: colors.map(parse),
     hoverRgb: parse(PILLS[palette].hover),
-    shadow: PILLS[palette].shadow
+    shadow: PILLS[palette].shadow,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -381,13 +391,16 @@ const GooeyNav = ({
     const fallback = fallbackRef.current;
     if (!stage || !canvas || !list || !overlay || !fallback) return;
 
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const context = useGL ? canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false }) : null; // Desk
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const context = useGL
+      ? canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: true, antialias: false })
+      : null; // Desk
     let gl = context; // Desk
     let pipeline = gl ? build(gl) : null; // Desk
-    const pick = () => { // Desk
-      fallback.style.display = pipeline ? 'none' : 'block';
-      canvas.style.display = pipeline ? 'block' : 'none';
+    const pick = () => {
+      // Desk
+      fallback.style.display = pipeline ? "none" : "block";
+      canvas.style.display = pipeline ? "block" : "none";
     }; // Desk
     pick(); // Desk
 
@@ -418,7 +431,7 @@ const GooeyNav = ({
         left: `${-MARGIN}px`,
         top: `${-MARGIN}px`,
         width: `${outerWidth}px`,
-        height: `${outerHeight}px`
+        height: `${outerHeight}px`,
       });
       const width = Math.max(1, Math.round(outerWidth * ratio));
       const height = Math.max(1, Math.round(outerHeight * ratio));
@@ -426,9 +439,14 @@ const GooeyNav = ({
         canvas.width = width;
         canvas.height = height;
       }
-      rects = Array.from(list.children).map(item => {
+      rects = Array.from(list.children).map((item) => {
         const rect = item.getBoundingClientRect();
-        return { x: (rect.left - box.left) / k, y: (rect.top - box.top) / k, w: rect.width / k, h: rect.height / k }; // Desk
+        return {
+          x: (rect.left - box.left) / k,
+          y: (rect.top - box.top) / k,
+          w: rect.width / k,
+          h: rect.height / k,
+        }; // Desk
       });
     };
 
@@ -470,15 +488,18 @@ const GooeyNav = ({
             const cross = x - step + (step * previous) / (previous - value);
             if (value < 0) start = cross;
             else if (start !== null) {
-              parts.push(`M${start.toFixed(1)},${y}H${cross.toFixed(1)}V${y + 1}H${start.toFixed(1)}Z`);
+              parts.push(
+                `M${start.toFixed(1)},${y}H${cross.toFixed(1)}V${y + 1}H${start.toFixed(1)}Z`,
+              );
               start = null;
             }
           }
           previous = value;
         }
-        if (start !== null) parts.push(`M${start.toFixed(1)},${y}H${view.width}V${y + 1}H${start.toFixed(1)}Z`);
+        if (start !== null)
+          parts.push(`M${start.toFixed(1)},${y}H${view.width}V${y + 1}H${start.toFixed(1)}Z`);
       }
-      return parts.join('');
+      return parts.join("");
     };
 
     const pill = (index: number): PillState => {
@@ -520,7 +541,7 @@ const GooeyNav = ({
         ex + Math.cos(into) * swing * 1.5,
         ey + Math.sin(into) * swing * 1.5,
         ex,
-        ey
+        ey,
       ];
     };
 
@@ -532,7 +553,10 @@ const GooeyNav = ({
       const available = source.mass - source.outgoing;
       if (available <= 0.002) return;
       const room = MAX_DROPS - drops.length;
-      const count = Math.min(room, Math.max(1, Math.round(Math.max(1, s.particleCount) * available)));
+      const count = Math.min(
+        room,
+        Math.max(1, Math.round(Math.max(1, s.particleCount) * available)),
+      );
       if (count <= 0) return;
       const window = Math.max(0.15, s.animationTime / 1000) * 0.16;
       for (let i = 0; i < count; i++) {
@@ -551,8 +575,8 @@ const GooeyNav = ({
           leave: now + Math.random() * window * 1000,
           emerged: 0,
           absorbed: 0,
-          state: 'waiting',
-          tint: s.tints.length ? s.tints[Math.floor(Math.random() * s.tints.length)] : null
+          state: "waiting",
+          tint: s.tints.length ? s.tints[Math.floor(Math.random() * s.tints.length)] : null,
         });
       }
     };
@@ -565,10 +589,16 @@ const GooeyNav = ({
       const blobs: Blob[] = [];
       for (const [index, state] of pills) {
         const box = shape(index, state.scale);
-        if (box) boxes.push({ cx: box.x + box.w / 2, cy: box.y + box.h / 2, hw: box.w / 2, hh: box.h / 2 });
+        if (box)
+          boxes.push({
+            cx: box.x + box.w / 2,
+            cy: box.y + box.h / 2,
+            hw: box.w / 2,
+            hh: box.h / 2,
+          });
       }
       for (const drop of drops) {
-        if (drop.state === 'waiting') continue;
+        if (drop.state === "waiting") continue;
         const radius = 0.26 * height * drop.size * Math.min(drop.emerged, 1 - drop.absorbed);
         if (radius <= 0.05) continue;
         const speed = Math.hypot(drop.vx, drop.vy);
@@ -579,7 +609,7 @@ const GooeyNav = ({
           r: radius,
           tx: speed > 0.01 ? (drop.vx / speed) * length : 0,
           ty: speed > 0.01 ? (drop.vy / speed) * length : 0,
-          tint: drop.tint
+          tint: drop.tint,
         });
       }
 
@@ -588,17 +618,17 @@ const GooeyNav = ({
         const box = boxes[0];
         overlay.style.clipPath = `path('${pillPath(box.cx - box.hw, box.cy - box.hh, box.hw * 2, box.hh * 2)}')`;
       } else {
-        overlay.style.clipPath = `path('${trace(boxes, blobs, smooth) || 'M0,0Z'}')`;
+        overlay.style.clipPath = `path('${trace(boxes, blobs, smooth) || "M0,0Z"}')`;
       }
-      overlay.style.visibility = 'visible';
+      overlay.style.visibility = "visible";
 
       if (!pipeline || !gl) {
         // Desk: the pill and its goo, clipped to the same traced shape as the active labels.
         fallback.style.width = `${view.width}px`; // Desk
         fallback.style.height = `${view.height}px`; // Desk
         fallback.style.clipPath = overlay.style.clipPath; // Desk
-        fallback.style.borderRadius = '0'; // Desk: the clip draws the pill's ends.
-        fallback.style.opacity = boxes.length || blobs.length ? '1' : '0'; // Desk
+        fallback.style.borderRadius = "0"; // Desk: the clip draws the pill's ends.
+        fallback.style.opacity = boxes.length || blobs.length ? "1" : "0"; // Desk
         return;
       }
 
@@ -646,7 +676,13 @@ const GooeyNav = ({
       gl.uniform1i(uniforms.uCount, count);
       gl.uniform1f(uniforms.uSmooth, smooth);
       gl.uniform3f(uniforms.uPill, s.pillRgb[0], s.pillRgb[1], s.pillRgb[2]);
-      gl.uniform4f(uniforms.uHoverColor, s.hoverRgb[0], s.hoverRgb[1], s.hoverRgb[2], s.hoverRgb[3] * hover.alpha);
+      gl.uniform4f(
+        uniforms.uHoverColor,
+        s.hoverRgb[0],
+        s.hoverRgb[1],
+        s.hoverRgb[2],
+        s.hoverRgb[3] * hover.alpha,
+      );
       gl.uniform1f(uniforms.uShadow, s.shadow);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     };
@@ -661,12 +697,12 @@ const GooeyNav = ({
 
       for (let i = drops.length - 1; i >= 0; i--) {
         const drop = drops[i];
-        if (drop.state === 'waiting') {
+        if (drop.state === "waiting") {
           if (now < drop.leave) continue;
-          drop.state = 'flying';
+          drop.state = "flying";
           plan(drop, drop.index, now, true);
         }
-        if (drop.state === 'flying') {
+        if (drop.state === "flying") {
           drop.emerged = Math.min(1, drop.emerged + dt / emergeTime);
           const source = pills.get(drop.source);
           if (source && drop.given < drop.mass) {
@@ -685,7 +721,7 @@ const GooeyNav = ({
             drop.x,
             drop.y,
             drop.x,
-            drop.y
+            drop.y,
           ];
           const x = bezier(x0, x1, x2, x3, eased);
           const y = bezier(y0, y1, y2, y3, eased);
@@ -695,9 +731,9 @@ const GooeyNav = ({
           }
           drop.x = x;
           drop.y = y;
-          if (t >= 1) drop.state = 'absorbing';
+          if (t >= 1) drop.state = "absorbing";
         }
-        if (drop.state === 'absorbing') {
+        if (drop.state === "absorbing") {
           const step = Math.min(1 - drop.absorbed, dt / absorbTime);
           drop.absorbed += step;
           drop.vx *= 0.8;
@@ -714,10 +750,16 @@ const GooeyNav = ({
       const h = dt / steps;
       for (const [index, state] of pills) {
         for (let n = 0; n < steps; n++) {
-          state.velocity += (omega * omega * (state.mass - state.scale) - 2 * zeta * omega * state.velocity) * h;
+          state.velocity +=
+            (omega * omega * (state.mass - state.scale) - 2 * zeta * omega * state.velocity) * h;
           state.scale += state.velocity * h;
         }
-        if (index !== target && state.mass <= 0.002 && state.outgoing <= 0.002 && Math.abs(state.scale) < 0.004) {
+        if (
+          index !== target &&
+          state.mass <= 0.002 &&
+          state.outgoing <= 0.002 &&
+          Math.abs(state.scale) < 0.004
+        ) {
           pills.delete(index);
         }
       }
@@ -745,7 +787,9 @@ const GooeyNav = ({
       const hoverRect = rects[hover.index];
       const hovering =
         Math.abs(hoverGoal - hover.alpha) > 0.003 ||
-        (hoverRect && Math.abs(hoverRect.x + hoverRect.w / 2 - hover.x) + Math.abs(hoverRect.w - hover.w) > 0.1);
+        (hoverRect &&
+          Math.abs(hoverRect.x + hoverRect.w / 2 - hover.x) + Math.abs(hoverRect.w - hover.w) >
+            0.1);
       if (!resting || hovering) raf = requestAnimationFrame(frame);
       else {
         host.mass = 1;
@@ -784,9 +828,9 @@ const GooeyNav = ({
       pill(index);
       for (const drop of drops) {
         drop.index = index;
-        if (drop.state === 'flying') plan(drop, index, now, false);
-        if (drop.state === 'absorbing') {
-          drop.state = 'flying';
+        if (drop.state === "flying") plan(drop, index, now, false);
+        if (drop.state === "absorbing") {
+          drop.state = "flying";
           drop.mass *= 1 - drop.absorbed;
           drop.absorbed = 0;
           plan(drop, index, now, false);
@@ -799,7 +843,7 @@ const GooeyNav = ({
     };
 
     const onOver = (event: PointerEvent) => {
-      const item = (event.target as Element).closest<HTMLElement>('[data-gooey-index]');
+      const item = (event.target as Element).closest<HTMLElement>("[data-gooey-index]");
       if (!item || !list.contains(item)) return;
       const index = Number(item.dataset.gooeyIndex);
       const rect = rects[index];
@@ -820,13 +864,14 @@ const GooeyNav = ({
     };
 
     // Desk: a lost context (the browser drops the oldest past its limit) falls back to the CSS pill.
-    const onLost = () => { // Desk
+    const onLost = () => {
+      // Desk
       pipeline = null; // Desk
       gl = null; // Desk
       pick(); // Desk
       render(); // Desk
     }; // Desk
-    canvas.addEventListener('webglcontextlost', onLost); // Desk
+    canvas.addEventListener("webglcontextlost", onLost); // Desk
 
     const resizeObserver = new ResizeObserver(() => {
       measure();
@@ -836,8 +881,8 @@ const GooeyNav = ({
     resizeObserver.observe(stage);
     resizeObserver.observe(list);
 
-    list.addEventListener('pointerover', onOver);
-    list.addEventListener('pointerleave', onLeave);
+    list.addEventListener("pointerover", onOver);
+    list.addEventListener("pointerleave", onLeave);
 
     measure();
     settle(indexRef.current);
@@ -848,26 +893,29 @@ const GooeyNav = ({
     });
 
     engineRef.current = {
-      go: index => go(index, true),
+      go: (index) => go(index, true),
       refresh: () => {
         render();
         wake();
-      }
+      },
     };
 
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
-      list.removeEventListener('pointerover', onOver);
-      list.removeEventListener('pointerleave', onLeave);
-      canvas.removeEventListener('webglcontextlost', onLost); // Desk
+      list.removeEventListener("pointerover", onOver);
+      list.removeEventListener("pointerleave", onLeave);
+      canvas.removeEventListener("webglcontextlost", onLost); // Desk
       if (gl && pipeline) {
         gl.deleteBuffer(pipeline.buffer);
         gl.deleteProgram(pipeline.program);
       }
       // Desk: release the context once the canvas has left the page (StrictMode re-runs this effect on it).
-      if (gl) setTimeout(() => !canvas.isConnected && context?.getExtension('WEBGL_lose_context')?.loseContext()); // Desk
+      if (gl)
+        setTimeout(
+          () => !canvas.isConnected && context?.getExtension("WEBGL_lose_context")?.loseContext(),
+        ); // Desk
       engineRef.current = null;
     };
   }, [items.length, useGL]); // Desk
@@ -898,13 +946,13 @@ const GooeyNav = ({
         );
       }
       const shared = {
-        className: 'gooey-nav__link',
-        'aria-current': !role && index === current ? ('page' as const) : undefined, // Desk
+        className: "gooey-nav__link",
+        "aria-current": !role && index === current ? ("page" as const) : undefined, // Desk
         ...itemProps?.(index), // Desk
         onClick: (event: MouseEvent) => {
-          if (!item.href || item.href === '#') event.preventDefault();
+          if (!item.href || item.href === "#") event.preventDefault();
           select(index);
-        }
+        },
       };
       return (
         <li
@@ -912,7 +960,7 @@ const GooeyNav = ({
           role={presentational} // Desk
           className="gooey-nav__item"
           data-gooey-index={index}
-          data-active={index === current ? '' : undefined}
+          data-active={index === current ? "" : undefined}
         >
           {item.href ? (
             <a href={item.href} {...shared}>
@@ -932,8 +980,15 @@ const GooeyNav = ({
       role={role} // Desk
       aria-label={ariaLabel} // Desk
       onKeyDown={onKeyDown} // Desk
-      className={`gooey-nav ${SIZES[size] ?? SIZES.md}${frame ? ' gooey-nav--framed' : ''} ${className}`.trim()}
-      style={{ ...THEMES[palette], '--gn-pill': pillColor, '--gn-active-ink': textColor, ...style } as CSSProperties}
+      className={`gooey-nav ${SIZES[size] ?? SIZES.md}${frame ? " gooey-nav--framed" : ""} ${className}`.trim()}
+      style={
+        {
+          ...THEMES[palette],
+          "--gn-pill": pillColor,
+          "--gn-active-ink": textColor,
+          ...style,
+        } as CSSProperties
+      }
     >
       {frame && <span className="gooey-nav__rim" />}
       <div ref={stageRef} className="gooey-nav__stage">

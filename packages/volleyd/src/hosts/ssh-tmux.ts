@@ -238,6 +238,11 @@ export interface RemoteHost extends Host {
    */
   runDoctor(opts: DoctorRunOptions): Promise<DoctorReport>;
   /**
+   * `volley peer cleanup --json …` on the box (SPEC §4.6.26): null when ssh failed. Optional:
+   * a host without it gets no process, branch or clone step.
+   */
+  runCleanup?(opts: PeerCleanupOptions): Promise<PeerCleanupReport | null>;
+  /**
    * One Claude login's usage probe on the box (`volley peer doctor --json --probe-login
    * <profile>`, a prime): its `claude_logins`. Null when the box's volley has no such flag.
    */

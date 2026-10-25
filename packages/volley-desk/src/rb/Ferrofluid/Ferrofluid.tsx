@@ -1,10 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties, type HTMLAttributes } from 'react';
-import './Ferrofluid.css';
+import { type CSSProperties, type HTMLAttributes, useEffect, useRef } from "react";
+import "./Ferrofluid.css";
 
-export type FerrofluidFlow = 'up' | 'down' | 'left' | 'right' | 'none';
+export type FerrofluidFlow = "up" | "down" | "left" | "right" | "none";
 
 export interface FerrofluidProps extends HTMLAttributes<HTMLDivElement> {
   colors?: string[];
@@ -31,7 +31,7 @@ export interface FerrofluidProps extends HTMLAttributes<HTMLDivElement> {
   opacity?: number;
   paused?: boolean;
   dpr?: number;
-  mixBlendMode?: CSSProperties['mixBlendMode'];
+  mixBlendMode?: CSSProperties["mixBlendMode"];
 }
 
 type Settings = {
@@ -69,7 +69,13 @@ const CELL = 1 / 3;
 const BOUND_CELL = 1;
 const INTRO_SECONDS = 2.4;
 const FOV = (38 * Math.PI) / 180;
-const FLOW: Record<string, number[]> = { up: [0, 1], down: [0, -1], left: [-1, 0], right: [1, 0], none: [0, 0] };
+const FLOW: Record<string, number[]> = {
+  up: [0, 1],
+  down: [0, -1],
+  left: [-1, 0],
+  right: [1, 0],
+  none: [0, 0],
+};
 
 const VERTEX = `#version 300 es
 in vec2 aPosition;
@@ -478,7 +484,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -490,13 +496,13 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 const Ferrofluid = ({
-  colors = ['#ffffff', '#ffffff', '#ffffff'],
+  colors = ["#ffffff", "#ffffff", "#ffffff"],
   speed = 0.5,
   scale = 1.6,
   spikeHeight = 1,
@@ -506,7 +512,7 @@ const Ferrofluid = ({
   tilt = 48,
   magnetism = 1,
   variation = 0,
-  flowDirection = 'down',
+  flowDirection = "down",
   brightness = 1,
   mouseInteraction = true,
   mouseStrength = 1,
@@ -521,7 +527,7 @@ const Ferrofluid = ({
   paused = false,
   dpr,
   mixBlendMode,
-  className = '',
+  className = "",
   style,
   ...rest
 }: FerrofluidProps) => {
@@ -529,7 +535,7 @@ const Ferrofluid = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const settings: Settings = {
-    colors: Array.isArray(colors) && colors.length ? colors.slice(0, 3) : ['#ffffff'],
+    colors: Array.isArray(colors) && colors.length ? colors.slice(0, 3) : ["#ffffff"],
     speed: Math.max(0, speed),
     scale: clamp(scale, 0.2, 6),
     spikeHeight: Math.max(0, spikeHeight),
@@ -552,7 +558,7 @@ const Ferrofluid = ({
     color,
     opacity: clamp(opacity, 0, 1),
     paused,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -560,16 +566,16 @@ const Ferrofluid = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = Boolean(gl.getExtension('EXT_color_buffer_float'));
+    const floatTargets = Boolean(gl.getExtension("EXT_color_buffer_float"));
     const sim = link(gl, SIM_FRAGMENT);
     const bounds = link(gl, BOUND_FRAGMENT);
     const render = link(gl, RENDER_FRAGMENT);
@@ -586,8 +592,10 @@ const Ferrofluid = ({
     const makeTarget = (width: number, height: number, filter: number): Target => {
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
-      if (floatTargets) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
-      else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      if (floatTargets)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      else
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -605,7 +613,7 @@ const Ferrofluid = ({
       gl.deleteFramebuffer(target.framebuffer);
     };
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const cache = new Map<string, number[]>();
     const parse = (value: string | undefined, fallback: number[]): number[] => {
       if (!value) return fallback;
@@ -615,7 +623,7 @@ const Ferrofluid = ({
       let rgb = fallback;
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = key;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -625,10 +633,18 @@ const Ferrofluid = ({
       return rgb;
     };
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const tanHalf = Math.tan(FOV / 2);
     const view = { width: 1, height: 1, worldHeight: 10, scale: 0, tilt: -1, reach: 1 };
-    const camera = { x: 0, y: 0, z: 1, forward: [0, 1, 0], upward: [0, 0, 1], far: 10, distance: 4 };
+    const camera = {
+      x: 0,
+      y: 0,
+      z: 1,
+      forward: [0, 1, 0],
+      upward: [0, 0, 1],
+      far: 10,
+      distance: 4,
+    };
     const grid = { width: 0, height: 0, originX: 0, originY: 0, boundWidth: 0, boundHeight: 0 };
     let states: Target[] = [];
     let boundTarget: Target | null = null;
@@ -686,14 +702,20 @@ const Ferrofluid = ({
       camera.z = distance * Math.sin(pitch);
       camera.far = distance * 2.5;
       camera.distance = distance;
-      const corners = [groundAt(-1, -1), groundAt(1, -1), groundAt(-1, 1), groundAt(1, 1), groundAt(0, 1)];
-      const xs = corners.map(c => c[0]);
-      const ys = corners.map(c => c[1]);
+      const corners = [
+        groundAt(-1, -1),
+        groundAt(1, -1),
+        groundAt(-1, 1),
+        groundAt(1, 1),
+        groundAt(0, 1),
+      ];
+      const xs = corners.map((c) => c[0]);
+      const ys = corners.map((c) => c[1]);
       const minX = Math.min(...xs) - 3;
       const maxX = Math.max(...xs) + 3;
       const minY = Math.min(...ys) - 3;
       const maxY = Math.max(...ys) + 3;
-      view.reach = Math.max(...corners.map(c => Math.hypot(c[0], c[1]))) + 4;
+      view.reach = Math.max(...corners.map((c) => Math.hypot(c[0], c[1]))) + 4;
       const gridWidth = Math.ceil((maxX - minX) / CELL) + 2;
       const gridHeight = Math.ceil((maxY - minY) / CELL) + 2;
       grid.originX = minX;
@@ -701,7 +723,10 @@ const Ferrofluid = ({
       if (gridWidth !== grid.width || gridHeight !== grid.height) {
         states.forEach(dropTarget);
         dropTarget(boundTarget);
-        states = [makeTarget(gridWidth, gridHeight, gl.LINEAR), makeTarget(gridWidth, gridHeight, gl.LINEAR)];
+        states = [
+          makeTarget(gridWidth, gridHeight, gl.LINEAR),
+          makeTarget(gridWidth, gridHeight, gl.LINEAR),
+        ];
         grid.width = gridWidth;
         grid.height = gridHeight;
         grid.boundWidth = Math.ceil((gridWidth * CELL) / BOUND_CELL);
@@ -826,7 +851,7 @@ const Ferrofluid = ({
       gl.uniform1f(ru.uSpan, shape.span);
       gl.uniform1f(ru.uExponent, shape.exponent);
       gl.uniform1f(ru.uWarp, 0.06 * s.turbulence);
-      const lights = s.colors.map(value => parse(value, [1, 1, 1]));
+      const lights = s.colors.map((value) => parse(value, [1, 1, 1]));
       const key = lights[0];
       const strip = lights[1] ?? key;
       const fill = lights[2] ?? strip;
@@ -888,7 +913,7 @@ const Ferrofluid = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== 'mouse') pointer.inside = false;
+      if (event.pointerType !== "mouse") pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -902,20 +927,20 @@ const Ferrofluid = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -934,12 +959,12 @@ const Ferrofluid = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       states.forEach(dropTarget);
       dropTarget(boundTarget);
       gl.deleteProgram(sim.program);
@@ -947,7 +972,7 @@ const Ferrofluid = ({
       gl.deleteProgram(render.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -958,7 +983,7 @@ const Ferrofluid = ({
   return (
     <div
       ref={containerRef}
-      className={`ferrofluid-container${className ? ` ${className}` : ''}`}
+      className={`ferrofluid-container${className ? ` ${className}` : ""}`}
       style={mixBlendMode ? { ...style, mixBlendMode } : style}
       {...rest}
     >

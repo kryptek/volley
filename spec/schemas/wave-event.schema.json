@@ -1674,7 +1674,10 @@
           }
         },
         {
-          "if": { "properties": { "type": { "const": "repo_clone_removed" } }, "required": ["type"] },
+          "if": {
+            "properties": { "type": { "const": "repo_clone_removed" } },
+            "required": ["type"]
+          },
           "then": {
             "properties": {
               "payload": {
