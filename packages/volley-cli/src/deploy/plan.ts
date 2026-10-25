@@ -273,6 +273,7 @@ export function deployPlan(ctx: PlanContext): PlanStep[] {
       id: "install",
       title: "bun install --frozen-lockfile",
       commands: [{ argv: [bun, "install", "--frozen-lockfile"], cwd: repo }],
+      detail: `then record the bun.lock it installed from in node_modules/${LOCK_MARKER}`,
     },
     {
       id: "build",
@@ -328,6 +329,8 @@ export const stashName = (now: Date) =>
  * After the deploy's `bun install --frozen-lockfile` on a paired machine: record the bun.lock it
  * installed from, as the doctor's own install does (`LOCK_MARKER`), so the machine's doctor says
  * `synced`. A shell script, not a `volley` verb, so a rollback to any older release records too.
+ * The supervisor's own deploy records in-process (`recordInstall`, in `apply.ts`); install.sh
+ * carries this body too, and tests pin the three to each other.
  */
 export const RECORD_LOCK_ARGV: readonly string[] = [
   "sh",

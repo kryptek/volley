@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { SIM_BIN } from "../src/env";
+import { SIM_BIN, simEnvLine } from "../src/env";
 import { HEAD_MOVED_STDERR, runGh } from "../src/gh";
 import { readWorld } from "../src/world";
 import { git, makeRepo, pushBranch } from "./helpers/repo";
@@ -11,8 +11,8 @@ import { tempDir } from "./helpers/tmp";
 let home: string;
 let work: string;
 let origin: string;
-const gh = (argv: string[], cwd = work) =>
-  runGh(argv, { cwd, env: { VOLLEY_SIM_HOME: home, VOLLEY_SIMULATED: "1" } });
+const gh = (argv: string[], cwd = work, env: Record<string, string> = {}) =>
+  runGh(argv, { cwd, env: { VOLLEY_SIM_HOME: home, VOLLEY_SIMULATED: "1", ...env } });
 const json = (r: { stdout: string }) => JSON.parse(r.stdout);
 
 beforeEach(() => {
@@ -140,6 +140,112 @@ describe("gh repo", () => {
     expect(gh(["repo", "delete", "volley-sim/demo", "--yes"], dir).code).toBe(0);
     expect(existsSync(url)).toBe(false);
     expect(gh(["repo", "view", "volley-sim/demo"], dir).code).toBe(1);
+  });
+});
+
+describe("gh repo clone and VOLLEY_SIM_ORIGINS (a repository added by slug, #596)", () => {
+  it("`repo clone <slug>` clones the world's origin into <name>, or into <dir> when given", () => {
+    const dir = tempDir("volley-sim-gh-clone-");
+    expect(gh(["repo", "create", "volley-sim/demo", "--private"], dir).code).toBe(0);
+    const r = gh(["repo", "clone", "volley-sim/demo"], dir);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(dir, "demo", ".git"))).toBe(true);
+    expect(git(join(dir, "demo"), "remote", "get-url", "origin")).toBe(
+      join(home, "origins", "volley-sim", "demo.git"),
+    );
+    expect(gh(["repo", "clone", "volley-sim/demo", join(dir, "elsewhere", "d")], dir).code).toBe(0);
+    expect(existsSync(join(dir, "elsewhere", "d", ".git"))).toBe(true);
+    // The clone is the repository the world knows.
+    const view = gh(["repo", "view", "--json", "nameWithOwner"], join(dir, "demo"));
+    expect(json(view).nameWithOwner).toBe("volley-sim/demo");
+  });
+
+  it("an unknown slug fails as GitHub does", () => {
+    const dir = tempDir("volley-sim-gh-clone-");
+    const r = gh(["repo", "clone", "volley-sim/nosuch"], dir);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe(
+      "GraphQL: Could not resolve to a Repository with the name 'volley-sim/nosuch'. (repository)\n",
+    );
+    expect(existsSync(join(dir, "nosuch"))).toBe(false);
+  });
+
+  it("with VOLLEY_SIM_ORIGINS=<dir> both `repo create` and `repo clone` use it", () => {
+    const dir = tempDir("volley-sim-gh-origins-");
+    const origins = join(dir, "shared-origins");
+    const env = { VOLLEY_SIM_ORIGINS: origins };
+    expect(gh(["repo", "create", "volley-sim/shared", "--private"], dir, env).code).toBe(0);
+    expect(existsSync(join(origins, "volley-sim", "shared.git", "HEAD"))).toBe(true);
+    expect(existsSync(join(home, "origins"))).toBe(false);
+    // Another machine's world (a fresh home) sharing the origins clones it.
+    const other = join(dir, "other-sim");
+    const r = runGh(["repo", "clone", "volley-sim/shared"], {
+      cwd: dir,
+      env: { VOLLEY_SIM_HOME: other, VOLLEY_SIMULATED: "1", ...env },
+    });
+    expect(r.code).toBe(0);
+    expect(git(join(dir, "shared"), "remote", "get-url", "origin")).toBe(
+      join(origins, "volley-sim", "shared.git"),
+    );
+  });
+
+  it("`volley sim env` carries VOLLEY_SIM_ORIGINS and VOLLEY_SIM_WORKFLOWS on when set", () => {
+    const plain = simEnvLine("/path/to/sim", "/path/to/bin");
+    expect(plain).toBe(
+      `export PATH='/path/to/bin':"$PATH" VOLLEY_SIM_HOME='/path/to/sim' VOLLEY_SIMULATED=1`,
+    );
+    expect(
+      simEnvLine("/path/to/sim", "/path/to/bin", {
+        VOLLEY_SIM_ORIGINS: "volley@10.0.0.1:/path/to/origins",
+        VOLLEY_SIM_WORKFLOWS: "0",
+      }),
+    ).toBe(
+      `${plain} VOLLEY_SIM_ORIGINS='volley@10.0.0.1:/path/to/origins' VOLLEY_SIM_WORKFLOWS='0'`,
+    );
+    expect(simEnvLine("/path/to/sim", "/path/to/bin", { VOLLEY_SIM_ORIGINS: "" })).toBe(plain);
+  });
+});
+
+describe("VOLLEY_SIM_WORKFLOWS (a repository with no CI, #602)", () => {
+  const off = { VOLLEY_SIM_WORKFLOWS: "0" };
+
+  it("=0: `actions/workflows` is empty, and no run is created on a push or listed", () => {
+    expect(
+      json(gh(["api", "repos/{owner}/{repo}/actions/workflows?per_page=100"], work, off)),
+    ).toEqual({
+      total_count: 0,
+      workflows: [],
+    });
+    const head = pushBranch(work, "feat/noci", "noci.txt");
+    const r = gh(
+      ["pr", "create", "--title", "feat: noci", "--body", "b", "--base", "main"],
+      work,
+      off,
+    );
+    expect(r.code).toBe(0);
+    expect(json(gh(["run", "list", "--commit", head, "--json", "databaseId"], work, off))).toEqual(
+      [],
+    );
+    expect(
+      json(gh(["run", "list", "--branch", "feat/noci", "--json", "databaseId"], work, off)),
+    ).toEqual([]);
+    expect(
+      json(gh(["api", `repos/{owner}/{repo}/actions/runs?head_sha=${head}`], work, off)),
+    ).toEqual({ total_count: 0, workflow_runs: [] });
+    expect(json(gh(["pr", "checks", "feat/noci", "--json", "name"], work, off))).toEqual([]);
+    expect(readWorld(home).runs).toEqual([]);
+  });
+
+  it("unset or =1: one active workflow and a green run, as before (#602's pin)", () => {
+    for (const env of [{}, { VOLLEY_SIM_WORKFLOWS: "1" }]) {
+      const w = json(gh(["api", "repos/{owner}/{repo}/actions/workflows?per_page=100"], work, env));
+      expect(w.total_count).toBe(1);
+      expect(w.workflows.map((x: { state: string }) => x.state)).toEqual(["active"]);
+    }
+    const head = pushBranch(work, "feat/ci", "ci.txt");
+    const runs = json(gh(["run", "list", "--commit", head, "--json", "databaseId,conclusion"]));
+    expect(runs).toHaveLength(1);
+    expect(runs[0].conclusion).toBe("success");
   });
 });
 

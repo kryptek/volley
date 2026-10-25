@@ -3046,7 +3046,16 @@ hosts:
 tasks:
   T1: { issue: 102, host: box }
   T2: { issue: 103, host: { type: ssh, name: box, tunnel: { remote_port: 2883 } } }
+  T3: { issue: 104, host: macbook-pro }   # the supervisor's own machine, by its name
 ```
+
+A task's `host:` (and `placement_prefer` / `placement_avoid`) may also name the supervisor's own
+machine by the name it publishes everywhere (`fleet.local_name`, else derived from the host name:
+`MacBook-Pro.local` → `macbook-pro`): it is the same as `host: local`. Any other name that is
+neither `local`, `auto`, a `hosts` entry nor an inline host is refused at submit (and by
+`volleyd validate` when `config.yaml` exists), with the names it knows: `tasks.T1.host: unknown
+host "mac": this machine is macbook-pro; paired: box`. `volleyd validate`'s placement line prints
+both names, so there is somewhere to read them from before writing the file.
 
 #### Repositories
 
@@ -3633,6 +3642,16 @@ the mailbox); `volley repo` sends them.
   nothing is journaled and no config changes (the Desk's Add repository sheet checks a path with it).
 - Readiness judges every repository assigned to a machine (not only the running waves'), and a
   `repo_add` run's `cloning` / `blocked` stands in its verdict until the run that settles it.
+- On a paired machine, readiness also checks the path a spawn would use (#608): the clone
+  `remoteHost` resolves from config and the machine's record (`cloneFacts`, the one place both
+  read). A `ready` clone the record reports elsewhere is `blocked` (`the supervisor would spawn in
+  <path> but box reports its clone at <path>`); and with each PATH probe (every
+  `path_probe_interval_ms`, at once when a spawn path changes) the supervisor runs `probeClone` at
+  every wanted repository's spawn path, so a clone missing there (`no clone at <path> on box`) or a
+  clone of another repository (`<path> on box is a clone of <owner/name>`) is `blocked` too. A probe
+  that fails over ssh changes nothing (the machine's PATH probe reason says so). A spawn that found
+  no clone (`REMOTE_REPO_MISSING`) blocks that repository there with its message until a probe
+  finds the clone at that path.
 
 ---
 
@@ -3649,13 +3668,13 @@ machine, a `hosts.<name>`, is configured, and `local` while none is: an owner wh
 machine has it used, and `placement: local` (or `volleyd config set placement.default local`)
 keeps a wave here. volleyd decides it when the wave is first submitted, and the journaled wave
 keeps the hosts it got: a later plan version without `placement:` keeps the wave's placement, so
-pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome:
+pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome, naming this machine and the paired ones (without a `config.yaml`, `validate` knows neither and prints `placement: auto (wave file)` and the like):
 
 ```text
-placement: auto (placement.default; 1 paired machine)
-placement: local (no paired machine)
-placement: local (placement.default)
-placement: auto (wave file)
+placement: auto (placement.default; this machine macbook-pro, 1 paired: box-a)
+placement: local (no paired machine; this machine macbook-pro)
+placement: local (placement.default; this machine macbook-pro, 1 paired: box-a)
+placement: auto (wave file; this machine macbook-pro, 1 paired: box-a)
 ```
 
 **Overloaded while a peer idles.** A running `placement: local` wave on a supervisor whose own
@@ -3680,6 +3699,16 @@ rename), and the reducer folds it into the wave state's `tasks[].placement` and 
 (`tasks[].host`, absent for its own machine). Under `placement: auto`, a task that names its host is journaled `by: "wave_file"`,
 unscored, with that one candidate. `volleyd spawn` refuses a task that is still `auto` (it is
 placed when admitted).
+
+**Falling back off a machine without the clone.** A spawn on a paired machine that finds no clone
+where it runs (`REMOTE_REPO_MISSING`) blocks that repository in the machine's readiness. When
+volleyd chose the machine (`by` `auto`, `decision` or an earlier `fallback`), the task is placed
+again with that machine excluded: `spawn_failed` is journaled, then `task_placed { by: "fallback",
+from: "box-a", why: "no clone at … on dev@box-a" }`, no decision opens, and the next tick spawns it
+where it now is (`volleyd status` shows `on <host> (fallback, …)` and the `why`). With no other
+machine eligible, or a host the wave file named (`by: "wave_file"`), `remote_repo_missing` opens as
+before; in the first case its question ends `; no other machine can take it now (<why>)?`. The
+`placement.by` values are `auto`, `wave_file`, `decision` (an owner's answer) and `fallback`.
 
 **Switching a running wave to placement.** A task that has spawned keeps the host it runs on: a
 plan version that writes another `host:` for it (say `placement: auto` on an in-flight wave) never

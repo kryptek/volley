@@ -170,14 +170,17 @@ describe("volleyd validate: the release branch", () => {
     writeFileSync(join(home, "config.yaml"), "require_fresh_base: false\n");
     const alone = await runCli(["validate", waveFile(repo)], env);
     expect(alone.exitCode).toBe(0);
-    expect(alone.stdout).toContain("placement: local (no paired machine)\n");
+    const me = localMachineName(null);
+    expect(alone.stdout).toContain(`placement: local (no paired machine; this machine ${me})\n`);
     writeFileSync(
       join(home, "config.yaml"),
       "require_fresh_base: false\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
     );
     const paired = await runCli(["validate", waveFile(repo)], env);
     expect(paired.exitCode).toBe(0);
-    expect(paired.stdout).toContain("placement: auto (placement.default; 1 paired machine)\n");
+    expect(paired.stdout).toContain(
+      `placement: auto (placement.default; this machine ${me}, 1 paired: box-a)\n`,
+    );
     // It places, so the preview is attempted (no supervisor here: it says so).
     expect(paired.stdout).toContain("placement preview unavailable");
     writeFileSync(
@@ -185,7 +188,30 @@ describe("volleyd validate: the release branch", () => {
       "require_fresh_base: false\nplacement: { default: local }\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
     );
     const pinned = await runCli(["validate", waveFile(repo)], env);
-    expect(pinned.stdout).toContain("placement: local (placement.default)\n");
+    expect(pinned.stdout).toContain(
+      `placement: local (placement.default; this machine ${me}, 1 paired: box-a)\n`,
+    );
+  });
+
+  it("a task's host: may name this machine; an unknown name is refused with the names (#608)", async () => {
+    git(repo, "branch", "release/x");
+    const home = join(dir, "home-names");
+    mkdirSync(home);
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nfleet: { local_name: null }\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
+    );
+    const me = localMachineName(null);
+    const own = await runCli(["validate", waveFile(repo, `{ issue: 1, host: ${me} }`)], env);
+    expect(own.stderr).toBe("");
+    expect(own.exitCode).toBe(0);
+    expect(own.stdout).toContain(`this machine ${me}, 1 paired: box-a)\n`);
+    const typo = await runCli(["validate", waveFile(repo, "{ issue: 1, host: mac }")], env);
+    expect(typo.exitCode).not.toBe(0);
+    expect(typo.stderr).toContain(
+      `tasks.T1.host: unknown host "mac": this machine is ${me}; paired: box-a`,
+    );
   });
 
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {

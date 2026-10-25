@@ -37,7 +37,7 @@ export async function sim(args: SimArgs): Promise<ExitCode> {
   }
   const home = simHome(args.env);
   if (verb === "env") {
-    args.io.stdout(`${simEnvLine(home)}\n`);
+    args.io.stdout(`${simEnvLine(home, undefined, args.env)}\n`);
     return EXIT.OK;
   }
   const removed = resetWorld(home);

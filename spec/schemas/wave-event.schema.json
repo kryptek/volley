@@ -440,6 +440,9 @@
                         "$ref": "wave-state.schema.json#/$defs/hostName",
                         "description": "The host the task was placed on before, when it is re-placed."
                       },
+                      "why": {
+                        "$ref": "wave-state.schema.json#/$defs/placement/properties/why"
+                      },
                       "local": {
                         "const": true,
                         "description": "The supervisor's own machine (its agents' tasks[].host stays absent); absent for a peer."

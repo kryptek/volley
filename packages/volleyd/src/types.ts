@@ -637,7 +637,9 @@ export interface TaskState {
 export interface TaskPlacement {
   /** A machine name: the supervisor's own under its `fleet.local_name`. */
   host: string;
-  by: "auto" | "wave_file" | "decision";
+  by: "auto" | "wave_file" | "decision" | "fallback";
+  /** Why it was moved (`fallback`): what the machine it left said. */
+  why?: string;
   score: number | null;
   decided_at: string;
   candidates: { host: string; score: number | null; line: string }[];

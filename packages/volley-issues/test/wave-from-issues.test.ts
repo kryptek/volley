@@ -266,6 +266,27 @@ describe("waveFromIssues", () => {
     expect(volleydValidate(local).code).toBe(0);
   });
 
+  it("--placement <machine> pins every task to that machine and writes no placement: (#608)", () => {
+    for (const host of ["box-a", "macbook-pro"]) {
+      const yaml = waveFromIssues(THREE, { ...OPTS, placement: { host } }).yaml;
+      expect(yaml).not.toContain("placement:");
+      const hosts = yaml.split("\n").filter((l) => l.startsWith("    host: "));
+      expect(hosts).toEqual(THREE.map(() => `    host: "${host}"`));
+    }
+    const pinned = waveFromIssues(THREE, { ...OPTS, placement: { host: "box-a" } }).yaml;
+    const defaults = {
+      default: "auto" as const,
+      paired: 1,
+      pairedNames: ["box-a"],
+      local: "macbook-pro",
+    };
+    const wave = parseWaveFile(pinned, undefined, defaults);
+    expect(Object.values(wave.tasks).map((t) => t.host)).toEqual(["box-a", "box-a", "box-a"]);
+    const own = waveFromIssues(THREE, { ...OPTS, placement: { host: "macbook-pro" } }).yaml;
+    const local = parseWaveFile(own, undefined, defaults);
+    expect(Object.values(local.tasks).map((t) => t.host)).toEqual(["local", "local", "local"]);
+  });
+
   it("rejects an invalid wave id before emitting anything", () => {
     expect(() => waveFromIssues(THREE, { ...OPTS, wave: "Bad Wave" })).toThrow(/wave id/);
   });
@@ -506,6 +527,35 @@ describe("wave-from-issues CLI", () => {
     expect(spawnSync("bun", [VOLLEYD_CLI, "validate", out], { encoding: "utf-8" }).status).toBe(0);
   });
 
+  it("--placement <machine> says the name is checked by volleyd validate (#608)", () => {
+    const input = join(tmp(), "pinned.json");
+    writeFileSync(input, JSON.stringify(THREE));
+    const r = spawnSync(
+      "bun",
+      [
+        HELPER_CLI,
+        input,
+        "--wave",
+        OPTS.wave,
+        "--repo",
+        OPTS.repo,
+        "--release-branch",
+        OPTS.releaseBranch,
+        "--model",
+        OPTS.model,
+        "--placement",
+        "box-a",
+      ],
+      { encoding: "utf-8", env: noCoordinator },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('    host: "box-a"\n');
+    expect(r.stdout).not.toContain("placement:");
+    expect(r.stderr).toContain(
+      "placement: every task pinned to box-a; volleyd validate checks the name\n",
+    );
+  });
+
   it("prints the submit line with the coordinator's name as the owner", () => {
     const input = join(tmp(), "owner.json");
     writeFileSync(input, JSON.stringify(THREE));
@@ -539,7 +589,8 @@ describe("wave-from-issues CLI", () => {
       ["--merge", "yes"],
       ["--autopilot", "true"],
       ["--branch-update", "squash"],
-      ["--placement", "elsewhere"],
+      ["--placement", "Bad Name"],
+      ["--placement", "local,auto"],
     ] as const) {
       const r = spawnSync(
         "bun",

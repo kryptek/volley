@@ -3,9 +3,10 @@ import { derivedMaxAgents } from "volley-cli/peer/machine";
 import type { Sharing } from "./claude/sharing";
 import { REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { PATH_PROBE_TOOLS } from "./fence";
+import type { CloneProbe } from "./hosts/ssh-tmux";
 import { type MachineRecord, type MachineRepo, machineTopic } from "./machines";
 import { type FilterOptions, type MachineView, localRole, machineIneligible } from "./placement";
-import { originToSlug, sameSlug } from "./repos";
+import { originToSlug, sameSlug, trimPath } from "./repos";
 import type { LocalAgentsMode } from "./types";
 
 /**
@@ -73,6 +74,10 @@ export interface ReadinessInput {
    * that failed there (`blocked`, its why), by slug, which stands until its next run (SPEC §4.6.21).
    * `unassigned`: repositories config assigns only to other machines, `blocked` here whatever
    * clone the machine holds (the supervisor's own checkout of a wave's repository, #439).
+   * A peer's `spawn`: the path the supervisor would spawn each repository's agents in (`cloneFor`
+   * with the facts its spawn uses); a ready clone reported elsewhere is `blocked` (#608).
+   * `probed`: what the supervisor's own probe found at that path (`at`: when, epoch ms); a
+   * missing clone, or another repository's, is `blocked`. Neither applies to the own machine.
    */
   repos: {
     wanted: string[];
@@ -80,6 +85,8 @@ export interface ReadinessInput {
     legacy?: MachineRecord["repo"];
     runs?: Record<string, { state: "cloning" | "blocked"; reasons: string[]; path?: string }>;
     unassigned?: string[];
+    spawn?: Record<string, string>;
+    probed?: Record<string, CloneProbe & { at?: number }>;
   };
   /** The last PATH probe; null: not probed yet. */
   probe: PathProbe | null;
@@ -248,7 +255,8 @@ function repoVerdict(
  * without an origin yet serves every wanted slug, as placement resolves its clone.
  */
 function repoVerdicts(
-  i: Pick<ReadinessInput, "name" | "record" | "repos">,
+  i: Pick<ReadinessInput, "name" | "record" | "repos"> &
+    Partial<Pick<ReadinessInput, "local" | "checkedAt">>,
 ): Record<string, RepoVerdict> {
   const checks = i.record?.checks;
   const out: Record<string, RepoVerdict> = {};
@@ -275,6 +283,7 @@ function repoVerdicts(
         ? repoVerdict(s, legacy, legacyChecks)
         : { state: "absent", reasons: [`no clone of ${s} on ${i.name}`] };
   }
+  if (i.local !== true) spawnPathCheck(i, out);
   // A repo_add's run there says more than the record (until the run that brings it in).
   for (const [s, run] of Object.entries(i.repos.runs ?? {})) {
     const k = Object.keys(out).find((o) => sameSlug(o, s)) ?? s;
@@ -300,6 +309,42 @@ function repoVerdicts(
       .slice(0, REPOS_MAX)
       .map(([k, v]) => [k, { ...v, reasons: v.reasons.slice(0, REASONS_MAX).map(line) }]),
   );
+}
+
+/**
+ * A peer's ready repositories against the path the supervisor would spawn in (#608): reported
+ * elsewhere, or probed there and found missing or another repository's, they are `blocked`, the
+ * reported path kept. A probe that could not run is left out by the caller: the machine-level PATH
+ * probe reason says so once.
+ */
+function spawnPathCheck(
+  i: Pick<ReadinessInput, "name" | "repos"> & Partial<Pick<ReadinessInput, "checkedAt">>,
+  out: Record<string, RepoVerdict>,
+): void {
+  const of = <T>(m: Record<string, T> | undefined, k: string): T | undefined =>
+    Object.entries(m ?? {}).find(([s]) => sameSlug(s, k))?.[1];
+  for (const [k, v] of Object.entries(out)) {
+    if (v.state !== "ready") continue;
+    const spawn = of(i.repos.spawn, k);
+    if (spawn === undefined) continue;
+    const block = (why: string) => {
+      out[k] = { ...v, state: "blocked", reasons: [why] };
+    };
+    if (v.path !== undefined && trimPath(v.path) !== trimPath(spawn)) {
+      block(`the supervisor would spawn in ${spawn} but ${i.name} reports its clone at ${v.path}`);
+      continue;
+    }
+    const p = of(i.repos.probed, k);
+    if (p === undefined) continue;
+    const ago =
+      p.at !== undefined && i.checkedAt !== undefined
+        ? ` (probed ${Math.max(0, Math.round((i.checkedAt.getTime() - p.at) / 1000))} s ago)`
+        : "";
+    if (p.state === "missing" || p.state === "not_git")
+      block(`no clone at ${spawn} on ${i.name}${ago}`);
+    else if (p.state === "found" && p.slug !== undefined && !sameSlug(p.slug, k))
+      block(`${spawn} on ${i.name} is a clone of ${p.slug}`);
+  }
 }
 
 /** The blockers, in the order a person fixes them. */
@@ -438,10 +483,13 @@ export function parsePathProbe(stdout: string): PathProbe {
 }
 
 /**
- * A verdict without `checked_at`, nor the live seconds of a peer that may be back (`down 40 s`):
+ * A verdict without `checked_at`, nor the live seconds of a peer that may be back (`down 40 s`)
+ * or of a clone probe (`probed 40 s ago`):
  * what decides whether a re-publish carries news.
  */
 export function readinessKey(p: ReadinessPayload): string {
   const { checked_at: _at, ...rest } = p;
-  return JSON.stringify(rest).replace(/may be back \(down \d+ s,/g, "may be back (down _ s,");
+  return JSON.stringify(rest)
+    .replace(/may be back \(down \d+ s,/g, "may be back (down _ s,")
+    .replace(/\(probed \d+ s ago\)/g, "(probed _ s ago)");
 }

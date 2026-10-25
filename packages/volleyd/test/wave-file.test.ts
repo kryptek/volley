@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { explain } from "../src/overlap-plan";
+import type { PathError } from "../src/schemas";
 import {
+  type PlacementDefaults,
   WaveFileError,
   defaultPlacement,
   filePlan,
@@ -403,7 +405,7 @@ describe("placement (SPEC §4.6.15)", () => {
     const line = (
       raw: { placement?: "auto" | "local" },
       d: { default: "auto" | "local"; paired: number },
-    ) => formatPlacement(defaultPlacement(raw, d), d.paired);
+    ) => formatPlacement(defaultPlacement(raw, d), d);
     expect(line({}, { default: "auto", paired: 1 })).toBe(
       "placement: auto (placement.default; 1 paired machine)",
     );
@@ -415,6 +417,87 @@ describe("placement (SPEC §4.6.15)", () => {
     expect(line({ placement: "local" }, { default: "auto", paired: 1 })).toBe(
       "placement: local (wave file)",
     );
+  });
+
+  it("names this machine and the paired ones on the placement line (#608)", () => {
+    const named = { pairedNames: ["box-a"], local: "macbook-pro" };
+    const line = (
+      raw: { placement?: "auto" | "local" },
+      d: { default: "auto" | "local"; paired: number; pairedNames: string[]; local: string },
+    ) => formatPlacement(defaultPlacement(raw, d), d);
+    expect(line({}, { default: "auto", paired: 1, ...named })).toBe(
+      "placement: auto (placement.default; this machine macbook-pro, 1 paired: box-a)",
+    );
+    expect(line({}, { default: "auto", paired: 0, pairedNames: [], local: "macbook-pro" })).toBe(
+      "placement: local (no paired machine; this machine macbook-pro)",
+    );
+    expect(line({ placement: "auto" }, { default: "auto", paired: 1, ...named })).toBe(
+      "placement: auto (wave file; this machine macbook-pro, 1 paired: box-a)",
+    );
+    expect(
+      line({}, { default: "auto", paired: 2, pairedNames: ["box-a", "box-b"], local: "mac" }),
+    ).toBe("placement: auto (placement.default; this machine mac, 2 paired: box-a, box-b)");
+  });
+
+  describe("a host named by machine (#608)", () => {
+    const D = {
+      default: "auto" as const,
+      paired: 1,
+      pairedNames: ["box-a"],
+      local: "macbook-pro",
+    };
+    const host = (h: string) => `${HEADER}tasks:\n  T1:\n    issue: 1\n    host: ${h}\n`;
+    const refused = (text: string, d: PlacementDefaults = D): PathError[] => {
+      try {
+        parseWaveFile(text, undefined, d);
+      } catch (e) {
+        expect(e).toBeInstanceOf(WaveFileError);
+        return (e as WaveFileError).errors;
+      }
+      throw new Error("expected a WaveFileError");
+    };
+
+    it("the own machine's name is the local token; a paired name stays", () => {
+      expect(parseWaveFile(host("macbook-pro"), undefined, D).tasks.T1?.host).toBe("local");
+      expect(parseWaveFile(host("box-a"), undefined, D).tasks.T1?.host).toBe("box-a");
+      expect(parseWaveFile(host("local"), undefined, D).tasks.T1?.host).toBe("local");
+      expect(parseWaveFile(host("auto"), undefined, D).tasks.T1?.host).toBe("auto");
+    });
+
+    it("an unknown name is refused with this machine's and the paired machines' names", () => {
+      expect(refused(host("mac"))).toEqual([
+        {
+          path: "tasks.T1.host",
+          reason: 'unknown host "mac": this machine is macbook-pro; paired: box-a',
+        },
+      ]);
+      expect(refused(host("mac"), { ...D, paired: 0, pairedNames: [] })[0]?.reason).toBe(
+        'unknown host "mac": this machine is macbook-pro; no paired machine',
+      );
+      expect(refused(`${HEADER}placement_prefer: [mac]\n${TASKS}`)).toEqual([
+        {
+          path: "placement_prefer[0]",
+          reason: 'unknown host "mac": this machine is macbook-pro; paired: box-a',
+        },
+      ]);
+      expect(refused(`${HEADER}placement_avoid: [box-a, nope]\n${TASKS}`)[0]?.path).toBe(
+        "placement_avoid[1]",
+      );
+    });
+
+    it("prefer/avoid take this machine's name; an inline host is still accepted", () => {
+      const w = parseWaveFile(`${HEADER}placement_prefer: [macbook-pro]\n${TASKS}`, undefined, D);
+      expect(w.placement_prefer).toEqual(["macbook-pro"]);
+      const inline = `${HEADER}tasks:\n  T1:\n    issue: 1\n    host: { type: ssh, target: dev@x, repo: /r, volley_dir: /opt/v }\n`;
+      expect(parseWaveFile(inline, undefined, D).tasks.T1?.host).toBe("dev@x");
+    });
+
+    it("without the names (an old caller) no name is checked", () => {
+      expect(
+        parseWaveFile(host("build-box.lan"), undefined, { default: "auto", paired: 1 }).tasks.T1
+          ?.host,
+      ).toBe("build-box.lan");
+    });
   });
 
   it("placement: elsewhere is refused with a path-qualified error", () => {

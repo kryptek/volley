@@ -617,8 +617,14 @@
           "description": "The machine the task runs on; the supervisor's own machine under its fleet.local_name."
         },
         "by": {
-          "enum": ["auto", "wave_file", "decision"],
-          "description": "auto: the placement engine chose. wave_file: the wave file named the host. decision: an answered decision (machine_down, a respawn) moved it."
+          "enum": ["auto", "wave_file", "decision", "fallback"],
+          "description": "auto: the placement engine chose. wave_file: the wave file named the host. decision: an answered decision (machine_down, a respawn) moved it. fallback: the supervisor moved it off a machine that could not spawn it."
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Why it was moved (by fallback): what the machine it left said."
         },
         "score": {
           "oneOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }],

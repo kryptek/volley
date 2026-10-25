@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { LOCK_MARKER, recordInstall } from "../peer/doctor";
 import { deskStamp, readBundleVersion, writeDeskStamp } from "../setup/desk-build";
 import { deskEnvLeaks } from "../setup/services";
 import type { SetupExec } from "../setup/step";
@@ -8,6 +9,7 @@ import {
   type Command,
   type PlanContext,
   type PlanStep,
+  RECORD_LOCK_ARGV,
   type Ref,
   TAG_RE,
   deployPlan,
@@ -148,6 +150,14 @@ async function runStep(
       if (v !== version.cli) return `volley --version is ${v || "empty"}, not ${version.cli}`;
     }
   }
+  if (step.id === "install") {
+    // As paired machines do (RECORD_LOCK_ARGV): or the supervisor's doctor reads the install stale.
+    try {
+      recordInstall(ctx.repo);
+    } catch (e) {
+      return `could not record node_modules/${LOCK_MARKER}: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
   if (step.id === "build") {
     if (!existsSync(join(dist, "index.html")))
       return `the build wrote no ${join(dist, "index.html")}`;
@@ -272,7 +282,13 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
       ...failure(backFailed),
       byHand: backSteps
         .filter((s) => s.id !== "self-check" && s.id !== "health")
-        .flatMap((s) => s.commands.map(shell)),
+        .flatMap((s) => {
+          const lines = s.commands.map(shell);
+          // The deploy records the marker in-process; by hand it is RECORD_LOCK_ARGV.
+          if (s.id === "install")
+            lines.push(shell({ argv: [...RECORD_LOCK_ARGV], cwd: back.repo }));
+          return lines;
+        }),
     },
   });
 }

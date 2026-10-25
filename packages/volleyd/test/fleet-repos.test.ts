@@ -276,12 +276,52 @@ describe("two repositories on a supervisor and one paired box (#439)", () => {
   });
 });
 
+describe("one spawn path for readiness and the spawn (#608)", () => {
+  it("adopting a/a on the box at another path moves the verdict and the spawn together", async () => {
+    await setup();
+    await addBoth([clone(A, BOX_A), clone(B, BOX_B)]);
+    expect(await repoState(PEER, A)).toBe("ready");
+    const mine = "/srv/mine-a";
+    f.exec.on(["git", "-C", mine, "rev-parse", "--show-toplevel"], { stdout: `${mine}\n` });
+    // Config adopts a/a there; the box still reports its managed clone: the two disagree.
+    theBox().answers.doctor = report([clone(A, BOX_A), clone(B, BOX_B)]);
+    await f.adminOp({ op: "repo_add", slug: A, machines: [PEER], paths: { [PEER]: mine } });
+    await f.beat({ repos: [clone(A, BOX_A), clone(B, BOX_B)] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await f.verdict(PEER))?.repos[A]?.reasons[0]?.startsWith("the supervisor") === true;
+    });
+    expect((await f.verdict(PEER))?.repos[A]).toMatchObject({
+      state: "blocked",
+      path: BOX_A,
+      reasons: [`the supervisor would spawn in ${mine} but ${PEER} reports its clone at ${BOX_A}`],
+    });
+    // The box reports the adopted clone: ready, and its spawn runs there.
+    await f.beat({ repos: [{ ...clone(A, mine), managed: false }, clone(B, BOX_B)] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER, A)) === "ready";
+    });
+    expect((await f.verdict(PEER))?.repos[A]?.path).toBe(mine);
+    await f.submit("wa", "", `  T1: { issue: 42, host: ${PEER} }\n`, undefined, A);
+    expect(await spawned("wa")).toBe(PEER);
+    const ev = f.journal("wa").find((e) => e.type === "agent_spawned");
+    expect((ev?.data.remote as { repo?: string } | undefined)?.repo).toBe(mine);
+  });
+});
+
 describe("a legacy hosts.box.repo (D10) and a local → auto resubmit (D11)", () => {
   it("migrates when the box's record reports its origin, and the first wave still spawns there", async () => {
     await setup({ legacy: true });
     expect((await f.client.request("config_get", { path: `hosts.${PEER}.repo` })).result).toBe(
       f.repo,
     );
+    // The box's clone there is b/b's, as its record says (readiness probes it, #608).
+    theBox().answers.clone = (path) => ({
+      state: "found",
+      root: path,
+      slug: path === f.repo ? B : A,
+    });
     await f.beat({ repo: { path: f.repo, exists: true, origin: `github.com/${B}` } });
     await eventually(async () => {
       await f.tick(0);

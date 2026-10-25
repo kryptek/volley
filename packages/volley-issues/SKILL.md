@@ -137,6 +137,7 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   [--satisfied 5,6] [--namespace <ns>] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
   --merge auto --autopilot on --branch-update merge \
+  [--placement local|auto|<machine>] \
   --out .volley/waves/$WAVE.yaml
 ```
 
@@ -150,7 +151,7 @@ The three autopilot settings, written into the wave file:
 
 The helper writes no MCP setting. When the repository's agents need some of the user's own MCP servers (a migration counter, say), add `agent_mcp: inherit` and `agent_mcp_allow: [<server name>, …]` to the wave file's `config:` by hand: each agent then starts volleyd's `volley` plus only the named servers, not every server in the profile. Without the list `inherit` starts them all; a name volleyd finds nowhere is skipped and journaled once (`agent_mcp_allow_missing`).
 
-`--placement local|auto` pins where the wave's tasks run (`placement:`); left out, the supervisor's `placement.default` decides (`auto` once a machine is paired, so the tasks spread onto it), and `volleyd validate` prints which.
+`--placement local|auto` pins where the wave's tasks run (`placement:`); left out, the supervisor's `placement.default` decides (`auto` once a machine is paired, so the tasks spread onto it), and `volleyd validate` prints which. `--placement <machine>` pins every task to one machine instead (`host: <machine>` on each task, no `placement:`): this machine by its name, or a paired machine by its `hosts` name. `volleyd validate`'s placement line names them (`placement: auto (placement.default; this machine <name>, 1 paired: <box>)`), and it refuses a name it does not know, listing the ones it does; the helper checks nothing about the name.
 
 Before the submit lines the helper prints the overlap plan it wrote into the file (a `cluster …` line per group of issues sharing source files, the independent tasks, the expected branch updates) and a `footprints: …` line; bundled issues become one task with `issues:`, and a chained one gets an `after:` marked `# chained by the planner`. `--plan-only` prints just those lines and writes nothing, to look before writing. `--no-plan` writes the footprints without bundling or chaining anything, when the user wants one task per issue. What each line means and how to plan differently is in **Planning a batch** (above); show the user the plan with the generated file.
 
@@ -163,7 +164,7 @@ owner: coord-main (VOLLEY_COORDINATOR)
 
 `owner: VOLLEY_COORDINATOR is unset: …` means this shell has no coordinator name: export it (Prerequisites step 2) before Step 4.
 
-The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array, or a `--merge`, `--autopilot`, `--branch-update` or `--placement` value it does not know). Show the user the generated file.
+The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array, or a `--merge`, `--autopilot` or `--branch-update` value it does not know, or a `--placement` that is neither `local`, `auto` nor a machine name). Show the user the generated file.
 
 **The brief preface: public-repo hygiene rules go here.** The wave file carries `brief_preface: ".volley/brief-preface.md"` (`--brief-preface <path>` names another file, relative to the repo or absolute). volleyd puts that file, byte for byte, at the top of **every** brief it writes — implementer, both reviewers, fixup, rebase — above the role's own template. It is the only way to give volleyd-spawned agents the rules you would otherwise put in a hand-written brief, so rules like "this repository is public: no person names, no local usernames, no machine paths, no private hostnames or IPs" belong in it. When the repo is on this machine and the file does not exist, the helper writes it from `templates/brief-preface.md` and says so on stderr (`wrote <path> from the template`); an existing preface is never changed (`brief preface: <path> (kept)`). Show it to the user and add the repository's own rules under its `## Repository rules` heading:
 

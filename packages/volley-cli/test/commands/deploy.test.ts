@@ -118,6 +118,9 @@ describe("volley deploy --dry-run", () => {
     expect(out).toContain("target: v0.5.0");
     expect(out).toContain(`git -C ${m.f.repo} fetch --tags origin`);
     expect(out).toContain("launchctl kickstart -k gui/501/systems.volley.volleyd");
+    expect(out).toContain(
+      `       $ cd ${m.f.repo} && ${m.f.bun} install --frozen-lockfile\n       (then record the bun.lock it installed from in node_modules/.volley-lock-sha256)\n`,
+    );
     expect(out).toContain("dry run: nothing changed");
     // A dry run never fetches.
     expect(m.f.lines()).toEqual([
