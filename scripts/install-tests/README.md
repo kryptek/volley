@@ -124,7 +124,8 @@ one), set up, and check: launchd has `systems.volley.volleyd`
 and `systems.volley.desk`, the `volley-broker` keychain item exists (exit code only), the Desk
 answers `/version.json`, the hooks are in `~/.claude/settings.json`. Then stop the VM and boot it
 again (a guest reboot ends `tart run`), `--check` green within 2 minutes, the same checks again.
-Under `--no-lan` the `phone` row may be `skipped`, as on Layer 1's Mac.
+Under `--no-lan` the `phone` row may be `skipped`, as on Layer 1's Mac (and on Layers 2 and 4,
+whose VMs have a LAN address too).
 
 **Layer 4** (`vm-pair.sh`): two Ubuntu 24.04 VMs on multipass's private network. The hub is
 installed and set up; the peer gets this checkout as a peer install (`install.sh --peer`; `volley

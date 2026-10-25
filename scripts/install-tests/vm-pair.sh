@@ -144,5 +144,6 @@ stopped() {
 }
 poll 120 stopped || fail "volley-peer.service still runs on the peer after volley peer remove"
 
-summarize --total-ms $((t1 - t0))
+# --no-lan on a VM with a LAN address skips the phone step, as on Layer 3's Mac.
+summarize --total-ms $((t1 - t0)) --allow-skipped phone
 finish

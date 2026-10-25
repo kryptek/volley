@@ -362,6 +362,19 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(read(w, "summary.md")).toContain("services is pending");
   });
 
+  test("--no-lan on a VM with a LAN address: a skipped phone row passes, Layers 2 and 4", () => {
+    const skipped = readFileSync(join(FIXTURES, "check-phone-skipped.json"), "utf8");
+    for (const [script, args] of [
+      ["vm-linux.sh", ["ubuntu-24.04"]],
+      ["vm-pair.sh", []],
+    ] as const) {
+      const w = world();
+      const r = run(w, script, [...args], { rules: [["volley setup --check --json", 0, skipped]] });
+      expect(read(w, "summary.md")).toContain("skipped (allowed: phone)");
+      expect(r.out).not.toContain("a target was missed");
+    }
+  });
+
   test("a usage error exits 2 and touches nothing", () => {
     const w = world();
     const r = run(w, "vm-linux.sh", ["fedora-41"]);
