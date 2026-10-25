@@ -6,6 +6,7 @@ import {
   detectBrokerVersion,
   parseBrokerVersion,
   requireBrokerVersion,
+  snapListVersion,
 } from "../../src/auth/version";
 
 describe("parseBrokerVersion", () => {
@@ -16,6 +17,20 @@ describe("parseBrokerVersion", () => {
     ]);
     expect(parseBrokerVersion("2.1")).toEqual([2, 1, 0]);
     expect(parseBrokerVersion("no version here")).toBeNull();
+  });
+});
+
+describe("snapListVersion", () => {
+  it("reads the mosquitto snap's version from `snap list mosquitto` (its broker is a service: no /snap/bin/mosquitto)", () => {
+    const table = [
+      "Name       Version  Rev   Tracking       Publisher    Notes",
+      "mosquitto  2.1.2    1134  latest/stable  mosquitto**  -",
+    ].join("\n");
+    expect(snapListVersion(table)).toBe("2.1.2");
+    expect(snapListVersion("mosquitto  2.0.18  900  latest/stable  mosquitto**  -")).toBe("2.0.18");
+    expect(snapListVersion("error: no matching snaps installed")).toBeNull();
+    expect(snapListVersion("mosquitto-client  2.1.2  1  latest/stable  x  -")).toBeNull();
+    expect(snapListVersion("")).toBeNull();
   });
 });
 

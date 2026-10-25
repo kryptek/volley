@@ -244,6 +244,23 @@ describe("setup: broker", () => {
       expect(await p.verify?.()).toEqual(["mqtt://127.0.0.1:1883 still accepts anonymous clients"]);
     });
 
+    it("on the snap layout under sudo: the auth dir and admin.json go to the invoking user", async () => {
+      m.layout.name = "snap";
+      m.auth.invokingUser = () => ({ uid: 1234, gid: 5678, home: join(dir, "user-home") });
+      await applyAll(await planSecurity(m.ctx));
+      expect(m.auth.chowns).toContainEqual([m.layout.authDir, 1234, 5678]);
+      expect(m.auth.chowns).toContainEqual([join(m.layout.authDir, "admin.json"), 1234, 5678]);
+      expect(m.auth.chowns.map((c) => c[0])).not.toContain(m.layout.stateFile);
+    });
+
+    it("on the snap layout as root with no sudo user: the auth dir stays root's", async () => {
+      m.layout.name = "snap";
+      m.auth.invokingUser = () => "root";
+      await applyAll(await planSecurity(m.ctx));
+      expect(m.auth.chowns.map((c) => c[0])).not.toContain(m.layout.authDir);
+      expect(m.auth.chowns.map((c) => c[0])).not.toContain(join(m.layout.authDir, "admin.json"));
+    });
+
     it("waits for the restarted broker to take the admin login", async () => {
       let polls = 0;
       const restart = m.deps.exec;

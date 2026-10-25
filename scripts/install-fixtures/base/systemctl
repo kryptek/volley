@@ -1,5 +1,7 @@
 #!/bin/sh
 printf '%s\n' "systemctl $*" >>"$STUB_LOG"
+# STUB_SNAPD=active: snapd runs; =socket: socket-activated (a fresh cloud image), the service not yet.
 case "$*" in
+  *is-active*snapd.socket*) [ "${STUB_SNAPD:-}" = active ] || [ "${STUB_SNAPD:-}" = socket ] ;;
   *is-active*snapd*) [ "${STUB_SNAPD:-}" = active ] ;;
 esac

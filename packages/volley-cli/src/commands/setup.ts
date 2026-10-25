@@ -7,7 +7,13 @@ import { parseArgs } from "node:util";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
-import { type AuthContext, readCredentials, realAuthDeps, volleydHome } from "../auth/context";
+import {
+  type AuthContext,
+  handAuthDirOnExit,
+  readCredentials,
+  realAuthDeps,
+  volleydHome,
+} from "../auth/context";
 import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { askHidden } from "../hidden-input";
@@ -507,159 +513,166 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return checkExit(rows) === 0 ? EXIT.OK : EXIT.ERROR;
   }
 
-  const logFile = setupLogFile(ctx.volleydHome);
-  const journal = (step: StepName, event: string, summary?: string) =>
-    appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
+  const runSteps = async (): Promise<ExitCode> => {
+    const logFile = setupLogFile(ctx.volleydHome);
+    const journal = (step: StepName, event: string, summary?: string) =>
+      appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
-  io.stdout(
-    peer
-      ? `volley setup --peer: ${PEER_HEADER}\n`
-      : `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
-  );
-  const yes = ctx.yes;
-  // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
-  // the runs where its mode matters most) still records the mode it found, and replaces an
-  // earlier run's; and the terminal it put on record.
-  const metricsFile = setupMetricsFile(ctx.volleydHome);
-  let endStep: (changes: number) => void = () => {};
-  // The changes the current step applied before it stopped: what its metrics record.
-  let applied = 0;
-  const stopped = () => {
-    endStep(applied);
-    writeSetupMetrics(ctx, meter.done());
-    if (
-      !peer &&
-      (ctx.cmuxSocketMode !== undefined ||
-        ctx.terminal !== undefined ||
-        ctx.coordinator !== undefined)
-    ) {
-      writeSetupInstall(ctx, metricsFile);
-    }
-    return EXIT.ERROR;
-  };
-  const skipped: string[] = [];
-  for (const [name, planner] of steps) {
-    const i = ALL.findIndex(([n]) => n === name);
-    endStep = meter.begin(name);
-    applied = 0;
-    let plan: StepPlan;
-    try {
-      plan = await planner(ctx);
-    } catch (e) {
-      journal(name, "failed", e instanceof Error ? e.message : String(e));
-      io.stderr(`volley setup: ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
-      return stopped();
-    }
-    io.stdout(`\n[${i + 1}/${ALL.length}] ${plan.title}\n`);
-    for (const f of plan.found) io.stdout(`  · ${f}\n`);
-    if (plan.blocked !== undefined) {
-      journal(name, "blocked", plan.blocked.split("\n")[0]);
-      io.stdout(`  ✗ Blocked: ${plan.blocked}\n`);
-      return stopped();
-    }
-    if (plan.skipped !== undefined) {
-      journal(name, "skipped", plan.skipped);
-      io.stdout(`  – skipped: ${plan.skipped}\n`);
-      skipped.push(plan.title);
-      endStep(0);
-      continue;
-    }
-    if (plan.changes.length === 0) {
-      journal(name, "done");
-      io.stdout("  ✓ already done\n");
-      endStep(0);
-      continue;
-    }
-    journal(name, "planned", plan.changes.map((c) => c.summary).join("; "));
-    io.stdout("  Changes:\n");
-    for (const c of plan.changes) {
-      io.stdout(`    → ${c.summary}\n`);
-      if (c.detail !== undefined && c.detail !== "") io.stdout(`${indent(c.detail)}\n`);
-    }
-    const n = plan.changes.length;
-    const question = `Apply ${n === 1 ? "this change" : `these ${n} changes`} (${plan.title})?`;
-    if (!yes && plan.confirmed !== true && !(await deps.confirm(question))) {
-      journal(name, "declined");
-      io.stdout(
-        `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
-      );
-      return stopped();
-    }
-    for (const c of plan.changes) {
+    io.stdout(
+      peer
+        ? `volley setup --peer: ${PEER_HEADER}\n`
+        : `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
+    );
+    const yes = ctx.yes;
+    // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
+    // the runs where its mode matters most) still records the mode it found, and replaces an
+    // earlier run's; and the terminal it put on record.
+    const metricsFile = setupMetricsFile(ctx.volleydHome);
+    let endStep: (changes: number) => void = () => {};
+    // The changes the current step applied before it stopped: what its metrics record.
+    let applied = 0;
+    const stopped = () => {
+      endStep(applied);
+      writeSetupMetrics(ctx, meter.done());
+      if (
+        !peer &&
+        (ctx.cmuxSocketMode !== undefined ||
+          ctx.terminal !== undefined ||
+          ctx.coordinator !== undefined)
+      ) {
+        writeSetupInstall(ctx, metricsFile);
+      }
+      return EXIT.ERROR;
+    };
+    const skipped: string[] = [];
+    for (const [name, planner] of steps) {
+      const i = ALL.findIndex(([n]) => n === name);
+      endStep = meter.begin(name);
+      applied = 0;
+      let plan: StepPlan;
       try {
-        const lines = await c.apply();
-        journal(name, "applied", c.summary);
-        applied++;
-        io.stdout(`  ✓ ${c.summary}\n`);
-        for (const l of lines) if (l !== "") io.stdout(`${indent(l)}\n`);
+        plan = await planner(ctx);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        journal(name, "failed", `${c.summary}: ${msg}`);
-        io.stderr(`volley setup: ${plan.title}: ${c.summary}: ${msg}\n`);
+        journal(name, "failed", e instanceof Error ? e.message : String(e));
+        io.stderr(`volley setup: ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
         return stopped();
       }
+      io.stdout(`\n[${i + 1}/${ALL.length}] ${plan.title}\n`);
+      for (const f of plan.found) io.stdout(`  · ${f}\n`);
+      if (plan.blocked !== undefined) {
+        journal(name, "blocked", plan.blocked.split("\n")[0]);
+        io.stdout(`  ✗ Blocked: ${plan.blocked}\n`);
+        return stopped();
+      }
+      if (plan.skipped !== undefined) {
+        journal(name, "skipped", plan.skipped);
+        io.stdout(`  – skipped: ${plan.skipped}\n`);
+        skipped.push(plan.title);
+        endStep(0);
+        continue;
+      }
+      if (plan.changes.length === 0) {
+        journal(name, "done");
+        io.stdout("  ✓ already done\n");
+        endStep(0);
+        continue;
+      }
+      journal(name, "planned", plan.changes.map((c) => c.summary).join("; "));
+      io.stdout("  Changes:\n");
+      for (const c of plan.changes) {
+        io.stdout(`    → ${c.summary}\n`);
+        if (c.detail !== undefined && c.detail !== "") io.stdout(`${indent(c.detail)}\n`);
+      }
+      const n = plan.changes.length;
+      const question = `Apply ${n === 1 ? "this change" : `these ${n} changes`} (${plan.title})?`;
+      if (!yes && plan.confirmed !== true && !(await deps.confirm(question))) {
+        journal(name, "declined");
+        io.stdout(
+          `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
+        );
+        return stopped();
+      }
+      for (const c of plan.changes) {
+        try {
+          const lines = await c.apply();
+          journal(name, "applied", c.summary);
+          applied++;
+          io.stdout(`  ✓ ${c.summary}\n`);
+          for (const l of lines) if (l !== "") io.stdout(`${indent(l)}\n`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          journal(name, "failed", `${c.summary}: ${msg}`);
+          io.stderr(`volley setup: ${plan.title}: ${c.summary}: ${msg}\n`);
+          return stopped();
+        }
+      }
+      const problems = (await plan.verify?.()) ?? [];
+      if (problems.length > 0) {
+        journal(name, "failed", problems.join("; "));
+        io.stderr(
+          `volley setup: ${plan.title}: after the changes:\n${problems.map((p) => `  - ${p}\n`).join("")}`,
+        );
+        return stopped();
+      }
+      for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
+      journal(name, "verified");
+      endStep(n);
     }
-    const problems = (await plan.verify?.()) ?? [];
-    if (problems.length > 0) {
-      journal(name, "failed", problems.join("; "));
-      io.stderr(
-        `volley setup: ${plan.title}: after the changes:\n${problems.map((p) => `  - ${p}\n`).join("")}`,
+    // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
+    const metrics = meter.done();
+    writeSetupMetrics(ctx, metrics);
+    const finished =
+      skipped.length === 0
+        ? completeLine(metrics)
+        : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`;
+    if (peer) {
+      // setup.json is the supervisor's install record (volleyd plans the Desk's setup with it).
+      io.stdout(
+        [
+          "",
+          finished,
+          ...(existsSync(join(ctx.home, ".volley", "peer.json"))
+            ? []
+            : [
+                "Next: pair this machine: `volley peer join <code> --to <user@supervisor>` with a code from",
+                "`volley peer invite` there (or run `volley machine add <user@this-machine>` there instead).",
+              ]),
+          `Metrics: ${metricsFile}.`,
+          `Journal: ${logFile}. Rerun \`volley setup --peer\` any time to check and fix.`,
+          "",
+        ].join("\n"),
       );
-      return stopped();
+      return EXIT.OK;
     }
-    for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
-    journal(name, "verified");
-    endStep(n);
-  }
-  // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
-  const metrics = meter.done();
-  writeSetupMetrics(ctx, metrics);
-  const finished =
-    skipped.length === 0
-      ? completeLine(metrics)
-      : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`;
-  if (peer) {
-    // setup.json is the supervisor's install record (volleyd plans the Desk's setup with it).
+    writeSetupInstall(ctx, metricsFile);
+    const reach = ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome);
     io.stdout(
       [
         "",
         finished,
-        ...(existsSync(join(ctx.home, ".volley", "peer.json"))
-          ? []
-          : [
-              "Next: pair this machine: `volley peer join <code> --to <user@supervisor>` with a code from",
-              "`volley peer invite` there (or run `volley machine add <user@this-machine>` there instead).",
-            ]),
+        privateDeskLine(ctx.deskHost, ctx.deskPort, reach, readDeskPrivateUrl(ctx.volleydHome)) ??
+          `Desk: http://${ctx.deskHost.includes(":") ? `[${ctx.deskHost}]` : ctx.deskHost}:${ctx.deskPort}`,
+        ...(ctx.firstWaveScratch !== undefined
+          ? [
+              `The test wave's scratch repository is ${ctx.firstWaveScratch}: delete it with \`${ghRepoDeleteLine(ctx.firstWaveScratch)}\`.`,
+            ]
+          : []),
+        "Coordinator sessions log in with coordinator.json from the auth dir",
+        `(${join(auth.dir, "coordinator.json")}): the MCP registration names the dir, never a`,
+        "password. The volley and volleyd commands on this machine use that login on their own",
+        "(keychain, then coordinator.json).",
         `Metrics: ${metricsFile}.`,
-        `Journal: ${logFile}. Rerun \`volley setup --peer\` any time to check and fix.`,
+        `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
         "",
       ].join("\n"),
     );
     return EXIT.OK;
+  };
+  try {
+    return await runSteps();
+  } finally {
+    handAuthDirOnExit(auth, (line) => io.stderr(`volley setup: ${line}\n`));
   }
-  writeSetupInstall(ctx, metricsFile);
-  const reach = ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome);
-  io.stdout(
-    [
-      "",
-      finished,
-      privateDeskLine(ctx.deskHost, ctx.deskPort, reach, readDeskPrivateUrl(ctx.volleydHome)) ??
-        `Desk: http://${ctx.deskHost.includes(":") ? `[${ctx.deskHost}]` : ctx.deskHost}:${ctx.deskPort}`,
-      ...(ctx.firstWaveScratch !== undefined
-        ? [
-            `The test wave's scratch repository is ${ctx.firstWaveScratch}: delete it with \`${ghRepoDeleteLine(ctx.firstWaveScratch)}\`.`,
-          ]
-        : []),
-      "Coordinator sessions log in with coordinator.json from the auth dir",
-      `(${join(auth.dir, "coordinator.json")}): the MCP registration names the dir, never a`,
-      "password. The volley and volleyd commands on this machine use that login on their own",
-      "(keychain, then coordinator.json).",
-      `Metrics: ${metricsFile}.`,
-      `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
-      "",
-    ].join("\n"),
-  );
-  return EXIT.OK;
 }
 
 /**

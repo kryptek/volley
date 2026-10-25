@@ -37,8 +37,8 @@ PEER=peer
 WAVE=hello-peer
 
 lib_init
-HUB_VM=$(vm_name hub)
-PEER_VM=$(vm_name peer)
+HUB_VM=$(vm_name hub) || exit 1
+PEER_VM=$(vm_name peer) || exit 1
 refuse_existing "$HUB_VM"
 refuse_existing "$PEER_VM"
 track "$HUB_VM"
@@ -144,5 +144,6 @@ stopped() {
 }
 poll 120 stopped || fail "volley-peer.service still runs on the peer after volley peer remove"
 
-summarize --total-ms $((t1 - t0))
+# --no-lan on a VM with a LAN address skips the phone step, as on Layer 3's Mac.
+summarize --total-ms $((t1 - t0)) --allow-skipped phone
 finish

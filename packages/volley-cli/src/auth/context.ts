@@ -11,13 +11,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type Layout, detectLayout } from "./config";
 import { DynsecSession, brokerTransport, sysVersion } from "./dynsec";
-import { requireBrokerVersion } from "./version";
+import { requireBrokerVersion, snapListVersion } from "./version";
 
 /**
  * What every `volley auth` verb shares: its side effects (injectable, so tests never touch a
@@ -92,6 +92,8 @@ export const VOLLEYD_BROKER_FILE = "broker.json";
 export const VOLLEYD_ADMIN_FILE = "dynsec-admin.json";
 /** The dynsec admin login, in the auth directory (mode 0600). */
 export const ADMIN_FILE = "admin.json";
+/** The snap layout's mosquitto command: absent from current snaps (their broker is a service). */
+const SNAP_MOSQUITTO = "/snap/bin/mosquitto";
 
 function run(
   cmd: string,
@@ -134,7 +136,11 @@ export const realAuthDeps: AuthDeps = {
   mosquittoVersion: async (binary) => {
     const r = await run(binary, ["-h"]);
     const text = `${r.stdout}\n${r.stderr}`;
-    return r.code === 127 || !/version/.test(text) ? null : text;
+    if (r.code !== 127 && /version/.test(text)) return text;
+    // The snap's broker is a service with no command in /snap/bin: snapd knows its version.
+    if (binary !== SNAP_MOSQUITTO) return null;
+    const v = snapListVersion((await run("snap", ["list", "mosquitto"])).stdout);
+    return v === null ? null : `mosquitto version ${v}`;
   },
   // The password reaches mosquitto_ctrl on its command line, so it is briefly visible in `ps`.
   ctrlInit: (ctrl, stateFile, user, password) =>
@@ -242,8 +248,7 @@ export async function openAdmin(ctx: AuthContext): Promise<AdminLink> {
 }
 
 /** The mosquitto binary of `layout` (the snap's wrapper, not a distro 2.0 earlier on PATH). */
-export const binaryOf = (layout: Layout) =>
-  layout.name === "snap" ? "/snap/bin/mosquitto" : "mosquitto";
+export const binaryOf = (layout: Layout) => (layout.name === "snap" ? SNAP_MOSQUITTO : "mosquitto");
 
 /** Directories holding one `.volley/agent.json` per agent: `<root>/<wave>/<task>-<role>`. */
 export function agentJsonFiles(roots: readonly string[]): string[] {
@@ -277,6 +282,45 @@ export function ensureOwnedDir(
   }
   if (user !== null) for (const d of created) deps.chown(d, user.uid, user.gid);
   return created;
+}
+
+/**
+ * Under sudo, the snap layout's auth dir and the files in it (admin.json, coordinator.json, the
+ * account and token registries) go to the invoking user, as ~/.volley/volleyd/dynsec-admin.json
+ * does: the user-level setup and the coordinator's CLIs read and rewrite them. mosquitto never
+ * reads this dir (its state file, outside it, stays root's). Other layouts, and root with no sudo
+ * user, keep them root's, and so does a dir that holds mosquitto's config or state file
+ * (`--dir` at /var/snap/mosquitto/common). `volley setup` and `volley auth` call it when they
+ * finish, since a registry rewritten by rename comes back root's.
+ */
+export function handAuthDirToInvoker(ctx: Pick<AuthContext, "dir" | "layout" | "env" | "deps">) {
+  if (ctx.layout.name !== "snap" || !existsSync(ctx.dir)) return;
+  const dir = resolve(ctx.dir);
+  if ([ctx.layout.config, ctx.layout.stateFile].some((f) => dirname(resolve(f)) === dir)) return;
+  const user = ctx.deps.invokingUser(ctx.env);
+  if (typeof user !== "object" || user === null) return;
+  ctx.deps.chown(ctx.dir, user.uid, user.gid);
+  for (const e of readdirSync(ctx.dir, { withFileTypes: true })) {
+    if (e.isFile()) ctx.deps.chown(join(ctx.dir, e.name), user.uid, user.gid);
+  }
+}
+
+/**
+ * handAuthDirToInvoker when a command finishes: a failed handover (EPERM, a file renamed away
+ * mid-walk) is a warning, never the command's exit code or message.
+ */
+export function handAuthDirOnExit(
+  ctx: Pick<AuthContext, "dir" | "layout" | "env" | "deps">,
+  warn: (line: string) => void,
+) {
+  try {
+    handAuthDirToInvoker(ctx);
+  } catch (e) {
+    warn(
+      `could not give ${ctx.dir} to the sudo user (${e instanceof Error ? e.message : String(e)}); ` +
+        `fix it with: sudo chown -R "$SUDO_USER" ${ctx.dir}`,
+    );
+  }
 }
 
 /** Run `fn` on an admin link, closing it and reporting any failure. */

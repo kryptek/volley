@@ -5,6 +5,7 @@ import {
   VOLLEYD_ADMIN_FILE,
   VOLLEYD_BROKER_FILE,
   ensureOwnedDir,
+  handAuthDirToInvoker,
   openAdmin,
   readCredentials,
   withAdmin,
@@ -228,6 +229,7 @@ export async function planAccounts(ctx: SetupContext): Promise<StepPlan> {
         ensureOwnedDir(deps, dirname(r.file), owner);
         writeSecret(r.file, `${JSON.stringify({ username: r.user, password })}\n`);
         if (owner !== null) deps.chown(r.file, owner.uid, owner.gid);
+        else handAuthDirToInvoker(ctx.auth);
         return [`Wrote ${r.file} (mode 0600) with ${r.user}'s new password.`];
       },
     });

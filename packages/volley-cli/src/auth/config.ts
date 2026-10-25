@@ -55,7 +55,8 @@ const snap = (arch: string): Layout => ({
   bind: "127.0.0.1",
   log: "stderr",
   restart: "sudo snap restart mosquitto",
-  ctrl: "mosquitto.ctrl",
+  // By its path: sudo's secure_path lacks /snap/bin on Debian (Ubuntu's has it).
+  ctrl: "/snap/bin/mosquitto.ctrl",
 });
 
 const etc = (arch: string): Layout => ({

@@ -16,6 +16,7 @@ import {
   ADMIN_FILE,
   type AuthContext,
   binaryOf,
+  handAuthDirToInvoker,
   openAdmin,
   realAuthDeps,
   volleydHome,
@@ -351,6 +352,7 @@ async function receive(
         r.admin,
         typeof invoker === "object" && invoker !== null ? invoker : null,
       );
+      handAuthDirToInvoker({ dir: authDir, layout, env, deps: deps.setup.auth });
       io.stdout(
         `Placed the broker's state file at ${layout.stateFile} (${r.logins} logins) and its admin login in ${join(authDir, ADMIN_FILE)}.\n`,
       );

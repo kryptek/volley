@@ -4,7 +4,13 @@ import { parseArgs } from "node:util";
 import { MOSQUITTO_ETC_DIRS } from "volley-mcp/config";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
-import { type AuthContext, type AuthDeps, realAuthDeps, withAdmin } from "../auth/context";
+import {
+  type AuthContext,
+  type AuthDeps,
+  handAuthDirOnExit,
+  realAuthDeps,
+  withAdmin,
+} from "../auth/context";
 import { DynsecError, classify, cmd, deleteClients, listAllClients } from "../auth/dynsec";
 import { type MigrateFlags, initOrMigrate } from "../auth/migrate";
 import { FIXED_IDENTITIES, RESERVED_AGENT_IDS, badAgentId, isAgentClient } from "../auth/roles";
@@ -146,97 +152,106 @@ export async function auth(
     deps,
   };
 
-  if (ACCOUNT) {
-    const flags: AccountFlags = { json: bool("json") };
-    for (const k of ["role", "kind", "label", "ttl"] as const) {
-      const s = str(k);
-      if (s !== undefined) flags[k] = s;
+  const runVerb = async (): Promise<ExitCode> => {
+    if (ACCOUNT) {
+      const flags: AccountFlags = { json: bool("json") };
+      for (const k of ["role", "kind", "label", "ttl"] as const) {
+        const s = str(k);
+        if (s !== undefined) flags[k] = s;
+      }
+      return accountVerb(ctx, verb as AccountVerb, name, flags, (fn) => withAdmin(ctx, fn), [
+        ...RESERVED_ACCOUNT_NAMES,
+        ...RESERVED_AGENT_IDS,
+      ]);
     }
-    return accountVerb(ctx, verb as AccountVerb, name, flags, (fn) => withAdmin(ctx, fn), [
-      ...RESERVED_ACCOUNT_NAMES,
-      ...RESERVED_AGENT_IDS,
-    ]);
-  }
 
-  const takesId = verb === "add-agent" || verb === "rm-agent";
-  if (takesId !== (name !== undefined)) {
-    io.stderr(AUTH_HELP);
-    return EXIT.USAGE;
-  }
+    const takesId = verb === "add-agent" || verb === "rm-agent";
+    if (takesId !== (name !== undefined)) {
+      io.stderr(AUTH_HELP);
+      return EXIT.USAGE;
+    }
 
-  if (verb === "init" || verb === "migrate") {
-    const flags: MigrateFlags = {
-      migrate: verb === "migrate",
-      force: bool("force"),
-      noConfig: bool("no-config"),
-      restart: bool("restart"),
-      coordinatorFile: bool("coordinator-file"),
-      volleydFile: bool("volleyd-file"),
-      roles: bool("roles"),
-      yes: bool("yes"),
-      worktrees: (v.worktrees as string[] | undefined) ?? [],
-      config: str("config") ?? layout.config,
-      stateFile: str("state-file") ?? layout.stateFile,
-    };
-    return initOrMigrate(ctx, flags);
-  }
+    if (verb === "init" || verb === "migrate") {
+      const flags: MigrateFlags = {
+        migrate: verb === "migrate",
+        force: bool("force"),
+        noConfig: bool("no-config"),
+        restart: bool("restart"),
+        coordinatorFile: bool("coordinator-file"),
+        volleydFile: bool("volleyd-file"),
+        roles: bool("roles"),
+        yes: bool("yes"),
+        worktrees: (v.worktrees as string[] | undefined) ?? [],
+        config: str("config") ?? layout.config,
+        stateFile: str("state-file") ?? layout.stateFile,
+      };
+      return initOrMigrate(ctx, flags);
+    }
 
-  if (verb === "list-agents") {
+    if (verb === "list-agents") {
+      return withAdmin(ctx, async ({ session }) => {
+        const agents = (await listAllClients(session)).filter(isAgentClient).map((c) => c.username);
+        io.stdout(
+          bool("json")
+            ? `${JSON.stringify({ agents })}\n`
+            : agents.length === 0
+              ? "No agent logins.\n"
+              : `${agents.join("\n")}\n`,
+        );
+        return EXIT.OK;
+      });
+    }
+
+    const id = name as string;
+    const why = badAgentId(id);
+    if (why !== null) {
+      io.stderr(`volley auth: ${why}\n`);
+      return EXIT.USAGE;
+    }
+    if (verb === "add-agent") {
+      return withAdmin(ctx, async ({ session }) => {
+        const password = deps.generatePassword();
+        const [r] = await session.run([cmd.createClient(id, password, ["agent"])]);
+        const o = r === undefined ? "failed" : classify(r);
+        if (o === "exists") {
+          io.stderr(
+            `volley auth: "${id}" already has a broker login; rm-agent it first for a new password\n`,
+          );
+          return EXIT.ERROR;
+        }
+        if (o !== "ok") throw new DynsecError(`createClient ${id}: ${r?.error ?? "no answer"}`);
+        io.stdout(
+          bool("json") ? `${JSON.stringify({ username: id, password })}\n` : `${password}\n`,
+        );
+        return EXIT.OK;
+      });
+    }
+
+    // rm-agent: idempotent, so a supervisor's retire path can simply retry. Only an agent login.
     return withAdmin(ctx, async ({ session }) => {
-      const agents = (await listAllClients(session)).filter(isAgentClient).map((c) => c.username);
-      io.stdout(
-        bool("json")
-          ? `${JSON.stringify({ agents })}\n`
-          : agents.length === 0
-            ? "No agent logins.\n"
-            : `${agents.join("\n")}\n`,
-      );
-      return EXIT.OK;
-    });
-  }
-
-  const id = name as string;
-  const why = badAgentId(id);
-  if (why !== null) {
-    io.stderr(`volley auth: ${why}\n`);
-    return EXIT.USAGE;
-  }
-  if (verb === "add-agent") {
-    return withAdmin(ctx, async ({ session }) => {
-      const password = deps.generatePassword();
-      const [r] = await session.run([cmd.createClient(id, password, ["agent"])]);
-      const o = r === undefined ? "failed" : classify(r);
-      if (o === "exists") {
+      const [r] = await session.run([cmd.getClient(id)]);
+      if (r !== undefined && classify(r) === "missing") {
+        io.stderr(`volley auth: "${id}" has no broker login; nothing to revoke\n`);
+        return EXIT.OK;
+      }
+      const roles = (
+        (r?.data?.client as { roles?: { rolename: string }[] } | undefined)?.roles ?? []
+      ).map((x) => x.rolename);
+      if (!isAgentClient({ roles })) {
         io.stderr(
-          `volley auth: "${id}" already has a broker login; rm-agent it first for a new password\n`,
+          `volley auth: "${id}" is not an agent login (roles: ${roles.join(", ") || "none"}); not deleted\n`,
         );
         return EXIT.ERROR;
       }
-      if (o !== "ok") throw new DynsecError(`createClient ${id}: ${r?.error ?? "no answer"}`);
-      io.stdout(bool("json") ? `${JSON.stringify({ username: id, password })}\n` : `${password}\n`);
+      await deleteClients(session, [id]);
       return EXIT.OK;
     });
+  };
+  try {
+    return await runVerb();
+  } finally {
+    handAuthDirOnExit(ctx, (line) => io.stderr(`volley auth: ${line}\n`));
   }
-
-  // rm-agent: idempotent, so a supervisor's retire path can simply retry. Only an agent login.
-  return withAdmin(ctx, async ({ session }) => {
-    const [r] = await session.run([cmd.getClient(id)]);
-    if (r !== undefined && classify(r) === "missing") {
-      io.stderr(`volley auth: "${id}" has no broker login; nothing to revoke\n`);
-      return EXIT.OK;
-    }
-    const roles = (
-      (r?.data?.client as { roles?: { rolename: string }[] } | undefined)?.roles ?? []
-    ).map((x) => x.rolename);
-    if (!isAgentClient({ roles })) {
-      io.stderr(
-        `volley auth: "${id}" is not an agent login (roles: ${roles.join(", ") || "none"}); not deleted\n`,
-      );
-      return EXIT.ERROR;
-    }
-    await deleteClients(session, [id]);
-    return EXIT.OK;
-  });
 }
 
 export const AUTH_HELP = `Usage: volley auth <verb> [args] [options]
