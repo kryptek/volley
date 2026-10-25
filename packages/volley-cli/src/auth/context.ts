@@ -71,6 +71,11 @@ export interface AuthDeps {
   ) => { uid: number; gid: number; home: string } | "root" | null;
   /** How long a restarted broker gets to accept the admin login (`--restart`). */
   restartWaitMs?: number;
+  /**
+   * One op to volleyd (`add --for-wave` sends `account_create` there, so the account is journaled
+   * as the wave's); default `askVolleyd` (commands/peer.ts).
+   */
+  askVolleyd?: typeof import("../commands/peer").askVolleyd;
 }
 
 export interface AdminCredentials {

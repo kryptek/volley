@@ -37,5 +37,7 @@ export function renderHandoff(h: HandoffInput): string {
         ]
       : []),
     "Use `/volley` and `/volley-issues` as usual.",
+    // SPEC §4.6.26: what the coordinator makes for one wave goes when that wave is cleaned.
+    "Anything you register or mint for a wave (`volley repo add`, `volley auth add`), pass `--for-wave <wave>`: that wave's cleanup removes it, and without the flag it stays the owner's.",
   ].join("\n");
 }

@@ -411,3 +411,70 @@ export function pendingRepoRuns(
   }
   return out;
 }
+
+/** A managed clone volleyd made for a wave-owned registration (SPEC §4.6.26). */
+export interface OwnedClone {
+  machine: string;
+  slug: string;
+  path: string;
+}
+
+/** Is `path` the managed clone of `slug` on `machine` (`local`: the supervisor's own)? */
+function isManagedPath(
+  path: string,
+  slug: string,
+  root: string,
+  local: boolean,
+  localHome: string | undefined,
+): boolean {
+  if (local) return path === managedClonePath(root, slug, localHome);
+  const r = remoteRepoRoot(root);
+  if (posix.isAbsolute(r)) return path === posix.join(r, slug);
+  // A home-relative root: the box's own home, which the supervisor only sees in the path.
+  const tail = `/${posix.join(r === "~" ? "" : r.slice(2), slug)}`;
+  return posix.isAbsolute(path) && path.endsWith(tail) && path.length > tail.length;
+}
+
+/**
+ * The clones cleanup of `wave` may delete (SPEC §4.6.26, D10), pure. A clone is owned only when
+ * the registration is (`repo_added { wave }`, not removed since), volleyd's own clone run made it
+ * after that add (`repo_clone_run { ok: true, cloned: true, path }`; an adopted or pre-existing
+ * clone reads `cloned: false`), and `path` is still the managed `<repo_root>/<owner>/<name>` of
+ * that machine; a clone already deleted (`repo_clone_removed`) is not listed.
+ */
+export function ownedClonesOf(
+  wave: string,
+  system: readonly { type: string; data: Record<string, unknown> }[],
+  cfg: { repo_root: string; localName: string; localHome?: string },
+): OwnedClone[] {
+  const owned = new Map<string, boolean>();
+  const out = new Map<string, OwnedClone>();
+  const key = (machine: string, path: string) => `${machine}\u0000${path}`;
+  for (const e of system) {
+    const slug = typeof e.data.slug === "string" ? e.data.slug.toLowerCase() : null;
+    if (slug === null) continue;
+    if (e.type === "repo_added") owned.set(slug, e.data.wave === wave);
+    else if (e.type === "repo_removed") owned.set(slug, false);
+    else if (e.type === "repo_clone_run") {
+      const { machine, path } = e.data;
+      if (
+        owned.get(slug) === true &&
+        e.data.ok === true &&
+        e.data.cloned === true &&
+        typeof machine === "string" &&
+        typeof path === "string" &&
+        isManagedPath(
+          path,
+          String(e.data.slug),
+          cfg.repo_root,
+          machine === cfg.localName,
+          cfg.localHome,
+        )
+      )
+        out.set(key(machine, path), { machine, slug: String(e.data.slug), path });
+    } else if (e.type === "repo_clone_removed") {
+      out.delete(key(String(e.data.machine), String(e.data.path)));
+    }
+  }
+  return [...out.values()];
+}

@@ -105,6 +105,20 @@ const repoState = async (machine: string, slug = SLUG) =>
 const systemTypes = (type: string) => f.system().filter((e) => e.type === type);
 
 describe("repo_add (admin)", () => {
+  it("journals the wave a registration was made for; an id that is no wave id is refused (#612 D5)", async () => {
+    await setup();
+    const bad = await f.adminOp({ op: "repo_add", slug: SLUG, wave: "Not A Wave" });
+    expect(bad).toMatchObject({ ok: false });
+    expect(bad?.error).toMatch(/^wave/);
+    expect(systemTypes("repo_added")).toEqual([]);
+    // The wave need not be submitted yet: setup's first wave registers its repository first.
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG, wave: "w-demo" });
+    expect(r).toMatchObject({ ok: true });
+    expect(systemTypes("repo_added").map((e) => e.data)).toEqual([
+      { by: "admin-1", slug: SLUG, machines: "all", wave: "w-demo" },
+    ]);
+  });
+
   it("carries the repository's workflows as ci: { workflows } (#602); absent when unreadable", async () => {
     await setup();
     f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {

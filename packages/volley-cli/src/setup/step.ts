@@ -371,14 +371,20 @@ const SLUG = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/volley-hello-[a-z0-9]{4}$/;
 /** A test wave's file: `<abs clone>/.volley/waves/hello-<4>.yaml`. */
 const HELLO_FILE = /^\/[^\n\0]*\/\.volley\/waves\/hello-[a-z0-9]{4}\.yaml$/;
 
-/** `volley repo add <owner/volley-hello-…> --wait` and `volley repo status <it> --json`. */
+/**
+ * `volley repo add <owner/volley-hello-<4>> --wait --for-wave hello-<4>` (the same four
+ * characters: the registration is that test wave's) and `volley repo status <it> --json`.
+ */
 function firstWaveVolley(rest: readonly string[]): boolean {
-  const [verb, sub, slug, flag] = rest;
+  const [verb, sub, slug, flag, forWave, wave] = rest;
+  if (verb !== "repo" || !SLUG.test(slug ?? "")) return false;
+  if (sub === "status") return rest.length === 4 && flag === "--json";
   return (
-    rest.length === 4 &&
-    verb === "repo" &&
-    SLUG.test(slug ?? "") &&
-    ((sub === "add" && flag === "--wait") || (sub === "status" && flag === "--json"))
+    sub === "add" &&
+    rest.length === 6 &&
+    flag === "--wait" &&
+    forWave === "--for-wave" &&
+    wave === `hello-${(slug as string).slice(-4)}`
   );
 }
 

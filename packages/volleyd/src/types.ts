@@ -179,6 +179,11 @@ export interface Tunables {
    * false: finished sessions stay open for inspection.
    */
   retire_close_session: boolean;
+  /**
+   * The daemon cleans a wave's items itself (SPEC §4.6.26): a task's once it ends and its agents
+   * are retired, the whole wave's once it ended and no agent is live. false: only by hand.
+   */
+  cleanup_on_end: boolean;
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
@@ -705,6 +710,8 @@ export interface WaveState {
   alarms?: { alarm: string; message: string }[];
   /** When, by whom and why the wave was archived (`volleyd status --all` only). */
   archived?: { at: string; by: string; reason: string };
+  /** The last cleanup run (`wave_cleaned`, SPEC §4.6.26): its counts and what it kept, and why. */
+  cleanup?: WaveCleanup;
   /** The overlap plan (`wave_planned`); absent until planned. Not `plan`: that is the wave file. */
   overlap_plan?: { clusters: PlanCluster[] };
   /**
@@ -796,6 +803,51 @@ export interface CoordinatorAttention {
   session_url?: string;
   workspace?: string;
   last_seen: string;
+}
+
+/** What one cleanup run removed, by kind (`wave_cleaned.removed`; zeros included). */
+export interface CleanupCounts {
+  worktrees: number;
+  sessions: number;
+  processes: number;
+  branches: number;
+  logins: number;
+  repos: number;
+  accounts: number;
+  clones: number;
+}
+
+/** A thing a wave left (SPEC §4.6.26): its kind, the machine it is on, what it is, and why kept. */
+export interface Resource {
+  kind:
+    | "worktree"
+    | "session"
+    | "process"
+    | "branch"
+    | "remote_branch"
+    | "release_branch"
+    | "login"
+    | "lock"
+    | "repo"
+    | "clone"
+    | "account";
+  /** `local` (the supervisor) or a paired machine's name. */
+  host: string;
+  what: string;
+  task?: string;
+  /** Why it was kept (borrowed, unmerged, unreachable, …), with the command to remove it if any. */
+  why?: string;
+}
+
+/** `WaveState.cleanup`: the last `wave_cleaned` folded (reducer.ts). */
+export interface WaveCleanup {
+  at: string;
+  removed: CleanupCounts;
+  kept: Resource[];
+  /** The summary line the run printed last. */
+  summary: string;
+  /** Set when the run cleaned one task only (the per-task pass). */
+  task?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -984,6 +1036,10 @@ export const WAVE_EVENT_TYPES = [
   "peer_retargeted",
   // Fleet (SPEC §4.6.14): an admin's `machine_add` made a bare box a paired machine (or failed).
   "machine_added",
+  // Wave cleanup (SPEC §4.6.26): one run's summary in the wave's journal, and a managed clone
+  // a wave-owned registration's run made, deleted, in `_system`.
+  "wave_cleaned",
+  "repo_clone_removed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
