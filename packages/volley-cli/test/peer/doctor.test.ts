@@ -19,6 +19,7 @@ import {
   type DoctorReport,
   doctor,
   normalizeOrigin,
+  recordInstall,
   runDoctor,
   scrub,
 } from "../../src/peer/doctor";
@@ -30,6 +31,7 @@ import {
   type FakePeerMachine,
   fakePeerMachine,
 } from "../helpers/fake-peer-machine";
+import { tempDir } from "../helpers/tmp";
 
 let box: FakePeerMachine | null = null;
 afterEach(() => {
@@ -322,7 +324,12 @@ describe("volley peer doctor: the volley checkout", () => {
     await m.exec(["git", "-C", m.volleyDir, "checkout", "--detach", "v0.4.0"]);
     const r = await report(m);
     expect(check(r, "volley.installed")).toMatchObject({ ok: false, severity: "block" });
-    expect(check(r, "volley.installed")?.detail).toContain("bun.lock");
+    expect(check(r, "volley.installed")?.fix).toBe(
+      `/usr/bin/bun install --cwd ${m.volleyDir} --frozen-lockfile`,
+    );
+    expect(check(r, "volley.installed")?.detail).toBe(
+      `volley 0.4.0 in ${m.volleyDir}: dependencies not installed from its current bun.lock (changed since the last recorded install; reinstall with --frozen-lockfile)`,
+    );
     m.calls.length = 0;
     const fixed = await run(m, { fix: true, yes: true });
     expect(MUTATING(m)).toEqual([
@@ -337,6 +344,19 @@ describe("volley peer doctor: the volley checkout", () => {
     const r = await run(m, { fix: true, yes: true });
     expect(r.exit).toBe(0);
     expect(check(await report(m), "volley.installed")?.ok).toBe(true);
+  });
+
+  it("a marker written by recordInstall (volley deploy's own) reads synced", async () => {
+    const m = machine({ staleInstall: true });
+    expect(check(await report(m), "volley.installed")?.ok).toBe(false);
+    recordInstall(m.volleyDir);
+    expect(check(await report(m), "volley.installed")?.ok).toBe(true);
+  });
+
+  it("recordInstall throws when node_modules is missing", () => {
+    const dir = tempDir("volley-record-");
+    writeFileSync(join(dir, "bun.lock"), "{}");
+    expect(() => recordInstall(dir)).toThrow();
   });
 
   it("package.json and bun.lock disagreeing is explained, with no fix the doctor would run", async () => {

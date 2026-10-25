@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   cpSync,
@@ -13,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { RECORD_LOCK_ARGV } from "volley-cli/deploy/plan";
 import { commandScript } from "volley-cli/setup/services";
 import { tempDir } from "./helpers/tmp";
 
@@ -86,6 +88,12 @@ function world(platform: Platform, installed: string[] = [], env: Record<string,
     if (real === null) throw new Error(`the test needs ${u} on /usr/bin:/bin`);
     symlinkSync(real, join(utils, u));
   }
+  // The lock marker's hash: sha256sum on Linux, shasum on macOS.
+  const hasher = ["sha256sum", "shasum"]
+    .map((u) => [u, Bun.which(u, { PATH: "/usr/bin:/bin" })] as const)
+    .find(([, real]) => real !== null);
+  if (hasher === undefined) throw new Error("the test needs sha256sum or shasum on /usr/bin:/bin");
+  symlinkSync(hasher[1] as string, join(utils, hasher[0]));
   const [s, m, release] =
     platform === "macos-arm64"
       ? ["Darwin", "arm64", ""]
@@ -286,6 +294,7 @@ describe("macOS: the Homebrew tap", () => {
       ["--source", "."],
     ]) {
       const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1" });
+      writeFileSync(join(w.home, "bun.lock"), "{}\n");
       const r = run(w, ["--no-setup", ...args]);
       expect(r.code).toBe(0);
       expect(has(r, "brew info")).toEqual([]);
@@ -631,6 +640,12 @@ describe("the source", () => {
     ]);
     expect(has(r, "bun install")).toEqual(["bun install --frozen-lockfile"]);
     expect(existsSync(join(src(w), "node_modules"))).toBe(true);
+    // The bun.lock it installed from, as `volley deploy` records it: the doctor reads synced.
+    expect(readFileSync(join(src(w), "node_modules", ".volley-lock-sha256"), "utf-8")).toBe(
+      `${createHash("sha256")
+        .update(readFileSync(join(src(w), "bun.lock")))
+        .digest("hex")}\n`,
+    );
 
     const again = run(w, ["--no-setup"]);
     expect(has(again, "git")).toEqual([
@@ -664,6 +679,7 @@ describe("the source", () => {
     const w = world("ubuntu", LINUX_ALL);
     const checkout = join(w.dir, "checkout");
     mkdirSync(checkout);
+    writeFileSync(join(checkout, "bun.lock"), "{}\n");
     const r = run(w, ["--no-setup", "--source", checkout]);
     expect(r.code).toBe(0);
     expect(has(r, "git")).toEqual([]);
@@ -672,6 +688,11 @@ describe("the source", () => {
     expect(existsSync(join(checkout, "node_modules"))).toBe(true);
     const shim = readFileSync(join(w.home, ".volley", "bin", "volley"), "utf-8");
     expect(shim).toBe(commandScript(join(w.bin, "bun"), cli(checkout, "volley-cli")));
+  });
+
+  test("the marker is written by RECORD_LOCK_ARGV's body, the one volley deploy runs", () => {
+    const lines = readFileSync(SCRIPT, "utf-8").split("\n");
+    expect(lines).toContain(`  ${RECORD_LOCK_ARGV[2]}`);
   });
 });
 
@@ -698,6 +719,7 @@ describe("the shims and PATH", () => {
     const w = world("ubuntu", LINUX_ALL);
     const checkout = join(w.dir, "it's here");
     mkdirSync(checkout);
+    writeFileSync(join(checkout, "bun.lock"), "{}\n");
     run(w, ["--no-setup", "--source", checkout]);
     expect(readFileSync(join(w.home, ".volley", "bin", "volleyd"), "utf-8")).toBe(
       commandScript(join(w.bin, "bun"), cli(checkout, "volleyd")),

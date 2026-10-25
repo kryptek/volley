@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { LOCK_MARKER, recordInstall } from "../peer/doctor";
 import { deskStamp, readBundleVersion, writeDeskStamp } from "../setup/desk-build";
 import { deskEnvLeaks } from "../setup/services";
 import type { SetupExec } from "../setup/step";
@@ -146,6 +147,14 @@ async function runStep(
     if (step.id === "self-check" && c.argv[2] === "--version" && version.cli !== null) {
       const v = r.stdout.trim();
       if (v !== version.cli) return `volley --version is ${v || "empty"}, not ${version.cli}`;
+    }
+  }
+  if (step.id === "install") {
+    // As paired machines do (RECORD_LOCK_ARGV): or the supervisor's doctor reads the install stale.
+    try {
+      recordInstall(ctx.repo);
+    } catch (e) {
+      return `could not record node_modules/${LOCK_MARKER}: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
   if (step.id === "build") {
