@@ -202,6 +202,12 @@ export interface HarnessOptions {
   mergeTrain?: boolean;
   /** `autopilot.ci_fixup_max` the driver reads (default: the config default). */
   ciFixupMax?: number;
+  /**
+   * The repository's CI mode, journaled (`ci_mode_detected`) by `start()` as admission does
+   * (default: nothing journaled, i.e. `workflows`). `requiredChecks`: what `required` read.
+   */
+  ciMode?: "none" | "workflows" | "required";
+  requiredChecks?: string[];
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -696,6 +702,16 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     /** Submit the wave and start the implementer (what the daemon's admission + T4 spawn do). */
     async start() {
       await journal({ type: "wave_submitted", data: { wave, owner: "coord-1" } });
+      if (o.ciMode !== undefined)
+        await journal({
+          type: "ci_mode_detected",
+          data: {
+            mode: o.ciMode,
+            workflows: o.ciMode === "none" ? 0 : 1,
+            required_checks: o.requiredChecks ?? [],
+            source: "gh",
+          },
+        });
       await journal({ type: "task_queued", task: "T1", data: { issue: 42 } });
       await journal({ type: "task_admitted", task: "T1", data: {} });
       for (const [i, id] of Object.keys(o.dependents ?? {}).entries())

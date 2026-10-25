@@ -226,3 +226,126 @@ describe("viewFromSlug: a wave named by its owner/name reads its view by slug (#
     expect(viewFromSlug("gh repo view b/b: not found")).toEqual({ visibility: "unknown" });
   });
 });
+
+describe("the repository's CI mode, read at submit beside the visibility (#602)", () => {
+  let env: DaemonEnv;
+  let fake: FakeExec;
+  let repo: string;
+  const WORKFLOWS = ["gh", "api", "repos/{owner}/{repo}/actions/workflows?per_page=100"];
+  const BRANCH = ["gh", "api", "repos/{owner}/{repo}/branches/release/w1"];
+  const RULES = ["gh", "api", "repos/{owner}/{repo}/rules/branches/release/w1"];
+
+  const journal = (): JournalEvent[] =>
+    readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
+
+  /** A daemon on fakes; `facts` scripts the three reads; returns the `run`'s result. */
+  async function submit(o: {
+    workflows?: number | { code: number };
+    required?: string[];
+    ci?: string;
+  }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    env = await makeDaemonEnv();
+    repo = join(realpathSync(env.home), "repo");
+    mkdirSync(repo);
+    const claudeJson = join(env.home, "claude.json");
+    writeFileSync(
+      claudeJson,
+      JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } }),
+    );
+    fake = fakeExec()
+      .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/release/w1"], {
+        stdout: `${"1".repeat(40)}\n`,
+      })
+      .on(["gh", "issue", "view"], {
+        stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
+      })
+      .on(["gh", "repo", "view"], {
+        stdout: readFileSync(join(FIXTURES, "gh-repo-view-private.json"), "utf-8"),
+      })
+      .on(
+        WORKFLOWS,
+        typeof o.workflows === "object"
+          ? o.workflows
+          : {
+              stdout: JSON.stringify({
+                workflows: Array.from({ length: o.workflows ?? 0 }, (_, i) => ({
+                  id: i,
+                  state: "active",
+                })),
+              }),
+            },
+      )
+      .on(BRANCH, {
+        stdout: JSON.stringify({
+          protected: (o.required ?? []).length > 0,
+          protection: { required_status_checks: { contexts: o.required ?? [] } },
+        }),
+      })
+      .on(RULES, { stdout: "[]" });
+    const daemon = await env.start({
+      clock: fakeClock(Date.now()),
+      spawner: {
+        host: fakeHost(fake),
+        claudeJsonPath: claudeJson,
+        hooksDir: "/opt/volley-hooks",
+        credentials: memoryCredentials(),
+      },
+    });
+    const waits = journalWait(env.home, () => daemon);
+    const wave = join(env.home, "w1.yaml");
+    writeFileSync(
+      wave,
+      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\n${o.ci !== undefined ? `ci: ${o.ci}\n` : ""}tasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")} }\n`,
+    );
+    const r = await runCli(["run", wave], env.env);
+    if (r.exitCode === 0) {
+      await waits.event("w1", "agent_spawned");
+      await waits.settled();
+    }
+    return r;
+  }
+
+  const state = async () =>
+    ((await env.retained("volley/_waves/w1/state")) as { payload: WaveState }).payload;
+  const types = () => journal().map((e) => e.type);
+
+  afterEach(async () => {
+    await env.cleanup();
+  });
+
+  it("no workflows, no required checks: ci_mode_detected none after the visibility; status says so", async () => {
+    expect((await submit({ workflows: 0 })).exitCode).toBe(0);
+    const t = types();
+    expect(t.indexOf("ci_mode_detected")).toBeGreaterThan(t.indexOf("repo_visibility_detected"));
+    expect(journal().find((e) => e.type === "ci_mode_detected")?.data).toEqual({
+      mode: "none",
+      workflows: 0,
+      required_checks: [],
+      source: "gh",
+    });
+    expect(await state()).toMatchObject({ ci_mode: "none", ci_workflows: 0 });
+    expect(fake.calls.find((c) => c.argv[2] === WORKFLOWS[2])?.opts.cwd).toBe(repo);
+    expect((await runCli(["status", "w1"], env.env)).stdout).toContain(
+      "ci: none (no workflows: the two reviewers and the gate are the check)",
+    );
+  });
+
+  it("unreadable facts: mode workflows and the ci_mode_unknown alarm", async () => {
+    expect((await submit({ workflows: { code: 1 } })).exitCode).toBe(0);
+    expect(journal().find((e) => e.type === "ci_mode_detected")?.data).toMatchObject({
+      mode: "workflows",
+      workflows: null,
+    });
+    expect(
+      journal().some((e) => e.type === "alarm_raised" && e.data.alarm === "ci_mode_unknown"),
+    ).toBe(true);
+  });
+
+  it("ci: none on a release branch with required checks is refused at submit, naming them", async () => {
+    const r = await submit({ workflows: 1, required: ["build", "test"], ci: "none" });
+    expect(r.exitCode).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain("ci: ");
+    expect(`${r.stdout}${r.stderr}`).toContain("requires the checks build, test");
+  });
+});

@@ -343,6 +343,16 @@ export type PublicHygiene = "auto" | "on" | "off";
 /** `gh repo view --json visibility`, lowercased; `unknown` when it could not be read. */
 export type RepoVisibility = "public" | "private" | "internal" | "unknown";
 
+/**
+ * What the repository's CI is for a wave version (SPEC §4.6.8): `none` (no active workflow and no
+ * required check: a head with no run is verified without CI), `workflows` (a head waits for its
+ * runs) or `required` (the release branch requires checks: a head never passes without them).
+ */
+export type CiMode = "none" | "workflows" | "required";
+
+/** The wave file's `ci:` (absent: `auto`, the supervisor's detection). */
+export type CiOverride = "auto" | "none" | "required";
+
 /** wave-state `github` (SPEC §4.6.1): the repository on GitHub, as `gh repo view` read it. */
 export interface GitHubRepo {
   /** `owner/repo` (gh's `nameWithOwner`). */
@@ -505,6 +515,8 @@ export interface Wave {
   placement_avoid?: string[];
   /** `merge:` as written (SPEC §4.6.17); absent: the `autopilot.merge` tunable. */
   merge?: MergeMode;
+  /** `ci:` as written (SPEC §4.6.8); absent: `auto`, the CI mode detected at admission. */
+  ci?: CiOverride;
   /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
   playbook?: string;
   /**
@@ -668,6 +680,12 @@ export interface WaveState {
   repo_visibility?: RepoVisibility | null;
   /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
   hygiene_level?: HygieneLevel;
+  /** The repository's CI mode as journaled for this version (`ci_mode_detected`, SPEC §4.6.8). */
+  ci_mode?: CiMode;
+  /** The active workflows that read counted (null: not read). */
+  ci_workflows?: number | null;
+  /** The checks the release branch requires, as that read found them. */
+  ci_required_checks?: string[];
   /**
    * The repository on GitHub as read for this version (SPEC §4.6.1): absent when it could not
    * be read, never derived from `repo` or a remote.
@@ -886,6 +904,8 @@ export const WAVE_EVENT_TYPES = [
   "peer_drain_started",
   // Public hygiene (reviews.ts): the repository's visibility, read once per wave version.
   "repo_visibility_detected",
+  // The repository's CI mode (ci-mode.ts), read once per wave version beside the visibility.
+  "ci_mode_detected",
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",

@@ -671,6 +671,35 @@ describe("repo_visibility_detected github (SPEC §4.6.1)", () => {
   });
 });
 
+describe("ci_mode_detected (SPEC §4.6.8)", () => {
+  const wave = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+  );
+  const AT = "2026-10-19T10:00:00.000Z";
+  const submitted: JournalEvent = { seq: 1, at: AT, type: "wave_submitted", data: { wave } };
+  const detected = (seq: number, mode: string, workflows: number | null): JournalEvent => ({
+    seq,
+    at: AT,
+    type: "ci_mode_detected",
+    data: { mode, workflows, required_checks: [], source: "gh" },
+  });
+
+  it("sets state.ci_mode, schema-valid; a later version's read replaces it", () => {
+    const state = reduce([submitted, detected(2, "none", 0)]);
+    expect(state.ci_mode).toBe("none");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    expect(reduce([submitted, detected(2, "none", 0), detected(3, "workflows", 2)]).ci_mode).toBe(
+      "workflows",
+    );
+  });
+
+  it("absent before any read", () => {
+    expect(reduce([submitted])).not.toHaveProperty("ci_mode");
+  });
+});
+
 describe("the release train (SPEC §4.6.19)", () => {
   const last = events.at(-1) as JournalEvent;
   let seq = last.seq;

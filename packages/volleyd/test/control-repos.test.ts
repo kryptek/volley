@@ -105,6 +105,19 @@ const repoState = async (machine: string, slug = SLUG) =>
 const systemTypes = (type: string) => f.system().filter((e) => e.type === type);
 
 describe("repo_add (admin)", () => {
+  it("carries the repository's workflows as ci: { workflows } (#602); absent when unreadable", async () => {
+    await setup();
+    f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {
+      stdout: JSON.stringify({ total_count: 0, workflows: [] }),
+    });
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(r).toMatchObject({ ok: true, result: { slug: SLUG, ci: { workflows: 0 } } });
+    f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], { code: 1 });
+    const again = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(again?.ok).toBe(true);
+    expect(again?.result).not.toHaveProperty("ci");
+  });
+
   it("validates with gh, patches config, runs the box's doctor with the add and a clone, trusts every profile, journals and republishes readiness", async () => {
     await setup();
     const r = await f.adminOp({ op: "repo_add", slug: SLUG });

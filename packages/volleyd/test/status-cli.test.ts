@@ -224,6 +224,34 @@ describe("volleyd status formatting", () => {
     expect(formatWave(base)).not.toContain("spawns:");
   });
 
+  it("ci: the repository's CI mode as read for the version (SPEC §4.6.8); absent, no line", () => {
+    const base = {
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running" as const,
+      tasks: [],
+      open_decisions: [],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    };
+    expect(formatWave({ ...base, ci_mode: "none", ci_workflows: 0 })).toContain(
+      "\n  ci: none (no workflows: the two reviewers and the gate are the check)\n",
+    );
+    expect(formatWave({ ...base, ci_mode: "workflows", ci_workflows: 3 })).toContain(
+      "\n  ci: workflows (3)\n",
+    );
+    expect(
+      formatWave({ ...base, ci_mode: "required", ci_required_checks: ["build", "test"] }),
+    ).toContain("\n  ci: required (build, test)\n");
+    expect(formatWave({ ...base, ci_mode: "workflows", ci_workflows: null })).toContain(
+      "\n  ci: workflows (not read)\n",
+    );
+    expect(formatWave(base)).not.toContain("ci:");
+  });
+
   it("prints one plan: line per cluster of the overlap plan under the header (SPEC §4.6.22)", () => {
     const out = formatWave({
       wave: "w1",

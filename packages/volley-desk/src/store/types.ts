@@ -289,6 +289,11 @@ export interface WaveStatePayload {
   effective_config?: Tunables;
   /** Absent from an older supervisor or when the read failed: nothing then links. */
   github?: GitHubRepo;
+  /**
+   * The repository's CI as volleyd read it for this version (SPEC §4.6.8): `none` (no workflows
+   * and no required checks: the reviewers and the gate are the check). Absent: an older supervisor.
+   */
+  ci_mode?: "none" | "workflows" | "required";
   /** Absent from a supervisor that predates autopilot. */
   autopilot?: WaveAutopilot;
   /** Absent while the queue is empty. */

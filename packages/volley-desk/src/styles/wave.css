@@ -232,6 +232,10 @@ a.dag-issue-link {
   color: var(--mute);
   border-color: rgba(163, 171, 192, 0.4);
 }
+.chip--noci {
+  color: var(--mute);
+  border-color: color-mix(in srgb, var(--mute) 45%, transparent);
+}
 .chip--ci {
   color: var(--amber-text);
   border-color: color-mix(in srgb, var(--amber) 45%, transparent);
@@ -284,7 +288,8 @@ a.dag-issue-link {
   background: var(--acc);
 }
 .ci-jobs,
-.ci-why {
+.ci-why,
+.ci-none {
   margin: 0;
   overflow-wrap: anywhere;
 }

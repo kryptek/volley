@@ -249,6 +249,7 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  const ci = s.ci_mode !== undefined ? `  ${formatCiMode(s)}\n` : "";
   const github = s.github !== undefined ? `  github: ${s.github.slug}\n` : "";
   // What autopilot did in the wave (absent: a state from before autopilot).
   const ap = s.autopilot;
@@ -322,6 +323,7 @@ export function formatWave(
     autopilot +
     preface +
     hygiene +
+    ci +
     github +
     rows.join("") +
     decisions.join("")
@@ -357,6 +359,18 @@ export function formatMergeQueue(q: NonNullable<WaveState["merge_queue"]>): stri
  * `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)` (the visibility could not be read),
  * `P1 (forced)` (`public_hygiene: on`) or `off`: what the wave's reviewers flag.
  */
+/**
+ * `ci: none (no workflows: the two reviewers and the gate are the check)`, `ci: workflows (3)` or
+ * `ci: required (build, test)`: the repository's CI as read for this version (SPEC §4.6.8).
+ */
+export function formatCiMode(s: WaveState): string {
+  if (s.ci_mode === "none")
+    return "ci: none (no workflows: the two reviewers and the gate are the check)";
+  if (s.ci_mode === "required")
+    return `ci: required (${(s.ci_required_checks ?? []).join(", ") || "checks not read"})`;
+  return `ci: workflows (${typeof s.ci_workflows === "number" ? s.ci_workflows : "not read"})`;
+}
+
 function formatHygiene(s: WaveState): string {
   if (s.hygiene_level === "off") return "hygiene: off";
   return `hygiene: ${s.hygiene_level === "p3" ? "P3" : "P1"} (${s.repo_visibility ?? "forced"})`;

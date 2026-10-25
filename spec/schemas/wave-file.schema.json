@@ -62,6 +62,10 @@
       "enum": ["auto", "manual"],
       "description": "Who merges a gated PR (spec section 4.6.17): auto (the supervisor squash-merges exactly the gated head) or manual (a human merges). Absent: the supervisor's autopilot.merge tunable (default auto)."
     },
+    "ci": {
+      "enum": ["auto", "none", "required"],
+      "description": "The repository's CI (spec section 4.6.8): auto (the supervisor reads the repository's active workflows and the release branch's required checks at admission), none (a head with no CI run is verified without CI; refused when the release branch requires checks) or required (a head never passes without its runs). Absent: auto."
+    },
     "placement": {
       "enum": ["auto", "local"],
       "default": "local",
