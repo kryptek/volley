@@ -63,6 +63,9 @@ RC_LINE='export PATH="$HOME/.volley/bin:$PATH" # volley'
 OS_RELEASE="${VOLLEY_INSTALL_OS_RELEASE:-/etc/os-release}"
 TTY="${VOLLEY_INSTALL_TTY:-/dev/tty}"
 SYSTEM_DIRS="${VOLLEY_INSTALL_SYSTEM_DIRS-/opt/homebrew/bin:/usr/local/bin:/snap/bin}"
+# Seconds between `snap install` tries (a snapd with no snaps yet stands by after 5 s idle, and a
+# request that lands while it stops is cancelled).
+SNAP_RETRY_S="${VOLLEY_INSTALL_SNAP_RETRY_S:-10}"
 
 say() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -150,10 +153,18 @@ detect_platform() {
 MAC_TOOLS="brew bun mosquitto gh git tmux claude"
 LINUX_TOOLS="git tmux curl ca-certificates bun gh mosquitto claude"
 
-# The x.y.z `mosquitto -h` prints, or nothing.
+# The x.y.z `mosquitto -h` prints, else the mosquitto snap's (its broker is a service: /snap/bin
+# holds only its clients), or nothing.
 mosquitto_version() {
-  have mosquitto || return 0
-  mosquitto -h 2>&1 | sed -n 's/^mosquitto version \([0-9][0-9]*\.[0-9][0-9]*[0-9.]*\).*/\1/p' | head -n 1
+  if have mosquitto; then
+    mosquitto -h 2>&1 | sed -n 's/^mosquitto version \([0-9][0-9]*\.[0-9][0-9]*[0-9.]*\).*/\1/p' | head -n 1
+  else
+    snap_mosquitto_version
+  fi
+}
+snap_mosquitto_version() {
+  have snap || return 0
+  snap list mosquitto 2>/dev/null | sed -n 's/^mosquitto  *\([0-9][0-9]*\.[0-9][0-9.]*\) .*/\1/p' | head -n 1
 }
 
 # Whether the mosquitto on PATH is 2.1 or newer (Dynamic Security's %u in role ACLs).
@@ -197,7 +208,7 @@ check() {
     if present "$t"; then
       where=$(command -v "$t" 2>/dev/null || true)
       [ "$t" = tailscale ] && [ -z "$where" ] && where=$TAILSCALE_APP_CLI
-      [ "$t" = mosquitto ] && where="$(mosquitto_version), $where"
+      [ "$t" = mosquitto ] && where="$(mosquitto_version), ${where:-(snap)}"
       [ "$t" = ca-certificates ] && where="(dpkg)"
       printf '  found    %-16s %s\n' "$t" "$(tildify "$where")"
     else
@@ -205,6 +216,8 @@ check() {
       note=''
       if [ "$t" = mosquitto ] && have mosquitto; then
         note="$(mosquitto_version) on PATH; Volley needs 2.1 or newer"
+      elif [ "$t" = mosquitto ] && [ -n "$(snap_mosquitto_version)" ]; then
+        note="the snap is $(snap_mosquitto_version); Volley needs 2.1 or newer"
       fi
       printf '  missing  %-16s %s\n' "$t" "$note"
     fi
@@ -349,9 +362,11 @@ snapd_usable() {
 # without a broker is not installed; rerunning once it is fixed is the designed path).
 broker_missing() {
   v=$(mosquitto_version)
-  if [ -n "$v" ]; then
+  if [ -n "$v" ] && have mosquitto; then
     warn "mosquitto $v is on PATH; Volley needs 2.1 or newer. Stop and remove it first (its broker"
     warn "holds port 1883, and its binary would shadow a newer one):  sudo apt-get remove mosquitto"
+  elif [ -n "$v" ]; then
+    warn "the mosquitto snap is $v; Volley needs 2.1 or newer:  sudo snap refresh mosquitto"
   else
     warn "mosquitto 2.1 or newer could not be installed (see the output above)."
   fi
@@ -377,7 +392,7 @@ install_linux() {
   # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883. No snap
   # command (Debian's cloud image, a minimal Ubuntu): snapd from apt first.
   need_snap='' need_snapd=''
-  if [ -z "$PEER" ] && ! have mosquitto; then
+  if [ -z "$PEER" ] && [ -z "$(mosquitto_version)" ]; then
     if ! have snap; then
       need_snapd=1 need_snap=1
     elif snapd_usable; then
@@ -459,7 +474,18 @@ install_linux() {
     # A fresh snapd seeds itself first; `snap install` before that fails.
     [ -n "$need_snapd" ] && { as_root snap wait system seed.loaded || true; }
     say "Installing mosquitto with snap..."
-    as_root snap install mosquitto || warn "snap install mosquitto failed."
+    # A snapd with no snaps stands by after 5 s idle, and a request that lands while it stops is
+    # cancelled ("context canceled"; Debian 13 right after apt): try again after a pause.
+    tries=1
+    until as_root snap install mosquitto; do
+      if [ "$tries" -ge 3 ]; then
+        warn "snap install mosquitto failed."
+        break
+      fi
+      tries=$((tries + 1))
+      sleep "$SNAP_RETRY_S"
+      as_root snap wait system seed.loaded || true
+    done
     path_add /snap/bin
   fi
 

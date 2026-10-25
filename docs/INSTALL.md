@@ -198,7 +198,9 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
   it runs or is socket-activated (a fresh Ubuntu cloud image); when the `snap` command is
   missing (Debian's cloud image, a minimal Ubuntu) the installer adds `snapd` to its one
   `apt-get install`, waits for snapd's first seed (`snap wait system seed.loaded`), then
-  installs the snap. When no mosquitto 2.1 can be put on the machine (an older one on `PATH`,
+  installs the snap (up to three tries, 10 s apart: a snapd with no snaps yet stands by after
+  5 s idle and cancels a request that lands while it stops). The snap's broker is a service, so no `mosquitto` command appears on `PATH`; the
+  installer, its `--check` and `volley setup` read its version from `snap list mosquitto`. When no mosquitto 2.1 can be put on the machine (an older one on `PATH`,
   snapd that cannot be installed, a failed snap install), the install **stops with exit 1
   before cloning Volley** and prints the fix; it never says "Volley is installed" without a
   broker. Fix it and rerun the one command; or run the broker in a container:

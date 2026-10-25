@@ -1,7 +1,20 @@
 #!/bin/sh
 printf '%s\n' "snap $*" >>"$STUB_LOG"
-if [ "${1:-}" = install ]; then
-  [ -z "${STUB_SNAP_FAIL:-}" ] || exit 1
-  "$STUB_FIXTURES/provide" "$2" "$STUB_BIN"
-fi
+case "${1:-}" in
+  install)
+    # STUB_SNAP_FAIL=1: every install fails; =once: the first (snapd restarting on a fresh seed).
+    case "${STUB_SNAP_FAIL:-}" in
+      '') ;;
+      once) [ -e "$STUB_STATE/snap-failed-once" ] || { : >"$STUB_STATE/snap-failed-once"; exit 1; } ;;
+      *) exit 1 ;;
+    esac
+    # As the real snap: mosquitto's broker is a service, so nothing lands on PATH for it.
+    if [ "$2" = mosquitto ]; then : >"$STUB_STATE/snap-mosquitto"; else "$STUB_FIXTURES/provide" "$2" "$STUB_BIN"; fi
+    ;;
+  list)
+    [ -e "$STUB_STATE/snap-$2" ] || { echo "error: no matching snaps installed" >&2; exit 1; }
+    printf 'Name       Version  Rev   Tracking       Publisher    Notes\n'
+    printf '%s  %s    1134  latest/stable  mosquitto**  -\n' "$2" "${STUB_SNAP_MOSQUITTO_VERSION:-2.1.2}"
+    ;;
+esac
 exit 0

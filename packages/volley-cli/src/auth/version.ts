@@ -31,6 +31,15 @@ export function parseBrokerVersion(text: string): [number, number, number] | nul
   return [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
 }
 
+/**
+ * The mosquitto snap's version from `snap list mosquitto`, or null. The snap's broker is a service,
+ * so /snap/bin holds only its clients and there is no `mosquitto -h` to run.
+ */
+export function snapListVersion(text: string): string | null {
+  const m = /^mosquitto\s+(\d+\.\d+(?:\.\d+)?)\s/m.exec(text);
+  return m === null ? null : (m[1] as string);
+}
+
 export type VersionCheck =
   | { ok: true; version: string }
   | { ok: false; code: BrokerVersionCode; message: string };

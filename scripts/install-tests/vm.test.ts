@@ -210,6 +210,10 @@ describe("Layer 2: vm-linux.sh", () => {
       // The checkout under test, then its install.sh.
       new RegExp(`^ssh ${vm}: rm -rf ~/volley .*tar -C ~/volley -xzf - \\(stdin \\d+ bytes\\)$`),
       new RegExp(`^ssh ${vm}: .*sh -s -- --source ~/volley --no-setup +<~/volley/install\\.sh$`),
+      // The snap broker's files are root's: its steps under sudo first (docs/INSTALL.md).
+      new RegExp(
+        `^ssh ${vm}: .*\\[ ! -d /snap/mosquitto/current \\] \\|\\| sudo ~/\\.volley/bin/volley setup --step detect --step security --step accounts --yes --no-lan$`,
+      ),
       new RegExp(
         `^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --yes --no-lan --simulated$`,
       ),

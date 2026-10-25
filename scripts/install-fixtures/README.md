@@ -7,8 +7,10 @@ and a few real file utilities. Every stub appends `<name> <args>` to `$STUB_LOG`
 - `base/`: `uname` (answers `$STUB_UNAME_S` / `$STUB_UNAME_M`), `sudo` (`-v` succeeds, `tee` swallows
   its input, other commands run), `bash` (runs the downloaded installer with `sh`), `apt-get`,
   `dpkg`, `systemctl` (`snapd.service` is active when `$STUB_SNAPD=active`; `snapd.socket` when it
-  is `active` or `socket`, a fresh cloud image's socket-activated snapd), `snap` (`install` provides
-  the tool, or fails when `$STUB_SNAP_FAIL` is set; `wait` succeeds), `launchctl`, `id` (`-u` answers
+  is `active` or `socket`, a fresh cloud image's socket-activated snapd), `snap` (`install mosquitto`
+  records the snap and, as the real one, puts nothing on PATH: its broker is a service; `list
+  mosquitto` then prints snapd's table with `$STUB_SNAP_MOSQUITTO_VERSION`, default 2.1.2;
+  `$STUB_SNAP_FAIL=1` fails every install, `once` the first; `wait` succeeds), `launchctl`, `id` (`-u` answers
   `$STUB_UID`, default 1000). `apt-get install` provides each package's tool (`snapd` the `snap`
   stub) and exits 100 without installing anything when a package is `$STUB_APT_FAIL`. A test
   removes a base stub for a machine without it (`without(w, "snap")`).

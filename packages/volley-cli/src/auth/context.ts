@@ -17,7 +17,7 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type Layout, detectLayout } from "./config";
 import { DynsecSession, brokerTransport, sysVersion } from "./dynsec";
-import { requireBrokerVersion } from "./version";
+import { requireBrokerVersion, snapListVersion } from "./version";
 
 /**
  * What every `volley auth` verb shares: its side effects (injectable, so tests never touch a
@@ -92,6 +92,8 @@ export const VOLLEYD_BROKER_FILE = "broker.json";
 export const VOLLEYD_ADMIN_FILE = "dynsec-admin.json";
 /** The dynsec admin login, in the auth directory (mode 0600). */
 export const ADMIN_FILE = "admin.json";
+/** The snap layout's mosquitto command: absent from current snaps (their broker is a service). */
+const SNAP_MOSQUITTO = "/snap/bin/mosquitto";
 
 function run(
   cmd: string,
@@ -134,7 +136,11 @@ export const realAuthDeps: AuthDeps = {
   mosquittoVersion: async (binary) => {
     const r = await run(binary, ["-h"]);
     const text = `${r.stdout}\n${r.stderr}`;
-    return r.code === 127 || !/version/.test(text) ? null : text;
+    if (r.code !== 127 && /version/.test(text)) return text;
+    // The snap's broker is a service with no command in /snap/bin: snapd knows its version.
+    if (binary !== SNAP_MOSQUITTO) return null;
+    const v = snapListVersion((await run("snap", ["list", "mosquitto"])).stdout);
+    return v === null ? null : `mosquitto version ${v}`;
   },
   // The password reaches mosquitto_ctrl on its command line, so it is briefly visible in `ps`.
   ctrlInit: (ctrl, stateFile, user, password) =>
@@ -242,8 +248,7 @@ export async function openAdmin(ctx: AuthContext): Promise<AdminLink> {
 }
 
 /** The mosquitto binary of `layout` (the snap's wrapper, not a distro 2.0 earlier on PATH). */
-export const binaryOf = (layout: Layout) =>
-  layout.name === "snap" ? "/snap/bin/mosquitto" : "mosquitto";
+export const binaryOf = (layout: Layout) => (layout.name === "snap" ? SNAP_MOSQUITTO : "mosquitto");
 
 /** Directories holding one `.volley/agent.json` per agent: `<root>/<wave>/<task>-<role>`. */
 export function agentJsonFiles(roots: readonly string[]): string[] {

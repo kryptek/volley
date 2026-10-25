@@ -46,6 +46,7 @@ const UTILS = [
   "rm",
   "rmdir",
   "sed",
+  "sleep",
   "sort",
   "tail",
   "touch",
@@ -119,6 +120,7 @@ function world(platform: Platform, installed: string[] = [], env: Record<string,
         : join(dir, "none"),
       VOLLEY_INSTALL_TTY: join(dir, "no-tty"),
       VOLLEY_INSTALL_SYSTEM_DIRS: "",
+      VOLLEY_INSTALL_SNAP_RETRY_S: "0",
       ...env,
     },
   };
@@ -410,11 +412,46 @@ describe("Linux prerequisites", () => {
     expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(false);
   });
 
+  test("the snap's broker is a service (no mosquitto on PATH): snapd's version counts", () => {
+    const w = world(
+      "ubuntu",
+      LINUX_ALL.filter((t) => t !== "mosquitto"),
+      { STUB_SNAPD: "socket" },
+    );
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(w.bin, "mosquitto"))).toBe(false);
+    expect(r.calls).toContain("snap list mosquitto");
+    const check = run(w, ["--check"]);
+    expect(check.code).toBe(0);
+    expect(check.out).toMatch(/found +mosquitto +2\.1\.2, \(snap\)/);
+    const again = run(w, ["--no-setup"]);
+    expect(again.code).toBe(0);
+    expect(has(again, "sudo")).toEqual([]);
+  });
+
+  test("a snap install that fails once (snapd standing by) is retried after a pause", () => {
+    const w = world("debian", ["curl"], { STUB_SNAP_FAIL: "once" });
+    without(w, "snap");
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(r.calls.filter((c) => c.startsWith("sudo snap "))).toEqual([
+      "sudo snap wait system seed.loaded",
+      "sudo snap install mosquitto",
+      "sudo snap wait system seed.loaded",
+      "sudo snap install mosquitto",
+    ]);
+  });
+
   test("snapd installed but the snap install fails: the install stops before Volley", () => {
     const w = world("ubuntu", ["curl"], { STUB_SNAPD: "socket", STUB_SNAP_FAIL: "1" });
     const r = run(w, ["--no-setup"]);
     expect(r.code).toBe(1);
-    expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
+    expect(has(r, "sudo snap install")).toEqual([
+      "sudo snap install mosquitto",
+      "sudo snap install mosquitto",
+      "sudo snap install mosquitto",
+    ]);
     expect(r.out).toContain("rerun");
     expect(r.out).not.toContain("Volley is installed");
     expect(has(r, "git clone")).toEqual([]);
@@ -465,12 +502,13 @@ describe("Linux prerequisites", () => {
     const w = world(
       "ubuntu",
       LINUX_ALL.filter((t) => t !== "mosquitto"),
-      { STUB_SNAPD: "active", STUB_MOSQUITTO_VERSION: "2.0.9" },
+      { STUB_SNAPD: "active", STUB_SNAP_MOSQUITTO_VERSION: "2.0.9" },
     );
     const r = run(w, ["--no-setup"]);
     expect(r.code).toBe(1);
     expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
-    expect(r.out).toContain("mosquitto 2.0.9 is on PATH");
+    expect(r.out).toContain("the mosquitto snap is 2.0.9");
+    expect(r.out).toContain("sudo snap refresh mosquitto");
     expect(r.out).not.toContain("Volley is installed");
     expect(has(r, "git clone")).toEqual([]);
   });
