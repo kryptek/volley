@@ -422,6 +422,8 @@ function BundleLabel({ t }: { t: DagNode }) {
 export function placementRule(p: TaskPlacement): string {
   if (p.by === "wave_file") return "pinned by the wave file";
   if (p.by === "decision") return `re-placed by owner on ${p.decided_at.slice(0, 10)}`;
+  if (p.by === "fallback")
+    return `moved off a machine that could not spawn it${p.why !== undefined ? `: ${p.why}` : ""}`;
   return "placed automatically at admission";
 }
 

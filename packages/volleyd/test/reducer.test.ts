@@ -456,6 +456,46 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T1?.host).toBe("auto");
   });
 
+  it("a fallback re-placement (#608) carries from and why, and both validate", () => {
+    const fallback: JournalEvent = {
+      seq: 5,
+      at: AT,
+      type: "task_placed",
+      task: "T1",
+      data: {
+        task: "T1",
+        host: "box-b",
+        score: 0.5,
+        candidates,
+        by: "fallback",
+        from: "box-a",
+        why: "no clone at /path/to/home/.volley/repos/a/a on dev@box-a",
+      },
+    };
+    expect(
+      schemaErrors(
+        "wave-event.schema.json",
+        envelope("_waves/events", fallback.type, {
+          wave: "w1",
+          seq: fallback.seq,
+          at: fallback.at,
+          task: fallback.task,
+          data: fallback.data,
+        }),
+      ),
+    ).toEqual([]);
+    const rec = apply(replay([...base, placedA]), fallback);
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.placement).toMatchObject({
+      host: "box-b",
+      by: "fallback",
+      why: "no clone at /path/to/home/.volley/repos/a/a on dev@box-a",
+    });
+    expect(rec.wave?.tasks.T1?.host).toBe("box-b");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+  });
+
   it("a new plan version keeps the placement of a task that is still auto", () => {
     let rec = replay([...base, placedA]);
     const v2 = { ...wave, version: 2 };

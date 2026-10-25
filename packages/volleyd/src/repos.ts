@@ -120,7 +120,8 @@ export interface MachineFacts {
   origin?: string | null | undefined;
 }
 
-const trimPath = (p: string): string => p.replace(/(.)\/+$/, "$1");
+/** `p` without its trailing slashes (`/` stays `/`). */
+export const trimPath = (p: string): string => p.replace(/(.)\/+$/, "$1");
 
 /**
  * The origin a machine record reports for `legacy` (its `hosts.<m>.repo`): the record's
