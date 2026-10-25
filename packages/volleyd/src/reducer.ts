@@ -897,6 +897,18 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       else Reflect.deleteProperty(state, "github");
       break;
     }
+    case "ci_mode_detected": {
+      const mode = ev.data.mode;
+      if (mode !== "none" && mode !== "workflows" && mode !== "required") break;
+      state.ci_mode = mode;
+      const workflows = ev.data.workflows;
+      state.ci_workflows = typeof workflows === "number" ? workflows : null;
+      const checks = ev.data.required_checks;
+      state.ci_required_checks = Array.isArray(checks)
+        ? checks.filter((c): c is string => typeof c === "string")
+        : [];
+      break;
+    }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
       next.owner_agent = null;

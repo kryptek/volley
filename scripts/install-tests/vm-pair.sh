@@ -63,12 +63,14 @@ wait_ssh "$PEER_ADDR" 300 || finish
 timing launch_ms $(($(now_ms) - t0))
 
 say "The hub: install.sh, volley setup --simulated"
+assert_no_git_identity "$HUB"
 install_volley "$HUB" || {
   fail "install.sh exited non-zero on the hub"
   finish
 }
 setup_volley "$HUB"
 [ -n "$SETUP_OK" ] || finish
+check_git_identity "$HUB"
 
 # The peer gets this checkout as the peer install (`machine add` would install the hub's release
 # tag, which a checkout under test is not), the simulator in every shell (the agents' launches

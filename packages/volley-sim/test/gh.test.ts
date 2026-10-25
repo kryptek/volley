@@ -45,6 +45,13 @@ describe("gh auth (setup's shapes)", () => {
   it("`api user` answers the login, and `--jq .login` just the name", () => {
     expect(json(gh(["api", "user"])).login).toBe("volley-sim");
     expect(gh(["api", "user", "--jq", ".login"]).stdout).toBe("volley-sim\n");
+    // The three fields setup reads for git's identity (name, else login; <id>+<login>@noreply).
+    expect(json(gh(["api", "user"]))).toMatchObject({
+      login: "volley-sim",
+      id: 1,
+      name: "Volley Sim",
+    });
+    expect(gh(["api", "user", "--jq", ".name"]).stdout).toBe("Volley Sim\n");
   });
 });
 
@@ -53,6 +60,15 @@ describe("gh api (volleyd's reads)", () => {
     const r = gh(["api", "repos/{owner}/{repo}/actions/runs?status=queued&per_page=1"]);
     expect(r.code).toBe(0);
     expect(json(r)).toEqual({ total_count: 0, workflow_runs: [] });
+  });
+
+  it("the CI mode reads (#602): one active workflow, an unprotected branch, no rulesets", () => {
+    const w = gh(["api", "repos/{owner}/{repo}/actions/workflows?per_page=100"]);
+    expect(w.code).toBe(0);
+    expect(json(w).workflows.map((x: { state: string }) => x.state)).toEqual(["active"]);
+    const b = gh(["api", "repos/{owner}/{repo}/branches/release/w1"]);
+    expect(json(b)).toEqual({ name: "release/w1", protected: false });
+    expect(json(gh(["api", "repos/{owner}/{repo}/rules/branches/release/w1"]))).toEqual([]);
   });
 
   it("tags: `git/matching-refs/tags/<prefix> --paginate --slurp` pages, `git/tags/<sha>` the tagged commit", () => {

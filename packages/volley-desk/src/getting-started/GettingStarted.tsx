@@ -1,10 +1,11 @@
 /**
  * Getting started, the Desk's first-launch wizard: `volley setup` seen from a browser. Its own
  * dialog over the Desk, a step rail on the left (one row of badges on a phone) and the stage on
- * the right: the step's eyebrow, heading and lede beside its otter raft scene (`StepArt`), the
- * step's body from the registry (`steps.ts`), and Back / Continue. The rail jumps to any step
- * already reached. X and Escape pause it at the current step; Skip for now stops it reopening;
- * Open the Desk on the last step finishes it. What the steps do lives in `steps/`.
+ * the right: the step's eyebrow (Step n of 7, Welcome and Done included; `stepLabel`), heading
+ * and lede beside its otter raft scene (`StepArt`), the step's body from the registry
+ * (`steps.ts`), and Back / Continue. The rail jumps to any step already reached. X and Escape
+ * pause it at the current step; Skip for now stops it reopening; Open the Desk on the last step
+ * finishes it. What the steps do lives in `steps/`.
  */
 import "../styles/getting-started.css";
 import { Cancel01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
@@ -14,10 +15,7 @@ import { useFocusTrap } from "../a11y/keys";
 import { StepArt } from "./art";
 import type { SceneId } from "./art/ids";
 import type { Summary } from "./state";
-import { STEPS, type WizardContext } from "./steps";
-
-/** The steps between Welcome and Done are numbered "Step n of 6" (Done is the sixth). */
-const NUMBERED = STEPS.length - 1;
+import { STEPS, type WizardContext, stepLabel } from "./steps";
 
 export interface GettingStartedProps {
   ctx: WizardContext;
@@ -108,7 +106,7 @@ export function GettingStarted(p: GettingStartedProps) {
                         {done ? (
                           <HugeiconsIcon icon={Tick02Icon} size={13} strokeWidth={2.2} />
                         ) : (
-                          i + 1
+                          stepLabel(i).n
                         )}
                       </span>
                       <span className="gs-rail-text">
@@ -140,9 +138,7 @@ export function GettingStarted(p: GettingStartedProps) {
           </button>
           <div className="gs-hero">
             <div className="gs-copy">
-              <p className="gs-eyebrow">
-                {cur === 0 ? "Getting started" : `Step ${cur} of ${NUMBERED}`}
-              </p>
+              <p className="gs-eyebrow">{stepLabel(cur).eyebrow}</p>
               <h2 className="gs-heading">{step.heading}</h2>
               <p className="gs-lede">{step.lede}</p>
             </div>

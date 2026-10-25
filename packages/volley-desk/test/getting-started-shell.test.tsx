@@ -6,7 +6,7 @@ import { GettingStarted } from "../src/getting-started/GettingStarted";
 import type { SceneId } from "../src/getting-started/art";
 import { __resetArtMapForTests } from "../src/getting-started/art/assetMap";
 import type { Summary } from "../src/getting-started/state";
-import { STEPS, type WizardContext } from "../src/getting-started/steps";
+import { STEPS, type WizardContext, stepLabel } from "../src/getting-started/steps";
 import { initialState } from "../src/store/reducer";
 import { fakeOps } from "./helpers/auth-ops";
 
@@ -79,7 +79,7 @@ describe("Getting started: the shell", () => {
       expect(buttons[i]).toHaveTextContent(sub);
     });
     expect(current(rail)).toHaveTextContent("Welcome");
-    expect(stage.getByText("Getting started", { selector: ".gs-eyebrow" })).toBeInTheDocument();
+    expect(stage.getByText("Step 1 of 7", { selector: ".gs-eyebrow" })).toBeInTheDocument();
     expect(heading()).toHaveTextContent("Let's get your first wave in the air.");
     expect(
       stage.getByText(/Volley coordinates your development waves across your repos/),
@@ -102,24 +102,49 @@ describe("Getting started: the shell", () => {
     const { rail, stage, on, dialog } = mount();
     fireEvent.click(stage.getByRole("button", { name: "Let's go" }));
     expect(on.onStep).toHaveBeenLastCalledWith("this-computer");
-    expect(stage.getByText("Step 1 of 6", { selector: ".gs-eyebrow" })).toBeInTheDocument();
+    expect(stage.getByText("Step 2 of 7", { selector: ".gs-eyebrow" })).toBeInTheDocument();
     expect(stage.getByRole("list", { name: "Install checks" })).toBeInTheDocument();
     expect(dialog.querySelector('[data-scene="this-computer"]')).not.toBeNull();
     expect(current(rail)).toHaveTextContent("This computer");
     expect(rail.getAllByRole("button")[0]?.querySelector(".gs-badge--done")).not.toBeNull();
 
-    for (const n of [2, 3, 4, 5]) {
+    for (const n of [3, 4, 5, 6]) {
       fireEvent.click(stage.getByRole("button", { name: "Continue" }));
-      expect(stage.getByText(`Step ${n} of 6`, { selector: ".gs-eyebrow" })).toBeInTheDocument();
+      expect(stage.getByText(`Step ${n} of 7`, { selector: ".gs-eyebrow" })).toBeInTheDocument();
     }
     fireEvent.click(stage.getByRole("button", { name: "Continue" }));
     expect(heading()).toHaveTextContent("You're good to go!");
-    expect(stage.getByText("Step 6 of 6", { selector: ".gs-eyebrow" })).toBeInTheDocument();
+    expect(stage.getByText("Step 7 of 7", { selector: ".gs-eyebrow" })).toBeInTheDocument();
     expect(current(rail)).toHaveTextContent("Done");
 
     fireEvent.click(stage.getByRole("button", { name: "Back" }));
     expect(current(rail)).toHaveTextContent("Access");
     expect(on.onStep).toHaveBeenLastCalledWith("access");
+  });
+
+  it("stepLabel counts every step, Welcome and Done included, out of STEPS.length", () => {
+    expect(stepLabel(0)).toEqual({ n: 1, of: 7, eyebrow: "Step 1 of 7" });
+    expect(stepLabel(STEPS.length - 1)).toEqual({ n: 7, of: 7, eyebrow: "Step 7 of 7" });
+  });
+
+  it("the rail badge and the eyebrow count the same step", () => {
+    const { rail, stage } = mount();
+    const read = () => {
+      const badge = current(rail)?.querySelector(".gs-badge")?.textContent ?? "";
+      const eyebrow = stage.getByText(/^Step /, { selector: ".gs-eyebrow" }).textContent;
+      expect(eyebrow).toBe(`Step ${badge} of ${STEPS.length}`);
+      return badge;
+    };
+    const badges = [read()];
+    fireEvent.click(stage.getByRole("button", { name: "Let's go" }));
+    badges.push(read());
+    for (let i = 0; i < 5; i++) {
+      fireEvent.click(stage.getByRole("button", { name: "Continue" }));
+      badges.push(read());
+    }
+    expect(heading()).toHaveTextContent("You're good to go!");
+    expect(badges).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
+    expect(stage.getByText("Step 7 of 7", { selector: ".gs-eyebrow" })).toBeInTheDocument();
   });
 
   it("Done lists the summary, unknown values as —, and Open the Desk finishes", () => {
@@ -154,7 +179,7 @@ describe("Getting started: the shell", () => {
     // Repos was reached before: still a jump away.
     expect(buttons[3]).toBeEnabled();
     fireEvent.click(buttons[3] as HTMLElement);
-    expect(stage.getByText("Step 3 of 6", { selector: ".gs-eyebrow" })).toBeInTheDocument();
+    expect(stage.getByText("Step 4 of 7", { selector: ".gs-eyebrow" })).toBeInTheDocument();
   });
 
   it("Escape and the close button pause at the current step; Skip for now skips", () => {

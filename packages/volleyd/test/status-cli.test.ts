@@ -16,8 +16,14 @@ import {
   renderPlist,
   uninstallService,
 } from "../src/commands/install";
-import { formatLocalAgents, formatLogins, formatWave } from "../src/commands/status";
+import {
+  formatFleetLines,
+  formatLocalAgents,
+  formatLogins,
+  formatWave,
+} from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { isCoordinatorRole } from "../src/coordinator/role";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
@@ -216,6 +222,37 @@ describe("volleyd status formatting", () => {
     expect(one.split("\n")[1]).toBe("  spawns: 1 productive · 2 churn (1 branch update, 1 retry)");
     // A state from before the field: no line.
     expect(formatWave(base)).not.toContain("spawns:");
+  });
+
+  it("ci: the repository's CI mode as read for the version (SPEC §4.6.8); absent, no line", () => {
+    const base = {
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running" as const,
+      tasks: [],
+      open_decisions: [],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    };
+    expect(formatWave({ ...base, ci_mode: "none", ci_workflows: 0 })).toContain(
+      "\n  ci: none (no workflows: the two reviewers and the gate are the check)\n",
+    );
+    expect(formatWave({ ...base, ci_mode: "workflows", ci_workflows: 3 })).toContain(
+      "\n  ci: workflows (3)\n",
+    );
+    expect(
+      formatWave({ ...base, ci_mode: "required", ci_required_checks: ["build", "test"] }),
+    ).toContain("\n  ci: required (build, test)\n");
+    expect(formatWave({ ...base, ci_mode: "required", ci_required_checks: [] })).toContain(
+      "\n  ci: required (no check named on the branch)\n",
+    );
+    expect(formatWave({ ...base, ci_mode: "workflows", ci_workflows: null })).toContain(
+      "\n  ci: workflows (not read)\n",
+    );
+    expect(formatWave(base)).not.toContain("ci:");
   });
 
   it("prints one plan: line per cluster of the overlap plan under the header (SPEC §4.6.22)", () => {
@@ -674,6 +711,49 @@ describe("volleyd status: local agents (SPEC §4.6.15)", () => {
     );
     expect(formatLocalAgents({ mode: "always", active: false })).toBe("local agents: always");
     expect(formatLocalAgents({ mode: "never", active: false })).toBe("local agents: never");
+  });
+});
+
+describe("volleyd status fleet lines", () => {
+  const role = {
+    machine: "box-a",
+    name: "coord-test",
+    state: "running",
+    since: "2026-10-25T10:00:00.000Z",
+    restarts: 0,
+    session_url: "https://example.invalid/s",
+  };
+  const presence = {
+    agent_id: "a-1",
+    presence: "online",
+    state: "working",
+    last_seen: "2026-10-25T10:00:00.000Z",
+  };
+
+  it("prints the coordinator role line from a role payload", () => {
+    expect(formatFleetLines({ waves: [], coordinator: role })).toBe(
+      "coordinator: coord-test on box-a: running since 2026-10-25T10:00:00.000Z · https://example.invalid/s\n",
+    );
+  });
+
+  it("prints nothing without a coordinator, or for another coordinator shape", () => {
+    expect(formatFleetLines({ waves: [] })).toBe("");
+    expect(formatFleetLines({ waves: [], coordinator: presence })).toBe("");
+  });
+
+  it("keeps the kill switch and hard ceiling lines in order", () => {
+    expect(formatFleetLines({ waves: [], ceiling: { live: 1, max: 8 }, kill_switch: true })).toBe(
+      "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\nhard ceiling: 1/8\n",
+    );
+  });
+
+  it("isCoordinatorRole accepts a role payload and refuses anything else", () => {
+    expect(isCoordinatorRole(role)).toBe(true);
+    expect(isCoordinatorRole(undefined)).toBe(false);
+    expect(isCoordinatorRole(null)).toBe(false);
+    expect(isCoordinatorRole(presence)).toBe(false);
+    const { since: _since, ...noSince } = role;
+    expect(isCoordinatorRole(noSince)).toBe(false);
   });
 });
 

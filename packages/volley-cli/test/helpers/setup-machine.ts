@@ -57,6 +57,9 @@ export const GH_GITCONFIG =
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 
+/** The fake machine's git identity: the signed-in account's (`gh api user`) noreply address. */
+export const OCTO_IDENTITY = "Octo Volley <1+octo-volley@users.noreply.github.com>";
+
 /**
  * A fake machine for `volley setup`: temp dirs for the broker config, auth dir, home and checkout;
  * the in-process Dynamic Security stand-in; and a fake exec that simulates the commands setup
@@ -100,6 +103,12 @@ export interface FakeMachine {
   claude: { installed: boolean; signedIn: boolean; plan: string };
   /** gh: installed, signed in as `login`; `gh auth login` signs it in. */
   gh: { installed: boolean; signedIn: boolean; login: string };
+  /**
+   * git's commit identity (`git var GIT_COMMITTER_IDENT`: `Name <email>`; null: none, so a commit
+   * dies with "Author identity unknown"). `git config --global user.name|user.email` writes
+   * `<home>/.gitconfig` and sets it once both are written.
+   */
+  git: { identity: string | null };
   /** The answers `ask` gives, in order (then null); and the prompts it showed. */
   typed: (string | null)[];
   asked: string[];
@@ -219,6 +228,7 @@ export function fakeMachine(
     },
     claude: { installed: true, signedIn: true, plan: "max" },
     gh: { installed: true, signedIn: true, login: "octo-volley" },
+    git: { identity: OCTO_IDENTITY },
     typed: [],
     asked: [],
     claudeJson: join(home, ".claude.json"),
@@ -246,6 +256,7 @@ export function fakeMachine(
   const volleydPlist = join(home, "Library", "LaunchAgents", "systems.volley.volleyd.plist");
   const hooksInstall = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
 
+  const wrote: { name?: string; email?: string } = {};
   const exec: SetupExec = async (argv, o) => {
     const a = [...argv];
     m.execCalls.push(a);
@@ -272,6 +283,27 @@ export function fakeMachine(
         return fw.origin === null
           ? { code: 2, stdout: "", stderr: "error: No such remote 'origin'" }
           : ok(`${fw.origin}\n`);
+      }
+      return ok();
+    }
+    // git's identity: the probe, and the two global writes (the Sign-ins step).
+    if (line === "git var GIT_COMMITTER_IDENT") {
+      return m.git.identity !== null
+        ? ok(`${m.git.identity} 1760000000 +0000\n`)
+        : {
+            code: 128,
+            stdout: "",
+            stderr: "fatal: unable to auto-detect email address (got 'octo@studio.(none)')\n",
+          };
+    }
+    if (a[0] === "git" && a[1] === "config" && a[2] === "--global" && a.length === 5) {
+      const key = a[3] === "user.name" ? "name" : a[3] === "user.email" ? "email" : null;
+      if (key === null) return { code: 1, stdout: "", stderr: `fake exec: ${line}` };
+      wrote[key] = a[4] as string;
+      const file = join(o?.env?.HOME ?? home, ".gitconfig");
+      writeFileSync(file, `${readText(file) ?? ""}[user]\n\t${key} = ${a[4]}\n`);
+      if (wrote.name !== undefined && wrote.email !== undefined) {
+        m.git.identity = `${wrote.name} <${wrote.email}>`;
       }
       return ok();
     }
@@ -476,8 +508,12 @@ export function fakeMachine(
         writeFileSync(join(home, ".gitconfig"), GH_GITCONFIG);
         return ok();
       }
-      if (a[1] === "api" && a[2] === "user")
-        return m.gh.signedIn ? ok(`${m.gh.login}\n`) : { code: 1, stdout: "", stderr: "" };
+      if (a[1] === "api" && a[2] === "user") {
+        if (!m.gh.signedIn) return { code: 1, stdout: "", stderr: "" };
+        return a.length === 3
+          ? ok(`${JSON.stringify({ login: m.gh.login, id: 1, name: "Octo Volley" })}\n`)
+          : ok(`${m.gh.login}\n`);
+      }
     }
     if (a[0] === "bun" && a[1] === "run" && a[2] === "build" && o?.cwd !== undefined) {
       mkdirSync(join(o.cwd, "dist"), { recursive: true });

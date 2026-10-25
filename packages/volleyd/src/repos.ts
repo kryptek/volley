@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { CONFIG_DEFAULTS } from "./config-defaults";
 import type { FleetConfig, GitHubRepo, RemoteHostConfig, Tunables } from "./types";
 
 /**
@@ -52,6 +53,28 @@ export function managedClonePath(root: string, slug: string, home?: string): str
 }
 
 /**
+ * The managed root on a paired machine (#596): a home-relative `repo_root` (`~`, `~/…`) is each
+ * machine's own; an absolute one (the installed daemon's `<VOLLEYD_HOME>/repos`) is the
+ * supervisor's disk, so a paired machine keeps the default `~/.volley/repos`, where its doctor
+ * clones.
+ */
+export function remoteRepoRoot(root: string): string {
+  return root === "~" || root.startsWith("~/") ? root : CONFIG_DEFAULTS.fleet.repo_root;
+}
+
+/**
+ * The path of `slug`'s clone a machine record reports existing (#596), compared
+ * case-insensitively; undefined without a record or such a clone. Any existing clone counts,
+ * managed or not (a legacy or adopted one the box reports is still where the repository is).
+ */
+export function reportedClone(
+  record: { repos?: readonly MachineRepoFacts[] | undefined } | undefined,
+  slug: string,
+): string | undefined {
+  return record?.repos?.find((r) => r.exists && sameSlug(r.slug, slug))?.path;
+}
+
+/**
  * A machine's home from the managed clones its record reports (#436): a managed clone sits at
  * `<repo_root>/<owner>/<name>` with `repo_root` expanded on the machine, so a home-relative
  * `repo_root` (`~/…`) leaves the home as the rest of its path. Undefined when no clone tells.
@@ -82,9 +105,17 @@ export interface RepoConfig {
   hosts: Record<string, Pick<RemoteHostConfig, "repo" | "repos">>;
 }
 
-/** What is known about the machine itself: its home, and its legacy clone's normalised origin. */
+/**
+ * What is known about the machine itself: its home, its reported clone of the repository, and its
+ * legacy clone's normalised origin.
+ */
 export interface MachineFacts {
   home?: string | undefined;
+  /**
+   * The clone its record reports for the repository (`reportedClone`): its managed clone, where
+   * the repository is assigned to it (#596).
+   */
+  clone?: string | undefined;
   /** The machine record's `repo.origin` (its `hosts.<name>.repo` clone's origin). */
   origin?: string | null | undefined;
 }
@@ -116,7 +147,8 @@ export type CloneKind = "adopted" | "managed" | "legacy";
 
 /**
  * `machine`'s clone of `slug`, where it comes from, and the slug as the config spells it: its adopted clone (`hosts.<m>.repos[slug]`),
- * else the managed path when `repos[slug].machines` includes it, else its legacy `hosts.<m>.repo`
+ * else the managed clone when `repos[slug].machines` includes it (the one its record reports, else
+ * the managed path), else its legacy `hosts.<m>.repo`
  * when the machine record's origin is that repository (or it reports none yet); undefined when it
  * has none.
  */
@@ -133,7 +165,7 @@ export function cloneSource(
   const path = adopted !== undefined ? host?.repos?.[adopted] : undefined;
   if (path !== undefined) return { path, kind: "adopted", slug: canonical };
   if (assigned(cfg, machine, slug)) {
-    const managed = managedClonePath(cfg.fleet.repo_root, canonical, facts.home);
+    const managed = facts.clone ?? managedClonePath(cfg.fleet.repo_root, canonical, facts.home);
     return { path: managed, kind: "managed", slug: canonical };
   }
   // No origin (not reported yet, as records arrive asynchronously, or a clone without one) does
@@ -273,7 +305,9 @@ export interface AddStep {
 /**
  * Each machine's steps of a `repo_add` of `slug` (D4, D6): adopt `paths[m]` or the managed clone,
  * clone it where the machine's record reports none, and trust it in the default profile and in
- * every signed-in profile there. Pure: config as it will be once the add is applied.
+ * every signed-in profile there. A paired machine's path is its record's, else its managed path
+ * under `remoteRepoRoot` once its home is known, never the supervisor's (#596). Pure: config as it
+ * will be once the add is applied.
  */
 export function addPlan(
   cfg: RepoConfig,
@@ -286,11 +320,19 @@ export function addPlan(
 ): AddStep[] {
   return machines.map((machine) => {
     const isLocal = machine === local;
-    const reported = records(machine)?.repos?.find((r) => sameSlug(r.slug, slug));
-    const home = isLocal
-      ? o.localHome
-      : homeFromClones(cfg.fleet.repo_root, records(machine)?.repos);
-    const source = cloneSource(cfg, machine, slug, { home });
+    const record = records(machine);
+    const reported = record?.repos?.find((r) => sameSlug(r.slug, slug));
+    const root = isLocal ? cfg.fleet.repo_root : remoteRepoRoot(cfg.fleet.repo_root);
+    const home = isLocal ? o.localHome : homeFromClones(root, record?.repos);
+    const source = cloneSource(
+      { ...cfg, fleet: { ...cfg.fleet, repo_root: root } },
+      machine,
+      slug,
+      {
+        home,
+        ...(isLocal ? {} : { clone: reportedClone(record, slug) }),
+      },
+    );
     const path =
       reported?.path ??
       (source !== undefined && posix.isAbsolute(source.path) ? source.path : undefined);

@@ -105,6 +105,19 @@ const repoState = async (machine: string, slug = SLUG) =>
 const systemTypes = (type: string) => f.system().filter((e) => e.type === type);
 
 describe("repo_add (admin)", () => {
+  it("carries the repository's workflows as ci: { workflows } (#602); absent when unreadable", async () => {
+    await setup();
+    f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {
+      stdout: JSON.stringify({ total_count: 0, workflows: [] }),
+    });
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(r).toMatchObject({ ok: true, result: { slug: SLUG, ci: { workflows: 0 } } });
+    f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], { code: 1 });
+    const again = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(again?.ok).toBe(true);
+    expect(again?.result).not.toHaveProperty("ci");
+  });
+
   it("validates with gh, patches config, runs the box's doctor with the add and a clone, trusts every profile, journals and republishes readiness", async () => {
     await setup();
     const r = await f.adminOp({ op: "repo_add", slug: SLUG });
@@ -272,6 +285,44 @@ describe("repo_add (admin)", () => {
     });
     expect(trusts).toHaveLength(2);
     expect(systemTypes("repo_clone_run").at(-1)?.data).toMatchObject({ machine: PEER, ok: true });
+  });
+
+  it("the box's lines name its own clone, never the supervisor's absolute repo_root (#596)", async () => {
+    // setup's repo_root is absolute, the supervisor's own, as `<VOLLEYD_HOME>/repos` is installed.
+    await setup();
+    const boxClone = "/path/to/box-home/.volley/repos/a/a";
+    const box = theBox();
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    box.answers.doctor = async () => {
+      await held;
+      return reportWith([clone(SLUG, boxClone)]);
+    };
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG });
+    // The supervisor's own clone path is never a line about the box.
+    expect(JSON.stringify(r)).not.toContain(`${PEER}: cloning (${localClone})`);
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "cloning";
+    });
+    const cloning = await f.adminOp({ op: "repo_status", slug: SLUG });
+    expect(cloning).toMatchObject({
+      result: { repos: [{ lines: expect.arrayContaining([`${PEER}: cloning`]) }] },
+    });
+    release();
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready" && (await repoState(LOCAL)) === "ready";
+    });
+    const st = await f.adminOp({ op: "repo_status", slug: SLUG });
+    expect(st).toMatchObject({
+      result: {
+        repos: [{ lines: [`${LOCAL}: ready (${localClone})`, `${PEER}: ready (${boxClone})`] }],
+      },
+    });
+    expect(trusts.map((t) => t.root)).toEqual([boxClone, boxClone]);
   });
 
   it("a second add that meets the first's run on the box runs once that run ends", async () => {

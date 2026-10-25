@@ -1139,8 +1139,8 @@ autopilot: on
     ci_failed/fix-flake: a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope
   ci_failed · classification: infra_incident (asked only once autopilot.incident_wait_max_s passed) · escalate budget_exhausted · no budget
     ci_failed/infra-incident: the incident outlasted the wait: the owner decides; volleyd never re-runs CI
-  ci_failed · otherwise (ci_none included) · escalate no_policy · no budget
-    ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
+  ci_failed · otherwise (a repository with workflows whose run never came included) · escalate no_policy · no budget
+    ci_failed/owner: a red head no rule routes, and a workflow-bearing repository whose run never arrived, are the owner's
   merge_conflict · a merge train's integration (train), within respawn_max per member task · drop <member> · respawn_max per <task> · max 1
     merge_conflict/drop-from-train: the train is formed again without the member, which takes an ordinary turn later; a second conflict of it is the owner's
   merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
@@ -3006,18 +3006,21 @@ hosts:
 
 For a task on `box` in a wave whose repository is `owner/name` (its state's `github.slug`, else
 the supervisor clone's `origin`), the clone is, in order: `hosts.box.repos.<owner/name>`; the
-managed clone `<repo_root>/<owner>/<name>` when `repos.<owner/name>.machines` includes `box`;
-the deprecated `hosts.box.repo`, unless the machine's record reports that clone's origin as
-another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
+managed clone when `repos.<owner/name>.machines` includes `box` (at the path the box's record
+reports, `repos[].path`, else `<repo_root>/<owner>/<name>` there); the deprecated
+`hosts.box.repo`, unless the machine's record reports that clone's origin as another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
 (`hosts.box.worktree_root` still wins; a legacy `repo` keeps `.volley-worktrees` beside it).
 That pin is host-wide: once a box's legacy `repo` migrates, every repository's worktrees on it
 stay under that `.volley-worktrees` until you unset `hosts.box.worktree_root`. A host with none
 of them fails the spawn: `host 'box' has no clone of <owner/name>: add it (Settings →
 Repositories, or volley repo add <owner/name> --machine box)`. A wave whose repository
-is not on GitHub uses the host's `repo` as before. volleyd learns a box's home directory from the
-managed clones its record reports (`repos[].path`, under a `~/…` `repo_root`); a managed path on
-a box whose home it does not know yet fails the spawn too; give that box absolute `repos` and
-`worktree_root`.
+is not on GitHub uses the host's `repo` as before. A `~/…` `repo_root` is each machine's own; an
+absolute one (the installed daemon's `<VOLLEYD_HOME>/repos`, under `defaultsFor`) is the
+supervisor's own disk, and a paired machine's managed clones stay under `~/.volley/repos`, where
+its doctor clones them (`volley repo add`'s `box: cloning` and `box: ready (…)` lines name the
+box's path, never the supervisor's). volleyd learns a box's home directory from the managed
+clones its record reports (`repos[].path`); a managed path on a box whose home it does not know
+yet fails the spawn too; give that box absolute `repos` and `worktree_root`.
 
 Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (below); the
 `repo:` key of a host is deprecated (one path per host, from before repositories) and migrates by
@@ -4127,7 +4130,18 @@ on from the red head's step: after a CI failure on the implementer's first head,
 on a fixup's or rebase's head, to the gate (the reviews of the head it fixed still hold).
 `re-verify` is for a fix or re-run you did yourself. Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
-`ci_none_grace_ms` asks the owner (`accept` / `cancel`). A PR GitHub reports `CONFLICTING`
+`ci_none_grace_ms` asks the owner (`accept` / `cancel`) in a repository with workflows. That
+holds only where CI can come: at admission volleyd reads the repository's active workflows and
+the release branch's required checks (`gh api …/actions/workflows`, `…/branches/<release>`,
+`…/rules/branches/<release>`) and journals `ci_mode_detected { mode, workflows, required_checks,
+source }`. Under `ci_mode: none` (no active workflow, no required check) a head with no run is
+verified at once with `ci: none`: no hold, no grace, no decision; the two reviewers and the gate
+are the check, and `volleyd status` says `ci: none (no workflows: the two reviewers and the gate
+are the check)`. A run that does exist on a head is honoured as ever. Under `required` the
+question after the grace names the required checks and offers `cancel` only (GitHub refuses the
+merge without them). A read that fails is `workflows`, with the alarm `ci_mode_unknown`. The wave
+file's `ci: auto | none | required` overrides the detection; `ci: none` on a release branch that
+requires checks is refused at submit. A PR GitHub reports `CONFLICTING`
 (the PR read carries `mergeable` and `mergeStateStatus`) gets no CI at all, so it is neither held
 nor asked about: volleyd journals `pr_conflicting { pr, head, release_branch, role? }` and enters the
 branch-update step at that head at once (`stage_entered { rebase: true, conflicting: true }`,
@@ -4448,7 +4462,8 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   draft refusal at that head counts, so the owner is asked once they run out; that decision
   carries `ready_failed: true`, which the `merge_refused/draft` row does not answer. Inside the
   mark's `ci_none_grace_ms` a head with no run yet is held too (GitHub has not created the runs
-  the mark starts). Red there opens `ci_failed` (`fixup`, `re-verify` or `cancel`).
+  the mark starts), except under `ci_mode: none`, where no run will ever start and none is
+  awaited. Red there opens `ci_failed` (`fixup`, `re-verify` or `cancel`).
 - **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
   task at a time its turn.
 - **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.

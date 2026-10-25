@@ -254,6 +254,13 @@ describe("machineFixes per repository", () => {
     expect(fixFor("claude.trust", ctx, APP)?.command).toBe("cd /srv/work/app && claude");
   });
 
+  it("git.identity: setup's Sign-ins step on that machine, for the person there", () => {
+    expect(fixFor("git.identity", ctx)).toMatchObject({
+      command: "volley setup --peer --step signin",
+      safe: false,
+    });
+  });
+
   it("a repository with no clone yet never borrows the wave repo's path", () => {
     const c = { machine: "box-a", repo: "/srv/work/wave", repos: [{ slug: APP }] };
     expect(fixFor("repo.clone", c, LIB)?.text).toBe(`Repair clones ${LIB} to <the repo's clone>`);

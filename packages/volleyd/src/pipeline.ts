@@ -73,6 +73,7 @@ import {
 import { type ChurnCause, churnCause } from "./spawn-class";
 import type {
   BranchUpdate,
+  CiMode,
   JournalEvent,
   NewEvent,
   NudgeOnMerge,
@@ -1001,6 +1002,10 @@ export interface PipelineView {
   issues?: number[];
   /** A merge train's synthetic task (SPEC §4.6.23); absent for any other task. */
   train?: TrainView;
+  /** The repository's CI mode for this version (SPEC §4.6.8); absent: `workflows`. */
+  ci_mode?: CiMode;
+  /** Under `ci_mode: required`, the checks the release branch requires, as read. */
+  required_checks?: string[];
 }
 
 /** One member of a merge train, as its integrator and the gate see it. */
@@ -1748,7 +1753,7 @@ function onReadyCi(
   if (v.stage !== "merge_ready" || !readyHeld(v) || ev.head !== v.p.head) return [];
   const { ci, head, pr } = ev;
   // No run yet inside the mark's grace: GitHub has not created the runs the mark starts.
-  const awaited = ci.state === "none" && readyMark(v.p.ready, ev.at).ready !== undefined;
+  const awaited = ci.state === "none" && readyMark(v.p.ready, ev.at, v.ci_mode).ready !== undefined;
   if (ci.state === "green" || (ci.state === "none" && !awaited))
     return [
       {
@@ -1949,7 +1954,9 @@ function onMovedCi(
   const waiting =
     ci.state === "running" ||
     ci.state === "unknown" ||
-    (ci.state === "none" && ev.waited_ms < DAEMON_DEFAULTS.ci_none_grace_ms);
+    (ci.state === "none" &&
+      v.ci_mode !== "none" &&
+      ev.waited_ms < DAEMON_DEFAULTS.ci_none_grace_ms);
   if (waiting)
     return holdFor(
       v,
@@ -2315,7 +2322,7 @@ function onVerified(
     (ev.train.missing.length > 0 || !ev.train.descends)
   )
     return trainIncomplete(v, v.train, ev, run, ev.report, ev.train);
-  const out = artifactOutcome(v.task, ev.role, ev.report);
+  const out = withoutCi(v, ev, artifactOutcome(v.task, ev.role, ev.report));
   const head = ev.report.kind === "ok" ? ev.report.head : undefined;
   // In the CI hold of a role that is done (its push is in), the PR branch moved: a push from
   // outside the pipeline, the same as at any other gate.
@@ -2339,7 +2346,7 @@ function onVerified(
     (out.kind === "verified" || out.kind === "ci_pending")
   )
     return [
-      ...ciPending(v, ev, ev.report.head),
+      ...(noCi(v, ev.report.ci.state) ? [] : ciPending(v, ev, ev.report.head)),
       { kind: "pr_ready", pr: ev.report.pr.number, head: ev.report.head },
       ...retireIfLive(run),
     ];
@@ -2493,6 +2500,41 @@ function closesCheck(
   };
 }
 
+/** A repository with no CI (`ci_mode: none`): a head with no run is verified without CI. */
+const noCi = (v: PipelineView, state: CiFacts["state"]): boolean =>
+  v.ci_mode === "none" && state === "none";
+
+/**
+ * Under `ci_mode: none`, a head with no run (and a PR that is not conflicting) is verified at
+ * once, CI not applicable (`ci: "none"`), as the `accept` answer to a ci_none decision does. A run
+ * that exists on the head is always honoured: running holds, red is classified.
+ */
+function withoutCi(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  out: ArtifactOutcome,
+): ArtifactOutcome {
+  if (ev.report.kind !== "ok" || out.kind !== "ci_pending" || !noCi(v, ev.report.ci.state))
+    return out;
+  if (ev.report.pr.mergeable === "UNKNOWN") return out;
+  const { pr, head } = ev.report;
+  return {
+    kind: "verified",
+    event: {
+      type: "artifact_verified",
+      task: v.task,
+      data: {
+        role: ev.role,
+        head_sha: head,
+        branch: ev.report.branch,
+        pr: { number: pr.number, url: pr.url, head_sha: head, ci: "none" },
+        ci_runs: [],
+        ...(ev.report.touched !== undefined ? { touched: ev.report.touched } : {}),
+      },
+    },
+  };
+}
+
 /** A pushed head CI has not settled on (running, or no run yet: the owner is asked after the grace). */
 function noCiYet(
   v: PipelineView,
@@ -2506,9 +2548,14 @@ function noCiYet(
     const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
     const minutes = Math.round((ev.waited_ms ?? 0) / 60_000);
     // Only an update step's own head gets here conflicting: that, not the workflows, is the cause.
-    const question =
-      ev.report.kind === "ok" && ev.report.pr.mergeable === "CONFLICTING"
-        ? `The PR still conflicts with ${v.release_branch} at ${head.slice(0, 12)} after its branch-update step, so no CI has run for ${minutes} min. Resolve the conflict and push, then accept the head without CI, or cancel?`
+    const conflicting = ev.report.kind === "ok" && ev.report.pr.mergeable === "CONFLICTING";
+    // Required checks: GitHub refuses the merge without them, so there is no accepting the head.
+    const required = v.ci_mode === "required" && !conflicting;
+    const checks = v.required_checks ?? [];
+    const question = conflicting
+      ? `The PR still conflicts with ${v.release_branch} at ${head.slice(0, 12)} after its branch-update step, so no CI has run for ${minutes} min. Resolve the conflict and push, then accept the head without CI, or cancel?`
+      : required
+        ? `No CI run exists for ${head.slice(0, 12)} after ${minutes} min, and ${v.release_branch} ${checks.length > 0 ? `requires the checks ${checks.join(", ")}` : "names no required check, but the wave file says `ci: required`"}. Push a change that runs CI, or cancel?`
         : `No CI run exists for ${head.slice(0, 12)} after ${minutes} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`;
     return [
       ...retireIfLive(run),
@@ -2525,7 +2572,7 @@ function noCiYet(
           task: v.task,
           question,
           ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
-          options: ["accept", "cancel"],
+          options: required ? ["cancel"] : ["accept", "cancel"],
         },
       },
     ];
@@ -4558,8 +4605,10 @@ function askKey(task: TaskId, m: PipelineMarker | undefined): string | undefined
 function readyMark(
   r: TaskPipeline["ready"],
   now: number,
+  ciMode: CiMode | undefined,
 ): { ready?: { head: string; at: string } } {
-  if (r === undefined || r.green === true) return {};
+  // No CI: no run will ever start at the mark, so none is awaited.
+  if (r === undefined || r.green === true || ciMode === "none") return {};
   return now - Date.parse(r.at) < DAEMON_DEFAULTS.ci_none_grace_ms
     ? { ready: { head: r.head, at: r.at } }
     : {};
@@ -4684,6 +4733,10 @@ export class PipelineDriver {
       ...(this.turn?.task === task ? { merge_turn: this.turn.fresh ? "go" : "check" } : {}),
       ...(this.deps.heardFrom !== undefined ? { heard_from: this.deps.heardFrom } : {}),
       ...(wt.train !== undefined ? { train: this.trainView(task, rec) } : {}),
+      ...(rec.state.ci_mode !== undefined ? { ci_mode: rec.state.ci_mode } : {}),
+      ...(rec.state.ci_required_checks !== undefined
+        ? { required_checks: rec.state.ci_required_checks }
+        : {}),
       now: this.now(),
     };
   }
@@ -5657,7 +5710,7 @@ export class PipelineDriver {
       ...(since !== undefined ? { since } : {}),
       ...(run.adopt === true ? { adopt: true } : {}),
       ...(via !== undefined ? { runs_via: via } : {}),
-      ...readyMark(v.p.ready, this.now()),
+      ...readyMark(v.p.ready, this.now(), v.ci_mode),
     });
     if (report.kind === "ok") await this.noteCi(task, report.ci);
     // A merge-mode update moves the branch forward: a head that does not descend from the step's
@@ -5695,7 +5748,7 @@ export class PipelineDriver {
     if (
       report.kind === "ok" &&
       report.ci.state === "none" &&
-      (report.pr.mergeable !== "CONFLICTING" || role === "rebase")
+      (report.pr.mergeable !== "CONFLICTING" ? v.ci_mode !== "none" : role === "rebase")
     ) {
       const key = `${task}/${report.head}`;
       const first = this.noCiSince.get(key) ?? this.now();
@@ -6121,7 +6174,7 @@ export class PipelineDriver {
     const cwd = this.ghCwd() ?? this.headWorktree(v.p);
     if (ready === undefined || pr === undefined || head !== ready.head || cwd === undefined)
       return null;
-    const at = readyMark(ready, this.now()).ready?.at;
+    const at = readyMark(ready, this.now(), v.ci_mode).ready?.at;
     const ci = await redHeadCi(this.ghExec(v.task), cwd, head, this.runsVia(), at);
     await this.noteCi(v.task, ci);
     return { kind: "ready_ci", head, ci, pr, at: this.now() };
@@ -6147,7 +6200,7 @@ export class PipelineDriver {
     await this.noteCi(v.task, facts.ci);
     const key = `${v.task}/${moved.to}`;
     let waited = 0;
-    if (facts.ci.state === "none") {
+    if (facts.ci.state === "none" && v.ci_mode !== "none") {
       const first = this.noCiSince.get(key) ?? this.now();
       this.noCiSince.set(key, first);
       waited = this.now() - first;

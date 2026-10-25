@@ -573,6 +573,15 @@ describe("evaluate: guards", () => {
 });
 
 describe("renderPolicyTable", () => {
+  it("ci_failed/owner no longer calls a repository without workflows the owner's (#602)", () => {
+    const row = POLICY_TABLE.find((r) => r.policy === "ci_failed/owner");
+    expect(row?.condition).toBe(
+      "otherwise (a repository with workflows whose run never came included)",
+    );
+    expect(row?.rationale).toContain("a workflow-bearing repository whose run never arrived");
+    expect(`${row?.condition} ${row?.rationale}`).not.toContain("without workflows");
+  });
+
   it("one row per rule (after the owner_only row), with the effective budgets", () => {
     const rows = renderPolicyTable(POLICY_TABLE, { ...AP, relaunch_max: 3 });
     expect(rows).toHaveLength(POLICY_TABLE.length + 1);

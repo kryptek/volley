@@ -1,9 +1,11 @@
 import { isSlug } from "volleyd/repos";
 import type { AuthGh, Check, Facts } from "../doctor";
+import { binOf } from "./tools";
 
 /**
  * GitHub: this machine's own `gh` is signed in (`gh auth status`'s exit code: a state, never its
- * text) and its user may push to the wave repo (`viewerPermission` WRITE, MAINTAIN or ADMIN).
+ * text) and its user may push to the wave repo (`viewerPermission` WRITE, MAINTAIN or ADMIN);
+ * and git has a commit identity here (`git.identity`).
  */
 
 const PUSH = new Set(["WRITE", "MAINTAIN", "ADMIN"]);
@@ -50,7 +52,29 @@ export function ghState(f: Facts): AuthGh {
   return "ok";
 }
 
+/** git can commit here: without an identity an agent's first commit dies (warn, like gh.auth). */
+function gitIdentityCheck(f: Facts): Check {
+  const id = f.github.gitIdentity;
+  return {
+    id: "git.identity",
+    ok: id !== null,
+    severity: "warn",
+    detail:
+      id !== null
+        ? `git commits as ${id}`
+        : 'git has no commit identity (user.name/user.email): an agent\'s first commit here fails with "Author identity unknown"',
+    // Without git, tool.git's fix stands.
+    ...(id === null && binOf(f.tools.git) !== null
+      ? { fix: { command: "volley setup --peer --step signin" } }
+      : {}),
+  };
+}
+
 export function githubChecks(f: Facts): Check[] {
+  return [...ghChecks(f), gitIdentityCheck(f)];
+}
+
+function ghChecks(f: Facts): Check[] {
   const g = f.github;
   const who = g.user ?? "the signed-in GitHub user";
   const check = (ok: boolean, detail: string, fix?: string): Check => ({

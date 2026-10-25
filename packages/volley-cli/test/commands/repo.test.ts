@@ -84,6 +84,27 @@ describe("volley repo: arguments", () => {
     );
   });
 
+  it("prints the repository's CI after Added: none, or its workflows; nothing when unread (#602)", async () => {
+    const answer = (ci?: { workflows: number }) =>
+      fakeDeps(() => ({
+        ok: true,
+        result: {
+          slug: "a/a",
+          visibility: "private",
+          machines: ["box"],
+          status: [],
+          ...(ci !== undefined ? { ci } : {}),
+        },
+      })).deps;
+    expect((await run(["add", "a/a", "--machine", "box"], answer({ workflows: 0 }))).stdout).toBe(
+      "Added a/a (private) to box.\nCI: none — no GitHub Actions workflows; in a wave the two reviewers and the gate are the check\nFollow it with: volley repo status a/a\n",
+    );
+    expect(
+      (await run(["add", "a/a", "--machine", "box"], answer({ workflows: 3 }))).stdout,
+    ).toContain("Added a/a (private) to box.\nCI: 3 workflows\n");
+    expect((await run(["add", "a/a", "--machine", "box"], answer())).stdout).not.toContain("CI:");
+  });
+
   it("refuses a URL, a missing slug, a relative --path and a flag another verb owns", async () => {
     const { deps, asked } = fakeDeps(() => ({ ok: true }));
     for (const argv of [

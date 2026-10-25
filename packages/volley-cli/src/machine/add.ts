@@ -32,7 +32,8 @@ import {
  *                 join <code> --to <hub> --name <name> --target <user@host>`
  *   6. Sign-ins   `gh auth login --web` over `ssh -t`; Claude through volleyd's remote sign-in
  *                 (`volley claude add <name> --machine <name> --wait`, which prints the link);
- *                 `--no-signin` defers both
+ *                 `--no-signin` defers both. Then, with GitHub signed in and git unable to commit,
+ *                 `volley setup --peer --yes --git-identity` there (git's identity from that account)
  *   7. Doctor     `volley peer doctor --json` on the box: the readiness row; exit 1 when not ready
  *
  * Repositories need no flag: the hub's repositories assigned to all machines reach the box
@@ -40,6 +41,9 @@ import {
  */
 
 export type { DoctorReport };
+
+/** git's commit identity on the box, from its GitHub account (setup's, without the sign-ins). */
+const GIT_IDENTITY = "volley setup --peer --yes --git-identity";
 
 export interface ExecResult {
   code: number;
@@ -532,6 +536,23 @@ export async function machineAdd(
     if (ran) report = await doctor();
     if (typeof report === "string")
       return fail(`volley peer doctor printed no report on ${target}: ${report}`);
+  }
+  // git's commit identity, from the box's GitHub account once it is signed in (an agent's first
+  // commit dies "Author identity unknown" without one): that alone, never the box's sign-ins.
+  const identity = report.checks.find((c) => c.id === "git.identity");
+  const ghNow = report.auth.gh === "ok" || report.auth.gh === "no_write";
+  if (identity !== undefined && !identity.ok) {
+    if (ghNow) {
+      out(`  → git: a commit identity from the GitHub account (${GIT_IDENTITY} on ${name})\n`);
+      const r = await batch(GIT_IDENTITY);
+      relay(r);
+      if (r.code !== 0) out(`  ✗ git's commit identity was not set (exit ${r.code})\n`);
+      report = await doctor();
+      if (typeof report === "string")
+        return fail(`volley peer doctor printed no report on ${target}: ${report}`);
+    } else {
+      out(`  – git's commit identity: once GitHub is signed in, \`${GIT_IDENTITY}\` on ${name}\n`);
+    }
   }
 
   header(7, "Doctor");

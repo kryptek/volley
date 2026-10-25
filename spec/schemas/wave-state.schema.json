@@ -81,6 +81,19 @@
               "enum": ["p1", "p3", "off"],
               "description": "How the reviewers treat public hygiene for the current plan version (spec section 4.6.8): p1 (every hit blocks the merge; public, or visibility unknown), p3 (non-blocking notes; private or internal) or off. Absent: not recorded, which a supervisor treats as p1."
             },
+            "ci_mode": {
+              "enum": ["none", "workflows", "required"],
+              "description": "The repository's CI as the supervisor read it for the current plan version (spec section 4.6.8): none (no active workflow and no required check: a head with no CI run is verified without CI, the reviews and the gate being the check), workflows (a head waits for its runs) or required (the release branch requires checks). Absent: not recorded, which a supervisor treats as workflows."
+            },
+            "ci_workflows": {
+              "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }],
+              "description": "The active workflows that read counted; null when they could not be read."
+            },
+            "ci_required_checks": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "The status checks the release branch requires, as that read found them."
+            },
             "github": {
               "type": "object",
               "required": ["slug", "url"],

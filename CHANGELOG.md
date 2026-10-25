@@ -2,6 +2,40 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.13.2 — 2026-10-25
+
+### Fixed
+
+- **volley setup: a machine with no git identity gets one from the GitHub account, before anything
+  commits.** The Sign-ins step probes `git var GIT_COMMITTER_IDENT` and, when git could not commit
+  here, sets `user.name` (the account's name, else its login) and `user.email` (its
+  `<id>+<login>@users.noreply.github.com` address) in the global git config, shown and applied like
+  every other change; the test wave is blocked with that fix named instead of dying with "Author
+  identity unknown"; `volley setup --check` and `volley peer doctor` (`git.identity`) report it;
+  `volley setup --git-identity` sets only that, and `volley machine add` runs it on the box once
+  GitHub is signed in there (never the box's Claude sign-in). The install tests assert the
+  fresh user has no identity before the install and the commits carry setup's after it. (#595)
+- **volleyd: a repository added by slug to a paired machine is found where that machine put it.**
+  The spawn, `volley repo add`'s `cloning` line and the coordinator's repositories take a paired
+  machine's clone from its own record (`repos[].path`), else its managed path
+  `~/.volley/repos/<owner>/<name>` under its home — never the supervisor's absolute `repo_root`
+  (`<VOLLEYD_HOME>/repos`), which sent every spawn on the box into `REMOTE_REPO_MISSING` /
+  `remote_repo_missing`. (#596)
+- **volleyd: `volleyd status <wave>` no longer opens with `coordinator: undefined on undefined:
+  working since undefined`.** The coordinator role line is printed from the fleet answer only; a
+  wave's own `coordinator` (the owner's presence, shown on the owner line) is never formatted as
+  the role, and the formatter is guarded by the payload's shape. (#597)
+- volley-desk: Getting started's rail badge and stage eyebrow count the same step, 1 to 7, from
+  one `stepLabel`; the last scene no longer reads 7 in the rail and "Step 6 of 6" in the header. (#598)
+- **volleyd: a repository with no workflows never waits for CI.** At admission the supervisor reads
+  the repository's active workflows and the checks its release branch requires
+  (`ci_mode_detected`). When there are none, a head with no run is verified at once without CI
+  (`ci: none`), with no 15-minute hold and no owner decision: the two reviewers and the gate are the
+  check. `volleyd status` (`ci: none (…)`), the Desk (a `no CI` chip) and `volley repo add`
+  (`CI: none — …`) say so, and the policy no longer calls such a repository the owner's. A
+  repository with workflows behaves as before. Under required checks the question names them and
+  offers no `accept`. `ci: auto | none | required` in the wave file overrides the detection. (#602)
+
 ## 0.13.1 — 2026-10-25
 
 ### Fixed

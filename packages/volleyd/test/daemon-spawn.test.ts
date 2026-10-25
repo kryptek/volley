@@ -8,7 +8,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { cleanupWave } from "../src/commands/cleanup";
-import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, defaultsFor } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
@@ -24,7 +24,7 @@ import { trustDecisionId } from "../src/trust";
 import type { JournalEvent, TaskState } from "../src/types";
 import { addWorktree } from "../src/worktree";
 import { eventually } from "./helpers/broker-wait";
-import { CALM_OS, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { CALM_OS, type DaemonEnv, NS, OWNER_DECIDES, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
 import { asApiRuns, fakeExec } from "./helpers/fake-exec";
@@ -850,6 +850,11 @@ describe("placement at admission (SPEC §4.6.15)", () => {
        * (managed clones under its default repo_root), which has no legacy `repo`.
        */
       repos?: boolean;
+      /**
+       * The daemon as installed (#596): its defaults are `defaultsFor({ VOLLEYD_HOME })`, so
+       * `fleet.repo_root` is the supervisor's absolute `<VOLLEYD_HOME>/repos`.
+       */
+      installed?: boolean;
     } = {},
   ) {
     env = await makeDaemonEnv();
@@ -918,6 +923,14 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     startOpts = {
       clock,
       log: (line) => logs.push(line),
+      ...(o.installed === true
+        ? {
+            configDefaults: {
+              ...defaultsFor({ VOLLEYD_HOME: env.home }),
+              autopilot: OWNER_DECIDES.autopilot,
+            },
+          }
+        : {}),
       fleet: {
         os: o.os ?? CALM_OS,
         version: VERSION,
@@ -1136,6 +1149,37 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       expect(s?.worktree).toBe(
         join(boxHome, ".volley", "worktrees", "a/a", "w1", "T1-implementer"),
       );
+    });
+
+    it("on an installed daemon (absolute repo_root) the box's clone is the one its record reports (#596)", async () => {
+      localClaude = false;
+      await setup({
+        repos: true,
+        installed: true,
+        // A real box has no directory at the supervisor's path: only its own clones exist.
+        onBox: (b) => {
+          b.repoExists = async () => b.spec.repo?.startsWith(`${boxHome}/`) === true;
+        },
+      });
+      const clone = join(boxHome, ".volley", "repos", "a/a");
+      await submit("w1", "", "  T1: { issue: 42, host: box }\n");
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return (
+          spawnedOn("w1") !== undefined || journal("w1").some((e) => e.type === "spawn_failed")
+        );
+      });
+      expect(spawnedOn("w1")?.remote).toEqual({ target: "dev@box", repo: clone });
+      expect(box?.spec).toMatchObject({
+        repo: clone,
+        worktree_root: join(boxHome, ".volley", "worktrees", "a/a"),
+      });
+      const events = journal("w1");
+      expect(JSON.stringify(events)).not.toContain("REMOTE_REPO_MISSING");
+      expect(
+        events.some((e) => e.type === "decision_opened" && e.data.kind === "remote_repo_missing"),
+      ).toBe(false);
     });
 
     it("two waves on two slugs each spawn into their own clone on one box", async () => {
