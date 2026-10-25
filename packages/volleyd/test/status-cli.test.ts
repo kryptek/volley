@@ -16,8 +16,14 @@ import {
   renderPlist,
   uninstallService,
 } from "../src/commands/install";
-import { formatLocalAgents, formatLogins, formatWave } from "../src/commands/status";
+import {
+  formatFleetLines,
+  formatLocalAgents,
+  formatLogins,
+  formatWave,
+} from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { isCoordinatorRole } from "../src/coordinator/role";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
@@ -674,6 +680,49 @@ describe("volleyd status: local agents (SPEC §4.6.15)", () => {
     );
     expect(formatLocalAgents({ mode: "always", active: false })).toBe("local agents: always");
     expect(formatLocalAgents({ mode: "never", active: false })).toBe("local agents: never");
+  });
+});
+
+describe("volleyd status fleet lines", () => {
+  const role = {
+    machine: "box-a",
+    name: "coord-test",
+    state: "running",
+    since: "2026-10-25T10:00:00.000Z",
+    restarts: 0,
+    session_url: "https://example.invalid/s",
+  };
+  const presence = {
+    agent_id: "a-1",
+    presence: "online",
+    state: "working",
+    last_seen: "2026-10-25T10:00:00.000Z",
+  };
+
+  it("prints the coordinator role line from a role payload", () => {
+    expect(formatFleetLines({ waves: [], coordinator: role })).toBe(
+      "coordinator: coord-test on box-a: running since 2026-10-25T10:00:00.000Z · https://example.invalid/s\n",
+    );
+  });
+
+  it("prints nothing without a coordinator, or for another coordinator shape", () => {
+    expect(formatFleetLines({ waves: [] })).toBe("");
+    expect(formatFleetLines({ waves: [], coordinator: presence })).toBe("");
+  });
+
+  it("keeps the kill switch and hard ceiling lines in order", () => {
+    expect(formatFleetLines({ waves: [], ceiling: { live: 1, max: 8 }, kill_switch: true })).toBe(
+      "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\nhard ceiling: 1/8\n",
+    );
+  });
+
+  it("isCoordinatorRole accepts a role payload and refuses anything else", () => {
+    expect(isCoordinatorRole(role)).toBe(true);
+    expect(isCoordinatorRole(undefined)).toBe(false);
+    expect(isCoordinatorRole(null)).toBe(false);
+    expect(isCoordinatorRole(presence)).toBe(false);
+    const { since: _since, ...noSince } = role;
+    expect(isCoordinatorRole(noSince)).toBe(false);
   });
 });
 
