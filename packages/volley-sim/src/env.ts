@@ -5,9 +5,9 @@ import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Where the simulator lives and how a shell turns it on. The fakes (`bin/claude`, `bin/gh`) answer
- * only under `VOLLEY_SIMULATED=1`; anywhere else they hand the call to the real program further
- * down PATH, so the directory on PATH by accident never fakes anything.
+ * Where the simulator lives and how a shell turns it on. The fakes (`bin/claude`, `bin/gh`,
+ * `bin/tailscale`) answer only under `VOLLEY_SIMULATED=1`; anywhere else they hand the call to the
+ * real program further down PATH, so the directory on PATH by accident never fakes anything.
  */
 
 /** `packages/volley-sim/bin`: the directory `volley sim env` puts first on PATH. */
@@ -37,7 +37,14 @@ export function simEnvLine(home: string, bin: string = SIM_BIN): string {
 }
 
 /** What `volley sim reset` removes from the home: the world, its lock, the log, the origins. */
-export const WORLD_ENTRIES = ["world.json", "world.json.lock", "unknown.jsonl", "origins"];
+export const WORLD_ENTRIES = [
+  "world.json",
+  "world.json.lock",
+  "unknown.jsonl",
+  "origins",
+  // The fake tailscale's first `up` (its sign-in link printed once).
+  "tailscale-up",
+];
 
 /** Clear the world: every entry the simulator wrote in `home` (nothing else there). */
 export function resetWorld(home: string): string[] {

@@ -58,6 +58,7 @@ describe("setup metrics", () => {
       "detect",
       "security",
       "accounts",
+      "network",
       "signin",
       "claude-code",
       "terminal",

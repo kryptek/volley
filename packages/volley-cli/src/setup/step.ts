@@ -4,6 +4,8 @@ import { MCP_GET, MCP_REMOVE } from "./claude-code";
 import { lsofArgv, ssArgv } from "./desk-port";
 import type { FirstWaveMetrics, FirstWaveOptions, WaveView } from "./first-wave";
 import { isFirstWaveCommand } from "./first-wave-repo";
+import type { NetworkRecord } from "./journal";
+import { type NetworkKind, isTailscaleCommand } from "./network";
 import { isSigninCommand } from "./signin";
 import {
   CMUX_CHECK_OUT,
@@ -38,6 +40,11 @@ export type SetupExec = (
     input?: string;
     /** The command gets the terminal itself (a browser sign-in): nothing is captured. */
     tty?: boolean;
+    /**
+     * Kill the command after this long (volleyd's Desk runs honour it: the Tailscale sign-in);
+     * the terminal's exec ignores it.
+     */
+    timeoutMs?: number;
   },
 ) => Promise<ExecResult>;
 
@@ -113,6 +120,13 @@ export interface SetupDeps {
   now?: () => number;
   /** [0, 1) (the scratch repository's name). Unset: `Math.random`. */
   random?: () => number;
+  /** This machine's interfaces (the Network step's manual address). Unset: `os.networkInterfaces`. */
+  interfaces?: () => Record<
+    string,
+    readonly { address: string; family: string; internal: boolean }[] | undefined
+  >;
+  /** Every address a host name resolves to (the manual address). Unset: `dns.lookup`. */
+  resolveHost?: (host: string) => Promise<string[]>;
 }
 
 export interface SetupContext {
@@ -136,6 +150,20 @@ export interface SetupContext {
    * WebSocket listener. Unset: keep what the config has, else ask (no under `--yes`).
    */
   lan?: boolean;
+  /**
+   * `--network`: how this machine is reached from outside its network (the Network step). Unset:
+   * setup.json's record, else asked (none under `--yes`). The step settles it here.
+   */
+  network?: NetworkKind;
+  /** `--network-address` (with `manual`): this machine's address on the person's own VPN. */
+  networkAddress?: string;
+  /** The network record the Network step wrote in this run (setup.json keeps it). */
+  networkRecord?: NetworkRecord;
+  /**
+   * The Tailscale sign-in's limit when nobody is at a terminal (volleyd for the Desk): `tailscale
+   * up` runs captured for this long and its sign-in link is reported. Unset: it gets the terminal.
+   */
+  networkSigninTimeoutMs?: number;
   deskHost: string;
   deskPort: number;
   /**
@@ -197,6 +225,7 @@ export type StepName =
   | "detect"
   | "security"
   | "accounts"
+  | "network"
   | "signin"
   | "claude-code"
   | "terminal"
@@ -292,6 +321,8 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
       // The skills' installers, the sign-ins, and `claude mcp` for the volley entry only.
       (a0 === "bash" && argv.length === 2 && a1 !== undefined && skills.includes(a1)) ||
       isSigninCommand(argv) ||
+      // The Network step: Tailscale's version, status, address and sign-in (never funnel/serve).
+      isTailscaleCommand(argv, { sudo: true }) ||
       same(argv, MCP_GET) ||
       same(argv, MCP_REMOVE) ||
       (argv.length === 7 &&

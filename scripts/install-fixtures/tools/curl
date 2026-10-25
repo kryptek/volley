@@ -19,6 +19,8 @@ body() {
     https://bun.sh/install) installer bun "$HOME/.bun/bin" ;;
     https://claude.ai/install.sh) installer claude "$HOME/.local/bin" ;;
     https://cli.github.com/packages/githubcli-archive-keyring.gpg) printf 'keyring\n' ;;
+    https://pkgs.tailscale.com/stable/*.noarmor.gpg) printf 'tailscale keyring\n' ;;
+    https://pkgs.tailscale.com/stable/*.tailscale-keyring.list) printf 'deb tailscale\n' ;;
     *) printf 'curl stub: no response for %s\n' "$url" >&2; exit 22 ;;
   esac
 }

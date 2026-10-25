@@ -1327,3 +1327,75 @@ describe("volley peer doctor: many repositories (#435)", () => {
     });
   });
 });
+
+describe("volley peer doctor: network.private (informational)", () => {
+  it("Tailscale on record and signed in: ok, naming it", async () => {
+    const r = await report(machine({ trusted: true }));
+    expect(check(r, "network.private")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "tailscale: box.example.ts.net (100.64.0.9)",
+    });
+  });
+
+  it("Tailscale on record but not signed in: a warning whose fix is the Network step", async () => {
+    const r = await report(machine({ trusted: true, network: { tailscale: "NeedsLogin" } }));
+    expect(check(r, "network.private")).toMatchObject({
+      ok: false,
+      severity: "warn",
+      detail: "tailscale: not signed in (NeedsLogin)",
+      fix: "volley setup --step network",
+    });
+    // A warning only: nothing blocks.
+    expect(r.checks.filter((c) => !c.ok && c.severity === "block")).toEqual([]);
+  });
+
+  it("a paired machine's fix names `--peer`; Tailscale missing says so", async () => {
+    const m = machine({ trusted: true, network: { tailscale: null } });
+    mkdirSync(join(m.home, ".volley"), { recursive: true });
+    writeFileSync(join(m.home, ".volley", "peer.json"), "{}");
+    const r = await report(m);
+    expect(check(r, "network.private")).toMatchObject({
+      ok: false,
+      detail: "tailscale: not installed",
+      fix: "volley setup --peer --step network",
+    });
+  });
+
+  it("none, or no record: a warning", async () => {
+    const none = await report(machine({ trusted: true, network: { record: { kind: "none" } } }));
+    expect(check(none, "network.private")).toMatchObject({
+      ok: false,
+      detail: "none: reached on its own network only",
+    });
+    const missing = await report(machine({ trusted: true, network: { record: null } }));
+    expect(check(missing, "network.private")).toMatchObject({
+      ok: false,
+      detail: "no private network on record (volley setup's Network step has not run)",
+    });
+  });
+
+  it("manual: ok when the address is bound to this machine, else a warning", async () => {
+    const m = machine({
+      trusted: true,
+      network: { record: { kind: "manual", address: "198.51.100.7" } },
+    });
+    const bound = await report(m);
+    expect(check(bound, "network.private")).toMatchObject({ ok: false });
+    const io = makeBufferIO();
+    await doctor(
+      io,
+      m.deps({
+        interfaces: () => ({
+          wg0: [{ address: "198.51.100.7", family: "IPv4", internal: false }],
+        }),
+      }),
+      { repo: m.repoPath, json: true },
+    );
+    const r = JSON.parse(io.readStdout()) as DoctorReport;
+    expect(check(r, "network.private")).toMatchObject({
+      ok: true,
+      detail: "manual: 198.51.100.7 (on wg0)",
+    });
+  });
+});

@@ -23,6 +23,7 @@ case "${1:-}" in
   install)
     shift
     for f in "$@"; do
+      case "$f" in -*) continue ;; esac
       if [ "$f" = "$tap" ]; then
         if [ -n "${STUB_BREW_TAP_FAIL:-}" ]; then
           printf 'Error: %s: failed to download resource\n' "$tap" >&2

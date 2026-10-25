@@ -12,10 +12,12 @@ import { planDetect, planSecurity } from "volley-cli/setup/broker";
 import {
   appendSetupLog,
   lastSetup,
+  readNetworkRecord,
   readSetupInstall,
   recordCmuxSocketMode,
   setupLogFile,
 } from "volley-cli/setup/journal";
+import { TAILSCALE_LINUX_INSTALL, isNetworkKind, planNetwork } from "volley-cli/setup/network";
 import { planServicesForDesk as planServices } from "volley-cli/setup/services";
 import {
   type AnonymousProbe,
@@ -66,7 +68,8 @@ export const SETUP_OPS: ReadonlySet<string> = new Set([
   "desk_password",
 ]);
 
-// The Desk's wizard runs these. The terminal's others stay there: the sign-ins open a browser,
+// The Desk's wizard runs these (the Network step after accounts: the phone's link is made knowing
+// the address). The terminal's others stay there: the sign-ins open a browser,
 // Claude Code's profile and the Terminal are the user's, and the test wave (`first-wave`) runs
 // for up to 15 minutes against GitHub with the coordinator's login: `volley setup --step
 // first-wave` in a terminal.
@@ -74,6 +77,7 @@ const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],
   ["accounts", planAccounts],
+  ["network", planNetwork],
   ["services", planServices],
   ["phone", planPhone],
 ];
@@ -145,6 +149,8 @@ const LEFT = "left";
 
 const CMUX_PASSWORD = "Give volleyd the cmux socket password";
 const CMUX_REACH = "Make volleyd's service reach cmux";
+const TAILSCALE_INSTALL = "Install Tailscale (";
+const TAILSCALE_SUDO_SIGNIN = "Sign in to Tailscale (sudo ";
 /** Every summary start `terminalOnly` keys on (a test proves the planners still make each). */
 export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   WRITE,
@@ -155,6 +161,8 @@ export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   VOLLEYD_SERVICE,
   CMUX_PASSWORD,
   CMUX_REACH,
+  TAILSCALE_INSTALL,
+  TAILSCALE_SUDO_SIGNIN,
 ];
 
 /**
@@ -162,7 +170,8 @@ export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
  * wording) and the layout: anything that needs sudo or that the fence runs only on a brew layout
  * (a root-owned or containerised broker's config, state file and restart), volleyd's own service
  * or password (either would stop the volleyd answering), the macOS keychain (the logged-in
- * session's), and cmux's socket password and reach (a hidden prompt, a check from outside cmux).
+ * session's), cmux's socket password and reach (a hidden prompt, a check from outside cmux), and
+ * on Linux Tailscale's install and sign-in (both need sudo).
  */
 export function terminalOnly(
   step: StepName,
@@ -222,6 +231,21 @@ export function terminalOnly(
         "the cmux socket password is typed at a hidden prompt and checked with cmux from outside it, which only a terminal on the supervisor's machine can do",
       command: "volley setup --step terminal",
     };
+  }
+  if (step === "network" && ctx.deps.platform !== "darwin") {
+    if (summary.startsWith(TAILSCALE_INSTALL)) {
+      return {
+        reason:
+          "it needs sudo: Tailscale's package comes from its own package repository, which only a terminal can add (install.sh --network tailscale installs it with the other packages)",
+        command: TAILSCALE_LINUX_INSTALL,
+      };
+    }
+    if (summary.startsWith(TAILSCALE_SUDO_SIGNIN)) {
+      return {
+        reason: "it needs sudo: on Linux `tailscale up` changes the system's network settings",
+        command: "sudo tailscale up",
+      };
+    }
   }
   if (step === "services" && summary.startsWith(CMUX_REACH)) {
     return {
@@ -585,6 +609,7 @@ export class SetupOps {
       };
     });
     const lan = name === "security" ? lanState(run.ctx) : undefined;
+    const network = name === "network" ? networkState(run.ctx) : undefined;
     const digest = createHash("sha256")
       .update(
         JSON.stringify({
@@ -592,6 +617,7 @@ export class SetupOps {
           blocked: plan.blocked ?? null,
           skipped: plan.skipped ?? null,
           lan: lan?.planned ?? null,
+          ...(network !== undefined ? { network: network.planned } : {}),
         }),
       )
       .digest("hex")
@@ -606,12 +632,22 @@ export class SetupOps {
       ...(plan.skipped !== undefined ? { skipped: plan.skipped } : {}),
       plan_id: `${name}-${digest}`,
       ...(lan !== undefined ? { lan } : {}),
+      ...(network !== undefined ? { network } : {}),
     };
   }
 
   /** The planners' context for one request (`lan`, `repair` from it), or why there is none. */
   private run(p: Fields): Run | string {
     const o = this.o;
+    if (p.network !== undefined && !isNetworkKind(p.network)) {
+      return "network must be one of tailscale, manual, none";
+    }
+    if (p.network_address !== undefined) {
+      if (p.network !== "manual") return "network_address goes with network: manual";
+      if (typeof p.network_address !== "string" || p.network_address === "") {
+        return "network_address must be this machine's address on your own VPN (a host or IP)";
+      }
+    }
     // `volley auth init` finds volleyd's files through VOLLEYD_HOME: this volleyd's own home.
     const env: Record<string, string | undefined> = { ...o.env, VOLLEYD_HOME: o.volleydHome };
     const listeners = listenerUrls(o.brokerUrl);
@@ -646,9 +682,10 @@ export class SetupOps {
     const limit = DAEMON_DEFAULTS.setup_apply_timeout_ms;
     const fenced: SetupExec = async (argv, opts) => {
       try {
-        const r = await o.exec(argv, { ...opts, setup, timeoutMs: limit });
+        const ms = opts?.timeoutMs ?? limit;
+        const r = await o.exec(argv, { ...opts, setup, timeoutMs: ms });
         // The step's error is the command's stderr: say that it was killed, not just how it ended.
-        const killed = `(killed after ${Math.round(limit / 1000)} s)`;
+        const killed = `(killed after ${Math.round(ms / 1000)} s)`;
         return r.timedOut
           ? { ...r, stderr: r.stderr.trim() === "" ? killed : `${r.stderr.trim()} ${killed}` }
           : r;
@@ -704,8 +741,10 @@ export class SetupOps {
       setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun }),
     );
     const probes = new Map<string, AnonymousProbe>();
+    // Nobody at a terminal to ask (the Network step's VPN address comes in the request).
+    const { ask: _ask, ...unasked } = given;
     const deps: SetupDeps = {
-      ...given,
+      ...unasked,
       auth: authDeps,
       exec,
       probeAnonymous: async (url) => {
@@ -741,6 +780,13 @@ export class SetupOps {
         repair: p.repair === true,
         yes: false,
         ...(typeof p.lan === "boolean" ? { lan: p.lan } : {}),
+        // The Network step: the request's kind, else the record's, else Tailscale (the default
+        // the terminal's question offers); the Desk is the confirmation, so nothing is asked.
+        network: isNetworkKind(p.network)
+          ? p.network
+          : (readNetworkRecord(o.volleydHome)?.kind ?? "tailscale"),
+        ...(typeof p.network_address === "string" ? { networkAddress: p.network_address } : {}),
+        networkSigninTimeoutMs: DAEMON_DEFAULTS.network_signin_timeout_ms,
         deskHost: deps.lanHost(),
         deskPort: o.deskPort ?? DESK_PORT,
         deliverToken: (t) => {
@@ -768,6 +814,15 @@ function lanState(ctx: SetupContext): { planned: boolean; current: boolean | nul
     planned: ctx.lan,
     current: sameConfig(text, open) ? true : sameConfig(text, local) ? false : null,
   };
+}
+
+/**
+ * The Network step's kind: planned (what `planNetwork` settled) and setup.json's record now
+ * (null: none yet).
+ */
+function networkState(ctx: SetupContext): { planned: string; current: string | null } | undefined {
+  if (ctx.network === undefined) return undefined;
+  return { planned: ctx.network, current: readNetworkRecord(ctx.volleydHome)?.kind ?? null };
 }
 
 /**

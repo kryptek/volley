@@ -29,6 +29,7 @@
     "./setup/terminal": "./src/setup/terminal.ts",
     "./setup/journal": "./src/setup/journal.ts",
     "./setup/launchd": "./src/setup/launchd.ts",
+    "./setup/network": "./src/setup/network.ts",
     "./setup/service-path": "./src/setup/service-path.ts",
     "./setup/services": "./src/setup/services.ts",
     "./setup/step": "./src/setup/step.ts",

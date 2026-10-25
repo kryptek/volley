@@ -1,7 +1,7 @@
-# volley-sim — fake `claude` and `gh` for installed-mode runs
+# volley-sim — fake `claude`, `gh` and `tailscale` for installed-mode runs
 
-`packages/volley-sim` holds two executables, `bin/claude` and `bin/gh`, that stand in for Claude
-Code and the GitHub CLI when `VOLLEY_SIMULATED=1`. With them first on PATH, an **installed**
+`packages/volley-sim` holds three executables, `bin/claude`, `bin/gh` and `bin/tailscale`, that
+stand in for Claude Code, the GitHub CLI and Tailscale when `VOLLEY_SIMULATED=1`. With them first on PATH, an **installed**
 Volley — real volleyd, real tmux or cmux, real git, a real broker — runs a whole wave without a
 Claude account or a GitHub repository, and without spending any Claude usage. They behave like
 the in-process soak fleet in volleyd's tests (`packages/volleyd/test/helpers/soak-world.ts` and
@@ -18,8 +18,8 @@ volley sim reset           # clear the simulated world
 `export PATH='<repo>/packages/volley-sim/bin':"$PATH" VOLLEY_SIM_HOME='<dir>' VOLLEY_SIMULATED=1`.
 The world lives in `$VOLLEY_SIM_HOME` (default `~/.volley/sim`).
 
-Outside `VOLLEY_SIMULATED=1` both fakes hand the call, argv and stdio unchanged, to the next real
-`claude` / `gh` on PATH, so the directory left on a PATH by accident fakes nothing. The services'
+Outside `VOLLEY_SIMULATED=1` the fakes hand the call, argv and stdio unchanged, to the next real
+`claude` / `gh` / `tailscale` on PATH, so the directory left on a PATH by accident fakes nothing. The services'
 PATH (`stableServicePath` in volley-cli's `setup/service-path.ts`) and the installer
 (`install.sh`, `packaging/`) never include this package's `bin`; `test/guard.test.ts` greps both.
 volleyd started as a service therefore runs the real programs: a simulated wave runs a volleyd
@@ -31,7 +31,7 @@ started from the shell that ran the `eval`.
 | ------------------------------------------------- | ----------------------------------------------------------- |
 | volleyd, its fence, the journal                   | `gh`: PRs, issues, labels, CI runs, the GitHub sign-in      |
 | the broker (mosquitto; Aedes stays test-only)     | `claude`: sign-ins, MCP registrations, the agent's work     |
-| tmux / cmux panes and `.volley/launch.sh`         |                                                             |
+| tmux / cmux panes and `.volley/launch.sh`         | `tailscale`: `version`, `status --json` (Running, as `sim-machine.example.ts.net` at 100.64.0.2), `ip -4`, `up` (its sign-in link once, then exit 0) |
 | git: commits, pushes, a local bare origin, merges |                                                             |
 
 ### The world file

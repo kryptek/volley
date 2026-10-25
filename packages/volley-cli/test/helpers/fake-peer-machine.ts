@@ -85,7 +85,15 @@ export interface FakeMachineOptions {
   canonical?: Record<string, string | null>;
   /** Tools beyond the doctor's own (`java`, `mvn`…): absent unless listed. */
   extraTools?: Record<string, Partial<FakeTool>>;
+  /**
+   * setup.json's network record (null: none; default Tailscale) and Tailscale's backend state as
+   * `tailscale status --json` reports it (null: not installed; default Running).
+   */
+  network?: { record?: Record<string, unknown> | null; tailscale?: string | null };
 }
+
+/** The default network record of the fake box (Tailscale, signed in). */
+export const BOX_NETWORK = { kind: "tailscale", name: "box.example.ts.net", address: "100.64.0.9" };
 
 /** A git clone on the box. */
 export interface FakeClone {
@@ -170,6 +178,15 @@ export const fakeMcpEntry = (volleyDir: string, url?: string) => ({
 export function fakePeerMachine(opts: FakeMachineOptions = {}) {
   const root = tempDir("volley-fake-box-");
   const home = join(root, "home");
+  const networkRecord = opts.network?.record === undefined ? BOX_NETWORK : opts.network.record;
+  if (networkRecord !== null) {
+    mkdirSync(join(home, ".volley", "volleyd"), { recursive: true });
+    writeFileSync(
+      join(home, ".volley", "volleyd", "setup.json"),
+      JSON.stringify({ network: networkRecord }),
+    );
+  }
+  const tailscale = opts.network?.tailscale === undefined ? "Running" : opts.network.tailscale;
   const volleyDir = join(root, "volley");
   const repoPath = join(root, "src", "repo");
   mkdirSync(home, { recursive: true });
@@ -492,6 +509,18 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       }
       writeFileSync(claudeJsonFile, JSON.stringify({ ...j, mcpServers: servers }));
       return {};
+    }
+    if (cmd === "tailscale" && a.join(" ") === "status --json") {
+      if (tailscale === null) return { code: 127, stderr: "tailscale: not found" };
+      return {
+        stdout: JSON.stringify({
+          BackendState: tailscale,
+          Self:
+            tailscale === "Running"
+              ? { DNSName: `${BOX_NETWORK.name}.`, TailscaleIPs: [BOX_NETWORK.address] }
+              : null,
+        }),
+      };
     }
     if (cmd === "vm_stat") {
       return {

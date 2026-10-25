@@ -51,6 +51,33 @@ describe("setupFence", () => {
     expect(() => fence(argv)).toThrow(/volley setup does not run/);
   });
 
+  it.each([
+    [["tailscale", "version"]],
+    [["tailscale", "status", "--json"]],
+    [["tailscale", "ip", "-4"]],
+    [["tailscale", "up"]],
+    [["sudo", "tailscale", "up"]],
+    [["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json"]],
+    [["brew", "install", "--cask", "tailscale"]],
+  ])("allows the Network step's %j", (argv) => {
+    expect(() => fence(argv)).not.toThrow();
+  });
+
+  it.each([
+    [["tailscale", "funnel", "443"]],
+    [["tailscale", "funnel", "--bg", "5199"]],
+    [["tailscale", "serve", "5199"]],
+    [["tailscale", "serve", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "up", "--ssh"]],
+    [["sudo", "tailscale", "up", "--ssh"]],
+    [["sudo", "tailscale", "funnel", "443"]],
+    [["tailscale", "status"]],
+    [["/usr/local/bin/tailscale-evil", "up"]],
+    [["brew", "install", "--cask", "tailscale", "--force"]],
+  ])("refuses Tailscale's %j", (argv) => {
+    expect(() => fence(argv)).toThrow(/volley setup does not run/);
+  });
+
   it("allows nothing of the checkout's when there is none", () => {
     const bare = setupFence({
       restart: "sudo systemctl restart mosquitto",
