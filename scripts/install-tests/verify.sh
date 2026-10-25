@@ -49,7 +49,8 @@ if ! gh auth status >/dev/null 2>&1; then
   exit 2
 fi
 if [ -z "$BRANCH" ]; then
-  BRANCH=$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  # The checkout verify.sh is run from; outside one, the checkout verify.sh lives in.
+  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null)
   if [ -z "$BRANCH" ] || [ "$BRANCH" = HEAD ]; then
     echo "verify.sh: this checkout is on no branch: name one" >&2
     exit 2

@@ -990,16 +990,21 @@ describe("verify.sh", () => {
       calls: existsSync(log) ? readFileSync(log, "utf8").trimEnd().split("\n") : [],
     };
   }
-  const branch = () =>
-    Bun.spawnSync(["git", "-C", HERE, "rev-parse", "--abbrev-ref", "HEAD"])
-      .stdout.toString()
-      .trim();
+  /** Makes the world's directory a checkout on <ref> (a branch, or detached with "--detach"). */
+  function checkout(w: World, ref: string) {
+    const git = (...a: string[]) =>
+      Bun.spawnSync(["git", "-C", w.dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a]);
+    git("init", "-q", "-b", ref === "--detach" ? "main" : ref);
+    git("commit", "-q", "--allow-empty", "-m", "x");
+    if (ref === "--detach") git("checkout", "-q", "--detach");
+  }
 
   test("no argument dispatches the current branch; the run is the new one gh run list shows", () => {
     const w = world();
+    const b = "feature/vm-check";
+    checkout(w, b);
     const r = verify(w, []);
     expect(r.code).toBe(0);
-    const b = branch();
     expectInOrder(r.calls, [
       /^gh auth status$/,
       new RegExp(
@@ -1013,6 +1018,15 @@ describe("verify.sh", () => {
       /^gh run watch 1001 --exit-status$/,
       /^gh run download 1001 --dir \S+run-1001 --pattern layer\*$/,
     ]);
+  });
+
+  test("no argument on a detached checkout asks for a branch, dispatching nothing", () => {
+    const w = world();
+    checkout(w, "--detach");
+    const r = verify(w, []);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("verify.sh: this checkout is on no branch: name one");
+    expect(r.calls).toEqual(["gh auth status"]);
   });
 
   test("<branch> dispatches that ref; --version adds the input, and must be vX.Y.Z", () => {
