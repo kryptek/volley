@@ -1,6 +1,6 @@
 {
   "name": "volley-dash",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "private": true,
   "description": "Volley dashboard — real-time MQTT monitoring web UI (Vite + React + Tailwind + shadcn/ui + GSAP)",
   "license": "Apache-2.0",
