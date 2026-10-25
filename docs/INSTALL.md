@@ -222,6 +222,11 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
   sudo ~/.volley/bin/volley setup --step detect --step security --step accounts
   volley setup
   ```
+
+  Under sudo, setup gives the Volley auth dir (`/var/snap/mosquitto/common/volley`: `admin.json`,
+  `coordinator.json`) to you, as it does `~/.volley/volleyd/dynsec-admin.json`, so the second run
+  and your CLIs can read them; the broker's own files stay root's. Run as root with no sudo user,
+  it stays root's.
 - **Services** are `systemd --user` units. To keep volleyd and the Desk running while you are
   logged out, `loginctl enable-linger` (setup says so when it starts them). A container without
   systemd needs a stand-in: `scripts/install-tests/systemctl-stand-in.sh` is the one CI uses.

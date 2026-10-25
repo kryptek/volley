@@ -7,6 +7,7 @@ import {
   type AdminCredentials,
   binaryOf,
   ensureOwnedDir,
+  handAuthDirToInvoker,
   openAdmin,
   readCredentials,
   writeSecret,
@@ -288,6 +289,7 @@ export async function planSecurity(ctx: SetupContext): Promise<StepPlan> {
           );
         }
         writeSecret(adminPath, `${JSON.stringify({ username: DYNSEC_ADMIN_USER, password })}\n`);
+        handAuthDirToInvoker(ctx.auth);
         const owner = deps.brokerOwner();
         if (owner !== null) deps.chown(ctx.stateFile, owner.uid, owner.gid);
         return [`Created ${ctx.stateFile}; the admin login is in ${adminPath} (mode 0600).`];
