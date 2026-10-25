@@ -445,4 +445,42 @@ describe("volley desk serve --broker-host: /desk-config.json", () => {
     ).toBe(2);
     expect(io.readStderr()).toContain("--broker-ws-port needs --broker-host");
   });
+
+  it("--ws-url adds ws_url beside the broker (its host and port when no --broker-host names one)", async () => {
+    const a = await serveOnce(["--ws-url", "wss://desk.example.ts.net:8443"]);
+    expect(a.code).toBe(0);
+    expect(a.body).toEqual({
+      broker: { host: "desk.example.ts.net", ws_port: 8443 },
+      ws_url: "wss://desk.example.ts.net:8443",
+    });
+    expect(a.io.readStdout()).toContain("the broker at wss://desk.example.ts.net:8443");
+    expect(a.io.readStdout()).toContain(
+      "On your private network: https://desk.example.ts.net (tailscale serve)",
+    );
+    const b = await serveOnce(["--broker-host", "box-a", "--ws-url", "ws://box-a:9001"]);
+    expect(b.body).toEqual({ broker: { host: "box-a", ws_port: 9001 }, ws_url: "ws://box-a:9001" });
+  });
+
+  it("without --ws-url the shape is the old one", async () => {
+    const a = await serveOnce(["--broker-host", "box-a"]);
+    expect(a.body).toEqual({ broker: { host: "box-a", ws_port: 9001 } });
+  });
+
+  it("a --ws-url that is not a bare ws(s):// URL exits 2", async () => {
+    for (const bad of [
+      "http://desk.example.ts.net:8443",
+      "desk.example.ts.net:8443",
+      "wss://me:pw@desk.example.ts.net:8443",
+      "wss://desk.example.ts.net:8443/mqtt?x=1",
+      "wss://desk.example.ts.net:8443#x",
+      "",
+    ]) {
+      const io = makeBufferIO();
+      expect(
+        await desk({ argv: ["serve", "--root", root, "--ws-url", bad], env: {}, io }),
+        bad,
+      ).toBe(2);
+      expect(io.readStderr(), bad).toContain("--ws-url");
+    }
+  });
 });

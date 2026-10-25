@@ -59,7 +59,13 @@ describe("setupFence", () => {
     [["sudo", "tailscale", "up"]],
     [["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json"]],
     [["brew", "install", "--cask", "tailscale"]],
-  ])("allows the Network step's %j", (argv) => {
+    [["tailscale", "serve", "status", "--json"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:9001"]],
+    [["sudo", "tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5300"]],
+    [["tailscale", "serve", "--https=443", "off"]],
+    [["sudo", "tailscale", "serve", "--https=8443", "off"]],
+  ])("allows the Network step's and the Desk serve's %j", (argv) => {
     expect(() => fence(argv)).not.toThrow();
   });
 
@@ -68,6 +74,13 @@ describe("setupFence", () => {
     [["tailscale", "funnel", "--bg", "5199"]],
     [["tailscale", "serve", "5199"]],
     [["tailscale", "serve", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "serve", "reset"]],
+    [["sudo", "tailscale", "serve", "reset"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://0.0.0.0:5199"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://192.0.2.10:5199"]],
+    [["tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:1883"]],
+    [["tailscale", "funnel", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["sudo", "tailscale", "funnel", "--bg", "http://127.0.0.1:5199"]],
     [["tailscale", "up", "--ssh"]],
     [["sudo", "tailscale", "up", "--ssh"]],
     [["sudo", "tailscale", "funnel", "443"]],

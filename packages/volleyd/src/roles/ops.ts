@@ -325,8 +325,15 @@ export class RoleOps {
     if (rec.role !== "desk")
       return refuse(`rolling back a ${rec.role} move is not supported by this supervisor yet`);
     if (rec.kept === undefined) return refuse(`move ${id} kept nothing to roll back to`);
-    const kept = rec.kept as { desk?: { url: string }; port?: number; from_port?: number };
-    const issued: DeskIssued = { url: kept.desk?.url ?? "" };
+    const kept = rec.kept as {
+      desk?: { url: string; lan_url?: string };
+      port?: number;
+      from_port?: number;
+    };
+    const issued: DeskIssued = {
+      url: kept.desk?.url ?? "",
+      ...(kept.desk?.lan_url !== undefined ? { lan_url: kept.desk.lan_url } : {}),
+    };
     if (d.roles.desk.machine !== rec.to)
       return refuse(`the Desk runs on ${d.roles.desk.machine} now, not ${rec.to}: not rolled back`);
     const steps = deskSteps(

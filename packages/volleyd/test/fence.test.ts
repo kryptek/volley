@@ -641,6 +641,11 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     [["tailscale", "up"]],
     [["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "up"]],
     [["brew", "install", "--cask", "tailscale"]],
+    // The Desk on the tailnet (macOS): its two loopback-only serves, their status and removal.
+    [["tailscale", "serve", "status", "--json"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["tailscale", "serve", "--bg", "--https=8443", "http://127.0.0.1:9001"]],
+    [["tailscale", "serve", "--https=8443", "off"]],
   ];
   const SETUP_DENIED: [string[], string?][] = [
     // No setup step runs it (the accounts step issues the token in-process; admin_token runs it
@@ -669,6 +674,10 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     // Never exposed publicly, and never Tailscale's other settings.
     [["tailscale", "funnel", "443"]],
     [["tailscale", "serve", "5199"]],
+    [["tailscale", "serve", "reset"]],
+    [["tailscale", "serve", "--bg", "--https=443", "http://0.0.0.0:5199"]],
+    [["tailscale", "funnel", "--bg", "--https=443", "http://127.0.0.1:5199"]],
+    [["sudo", "tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:5199"]],
     [["tailscale", "up", "--ssh"]],
     [["tailscale", "set", "--ssh"]],
     // The keychain is a terminal's (the logged-in session's).

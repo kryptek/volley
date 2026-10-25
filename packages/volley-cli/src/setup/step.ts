@@ -7,6 +7,7 @@ import { isFirstWaveCommand } from "./first-wave-repo";
 import type { NetworkRecord } from "./journal";
 import { type NetworkKind, isTailscaleCommand } from "./network";
 import { isSigninCommand } from "./signin";
+import { isTailscaleServeCommand } from "./tailscale-serve";
 import {
   CMUX_CHECK_OUT,
   CMUX_CHECK_SCRIPT,
@@ -203,6 +204,17 @@ export interface SetupContext {
   firstWave?: FirstWaveOptions;
   /** The scratch repository the test wave made (`owner/name`): the end says how to delete it. */
   firstWaveScratch?: string;
+  /**
+   * Serve the Desk on the private network (`tailscale serve`, tailscale-serve.ts): `volley desk
+   * install --tailscale` sets it. Unset: the Services step serves it when the Network step
+   * recorded Tailscale.
+   */
+  deskServe?: boolean;
+  /**
+   * The Desk's private HTTPS address the Desk's planner settled on (null: none): setup.json's
+   * `desk_private_url` and the roles record's `desk.url` follow it.
+   */
+  deskPrivateUrl?: string | null;
 }
 
 /** A one-time admin token as `volley auth token --json` prints it. */
@@ -321,8 +333,10 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
       // The skills' installers, the sign-ins, and `claude mcp` for the volley entry only.
       (a0 === "bash" && argv.length === 2 && a1 !== undefined && skills.includes(a1)) ||
       isSigninCommand(argv) ||
-      // The Network step: Tailscale's version, status, address and sign-in (never funnel/serve).
+      // The Network step: Tailscale's version, status, address and sign-in (never funnel).
       isTailscaleCommand(argv, { sudo: true }) ||
+      // The Desk on the tailnet: the two loopback-only serves, their status and removal.
+      isTailscaleServeCommand(argv, { sudo: true }) ||
       same(argv, MCP_GET) ||
       same(argv, MCP_REMOVE) ||
       (argv.length === 7 &&

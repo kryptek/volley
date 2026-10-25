@@ -534,6 +534,21 @@ export default function App() {
     () => (authOps ? createPeerOps(authOps, { role: readSessionRole(authOps.identity) }) : null),
     [authOps],
   );
+  /**
+   * A paired machine's Claude sign-in (volleyd's `primary@<name>`): on its card, in Add a
+   * machine's step 4 and in Getting started › Your machines.
+   */
+  const peerSignIn = control
+    ? (name: string) => (
+        <PeerSignin
+          machine={name}
+          signin={state.signins?.[peerAccount(name)]}
+          signedIn={state.machines?.[name]?.auth?.claude === "signed_in"}
+          control={control}
+          ops={peerOps}
+        />
+      )
+    : undefined;
   // The machine-role ops (SPEC §4.6.24): Move a role here… on a machine card.
   const roleOps = useMemo(() => (authOps ? createRoleOps(authOps) : null), [authOps]);
   // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
@@ -1744,21 +1759,7 @@ export default function App() {
               Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
               (id) => isLiveAgent(state, id),
             ),
-            // A paired machine's Claude sign-in (volleyd's `primary@<name>`), on its card and in
-            // Add a machine's step 4.
-            ...(control
-              ? {
-                  signIn: (name: string) => (
-                    <PeerSignin
-                      machine={name}
-                      signin={state.signins?.[peerAccount(name)]}
-                      signedIn={state.machines?.[name]?.auth?.claude === "signed_in"}
-                      control={control}
-                      ops={peerOps}
-                    />
-                  ),
-                }
-              : {}),
+            ...(peerSignIn ? { signIn: peerSignIn } : {}),
           }}
           onboarding={{
             ops: authOps,
@@ -1816,6 +1817,10 @@ export default function App() {
               gettingStarted.close();
               setDeskSettings(section);
             },
+            config: configTransport,
+            peerOps,
+            sshHost: sshHost(brokerUrl),
+            ...(peerSignIn ? { signIn: peerSignIn } : {}),
           }}
           initial={gettingStarted.open}
           summary={gettingStarted.progress.summary}
