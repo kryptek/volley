@@ -369,7 +369,10 @@ export interface FakeRemoteAnswers {
    * Default: an all-green report.
    */
   doctor?: DoctorReport | Error | (() => Promise<DoctorReport>);
-  /** probeClone's answer per path (an Error: ssh failed). Default: a clone of `a/a` there. */
+  /**
+   * probeClone's answer per path (an Error: ssh failed). Default: a clone there of the
+   * repository a path ending `…/x/x` names (the tests' a/a and b/b), else of `a/a`.
+   */
   clone?: (path: string) => CloneProbe | Error;
 }
 
@@ -457,11 +460,13 @@ export function fakeRemoteHost(
     },
     probeClone: async (path: string) => {
       h.cloneProbes.push(path);
+      // A clone at `…/x/x` (the tests' a/a and b/b) is that repository's; any other path a/a's.
+      const slug = /\/(([^/]+)\/\2)\/?$/.exec(path)?.[1] ?? "a/a";
       const a = h.answers.clone?.(path) ?? {
         state: "found",
         root: path,
-        origin: "https://github.com/a/a.git",
-        slug: "a/a",
+        origin: `https://github.com/${slug}.git`,
+        slug,
       };
       if (a instanceof Error) throw a;
       return a;

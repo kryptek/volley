@@ -645,7 +645,11 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   });
 
   it("run does not check the local repo for a wave whose every task runs on a remote host", async () => {
-    const r = await setup("spawn_retry_max: 5", { release: "missing", taskHost: "build-box.lan" });
+    // An inline host: a bare name no config defines is refused at submit (#608).
+    const r = await setup("spawn_retry_max: 5", {
+      release: "missing",
+      taskHost: "{ type: ssh, target: dev@build-box.lan, repo: /srv/r, volley_dir: /opt/v }",
+    });
     expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     expect(gitCalls().filter((a) => a[3] === "rev-parse" && a[4] === "--verify")).toEqual([]);
