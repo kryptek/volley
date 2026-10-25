@@ -441,7 +441,9 @@ import {
   isSlug,
   legacyOrigin,
   pendingRepoRuns,
+  remoteRepoRoot,
   repoStateLine,
+  reportedClone,
   sameSlug,
   slugKey,
   unassignedSlugs,
@@ -5484,19 +5486,21 @@ export class Daemon {
     if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
     const eff = this.config.effective(wave);
     const slug = this.slugOf(wave);
+    const record = this.machines.record(t.host);
+    // The box's managed root: never the supervisor's absolute repo_root (#596).
+    const root = remoteRepoRoot(eff.fleet.repo_root);
     const target: SlugTarget | "legacy" =
       slug === undefined
         ? "legacy"
         : {
             slug,
             repos: eff.repos,
-            repo_root: eff.fleet.repo_root,
+            repo_root: root,
             // A managed clone's home-relative path, from the clones the machine reports (#436).
-            home: homeFromClones(eff.fleet.repo_root, this.machines.record(t.host)?.repos),
-            origin: legacyOrigin(
-              this.machines.record(t.host)?.repo,
-              t.host_spec?.repo ?? eff.hosts[t.host]?.repo,
-            ),
+            home: homeFromClones(root, record?.repos),
+            // Where the machine itself reports its clone (#596).
+            clone: reportedClone(record, slug),
+            origin: legacyOrigin(record?.repo, t.host_spec?.repo ?? eff.hosts[t.host]?.repo),
           };
     // The spec carries its clone, so the host built from it is one repository's.
     return this.remoteBySpec(
@@ -5989,9 +5993,18 @@ export class Daemon {
   /** The repositories `m` holds a clone of (assigned or adopted), each at its path there. */
   private coordinatorRepos(m: string, home: string): { slug: string; target: string }[] {
     const eff = this.config.effective();
-    const machine = this.isLocalMachine(m) ? this.config.localName() : m;
+    const isLocal = this.isLocalMachine(m);
+    const machine = isLocal ? this.config.localName() : m;
+    const record = isLocal ? undefined : this.machines.record(m);
+    // A paired machine's managed clone: its record's, else under its own root (#596).
+    const cfg = isLocal
+      ? eff
+      : { ...eff, fleet: { ...eff.fleet, repo_root: remoteRepoRoot(eff.fleet.repo_root) } };
     return assignedSlugs(eff, machine).flatMap((slug) => {
-      const path = cloneFor(eff, machine, slug, { home });
+      const path = cloneFor(cfg, machine, slug, {
+        home,
+        ...(isLocal ? {} : { clone: reportedClone(record, slug) }),
+      });
       const target = path?.startsWith("~/") ? join(home, path.slice(2)) : path;
       return target?.startsWith("/") === true ? [{ slug, target }] : [];
     });

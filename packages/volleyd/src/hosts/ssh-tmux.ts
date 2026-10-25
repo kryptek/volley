@@ -58,7 +58,11 @@ export interface RemoteHostSpec {
 /** A spec for one repository: its clone and worktree root are always resolved. */
 export type RepoHostSpec = RemoteHostSpec & { repo: string; worktree_root: string };
 
-/** What resolving a host's clone of one repository reads (config `repos`, `fleet.repo_root`). */
+/**
+ * What resolving a host's clone of one repository reads (config `repos`, the machine's managed
+ * root `remoteRepoRoot(fleet.repo_root)`), and what its record says (`clone`: where it reports
+ * the repository's clone, #596).
+ */
 export interface SlugTarget extends MachineFacts {
   slug: string;
   repos: Tunables["repos"];
