@@ -160,7 +160,7 @@ export function GettingStarted(p: GettingStartedProps) {
           <footer className="gs-foot">
             <p className="gs-note">
               Each step shows what it will change before you apply it. Run again any time from
-              Settings › Getting started.
+              Settings › Setup &amp; Security › Getting started.
             </p>
             <div className="gs-actions">
               {cur > 0 && (

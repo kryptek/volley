@@ -94,7 +94,7 @@ describe("Getting started: the shell", () => {
     expect(
       stage.getByText(/Each step shows what it will change before you apply it\./),
     ).toHaveTextContent(
-      "Each step shows what it will change before you apply it. Run again any time from Settings › Getting started.",
+      "Each step shows what it will change before you apply it. Run again any time from Settings › Setup & Security › Getting started.",
     );
   });
 

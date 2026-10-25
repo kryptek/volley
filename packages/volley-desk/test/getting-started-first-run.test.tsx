@@ -140,7 +140,7 @@ describe("Getting started on first launch", () => {
     window.history.replaceState(null, "", "/#getting-started");
     mount();
     expect(gettingStarted()).toBeNull();
-    const s = settings();
-    if (s) expect(within(s).queryByText("Getting started")).toBeNull();
+    // Nothing opens for steer; the row's absence in an opened Setup is setup-section.test.tsx's.
+    expect(settings()).toBeNull();
   });
 });

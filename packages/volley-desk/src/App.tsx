@@ -1256,7 +1256,7 @@ export default function App() {
     // Top first: the modal sheets and the Settings windows sit above the popout layer.
     closeTop: () => {
       if (preview) setPreview(false);
-      else if (gettingStarted.open !== null) gettingStarted.close();
+      else if (gettingStarted.open !== null && canGuide) gettingStarted.close();
       else if (setupWizard !== null) closeSetupWizard();
       else if (settings !== null) setSettings(null);
       else if (deskSettings !== null) setDeskSettings(null);
