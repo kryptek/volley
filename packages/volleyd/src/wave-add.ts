@@ -1,4 +1,4 @@
-import { isMap, parseDocument } from "yaml";
+import { isMap, isNode, parseDocument } from "yaml";
 import { type Tree, footprintOf } from "./footprint";
 import type { IssueFacts } from "./issue";
 import { assignTaskIds, parseDependsOn } from "./issue-task";
@@ -108,16 +108,42 @@ function pinnedHost(text: string): string | undefined {
   return hosts.size === 1 && typeof host === "string" ? host : undefined;
 }
 
+/** The column of `offset` in `text`. */
+const column = (text: string, offset: number) => offset - text.lastIndexOf("\n", offset - 1) - 1;
+
+/** The `tasks:` block mapping of the file, found through the YAML AST. */
+function tasksMap(text: string) {
+  const tasks = parseDocument(text).get("tasks", true);
+  if (!isMap(tasks) || tasks.flow === true || tasks.range == null) {
+    throw new Error("the wave file's tasks: is not a block mapping; add the task by hand");
+  }
+  return tasks as typeof tasks & { range: [number, number, number] };
+}
+
+/**
+ * The file's indents: where a task id sits under `tasks:` and how much deeper its fields go,
+ * read from its first task (a hand-edited file may indent by 4), else 2 and 2.
+ */
+function indents(text: string): { key: string; field: string } {
+  const [first] = tasksMap(text).items;
+  const at = isNode(first?.key) ? first.key.range?.[0] : undefined;
+  if (at === undefined) return { key: "  ", field: "    " };
+  const key = column(text, at);
+  const value = first?.value;
+  const inner =
+    isMap(value) && value.flow !== true && isNode(value.items[0]?.key)
+      ? value.items[0].key.range?.[0]
+      : undefined;
+  const step = inner !== undefined && column(text, inner) > key ? column(text, inner) - key : 2;
+  return { key: " ".repeat(key), field: " ".repeat(key + step) };
+}
+
 /**
  * `text` with `block` (whole lines) inserted after the last line of the `tasks:` map, found
  * through the YAML AST, so every byte of the file around it is kept.
  */
 function insertTasks(text: string, block: string): string {
-  const tasks = parseDocument(text).get("tasks", true);
-  if (!isMap(tasks) || tasks.flow === true || tasks.range == null) {
-    throw new Error("the wave file's tasks: is not a block mapping; add the task by hand");
-  }
-  const end = tasks.range[2];
+  const end = tasksMap(text).range[2];
   if (end > 0 && text[end - 1] === "\n") return `${text.slice(0, end)}${block}${text.slice(end)}`;
   const nl = text.indexOf("\n", end);
   if (nl === -1) return `${text}\n${block}`;
@@ -164,6 +190,8 @@ export function planAdd(input: AddInput): AddPlan {
   const notes: string[] = [];
   const added: AddedTask[] = [];
   const host = pinnedHost(input.text);
+  const { key: k, field: f2 } = indents(input.text);
+  if (input.tree === null) notes.push("no tree: footprints unresolved");
   let block = "";
   for (const i of issues) {
     const d = deps.get(i.number) ?? { declared: false, refs: [] };
@@ -198,12 +226,15 @@ export function planAdd(input: AddInput): AddPlan {
     };
     const id = ids.get(i.number) ?? `i${i.number}`;
     // The lines `wave-from-issues` writes for a task (no plan: the planner is a first-submit affair).
-    const lines = [`  ${id}:`, `    issue: ${i.number}`];
-    if (host !== undefined) lines.push(`    host: ${q(host)}`);
-    if (i.title !== "") lines.push(`    title: ${q(i.title)}`);
-    if (uniq.length > 0) lines.push(`    after: [${uniq.join(", ")}]`);
-    if (fp.files.length > 0) lines.push(`    files: ${q(fp.files)}`);
-    lines.push(`    footprint: ${q(footprint)}`);
+    const lines = [`${k}${id}:`, `${f2}issue: ${i.number}`];
+    if (host !== undefined) {
+      lines.push(`${f2}host: ${q(host)}`);
+      notes.push(`${id} is pinned to ${host} like the wave's other tasks`);
+    }
+    if (i.title !== "") lines.push(`${f2}title: ${q(i.title)}`);
+    if (uniq.length > 0) lines.push(`${f2}after: [${uniq.join(", ")}]`);
+    if (fp.files.length > 0) lines.push(`${f2}files: ${q(fp.files)}`);
+    lines.push(`${f2}footprint: ${q(footprint)}`);
     block += `${lines.join("\n")}\n`;
     added.push({ id, issue: i.number, title: i.title, after: uniq });
   }

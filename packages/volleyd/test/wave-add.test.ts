@@ -97,6 +97,15 @@ describe("planAdd", () => {
     expect(parseWaveFile(r.text).tasks.B13?.after).toEqual(["B10"]);
   });
 
+  it("a tasks: map indented by 4 spaces gets its block at the same indent", () => {
+    const text = `${HEAD}    T1:\n        issue: 42\n        title: "T1: x"\nconfig: { worktree_root: /path/to/worktrees }\n`;
+    const r = ok({ text, issues: [issue(602, "B13: x", "Depends on: none")] });
+    const at = text.indexOf("config:");
+    expect(r.text.slice(0, at)).toBe(text.slice(0, at));
+    expect(r.text.slice(at).startsWith("    B13:\n        issue: 602\n")).toBe(true);
+    expect(parseWaveFile(r.text).tasks.B13?.issue).toBe(602);
+  });
+
   it("a file without a final newline gets one before the block", () => {
     const r = ok({ text: TEXT.trimEnd() });
     expect(r.text.startsWith(`${TEXT.trimEnd()}\n  B13:\n`)).toBe(true);
@@ -204,12 +213,14 @@ describe("planAdd", () => {
       confidence: "none",
       unresolved: ["src/new.ts"],
     });
+    expect(r.notes).toContain("no tree: footprints unresolved");
   });
 
   it("a wave whose tasks are all pinned to one machine pins the new one there too", () => {
     const text = `${HEAD}  T1:\n    issue: 42\n    host: "box"\n  T2:\n    issue: 43\n    host: "box"\n`;
     const r = ok({ text, issues: [issue(602, "B13: x", "Depends on: none")] });
     expect(r.text.slice(text.length)).toContain('    host: "box"\n');
+    expect(r.notes).toContain("B13 is pinned to box like the wave's other tasks");
   });
 });
 

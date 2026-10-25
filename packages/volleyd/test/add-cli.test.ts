@@ -222,6 +222,23 @@ describe("volleyd add", () => {
     expect(w.gh.calls.length).toBeGreaterThan(0);
   });
 
+  it("no answer to the submit keeps the file as submitted and names volleyd diff", async () => {
+    const w = await world();
+    // The daemon's check of the release branch outlasts the submit's wait: no answer in time.
+    w.s.host.fake.on(["git", "-C", w.s.repo, "rev-parse", "--verify"], async () => {
+      await new Promise((r) => setTimeout(r, 1000));
+      return { stdout: "abc\n" };
+    });
+    const r = await w.add(["w1", "602", "--by", OWNER], { submitTimeoutMs: 300 });
+    expect(r.exitCode).toBe(124);
+    expect(r.stderr).toContain(
+      `no answer to the submit; ${w.file} is kept as submitted: check it with volleyd diff w1 ${w.file}`,
+    );
+    const now = readFileSync(w.file, "utf-8");
+    expect(now).not.toBe(w.before);
+    expect(now).toContain("  B13:\n    issue: 602\n");
+  });
+
   it("an --after that is no task is a usage error listing the wave's ids", async () => {
     const w = await world();
     const r = await w.add(["w1", "602", "--after", "T7", "--by", OWNER]);

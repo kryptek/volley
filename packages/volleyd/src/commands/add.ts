@@ -32,7 +32,8 @@ the plan the daemon runs (volleyd diff shows the difference otherwise), and only
 blocks are added to it. Refused, with the file untouched: a wave that is not live, an issue
 already in it, a closed issue, a dependency outside the wave that is open (one that is closed or
 labelled merged-to-release is satisfied). When the daemon refuses the version, the file is
-restored. The caller is --by, else VOLLEY_AGENT_ID, else the session registered for this
+restored. Run two adds to one wave one after the other: one that starts while another is
+fetching reads the same file, and its submit would drop the other's task. The caller is --by, else VOLLEY_AGENT_ID, else the session registered for this
 directory, else VOLLEY_COORDINATOR, else the name volley setup saved.
 `;
 
@@ -46,6 +47,8 @@ export interface AddDeps {
   waveTree: (repo: string, branch: string) => Promise<Tree | null>;
   /** Where the default `.volley/waves/<wave>.yaml` is looked for. */
   cwd: () => string;
+  /** How long the submit waits for the daemon's answer (tests shorten it). */
+  submitTimeoutMs?: number;
 }
 
 /** `volleyd add` over `deps` (tests pass fakes; `add` is the real one). */
@@ -189,7 +192,9 @@ export function makeAdd(deps: AddDeps): Command {
           { wave_yaml: plan.text, source: file, owner: caller },
           {
             text: `volleyd add ${wave} ${args.join(" ")}`,
-            timeoutMs: DAEMON_DEFAULTS.issue_fetch_ms + DAEMON_DEFAULTS.request_timeout_ms,
+            timeoutMs:
+              deps.submitTimeoutMs ??
+              DAEMON_DEFAULTS.issue_fetch_ms + DAEMON_DEFAULTS.request_timeout_ms,
           },
         )
         .catch(async (e: unknown) => {
