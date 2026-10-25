@@ -1401,3 +1401,134 @@ describe("volley peer doctor: network.private (informational)", () => {
     });
   });
 });
+
+describe("volley peer doctor: reaching the supervisor (network.internet, tunnel.up, supervisor.live)", () => {
+  const REACH = {
+    brokerUrl: "mqtt://127.0.0.1:21883",
+    tunnelPort: 21883,
+    auth: null,
+  } as const;
+  /** A fake probe set: each rung up unless `down` names it; records what was asked. */
+  const probes = (down: ("internet" | "tunnel" | "daemon")[] = []) => {
+    const asked: string[] = [];
+    return {
+      asked,
+      reach: {
+        internetUp: async () => {
+          asked.push("internet");
+          return !down.includes("internet");
+        },
+        tunnelUp: async (port: number) => {
+          asked.push(`tunnel:${port}`);
+          return !down.includes("tunnel");
+        },
+        daemonLive: async (url: string) => {
+          asked.push(`daemon:${url}`);
+          return !down.includes("daemon");
+        },
+      },
+    };
+  };
+  const reached = async (down: ("internet" | "tunnel" | "daemon")[] = []) => {
+    const m = machine({ trusted: true });
+    const p = probes(down);
+    const io = makeBufferIO();
+    await doctor(io, m.deps({ reach: p.reach }), { repo: m.repoPath, json: true, reach: REACH });
+    return { r: JSON.parse(io.readStdout()) as DoctorReport, asked: p.asked };
+  };
+
+  it("all up: the three rows pass, after network.private", async () => {
+    const { r, asked } = await reached();
+    const ids = r.checks.map((c) => c.id);
+    expect(ids.slice(ids.indexOf("network.private"))).toEqual([
+      "network.private",
+      "network.internet",
+      "tunnel.up",
+      "supervisor.live",
+    ]);
+    expect(check(r, "network.internet")).toMatchObject({ ok: true, severity: "warn" });
+    expect(check(r, "tunnel.up")).toMatchObject({ ok: true, detail: "127.0.0.1:21883 accepts" });
+    expect(check(r, "supervisor.live")).toMatchObject({
+      ok: true,
+      detail: "volleyd is live at mqtt://127.0.0.1:21883",
+    });
+    expect(asked).toEqual(["internet", "tunnel:21883", "daemon:mqtt://127.0.0.1:21883"]);
+  });
+
+  it("asks volleyd in the peer's own namespace, not the shell's", async () => {
+    const m = machine({ trusted: true });
+    const namespaces: (string | undefined)[] = [];
+    const reach = {
+      internetUp: async () => true,
+      tunnelUp: async () => true,
+      daemonLive: async (_url: string, _auth: unknown, namespace?: string) => {
+        namespaces.push(namespace);
+        return true;
+      },
+    };
+    const io = makeBufferIO();
+    await doctor(io, m.deps({ reach }), {
+      repo: m.repoPath,
+      json: true,
+      reach: { ...REACH, namespace: "fleet-b" },
+    });
+    expect(namespaces).toEqual(["fleet-b"]);
+  });
+
+  it("offline: network.internet fails with the offline fix; nothing later is probed", async () => {
+    const { r, asked } = await reached(["internet"]);
+    expect(check(r, "network.internet")).toMatchObject({
+      ok: false,
+      severity: "warn",
+      fix: "get online, then re-run",
+    });
+    expect(check(r, "tunnel.up")).toMatchObject({ ok: false });
+    expect(check(r, "supervisor.live")).toMatchObject({
+      ok: false,
+      detail: "not reached (see above)",
+    });
+    expect(asked).toEqual(["internet"]);
+  });
+
+  it("the tunnel down: tunnel.up fails with the tunnel fix", async () => {
+    const { r } = await reached(["tunnel"]);
+    expect(check(r, "network.internet")).toMatchObject({ ok: true });
+    expect(check(r, "tunnel.up")).toMatchObject({
+      ok: false,
+      detail: "127.0.0.1:21883 refuses",
+      fix: expect.stringContaining("systemctl --user restart volley-peer"),
+    });
+    expect(check(r, "supervisor.live")?.fix).toContain("volley peer doctor");
+  });
+
+  it("volleyd silent: supervisor.live fails with the daemon fix", async () => {
+    const { r } = await reached(["daemon"]);
+    expect(check(r, "tunnel.up")).toMatchObject({ ok: true });
+    expect(check(r, "supervisor.live")).toMatchObject({
+      ok: false,
+      detail: "volleyd is silent at mqtt://127.0.0.1:21883",
+      fix: expect.stringContaining("volley deploy --latest"),
+    });
+    // Warnings only: nothing blocks.
+    expect(r.checks.filter((c) => !c.ok && c.severity === "block")).toEqual([]);
+  });
+
+  it("no tunnel on this machine (tunnel: none): no tunnel.up row", async () => {
+    const m = machine({ trusted: true });
+    const io = makeBufferIO();
+    await doctor(io, m.deps({ reach: probes().reach }), {
+      repo: m.repoPath,
+      json: true,
+      reach: { ...REACH, tunnelPort: null },
+    });
+    const r = JSON.parse(io.readStdout()) as DoctorReport;
+    expect(check(r, "tunnel.up")).toBeUndefined();
+    expect(check(r, "supervisor.live")).toMatchObject({ ok: true });
+  });
+
+  it("not asked (the service's own runs): no reach rows", async () => {
+    const r = await report(machine({ trusted: true }));
+    expect(check(r, "network.internet")).toBeUndefined();
+    expect(check(r, "supervisor.live")).toBeUndefined();
+  });
+});

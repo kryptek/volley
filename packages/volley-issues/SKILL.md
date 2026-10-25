@@ -52,7 +52,9 @@ If neither a `#N` nor a `--flag` is supplied, print the usage shapes above and s
 Run `volleyd status` before dispatching anything:
 
 - **Exit 0** (the daemon answered): use the **Volleyd path** below, in its **autopilot flow** (submit and leave). This is the default. With `autopilot: off` for the wave (the user asks to drive it themselves), follow **Driving a wave by hand** instead of Step 5.
-- **Anything else** (daemon not installed, not running, or unreachable): tell the user, then use the **Legacy path**. Do not start a daemon on the user's behalf; `volleyd install` (macOS) or `volleyd daemon` is theirs to run.
+- **Exit 69** (`SUPERVISOR_UNREACHABLE`; every `volley` and `volleyd` command that cannot reach the supervisor gives exit 69: it climbed internet → private network → tunnel → broker → volleyd and stopped at the first rung that failed, submitting nothing): read the reason, cause and fix (`volleyd status --json` prints `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }`), relay the cause and the fix to the owner verbatim, and ask what to do. Wait for their answer, then run `volleyd status` again. You never switch brokers, namespaces or modes yourself (no other `--broker-url`, no `VOLLEY_BROKER_URL` of your own), and do not fall back to the legacy path: the waves and the agents are volleyd's, and they are still there when it answers again. The reasons are `offline`, `network_down`, `tunnel_down`, `broker_down`, `daemon_silent` and `no_broker_here` (`packages/volley-cli/README.md`, "When the supervisor does not answer").
+- **`volleyd` not installed** (the command is not found): tell the user, then use the **Legacy path**. Do not start a daemon on the user's behalf; `volleyd install` (macOS) or `volleyd daemon` is theirs to run.
+- **Any other exit** (a refused login, a bad URL): relay the error to the user and ask; do not fall back to the legacy path.
 
 The user can force the legacy path ("dispatch the old way", `--legacy`). Never mix the two for one wave: an agent volleyd spawned is volleyd's to steer, retire and clean up.
 

@@ -30,6 +30,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
   - [Pipe sub output through `jq`](#pipe-sub-output-through-jq)
 - [Global flags](#global-flags)
 - [Exit codes](#exit-codes)
+  - [When the supervisor does not answer](#when-the-supervisor-does-not-answer)
 - [Per-subcommand reference](#per-subcommand-reference)
 
 ---
@@ -1066,9 +1067,35 @@ Standardized across subcommands so shell scripts can branch cleanly:
 | `1` | broker error or unexpected runtime failure |
 | `2` | invalid usage (bad flags, missing required args) |
 | `3` | `deploy`: the services checkout has local changes (no `--force-clean`) |
+| `69` | `SUPERVISOR_UNREACHABLE`: the supervisor does not answer (below); nothing was submitted |
 | `124` | `wait`/`sub` timeout elapsed before the desired condition |
 
-`124` matches GNU `timeout(1)`'s exit-code convention so `wait` composes naturally with shell tools that already know about it.
+`124` matches GNU `timeout(1)`'s exit-code convention so `wait` composes naturally with shell tools that already know about it. `69` is `EX_UNAVAILABLE` from `sysexits.h`; volleyd's table has the same codes.
+
+### When the supervisor does not answer
+
+When a command's connect to the broker fails (or, for a command that needs volleyd, the broker answers but volleyd's retained status is not live), it does not stop at "cannot connect". It climbs a ladder, stops at the first rung that fails, prints the cause and one exact fix, submits nothing and exits `69`:
+
+1. **internet**: a TCP connect to `github.com:443` within 2 s (`VOLLEY_INTERNET_PROBE=<host>:<port>` names another target, for a network that blocks GitHub; a fleet on a LAN or VPN with no internet egress points it at a host on that network, or every dead broker reads `offline`).
+2. **private network**: the machine's `setup.json` `network` record (the Network step): `tailscale status --json` says `Running` (5 s), or the manual address answers on the broker's port within 3 s (a refusal counts: the address is reachable). `none`, or no record: unknown, and the ladder goes on.
+3. **tunnel**: on a paired machine (`~/.volley/peer.json`, unless it says `tunnel: none`), `127.0.0.1:<remote_port>` accepts a connection within 2 s.
+4. **broker**: the broker's port answers within 3 s.
+5. **volleyd**: a live retained `volley/<ns>/volleyd/status`.
+
+A broker on the machine's own loopback with no tunnel (the supervisor's own machine) skips the first two rungs: reaching it needs neither. Where the command runs is derived, not asked: `peer.json` present → a paired machine; `VOLLEY_AGENT_ID=coordinator` with `VOLLEY_BROKER_URL` → the coordinator role's session; `setup.json` with a layout → the supervisor's machine; else another machine. The whole ladder takes about fifteen seconds at worst. `volley peer run` never diagnoses (it is the tunnel), and `volley lease run` still runs its command unleased when the broker is down.
+
+On stderr: `volley <command>: supervisor unreachable (<reason>): <cause>` and, on the next line, `  fix: <fix>`. With `--json`, stdout carries `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }` too (`where.namespace`: the namespace whose volleyd was asked). The causes, verbatim:
+
+| Reason | Cause |
+|---|---|
+| `offline` | You are offline. Nothing can reach the supervisor until you are online. |
+| `network_down` | The private network is not up on this machine (Tailscale is not running: `tailscale up`; or connect your VPN). With setup.json's network record `tailscale` only the Tailscale half is printed; with `manual`, only `connect your VPN`. |
+| `tunnel_down` | This machine's tunnel to the broker is down (`127.0.0.1:<port>` refuses). `volley peer doctor` shows why; the service restarts it on its own (`launchctl kickstart -k gui/$UID/systems.volley.peer` or `systemctl --user restart volley-peer`). |
+| `broker_down` | The broker at `<url>` does not answer. On the supervisor's machine: `volley setup --check`; from elsewhere: check that machine is up. |
+| `daemon_silent` | The broker answers but volleyd is silent in namespace '`<ns>`' (no live status at `volley/<ns>/volleyd/status`; check --namespace / $VOLLEY_NAMESPACE): on the supervisor's machine run `launchctl kickstart -k gui/$UID/systems.volley.volleyd` (or `systemctl --user restart volleyd`) or `volley deploy --latest`. |
+| `no_broker_here` | A machine with no Volley setup and no broker on its own loopback: the mosquitto install hint, unchanged. |
+
+`volley peer doctor` on a paired machine shows the same rungs as rows (`network.internet`, `network.private`, `tunnel.up`, `supervisor.live`, each a warning with its fix line), and `volley setup --peer --check` prints them under its Network row. The `/volley-issues` skill relays the cause and the fix to the owner and asks; it never switches brokers or modes on its own.
 
 ---
 

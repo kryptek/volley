@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
@@ -11,6 +12,7 @@ import type { Answer } from "../../src/commands/peer";
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
+import { tempDir } from "../helpers/tmp";
 
 /** `volley coordinator` (SPEC §4.6.25): the retained topic read, and the admin ops. */
 
@@ -136,5 +138,45 @@ describe("volley coordinator", () => {
   it("an unknown verb is a usage error", async () => {
     const r = await run(["move"], deps().d);
     expect(r.exitCode).toBe(EXIT.USAGE);
+  });
+
+  it("a dead broker: the unreachable diagnosis and exit 69, not the old BROKER_DOWN", async () => {
+    const root = tempDir("volley-coord-reach-");
+    const io = makeBufferIO();
+    const exitCode = await runCoordinator(
+      {
+        argv: ["status"],
+        env: {
+          VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1",
+          HOME: join(root, "home"),
+          VOLLEYD_HOME: join(root, "volleyd"),
+        },
+        io,
+      },
+      deps().d,
+    );
+    expect(exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(io.readStderr()).toMatch(
+      /^volley coordinator: supervisor unreachable \(no_broker_here\): /,
+    );
+  });
+
+  it("status --json with a dead broker: the SUPERVISOR_UNREACHABLE object on stdout", async () => {
+    const root = tempDir("volley-coord-reach-");
+    const io = makeBufferIO();
+    const exitCode = await runCoordinator(
+      {
+        argv: ["status", "--json"],
+        env: {
+          VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1",
+          HOME: join(root, "home"),
+          VOLLEYD_HOME: join(root, "volleyd"),
+        },
+        io,
+      },
+      deps().d,
+    );
+    expect(exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(JSON.parse(io.readStdout())).toMatchObject({ error: "SUPERVISOR_UNREACHABLE" });
   });
 });

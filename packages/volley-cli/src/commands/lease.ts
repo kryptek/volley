@@ -11,7 +11,7 @@ import { VolleyError } from "volley-mcp/errors";
 import { isValidAgentId } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
-import { connectAsClient, openClient, reportConnectError } from "../connect";
+import { connectAsClient, connectToSupervisor, openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
@@ -172,13 +172,14 @@ export async function lease({ argv, env, io }: LeaseArgs): Promise<ExitCode> {
     if (r.leaseId?.includes(".") === true && isValidAgentId(prefix)) r.holder = prefix;
   }
   const leaseId = action === "acquire" ? (r.leaseId ?? `${r.holder}.${randomSuffix(8)}`) : "";
-  const broker = await connectAsClient(
+  const broker = await connectToSupervisor(
     r.brokerUrl,
     io,
     r.auth,
+    { command: `volley lease ${action}`, json: r.json === true, env },
     action === "acquire" ? releaseWill(r.pool as string, leaseId, r.holder) : undefined,
   );
-  if (broker === null) return EXIT.ERROR;
+  if (typeof broker === "number") return broker;
   try {
     if (action === "status") return await status(broker, r, io);
     if (action === "release") {

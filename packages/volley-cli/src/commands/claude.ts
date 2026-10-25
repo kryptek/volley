@@ -14,7 +14,7 @@ import {
   pendingProfiles,
   renderGroups,
 } from "../claude/groups";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor, reportDaemonSilent } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { askHidden } from "../hidden-input";
 import type { IO } from "../io";
@@ -248,19 +248,18 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
     return usage(e instanceof Error ? e.message : String(e));
   }
   const brokerUrl = resolveBrokerUrl(v["broker-url"], env);
-  const broker = await connectAsClient(
+  const reach = { command: "volley claude", json: v.json === true, env };
+  const broker = await connectToSupervisor(
     brokerUrl,
     io,
     resolveAuth({ username: v.username, password: v.password }, env, process.cwd(), brokerUrl),
+    reach,
   );
-  if (broker === null) return EXIT.ERROR;
+  if (typeof broker === "number") return broker;
   try {
     const status = await broker.queryRetained(buildTopic(namespace, "volleyd", "status"), PROBE_MS);
     const live = status !== null && LIVE.has(parseEnvelope(status)?.type ?? "");
-    if (!live) {
-      io.stderr(`volley claude: volleyd is not running in namespace '${namespace}'\n`);
-      return EXIT.ERROR;
-    }
+    if (!live) return reportDaemonSilent(io, brokerUrl, namespace, reach);
     if (verb === "code")
       return await sendEntry(io, broker, namespace, pos[0] as string, pos[1] as string, timeoutMs);
     if (v.code !== undefined)
