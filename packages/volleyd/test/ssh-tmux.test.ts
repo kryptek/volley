@@ -1157,6 +1157,24 @@ describe("resolveRemoteHost", () => {
       });
     });
 
+    it("the managed clone at the path the machine's record reports (#596)", () => {
+      expect(
+        resolveRemoteHost(
+          "box",
+          undefined,
+          { box },
+          ctx({
+            repos: { "o/r": { machines: ["box"] } },
+            repo_root: "/sup/.volley/volleyd/repos",
+            clone: "/home/dev/.volley/repos/o/r",
+          }),
+        ),
+      ).toMatchObject({
+        repo: "/home/dev/.volley/repos/o/r",
+        worktree_root: "/path/to/home/.volley/worktrees/o/r",
+      });
+    });
+
     it("then a legacy repo, unless the machine's origin is another repository's", () => {
       const configured = { box: { ...box, repo: "/src/r" } };
       expect(

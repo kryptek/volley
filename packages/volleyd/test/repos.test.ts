@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { CONFIG_DEFAULTS } from "../src/config-defaults";
 import {
   type RepoConfig,
   SLUG_PATTERN,
@@ -16,7 +17,9 @@ import {
   managedWorktreeRoot,
   originToSlug,
   pendingRepoRuns,
+  remoteRepoRoot,
   repoStateLine,
+  reportedClone,
   sameSlug,
   slugKey,
   unassignedSlugs,
@@ -186,6 +189,77 @@ describe("repos: cloneFor precedence", () => {
 
   it("is undefined for a machine with none of them", () => {
     expect(cloneFor(cfg(), "box", "o/r", { home })).toBeUndefined();
+  });
+});
+
+describe("repos: a paired machine's clone (#596)", () => {
+  it("remoteRepoRoot: a home-relative root applies to every machine; an absolute one is the supervisor's own", () => {
+    expect(remoteRepoRoot("~/.volley/repos")).toBe("~/.volley/repos");
+    expect(remoteRepoRoot("~/src/repos")).toBe("~/src/repos");
+    expect(remoteRepoRoot("~")).toBe("~");
+    expect(remoteRepoRoot("/sup/.volley/volleyd/repos")).toBe(CONFIG_DEFAULTS.fleet.repo_root);
+  });
+
+  it("reportedClone: the record's existing clone of the slug, case-insensitively", () => {
+    const repos = [
+      { slug: "o/r", path: "/home/dev/.volley/repos/o/r", exists: true, managed: true },
+      { slug: "o/gone", path: "/home/dev/.volley/repos/o/gone", exists: false, managed: true },
+    ];
+    expect(reportedClone({ repos }, "O/R")).toBe("/home/dev/.volley/repos/o/r");
+    expect(reportedClone({ repos }, "o/gone")).toBeUndefined();
+    expect(reportedClone({ repos }, "o/other")).toBeUndefined();
+    expect(reportedClone(undefined, "o/r")).toBeUndefined();
+  });
+
+  it("cloneSource: the reported clone is the managed path of a machine the repository is assigned to", () => {
+    const clone = "/home/dev/.volley/repos/o/r";
+    const listed = cfg({
+      repos: { "o/r": { machines: ["box"] } },
+      fleet: { repo_root: "/sup/.volley/volleyd/repos" },
+    });
+    expect(cloneFor(listed, "box", "o/r", { clone })).toBe(clone);
+    // Not assigned there: the fact changes nothing (adopted, legacy or none as before).
+    expect(cloneFor(listed, "mini", "o/r", { clone })).toBeUndefined();
+    const adopted = cfg({
+      repos: { "o/r": { machines: ["box"] } },
+      hosts: { box: { repos: { "o/r": "/srv/r" } }, mini: { repo: "/src/r" } },
+    });
+    expect(cloneFor(adopted, "box", "o/r", { clone })).toBe("/srv/r");
+    expect(cloneFor(adopted, "mini", "o/r", { clone })).toBe("/src/r");
+  });
+
+  it("addPlan under an absolute repo_root: a paired machine never shows the supervisor's path", () => {
+    const c = cfg({
+      repos: { "o/r": { machines: "all" } },
+      fleet: { repo_root: "/sup/.volley/volleyd/repos" },
+      hosts: { box: {}, b2: {}, b3: {} },
+    });
+    const records = (m: string) =>
+      m === "box"
+        ? {
+            repos: [
+              { slug: "o/r", path: "/home/dev/.volley/repos/o/r", exists: true, managed: true },
+            ],
+          }
+        : m === "b3"
+          ? {
+              repos: [
+                { slug: "x/y", path: "/home/b3/.volley/repos/x/y", exists: true, managed: true },
+              ],
+            }
+          : undefined;
+    const steps = addPlan(c, "control", [], records, "o/r", ["control", "box", "b2", "b3"], {
+      localHome: "/me",
+      localDir: (id) => `/me/.volley/claude/${id}`,
+    });
+    expect(steps.map((s) => [s.machine, s.path, s.clone])).toEqual([
+      ["control", "/sup/.volley/volleyd/repos/o/r", true],
+      ["box", "/home/dev/.volley/repos/o/r", false],
+      // No record: no path at all.
+      ["b2", undefined, true],
+      // A home learnt from another managed clone: the box's own managed path.
+      ["b3", "/home/b3/.volley/repos/o/r", true],
+    ]);
   });
 });
 

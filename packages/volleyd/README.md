@@ -3006,18 +3006,21 @@ hosts:
 
 For a task on `box` in a wave whose repository is `owner/name` (its state's `github.slug`, else
 the supervisor clone's `origin`), the clone is, in order: `hosts.box.repos.<owner/name>`; the
-managed clone `<repo_root>/<owner>/<name>` when `repos.<owner/name>.machines` includes `box`;
-the deprecated `hosts.box.repo`, unless the machine's record reports that clone's origin as
+managed clone when `repos.<owner/name>.machines` includes `box` (at the path the box's record
+reports, `repos[].path`, else `<repo_root>/<owner>/<name>` there); the deprecated `hosts.box.repo`, unless the machine's record reports that clone's origin as
 another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
 (`hosts.box.worktree_root` still wins; a legacy `repo` keeps `.volley-worktrees` beside it).
 That pin is host-wide: once a box's legacy `repo` migrates, every repository's worktrees on it
 stay under that `.volley-worktrees` until you unset `hosts.box.worktree_root`. A host with none
 of them fails the spawn: `host 'box' has no clone of <owner/name>: add it (Settings →
 Repositories, or volley repo add <owner/name> --machine box)`. A wave whose repository
-is not on GitHub uses the host's `repo` as before. volleyd learns a box's home directory from the
-managed clones its record reports (`repos[].path`, under a `~/…` `repo_root`); a managed path on
-a box whose home it does not know yet fails the spawn too; give that box absolute `repos` and
-`worktree_root`.
+is not on GitHub uses the host's `repo` as before. A `~/…` `repo_root` is each machine's own; an
+absolute one (the installed daemon's `<VOLLEYD_HOME>/repos`, under `defaultsFor`) is the
+supervisor's own disk, and a paired machine's managed clones stay under `~/.volley/repos`, where
+its doctor clones them (`volley repo add`'s `box: cloning` and `box: ready (…)` lines name the
+box's path, never the supervisor's). volleyd learns a box's home directory from the managed
+clones its record reports (`repos[].path`); a managed path on a box whose home it does not know
+yet fails the spawn too; give that box absolute `repos` and `worktree_root`.
 
 Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (below); the
 `repo:` key of a host is deprecated (one path per host, from before repositories) and migrates by
