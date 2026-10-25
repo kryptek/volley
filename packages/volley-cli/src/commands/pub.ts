@@ -5,7 +5,7 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic, isReservedTopic, isValidAgentId } from "volley-mcp/topics";
 import { parseJsonPayload, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
@@ -108,8 +108,8 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
     now: io.now,
   });
 
-  const broker = await connectAsClient(brokerUrl, io, auth);
-  if (broker === null) return EXIT.ERROR; // connectAsClient already printed the diagnostic.
+  const broker = await connectToSupervisor(brokerUrl, io, auth, { command: "volley pub", env });
+  if (typeof broker === "number") return broker; // already diagnosed and printed.
   try {
     await broker.publish(topic, JSON.stringify(envelope), { qos: cfg.qos, retain: cfg.retain });
     return EXIT.OK;

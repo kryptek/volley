@@ -118,13 +118,34 @@ describe("volleyd daemon + control channel", () => {
     for (const m of msgs) expect(schemaErrors("wave-event.schema.json", m)).toEqual([]);
   });
 
-  it("exits 1 with 'not running' within 2 s when no daemon is registered", async () => {
+  it("exits 69 (daemon_silent) within 2 s when no daemon is registered", async () => {
     const started = Date.now();
-    const r = await runCli(["status", "--json"], t.env);
+    const r = await runCli(["status"], t.env);
     // real process: the CLI's own control timeout, in a child process on the real clock.
     expect(Date.now() - started).toBeLessThan(2000);
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("volleyd not running");
+    expect(r.exitCode).toBe(69);
+    expect(r.stderr).toContain(
+      "volleyd status: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent",
+    );
+    expect(r.stderr).toContain("\n  fix: on the supervisor's machine: ");
+  });
+
+  it("status --json with no daemon: the SUPERVISOR_UNREACHABLE object on stdout", async () => {
+    const r = await runCli(["status", "--json"], t.env);
+    expect(r.exitCode).toBe(69);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      error: "SUPERVISOR_UNREACHABLE",
+      reason: "daemon_silent",
+      where: { kind: "other", brokerUrl: t.broker.url },
+      probes: { broker: "up", daemon: "silent" },
+    });
+  });
+
+  it("status with a live daemon works as before", async () => {
+    await t.start();
+    const r = await runCli(["status"], t.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).not.toContain("supervisor unreachable");
   });
 
   it("says 'not running' after a clean stop, and restores waves from the journal on restart", async () => {
@@ -132,7 +153,7 @@ describe("volleyd daemon + control channel", () => {
     expect((await runCli(["run", EXAMPLE], t.env)).exitCode).toBe(0);
     const before = await runCli(["status", "--json", WAVE], t.env);
     await d.stop();
-    expect((await runCli(["status"], t.env)).stderr).toContain("volleyd not running");
+    expect((await runCli(["status"], t.env)).stderr).toContain("(daemon_silent)");
 
     await t.start();
     const after = await runCli(["status", "--json", WAVE], t.env);
@@ -241,7 +262,7 @@ describe("volleyd daemon + control channel", () => {
     const r = await runCli(["run", bad], t.env); // no daemon running: still a validation error
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("dependency cycle");
-    expect(r.stderr).not.toContain("not running");
+    expect(r.stderr).not.toContain("supervisor unreachable");
   });
 
   it("answers unknown ops and unknown waves with ok:false", async () => {
@@ -357,13 +378,15 @@ describe("volleyd daemon + control channel", () => {
     expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
   });
 
-  it("reports a broker that is down as exit 1", async () => {
+  it("reports a broker that is down as exit 69 with the diagnosis", async () => {
     const dead = await startTestBroker();
     const url = dead.url;
     await dead.close();
     const r = await runCli(["status"], { ...t.env, VOLLEY_BROKER_URL: url });
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toMatch(/volleyd status: .*connect/);
+    expect(r.exitCode).toBe(69);
+    // No setup here and a broker on loopback: the install hint (no_broker_here).
+    expect(r.stderr).toMatch(/^volleyd status: supervisor unreachable \(no_broker_here\): /);
+    expect(r.stderr).toContain("install mosquitto");
   });
 });
 

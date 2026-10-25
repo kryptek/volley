@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
+import type { ReachProbes } from "../peer/checks/reach";
 import { MCP_GET, MCP_REMOVE } from "./claude-code";
 import { lsofArgv, ssArgv } from "./desk-port";
 import type { FirstWaveMetrics, FirstWaveOptions, WaveView } from "./first-wave";
@@ -127,6 +128,8 @@ export interface SetupDeps {
   >;
   /** Every address a host name resolves to (the manual address). Unset: `dns.lookup`. */
   resolveHost?: (host: string) => Promise<string[]>;
+  /** `--peer --check`'s reach rows (peer/checks/reach.ts). Unset: none are printed. */
+  reach?: ReachProbes;
 }
 
 export interface SetupContext {

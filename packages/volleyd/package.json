@@ -11,6 +11,7 @@
     "./claude/usage": "./src/claude/usage.ts",
     "./config-defaults": "./src/config-defaults.ts",
     "./footprint": "./src/footprint.ts",
+    "./io": "./src/io.ts",
     "./overlap": "./src/overlap.ts",
     "./overlap-plan": "./src/overlap-plan.ts",
     "./paired-hosts": "./src/paired-hosts.ts",

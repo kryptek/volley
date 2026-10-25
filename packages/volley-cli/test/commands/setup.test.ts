@@ -697,6 +697,53 @@ describe("volley setup", () => {
       expect(m.loaded.size).toBe(0);
     });
 
+    it("--check on a paired machine prints the reach rows under its Network row", async () => {
+      mkdirSync(join(m.ctx.home, ".volley"), { recursive: true });
+      writeFileSync(
+        peerJson(),
+        JSON.stringify({
+          name: "box-a",
+          host: "me@hub",
+          username: "peer-box-a",
+          password: "pw",
+          remote_port: 21883,
+          broker: {},
+        }),
+      );
+      const asked: string[] = [];
+      m.deps.reach = {
+        internetUp: async () => {
+          asked.push("internet");
+          return true;
+        },
+        tunnelUp: async (port) => {
+          asked.push(`tunnel:${port}`);
+          return false;
+        },
+        daemonLive: async () => {
+          asked.push("daemon");
+          return true;
+        },
+      };
+      try {
+        const r = await run(["--peer", "--check"]);
+        const lines = r.stdout.split("\n");
+        const at = lines.findIndex((l) => /^ {2}\S Network\b/.test(l));
+        expect(at).toBeGreaterThan(-1);
+        const after = lines.slice(at + 1).join("\n");
+        expect(after).toContain("      ✓ network.internet: online");
+        expect(after).toContain("      ! tunnel.up: 127.0.0.1:21883 refuses");
+        expect(after).toContain("        fix: `volley peer doctor`");
+        expect(after).toContain("      ! supervisor.live: not reached (see above)");
+        expect(asked).toEqual(["internet", "tunnel:21883"]);
+        // --json carries exactly the steps (no reach rows).
+        const j = await run(["--peer", "--check", "--json"]);
+        expect(j.stdout).not.toContain("tunnel.up");
+      } finally {
+        Reflect.deleteProperty(m.deps, "reach");
+      }
+    });
+
     it("refuses the hub's flags and steps", async () => {
       for (const extra of [
         ["--lan"],

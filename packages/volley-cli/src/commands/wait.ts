@@ -10,7 +10,7 @@ import {
   resolveBrokerUrl,
   resolveNamespace,
 } from "../args";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 
@@ -91,8 +91,8 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
 
   const topic = buildTopic(namespace, agentId, "status");
 
-  const broker = await connectAsClient(brokerUrl, io, auth);
-  if (broker === null) return EXIT.ERROR;
+  const broker = await connectToSupervisor(brokerUrl, io, auth, { command: "volley wait", env });
+  if (typeof broker === "number") return broker;
   try {
     // One subscription, kept open for the whole wait. The broker delivers the current
     // retained `status` payload immediately on subscribe; if it's already terminal, the

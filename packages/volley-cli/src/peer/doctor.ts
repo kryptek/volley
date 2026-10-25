@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import type { BrokerAuth } from "volley-mcp/config";
 import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
 import { managedClonePath, originToSlug, sameSlug } from "volleyd/repos";
 import { volleydHome } from "../auth/context";
@@ -29,6 +30,7 @@ import {
   gatherAccountProfiles,
   onboardingVersionOf,
 } from "./checks/profiles";
+import { type ReachProbes, probeReach, reachChecks } from "./checks/reach";
 import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks, reposChecks } from "./checks/repo";
 import {
   ON_PATH,
@@ -276,6 +278,16 @@ export interface Facts {
     /** A paired machine (`~/.volley/peer.json`): its Network step runs under `--peer`. */
     peer: boolean;
   };
+  /**
+   * Whether the supervisor is reachable from here (checks/reach.ts): the internet, the tunnel
+   * (null: none on this machine), volleyd's live status. Null when the run was not asked to look.
+   */
+  reach: {
+    brokerUrl: string;
+    internet: boolean;
+    tunnel: { port: number; up: boolean } | null;
+    supervisor: boolean;
+  } | null;
 }
 
 /** sha256 of `<dir>/bun.lock`; null without one. */
@@ -335,6 +347,8 @@ export interface DoctorDeps {
   env?: Record<string, string | undefined>;
   /** The Claude account profiles' root (default `<home>/.volley/claude`). */
   claudeRoot?: string;
+  /** The reach probes (supervisor/probes.ts) for `DoctorOptions.reach`; unset, nothing is probed. */
+  reach?: ReachProbes;
   /** This machine's interfaces (`network.private`'s manual address). Unset: `os.networkInterfaces`. */
   interfaces?: () => Record<
     string,
@@ -372,6 +386,12 @@ export interface DoctorOptions {
    * login it just signed in. The report is `{ claude_logins, doctor_at }`; no check runs.
    */
   probeLogin?: string;
+  /**
+   * Check that the supervisor is reachable (the `network.internet`, `tunnel.up` and
+   * `supervisor.live` rows) through this broker URL and tunnel port (null: no tunnel), with the
+   * deps' `reach` probes. Unset (the service's own runs): no reach rows.
+   */
+  reach?: { brokerUrl: string; tunnelPort: number | null; auth: BrokerAuth | null };
 }
 
 /** The record's check: no fix text (the doctor that reads a record supplies its own). */
@@ -778,6 +798,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   );
 
   const network = await gatherNetwork(deps, sh);
+  const reach = await gatherReach(deps, opts);
 
   return {
     platform: deps.platform,
@@ -830,8 +851,15 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     },
     profile,
     network,
+    reach,
   };
 }
+
+/** The reach rows' facts (checks/reach.ts), when the run was asked for them. */
+const gatherReach = (deps: DoctorDeps, opts: DoctorOptions): Promise<Facts["reach"]> =>
+  opts.reach !== undefined && deps.reach !== undefined
+    ? probeReach(deps.reach, opts.reach)
+    : Promise.resolve(null);
 
 /** The Network step's record (setup.json) and whether the machine is reachable that way now. */
 async function gatherNetwork(
@@ -889,6 +917,7 @@ export function checksOf(f: Facts): Check[] {
     accountProfilesCheck(f),
     ...machineChecks(f),
     ...networkChecks(f),
+    ...reachChecks(f.reach),
   ].map((c) => ({ ...c, detail: c.detail.slice(0, 200) }));
 }
 
