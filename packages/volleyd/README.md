@@ -171,6 +171,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
 | `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. For a wave id the daemon already holds, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
 | `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between a submitted wave's current plan and the file, without submitting. |
+| `volleyd add <wave> <issue...> [--after <task,...>] [--file <wave.yaml>] [--by <id>] [--json]` | Add issues to a running wave as new tasks in one command: fetch each issue, derive its task as `wave-from-issues` does, write it into the wave file (default `.volley/waves/<wave>.yaml` under this directory) and submit the next plan version (owner only). See [Plan changes](#plan-changes-versioned-wave-files). |
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. Notes that `volleyd run` needs an owner. |
 | `volleyd status [wave] [--all] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). Archived waves are left out; `--all` lists them too, each with an `archived <at> by <who>: <reason>` line. `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
@@ -4099,9 +4100,31 @@ answered; re-pointing an issue to yet another issue is a new question with a new
 open decision (answer `withdrawn`), and removing a task withdraws its open issue decision before
 asking to stop it. A version's `config:` block replaces the wave's overrides.
 
+**Adding an issue to a running wave.** `volleyd add <wave> <issue...>` is the one-command form of
+"append a task to the wave file and `volleyd run` it again". Each issue (`602`, `#602`, or an issue
+URL of the wave's repository) is fetched with `gh issue view` (`--repo <owner/name>` when the
+daemon read the repository's GitHub name, else in the wave's `repo:` directory) and becomes a task
+exactly as volley-issues' `wave-from-issues` derives one on day one (the shared code is
+`src/issue-task.ts`): its id is the title's tag, else `i<N>` (a tag an existing task already has
+falls back to `i<N>`, with a warning); its `after:` is its `Depends on:` line mapped to the tasks
+that carry those issues (`issue:` or a bundle's `issues:`), plus `--after`; its `files:` and
+`footprint:` come from its Files list against the release branch's tree (footprints are read on a
+wave's first submit only). Several issues in one call are added together, dependencies between
+them included. Nothing is re-planned: no bundle, chain or `plan:` for the new task. Four things are
+refused before the file is touched, each saying the way out: a wave that is not live (`complete`,
+`stopped`, `releasing`, archived; a `paused` one takes the task, which starts on resume), an issue
+already in the wave, a closed issue, and a dependency outside the wave that is open (one that is
+closed or labelled `merged-to-release` is satisfied and dropped; an open one is added in the same
+call: `volleyd add <wave> 590 602`). The file must be the plan the daemon runs (`volleyd diff`
+reports it unchanged), so that `add` changes one thing: the new task blocks are inserted at the end
+of `tasks:` and every other byte is kept. The file is written, then submitted as `run` submits it
+(owner-gated the same way); a submit the daemon refuses restores the previous bytes, so the file
+never says more than the daemon runs. Commit the edited file with the release.
+
 ```sh
 volleyd diff 2026-10-20-example wave-v2.yaml   # + T6 / - T3 / ~ T2  after +T6; model a -> b
 volleyd run wave-v2.yaml                        # submitted wave 2026-10-20-example plan v2
+volleyd add 2026-10-20-example 602              # + B13 / B13: #602 "B13: …" after [B10]
 ```
 
 ---

@@ -207,6 +207,16 @@ Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the us
 
 `volleyd validate` needs no daemon and reports path-qualified errors (unknown `after:` target, cycle, bad id); fix the file and re-run until it prints `ok`. Check its `brief preface:` line: `brief preface: none (no <path>)` means the agents get no repo rules — write the preface first (above). `volleyd status "$WAVE"` shows the same line under its header for the running wave, with the sha256 of the file the agents got. `volleyd run` validates again, submits, and returns as soon as the daemon has journaled the wave; it prints any overlap warnings with other running waves (advisory). `--owner` is the coordinator name (`$VOLLEY_COORDINATOR`; without one, the coordinator's auto-suffixed id): only the owner — or the session currently bound to the name — may resolve, pause, stop or steer the wave. Those commands identify the caller by `--by`, else `VOLLEY_AGENT_ID`, else the session registered for this directory (its coordinator name when it has one), else `VOLLEY_COORDINATOR`; without a coordinator name, if the shell's `VOLLEY_AGENT_ID` is not the suffixed id, export it (`export VOLLEY_AGENT_ID=<COORDINATOR-AGENT-ID>`) or pass `--by <COORDINATOR-AGENT-ID>`.
 
+### Adding an issue to a running wave
+
+A bug found mid-wave joins the running wave with one command, from the repository root, as the wave's owner:
+
+```bash
+volleyd add "$WAVE" 602            # or #602, or the issue URL; several issues at once; --after B10 to wait for a task too
+```
+
+It fetches the issue, derives its task as `wave-from-issues` does (the title's tag, else `i<N>`; `after:` from its `Depends on:` line; `files:`/`footprint:` from its Files list), adds the task block to `.volley/waves/<wave>.yaml` (`--file` names another) and submits the file as the wave's next plan version. Do not edit the file and `volleyd run` it again by hand for this. It refuses, with the file untouched, an issue already in the wave, a closed issue, a wave that has ended or is releasing, and a file that differs from the submitted plan (submit or revert that first). A dependency outside the wave that is still open is refused with the command that adds it in the same call (`volleyd add "$WAVE" 590 602`); one that is closed or merged to the release is already satisfied. Commit the edited wave file with the release.
+
 ### Step 5: submit and leave (autopilot)
 
 **Under autopilot the coordinator session does not babysit the wave.** Once `volleyd run` has returned, tell the user the wave is submitted and where to watch it (the Desk, `volleyd status "$WAVE"`), then end the session or go on to plan another wave. The session need not publish anything to stay present: the Desk shows the owner `away (autopilot)` while its waves run, and `gone` only when a decision waits that only the owner can answer. volleyd acts on every event itself: it spawns, reviews, answers the decisions its policy table covers (within per-wave budgets), merges each gated PR (`merge: auto`) in dependency order, brings branches up to date (`branch_update: merge`), fixes flaky CI, starts dependents once their dependencies are merged and runs the repository's release train, if it has one. The Desk and the morning digest show everything it did. Do **not** start a per-event loop, and do not background `volley wait` per agent.

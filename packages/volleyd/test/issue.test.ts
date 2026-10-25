@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { fetchIssue, fetchIssues, renderIssueMd } from "../src/issue";
+import { fetchIssue, fetchIssueFacts, fetchIssues, renderIssueMd } from "../src/issue";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
 import { fakeExec } from "./helpers/fake-exec";
@@ -40,6 +40,72 @@ describe("fetchIssue", () => {
     const fake = fakeExec().on(["gh", "issue", "view"], { code: 1, stderr: "not found" });
     const err = await fetchIssue(fake.exec, "/w/repo", 42).catch((e: unknown) => e);
     expect((err as SpawnError).code).toBe("ISSUE_FETCH_FAILED");
+  });
+});
+
+describe("fetchIssueFacts", () => {
+  const facts = JSON.stringify({
+    number: 602,
+    title: "B13: fix it",
+    body: "Depends on: #590",
+    url: "https://github.com/o/r/issues/602",
+    state: "OPEN",
+    labels: [
+      { id: "L1", name: "bug", description: "", color: "d73a4a" },
+      { name: "merged-to-release" },
+    ],
+  });
+
+  it("asks for state and labels in the repository's directory", async () => {
+    const fake = fakeExec().on(["gh", "issue", "view"], { stdout: facts });
+    const issue = await fetchIssueFacts(fake.exec, { cwd: "/w/repo" }, 602);
+    expect(fake.calls[0]?.argv).toEqual([
+      "gh",
+      "issue",
+      "view",
+      "602",
+      "--json",
+      "number,title,body,url,state,labels",
+    ]);
+    expect(fake.calls[0]?.opts.cwd).toBe("/w/repo");
+    expect(issue).toEqual({
+      number: 602,
+      title: "B13: fix it",
+      body: "Depends on: #590",
+      url: "https://github.com/o/r/issues/602",
+      state: "OPEN",
+      labels: ["bug", "merged-to-release"],
+    });
+  });
+
+  it("names the repository with --repo when given its slug", async () => {
+    const fake = fakeExec().on(["gh", "issue", "view"], { stdout: facts });
+    await fetchIssueFacts(fake.exec, { slug: "o/r" }, 602);
+    expect(fake.calls[0]?.argv).toEqual([
+      "gh",
+      "issue",
+      "view",
+      "602",
+      "--repo",
+      "o/r",
+      "--json",
+      "number,title,body,url,state,labels",
+    ]);
+    expect(fake.calls[0]?.opts.cwd).toBeUndefined();
+  });
+
+  it("a reply for a different number → ISSUE_MISMATCH; a gh failure says what gh said", async () => {
+    const other = fakeExec().on(["gh", "issue", "view"], { stdout: facts });
+    await expect(fetchIssueFacts(other.exec, { cwd: "/w" }, 7)).rejects.toMatchObject({
+      code: "ISSUE_MISMATCH",
+    });
+    const failing = fakeExec().on(["gh", "issue", "view"], {
+      code: 1,
+      stderr: "GraphQL: Could not resolve to an issue or pull request with the number of 9.\n",
+    });
+    await expect(fetchIssueFacts(failing.exec, { cwd: "/w" }, 9)).rejects.toThrow(
+      /Could not resolve to an issue/,
+    );
   });
 });
 
