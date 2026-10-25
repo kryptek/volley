@@ -202,17 +202,17 @@ describe("repos: a paired machine's clone (#596)", () => {
 
   it("reportedClone: the record's existing clone of the slug, case-insensitively", () => {
     const repos = [
-      { slug: "o/r", path: "/home/dev/.volley/repos/o/r", exists: true, managed: true },
-      { slug: "o/gone", path: "/home/dev/.volley/repos/o/gone", exists: false, managed: true },
+      { slug: "o/r", path: "/path/to/box-home/.volley/repos/o/r", exists: true, managed: true },
+      { slug: "o/gone", path: "/path/to/box-home/.volley/repos/o/gone", exists: false, managed: true },
     ];
-    expect(reportedClone({ repos }, "O/R")).toBe("/home/dev/.volley/repos/o/r");
+    expect(reportedClone({ repos }, "O/R")).toBe("/path/to/box-home/.volley/repos/o/r");
     expect(reportedClone({ repos }, "o/gone")).toBeUndefined();
     expect(reportedClone({ repos }, "o/other")).toBeUndefined();
     expect(reportedClone(undefined, "o/r")).toBeUndefined();
   });
 
   it("cloneSource: the reported clone is the managed path of a machine the repository is assigned to", () => {
-    const clone = "/home/dev/.volley/repos/o/r";
+    const clone = "/path/to/box-home/.volley/repos/o/r";
     const listed = cfg({
       repos: { "o/r": { machines: ["box"] } },
       fleet: { repo_root: "/sup/.volley/volleyd/repos" },
@@ -238,13 +238,13 @@ describe("repos: a paired machine's clone (#596)", () => {
       m === "box"
         ? {
             repos: [
-              { slug: "o/r", path: "/home/dev/.volley/repos/o/r", exists: true, managed: true },
+              { slug: "o/r", path: "/path/to/box-home/.volley/repos/o/r", exists: true, managed: true },
             ],
           }
         : m === "b3"
           ? {
               repos: [
-                { slug: "x/y", path: "/home/b3/.volley/repos/x/y", exists: true, managed: true },
+                { slug: "x/y", path: "/path/to/b3-home/.volley/repos/x/y", exists: true, managed: true },
               ],
             }
           : undefined;
@@ -254,11 +254,11 @@ describe("repos: a paired machine's clone (#596)", () => {
     });
     expect(steps.map((s) => [s.machine, s.path, s.clone])).toEqual([
       ["control", "/sup/.volley/volleyd/repos/o/r", true],
-      ["box", "/home/dev/.volley/repos/o/r", false],
+      ["box", "/path/to/box-home/.volley/repos/o/r", false],
       // No record: no path at all.
       ["b2", undefined, true],
       // A home learnt from another managed clone: the box's own managed path.
-      ["b3", "/home/b3/.volley/repos/o/r", true],
+      ["b3", "/path/to/b3-home/.volley/repos/o/r", true],
     ]);
   });
 });
