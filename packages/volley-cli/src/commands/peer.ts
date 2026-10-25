@@ -1638,6 +1638,7 @@ export const peerReach = (cfg: PeerConfig) => ({
   brokerUrl: brokerThroughTunnel(cfg),
   tunnelPort: peerTunnel(cfg) === "ssh" ? cfg.remote_port : null,
   auth: peerAuth(cfg),
+  namespace: cfg.namespace,
 });
 
 /** Connect through the tunnel as the peer, its LWT the record with `tunnel: down`. */

@@ -16,7 +16,7 @@ export type ReachProbes = Pick<Probes, "internetUp" | "tunnelUp" | "daemonLive">
 /** Each rung probed in order, a later one only when the earlier passed. */
 export async function probeReach(
   p: ReachProbes,
-  o: { brokerUrl: string; tunnelPort: number | null; auth: BrokerAuth | null },
+  o: { brokerUrl: string; tunnelPort: number | null; auth: BrokerAuth | null; namespace?: string },
 ): Promise<Reach> {
   const internet = await p.internetUp();
   const tunnel =
@@ -24,7 +24,7 @@ export async function probeReach(
       ? { port: o.tunnelPort, up: internet && (await p.tunnelUp(o.tunnelPort)) }
       : null;
   const reached = internet && (tunnel === null || tunnel.up);
-  const supervisor = reached && (await p.daemonLive(o.brokerUrl, o.auth));
+  const supervisor = reached && (await p.daemonLive(o.brokerUrl, o.auth, o.namespace));
   return { brokerUrl: o.brokerUrl, internet, tunnel, supervisor };
 }
 

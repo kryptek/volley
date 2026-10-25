@@ -391,7 +391,13 @@ export interface DoctorOptions {
    * `supervisor.live` rows) through this broker URL and tunnel port (null: no tunnel), with the
    * deps' `reach` probes. Unset (the service's own runs): no reach rows.
    */
-  reach?: { brokerUrl: string; tunnelPort: number | null; auth: BrokerAuth | null };
+  reach?: {
+    brokerUrl: string;
+    tunnelPort: number | null;
+    auth: BrokerAuth | null;
+    /** The namespace volleyd is asked in (the peer's own); unset: the env's. */
+    namespace?: string;
+  };
 }
 
 /** The record's check: no fix text (the doctor that reads a record supplies its own). */

@@ -8,7 +8,7 @@ import {
   formatCoordinator,
 } from "volleyd/coordinator/role";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type Answer, askVolleyd } from "./peer";
@@ -197,8 +197,12 @@ async function readRetained(
     io.stderr(`volley coordinator: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.USAGE;
   }
-  const broker = await connectAsClient(url, io, auth);
-  if (broker === null) return EXIT.ERROR;
+  const broker = await connectToSupervisor(url, io, auth, {
+    command: "volley coordinator",
+    json: v.json === true,
+    env,
+  });
+  if (typeof broker === "number") return broker; // already diagnosed and printed.
   try {
     const raw = await broker.queryRetained(COORDINATOR_TOPIC, READ_MS);
     const e = raw === null || raw === "" ? null : parseEnvelope(raw);

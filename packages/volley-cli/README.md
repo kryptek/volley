@@ -1076,7 +1076,7 @@ Standardized across subcommands so shell scripts can branch cleanly:
 
 When a command's connect to the broker fails (or, for a command that needs volleyd, the broker answers but volleyd's retained status is not live), it does not stop at "cannot connect". It climbs a ladder, stops at the first rung that fails, prints the cause and one exact fix, submits nothing and exits `69`:
 
-1. **internet**: a TCP connect to `github.com:443` within 2 s (`VOLLEY_INTERNET_PROBE=<host>:<port>` names another target, for a network that blocks GitHub).
+1. **internet**: a TCP connect to `github.com:443` within 2 s (`VOLLEY_INTERNET_PROBE=<host>:<port>` names another target, for a network that blocks GitHub; a fleet on a LAN or VPN with no internet egress points it at a host on that network, or every dead broker reads `offline`).
 2. **private network**: the machine's `setup.json` `network` record (the Network step): `tailscale status --json` says `Running` (5 s), or the manual address answers on the broker's port within 3 s (a refusal counts: the address is reachable). `none`, or no record: unknown, and the ladder goes on.
 3. **tunnel**: on a paired machine (`~/.volley/peer.json`, unless it says `tunnel: none`), `127.0.0.1:<remote_port>` accepts a connection within 2 s.
 4. **broker**: the broker's port answers within 3 s.

@@ -62,7 +62,10 @@ describe("diagnose: the reasons and their texts", () => {
     );
     expect(ts?.fix).toBe("`tailscale up`, then re-run");
     const manual = diagnose(
-      at({ ...COORDINATOR, network: { kind: "manual", address: "10.0.0.2" } }, { network: "down" }),
+      at(
+        { ...COORDINATOR, network: { kind: "manual", address: "192.0.2.10" } },
+        { network: "down" },
+      ),
     );
     expect(manual?.cause).toBe("The private network is not up on this machine (connect your VPN).");
     expect(manual?.fix).toBe("connect your VPN, then re-run");

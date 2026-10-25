@@ -72,6 +72,16 @@ describe("internetUp", () => {
     const shut = await closedPort();
     expect(await internetUp({ env: { VOLLEY_INTERNET_PROBE: `127.0.0.1:${shut}` } })).toBe(false);
   });
+
+  it("an IPv6 override is probed without its brackets", async () => {
+    const calls: [string, number, number][] = [];
+    const tcp = async (host: string, port: number, ms: number) => {
+      calls.push([host, port, ms]);
+      return "open" as const;
+    };
+    expect(await internetUp({ env: { VOLLEY_INTERNET_PROBE: "[::1]:443" }, tcp })).toBe(true);
+    expect(calls).toEqual([["::1", 443, 2000]]);
+  });
 });
 
 describe("networkUp", () => {

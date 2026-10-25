@@ -79,12 +79,12 @@ export const probeExec: ProbeExec = (argv, timeoutMs) =>
     });
   });
 
-/** `host:port` (the internet probe's override), or null when it is not one. */
+/** `host:port` or `[v6]:port` (the internet probe's override), or null when it is not one. */
 function hostPort(s: string | undefined): { host: string; port: number } | null {
-  const m = /^(.+):(\d{1,5})$/.exec(s ?? "");
+  const m = /^(?:\[([^\]]+)\]|(.+)):(\d{1,5})$/.exec(s ?? "");
   if (m === null) return null;
-  const port = Number(m[2]);
-  return port >= 1 && port <= 65_535 ? { host: m[1] as string, port } : null;
+  const port = Number(m[3]);
+  return port >= 1 && port <= 65_535 ? { host: (m[1] ?? m[2]) as string, port } : null;
 }
 
 /** Online: a TCP connect to github.com:443 (or `$VOLLEY_INTERNET_PROBE`) within two seconds. */
@@ -260,7 +260,8 @@ export interface Probes {
   networkUp: (record: NetworkRecord | null, port: number) => Promise<"up" | "down" | "unknown">;
   tunnelUp: (port: number) => Promise<boolean>;
   brokerUp: (url: string) => Promise<boolean>;
-  daemonLive: (url: string, auth: BrokerAuth | null) => Promise<boolean>;
+  /** volleyd's status in `namespace` (unset: the env's `VOLLEY_NAMESPACE`, else `default`). */
+  daemonLive: (url: string, auth: BrokerAuth | null, namespace?: string) => Promise<boolean>;
 }
 
 /** The real probes (`env` carries `VOLLEY_INTERNET_PROBE` and the namespace). */
@@ -270,8 +271,8 @@ export function realProbes(env: Record<string, string | undefined>): Probes {
     networkUp: (record, port) => networkUp(record, { port }),
     tunnelUp: (port) => tunnelUp(port),
     brokerUp: (url) => brokerUp(url),
-    daemonLive: (url, auth) =>
-      daemonLive(url, auth, { namespace: env.VOLLEY_NAMESPACE ?? "default" }),
+    daemonLive: (url, auth, namespace) =>
+      daemonLive(url, auth, { namespace: namespace ?? env.VOLLEY_NAMESPACE ?? "default" }),
   };
 }
 
@@ -279,8 +280,9 @@ export function realProbes(env: Record<string, string | undefined>): Probes {
  * Climb the ladder for `where`, stopping at the first rung that fails; the rungs not reached read
  * as passing (`up`, `unknown`). A broker on this machine's own loopback with no tunnel (the
  * supervisor's own machine) needs neither the internet nor the private network: those rungs are
- * skipped. `daemon` is asked only when `askDaemon`; the CLIs leave it unset (a command that reached
- * the broker asks the daemon itself and reports `silentInput`).
+ * skipped. `daemon` is asked only when `askDaemon`, which only tests set: every production caller
+ * leaves it unset (a command that reached the broker asks the daemon itself and reports
+ * `silentInput`).
  */
 export async function climb(
   where: Where,

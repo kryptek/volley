@@ -1455,6 +1455,26 @@ describe("volley peer doctor: reaching the supervisor (network.internet, tunnel.
     expect(asked).toEqual(["internet", "tunnel:21883", "daemon:mqtt://127.0.0.1:21883"]);
   });
 
+  it("asks volleyd in the peer's own namespace, not the shell's", async () => {
+    const m = machine({ trusted: true });
+    const namespaces: (string | undefined)[] = [];
+    const reach = {
+      internetUp: async () => true,
+      tunnelUp: async () => true,
+      daemonLive: async (_url: string, _auth: unknown, namespace?: string) => {
+        namespaces.push(namespace);
+        return true;
+      },
+    };
+    const io = makeBufferIO();
+    await doctor(io, m.deps({ reach }), {
+      repo: m.repoPath,
+      json: true,
+      reach: { ...REACH, namespace: "fleet-b" },
+    });
+    expect(namespaces).toEqual(["fleet-b"]);
+  });
+
   it("offline: network.internet fails with the offline fix; nothing later is probed", async () => {
     const { r, asked } = await reached(["internet"]);
     expect(check(r, "network.internet")).toMatchObject({
