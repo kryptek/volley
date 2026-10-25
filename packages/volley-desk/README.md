@@ -153,6 +153,12 @@ The Desk is built like the sign-in card (D10), one lit, raised object end to end
 
 ![Settings › Appearance › Current step: the nine effects, each card a live preview](docs/current-step.png)
 
+## Getting started art
+
+The Getting started wizard's art is Volley's mascot, the otter raft: three sea otters that hold paws so they do not drift apart (the cluster) and juggle a volleyball (passing work). `src/getting-started/art/` draws one vector cartoon scene per wizard step (`SCENE_IDS`: welcome, this-computer, machines, repos, people, access, done) from one character builder (`otter.tsx`: a fixed `PALETTE`, hat and prop tables), each an `<svg role="img">` named by its `SCENE_ALT`; `<StepArt scene="…" size={…} />` renders one (without `size` it fills its container, square). The Welcome scene animates (the ball travels a loop between the three otters, eyes blink, a gentle bob; `styles/getting-started-art.css`); under reduced motion it is a still frame with the ball mid-air. Only the ground shadows, floor lines and the dashed toss path follow the theme (`--line`), so the otters read the same on dark and light themes.
+
+To use raster art instead, drop the file in `public/getting-started/` and name it in `public/getting-started/art.json`, e.g. `{ "version": 1, "scenes": { "repos": "repos.webp" } }`: `StepArt` shows that image (same size, the scene's alt text) and the vector scene for every scene the map does not name. No code change. The map is fetched once per page load; a missing or malformed map means the vector scenes, and a name with a `/`, `..` or a scheme is ignored. It ships empty.
+
 ## Layout
 
 ```
