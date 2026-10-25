@@ -22,6 +22,7 @@ Subcommands:
   peer     Pair machines with volleyd's (invite, join, list, remove)
   machine  Add a bare box as a paired machine over ssh: install, pair, sign in, doctor (add)
   repo     Repositories on volleyd's machines (add, list, remove, status)
+  coordinator  The coordinator role: the Remote Control server volleyd keeps alive (status, open, restart, stop)
   role     Machine roles: which machine runs the broker, the supervisor, the Desk (status, move, rollback)
   broker   A broker move's steps on a machine (receive, probe, tunnel; volleyd runs them over ssh)
   setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
@@ -83,6 +84,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/repo")).repo as Subcommand;
     case "role":
       return (await import("./commands/role")).role as Subcommand;
+    case "coordinator":
+      return (await import("./commands/coordinator")).coordinator as Subcommand;
     case "broker":
       return (await import("./commands/broker-receive")).broker as Subcommand;
     case "setup":

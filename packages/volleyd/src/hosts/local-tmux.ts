@@ -1,4 +1,5 @@
 import { DAEMON_DEFAULTS } from "../config-defaults";
+import { COORDINATOR_COMMAND } from "../coordinator/role";
 import type { ExecFn, ExecResult } from "../exec";
 import { type ConsentToken, FenceError, TMUX_LAUNCH_COMMAND } from "../fence";
 import { reapUnder } from "../procs";
@@ -70,6 +71,22 @@ export class LocalTmuxHost implements Host {
   private async launchNow(spec: LaunchSpec): Promise<{ workspace: string }> {
     const fail = (msg: string, detail: Record<string, unknown> = {}) =>
       new SpawnError("LAUNCH_FAILED", msg, { outcome: "refused", ...detail });
+    if (spec.coordinator !== undefined) {
+      // The coordinator role (SPEC §4.6.25): its own session name, its sealed script, no size.
+      if (spec.command.trim() !== COORDINATOR_COMMAND)
+        throw fail(`the coordinator runs only '${COORDINATOR_COMMAND}'`);
+      const r = await this.exec(
+        ["tmux", "new-session", "-d", "-s", spec.name, "-c", spec.cwd, COORDINATOR_COMMAND],
+        { timeoutMs: DAEMON_DEFAULTS.launch_timeout_ms, coordinator: spec.coordinator },
+      ).catch((e: unknown) => {
+        throw fail(`tmux new-session: ${isNotFound(e) ? NOT_INSTALLED : String(e)}`);
+      });
+      if (r.code !== 0 || r.timedOut)
+        throw fail(`tmux new-session failed: ${r.timedOut ? "timed out" : r.stderr.trim()}`, {
+          outcome: r.timedOut ? "unknown" : "refused",
+        });
+      return { workspace: spec.name };
+    }
     if (spec.command.trim() !== TMUX_LAUNCH_COMMAND) {
       throw fail(`a local tmux session runs only '${TMUX_LAUNCH_COMMAND}'`);
     }

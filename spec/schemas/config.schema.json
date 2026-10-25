@@ -511,6 +511,54 @@
           "default": 300000,
           "description": "After a rate-limited GitHub answer (HTTP 403 or 429), the supervisor makes none of that wave's CI calls for this long (longer when the answer's output names a Retry-After). Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "coordinator": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The coordinator role (spec section 4.6.25): the owner's Claude Code Remote Control server, kept alive by the supervisor in a fixed directory on one machine. Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "machine": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+                { "type": "null" }
+              ],
+              "default": null,
+              "description": "The machine that hosts it: local (the supervisor's own), the supervisor's fleet.local_name, or a paired machine's hosts.<name> key; null: the role is off and nothing runs. A machine whose record says laptop: true is refused unless allow_laptop."
+            },
+            "dir": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^(~|~/[^\\n\\r\\0]*|/[^\\n\\r\\0]*)$",
+              "default": "~/.volley/coordinator",
+              "description": "Its directory on that machine, absolute or under that machine's home (~)."
+            },
+            "capacity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32,
+              "default": 4,
+              "description": "claude remote-control --capacity: the server's concurrent sessions."
+            },
+            "permission_mode": {
+              "enum": ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
+              "default": "acceptEdits",
+              "description": "claude remote-control --permission-mode for the sessions it spawns."
+            },
+            "restart_backoff_s": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": { "type": "integer", "minimum": 1, "maximum": 3600 },
+              "default": [5, 30, 120],
+              "description": "The waits (s) before each restart after the server died, the last repeated; three deaths in a row, each within the list's total of its start, leave it failed until coordinator_restart."
+            },
+            "allow_laptop": {
+              "type": "boolean",
+              "default": false,
+              "description": "true: coordinator.machine may name a machine whose record says laptop: true."
+            }
+          }
+        },
         "fleet": {
           "type": "object",
           "additionalProperties": false,
