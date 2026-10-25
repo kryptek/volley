@@ -290,7 +290,12 @@ export function fakeMachine(
       );
     }
     if (a[0] === "bun" && a[1] === volleydCli && a[2] === "validate") return ok();
-    // The broker steps as root (setup/escalate.ts): sudo's password, then the child run.
+    // The broker steps as root (setup/escalate.ts): sudo's probe, its password, then the child.
+    if (a.join(" ") === "sudo -n true") {
+      return m.sudo.passwordless
+        ? ok()
+        : { code: 1, stdout: "", stderr: "sudo: a password is required\n" };
+    }
     const at = a.indexOf(volleyCli);
     if (a[0] === "sudo" && at > 0 && m.rootChild !== undefined) {
       if (a[1] === "-n" && !m.sudo.passwordless) {

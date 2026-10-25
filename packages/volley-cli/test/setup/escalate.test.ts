@@ -138,4 +138,18 @@ describe("the messages", () => {
       "then run `volley setup --yes --no-lan --simulated` again.",
     ]);
   });
+
+  it("the command by hand keeps the files this run planned with, and --repair", () => {
+    expect(
+      noTerminalMessage({
+        layout: "etc",
+        volley: "volley",
+        lan: true,
+        argv: ["--repair"],
+        flags: { layout: "etc", config: "/path/to/my conf", repair: true },
+      })[1],
+    ).toBe(
+      "  sudo volley setup --step detect --step security --step accounts --yes --lan --layout etc --config '/path/to/my conf' --repair",
+    );
+  });
 });

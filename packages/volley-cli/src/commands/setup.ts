@@ -384,6 +384,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     }
     layout = LAYOUTS[layoutFlag as LayoutName];
   }
+  // What a run without the record finds (root's under sudo: its HOME has none).
+  const found = layout;
   const fromRecord = saved !== null && (layoutFlag ?? saved.layout) === saved.layout;
   if (fromRecord && layoutFlag === undefined) {
     layout = {
@@ -557,10 +559,14 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       })
     ) {
       const root = await runBrokerStepsAsRoot(ctx, io, {
+        // The files this run planned with (a flag's, or the last run's record), when root's run
+        // would not find them by itself: under sudo, HOME is root's and the record is not read.
         flags: {
-          ...(layoutFlag !== undefined ? { layout: layoutFlag } : {}),
-          ...(str("config") !== undefined ? { config: str("config") as string } : {}),
-          ...(str("state-file") !== undefined ? { stateFile: str("state-file") as string } : {}),
+          ...(layout.name !== found.name || layoutFlag !== undefined
+            ? { layout: layout.name }
+            : {}),
+          ...(ctx.config !== found.config ? { config: resolve(ctx.config) } : {}),
+          ...(ctx.stateFile !== found.stateFile ? { stateFile: resolve(ctx.stateFile) } : {}),
         },
         argv,
       });
@@ -735,10 +741,10 @@ before changing anything.
                backed up), create the plugin's state file and admin login, restart the broker,
                then check both listeners refuse anonymous clients. On a Linux install whose
                broker files are root's (the snap, /etc/mosquitto) steps 1-3 run through sudo,
-               announced first; a cloud image's passwordless sudo asks nothing. Asks whether devices on
-               your network may reach the WebSocket listener (port 9001: needed for the Desk on
-               a phone; logins required, not encrypted until TLS is set up), unless --lan or
-               --no-lan says; TCP (1883) stays on this machine either way
+               announced first; a cloud image's passwordless sudo asks nothing. Asks whether
+               devices on your network may reach the WebSocket listener (port 9001: needed for
+               the Desk on a phone; logins required, not encrypted until TLS is set up), unless
+               --lan or --no-lan says; TCP (1883) stays on this machine either way
   3. Accounts  Volley's shared roles and the fixed identities volleyd, desk, coordinator
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS

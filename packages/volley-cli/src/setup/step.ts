@@ -3,7 +3,7 @@ import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
 import type { ReachProbes } from "../peer/checks/reach";
 import { MCP_GET, MCP_REMOVE } from "./claude-code";
 import { lsofArgv, ssArgv } from "./desk-port";
-import { isRootStepCommand } from "./escalate";
+import { SUDO_PROBE, isRootStepCommand } from "./escalate";
 import type { FirstWaveMetrics, FirstWaveOptions, WaveView } from "./first-wave";
 import { isFirstWaveCommand } from "./first-wave-repo";
 import type { NetworkRecord } from "./journal";
@@ -321,6 +321,7 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
       line === "systemctl --user show -p MainPID --value volley-desk.service" ||
       // The broker steps as root on a Linux install whose broker files are root's (escalate.ts).
       isRootStepCommand(argv, { bun, repoRoot }) ||
+      same(argv, SUDO_PROBE) ||
       // `volley setup --peer`'s service (the unit writers of `volley peer join`).
       (a0 === "loginctl" &&
         a1 === "enable-linger" &&

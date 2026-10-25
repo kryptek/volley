@@ -118,15 +118,31 @@ describe("setupFence", () => {
       ).not.toThrow();
     });
 
+    it("allows the silent probe `sudo -n true`, never a prompting `sudo true`", () => {
+      expect(() => fence(["sudo", "-n", "true"])).not.toThrow();
+      expect(() => fence(["sudo", "true"])).toThrow(/volley setup does not run/);
+    });
+
     it.each([
       [["sudo", bun, cli, "setup", "--step", "services"]],
       [["sudo", "-n", "rm", "-rf", "/"]],
       [["sudo", bun, "/repo/packages/volleyd/src/cli.ts", "setup", "--step", "security"]],
-      [["sudo", bun, "/tmp/other.ts", "setup", "--step", "security"]],
+      [["sudo", bun, "/path/to/other.ts", "setup", "--step", "security"]],
       [["sudo", "-n", bun, cli, ...rest, "--simulated"]],
       [["sudo", "-E", bun, cli, ...rest]],
       [["sudo", "-n", "/usr/bin/evil", cli, ...rest]],
       [["sudo", bun, cli, "auth", "init"]],
+      // A full `volley setup` as root, a step twice, or a step short: only the three, once each.
+      [["sudo", "-n", bun, cli, "setup", "--yes", "--no-lan"]],
+      [["sudo", bun, cli, ...rest, "--step", "detect"]],
+      [
+        [
+          "sudo",
+          bun,
+          cli,
+          ...rest.filter((w, i) => w !== "accounts" && rest[i + 1] !== "accounts"),
+        ],
+      ],
     ])("refuses %j", (argv) => {
       expect(() => fence(argv)).toThrow(/volley setup does not run/);
     });

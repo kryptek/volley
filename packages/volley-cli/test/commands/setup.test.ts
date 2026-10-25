@@ -1,5 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { realAuthDeps } from "../../src/auth/context";
 import { cmd } from "../../src/auth/dynsec";
@@ -653,7 +660,9 @@ describe("volley setup", () => {
       const r = await run(["--yes", "--no-lan"]);
       expect(r.stderr).toBe("");
       expect(r.code).toBe(0);
-      const first = m.execCalls[0] ?? [];
+      // The probe decides by its exit code (sudo's own message is translated under a locale).
+      expect(m.execCalls[0]).toEqual(["sudo", "-n", "true"]);
+      const first = m.execCalls[1] ?? [];
       expect(first.slice(0, 3)).toEqual(["sudo", "-n", "bun"]);
       expect(first.slice(4)).toEqual([
         "setup",
@@ -711,11 +720,11 @@ describe("volley setup", () => {
       m.sudo.passwordless = false;
       const r = await run(["--yes", "--no-lan"]);
       expect(r.code).toBe(0);
+      // The probe fails (in any language), then the one `sudo` that prompts.
+      expect(m.execCalls[0]).toEqual(["sudo", "-n", "true"]);
       const calls = sudoCalls();
-      expect(calls).toHaveLength(2);
-      expect(calls[0]?.[1]).toBe("-n");
-      expect(calls[1]?.[1]).toBe("bun");
-      expect(calls[1]?.slice(1)).toEqual(calls[0]?.slice(2));
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[1]).toBe("bun");
       expect(r.stdout).toContain(DONE_NO_LAN);
       const metrics = JSON.parse(
         readFileSync(join(m.ctx.volleydHome, "setup-metrics.json"), "utf-8"),
@@ -737,6 +746,85 @@ describe("volley setup", () => {
       expect(readFileSync(m.layout.config, "utf-8")).toBe(ANONYMOUS_CONFIG);
     });
 
+    it("a child that fails under passwordless sudo is the child's failure, not a password", async () => {
+      m.rootChild = async () => ({ code: 3, stdout: "", stderr: "Fehler: kein Passwort\n" });
+      m.deps.interactive = false;
+      const r = await run(["--yes", "--no-lan"]);
+      expect(r.code).toBe(3);
+      expect(r.stderr).toContain("the broker steps under sudo failed (exit 3)");
+      expect(r.stderr).not.toContain("sudo needs your password");
+    });
+
+    it("passes the config and state file it planned with (from the last run's record), absolute", async () => {
+      const config = join(m.ctx.home, "elsewhere", "mosquitto.conf");
+      const stateFile = join(m.ctx.home, "elsewhere", "dynamic-security.json");
+      mkdirSync(dirname(config), { recursive: true });
+      writeFileSync(config, ANONYMOUS_CONFIG);
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(
+        join(m.ctx.volleydHome, "setup.json"),
+        JSON.stringify({
+          layout: "snap",
+          config,
+          state_file: stateFile,
+          auth_dir: m.layout.authDir,
+          broker_url: fake.url,
+        }),
+      );
+      m.rootChild = async () => ({ code: 1, stdout: "", stderr: "" });
+      await run(["--yes", "--no-lan"]);
+      const child = sudoCalls()[0] ?? [];
+      expect(child.slice(child.indexOf("--config"), child.indexOf("--config") + 2)).toEqual([
+        "--config",
+        config,
+      ]);
+      expect(child).toContain("--state-file");
+      expect(child[child.indexOf("--state-file") + 1]).toBe(stateFile);
+    });
+
+    it("a relative --config reaches the child as an absolute path", async () => {
+      m.rootChild = async () => ({ code: 1, stdout: "", stderr: "" });
+      const rel = relative(process.cwd(), m.layout.config);
+      await run(["--yes", "--no-lan", "--config", rel]);
+      const child = sudoCalls()[0] ?? [];
+      expect(child[child.indexOf("--config") + 1]).toBe(m.layout.config);
+      expect(child).not.toContain("--state-file");
+    });
+
+    it.skipIf(process.getuid?.() === 0)(
+      "a config the user cannot read: escalates, and continues once root's run made it readable",
+      async () => {
+        chmodSync(m.layout.config, 0o000);
+        const real = m.rootChild as NonNullable<typeof m.rootChild>;
+        m.rootChild = async (argv) => {
+          chmodSync(m.layout.config, 0o644);
+          return real(argv);
+        };
+        const r = await run(["--yes", "--no-lan"]);
+        expect(r.stderr).toBe("");
+        expect(r.code).toBe(0);
+        expect(children).toHaveLength(1);
+        expect(r.stdout).toContain(DONE_NO_LAN);
+      },
+    );
+
+    it.skipIf(process.getuid?.() === 0)(
+      "a config still unreadable after root's run: stops clearly, before the step loop",
+      async () => {
+        chmodSync(m.layout.config, 0o000);
+        m.rootChild = async () => ({ code: 0, stdout: "", stderr: "" });
+        const r = await run(["--yes", "--no-lan"]);
+        chmodSync(m.layout.config, 0o644);
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain(
+          `volley setup: Security: the broker steps ran as root, but you still cannot read the broker's files`,
+        );
+        expect(r.stderr).toContain(`sudo chmod a+r ${m.layout.config}`);
+        expect(r.stdout).not.toContain("[1/10]");
+        expect(journal().at(-1)).toMatchObject({ step: "security", event: "failed" });
+      },
+    );
+
     it("names ~/.volley/bin/volley in that command once it is installed", async () => {
       m.sudo.passwordless = false;
       m.deps.interactive = false;
@@ -751,7 +839,7 @@ describe("volley setup", () => {
       m.rootChild = async () => ({ code: 1, stdout: "", stderr: "volley setup: Security: boom\n" });
       const r = await run(["--yes", "--no-lan"]);
       expect(r.code).toBe(1);
-      expect(r.stderr).toContain("volley setup: Security: boom");
+      // The child's own messages went to the terminal it shares (tty: true).
       expect(r.stderr).toContain("see the output above");
       expect(r.stdout).not.toContain("[1/10]");
     });
