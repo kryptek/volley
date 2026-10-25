@@ -8,19 +8,22 @@ import type { Check, Facts } from "../doctor";
 
 export function networkChecks(f: Facts): Check[] {
   const n = f.network;
-  const fix = { command: `volley setup${n.peer ? " --peer" : ""} --step network` };
-  const check = (ok: boolean, detail: string): Check => ({
+  const step = `volley setup${n.peer ? " --peer" : ""} --step network`;
+  const check = (ok: boolean, detail: string, command = step): Check => ({
     id: "network.private",
     ok,
     severity: "warn",
     detail,
-    ...(ok ? {} : { fix }),
+    ...(ok ? {} : { fix: { command } }),
   });
   const r = n.record;
   if (r === null) {
     return [check(false, "no private network on record (volley setup's Network step has not run)")];
   }
-  if (r.kind === "none") return [check(false, "none: reached on its own network only")];
+  // A rerun with no flag keeps a `none` record, so the fix names the kind that changes it.
+  if (r.kind === "none") {
+    return [check(false, "none: reached on its own network only", `${step} --network tailscale`)];
+  }
   if (r.kind === "manual") {
     return [
       n.bound !== null

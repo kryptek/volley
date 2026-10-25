@@ -184,8 +184,7 @@ export async function planNetwork(ctx: SetupContext): Promise<StepPlan> {
   }
 
   if (kind === "manual") {
-    let address =
-      ctx.networkAddress ?? (prior?.kind === "manual" ? prior.address : undefined) ?? undefined;
+    let address = ctx.networkAddress ?? (prior?.kind === "manual" ? prior.address : undefined);
     if (address === undefined && !ctx.yes && ctx.check !== true && ctx.deps.ask !== undefined) {
       address = (await ctx.deps.ask(ADDRESS_QUESTION))?.trim() || undefined;
     }

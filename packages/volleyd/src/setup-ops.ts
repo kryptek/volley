@@ -17,7 +17,12 @@ import {
   recordCmuxSocketMode,
   setupLogFile,
 } from "volley-cli/setup/journal";
-import { TAILSCALE_LINUX_INSTALL, isNetworkKind, planNetwork } from "volley-cli/setup/network";
+import {
+  type NetworkKind,
+  TAILSCALE_LINUX_INSTALL,
+  isNetworkKind,
+  planNetwork,
+} from "volley-cli/setup/network";
 import { planServicesForDesk as planServices } from "volley-cli/setup/services";
 import {
   type AnonymousProbe,
@@ -820,7 +825,9 @@ function lanState(ctx: SetupContext): { planned: boolean; current: boolean | nul
  * The Network step's kind: planned (what `planNetwork` settled) and setup.json's record now
  * (null: none yet).
  */
-function networkState(ctx: SetupContext): { planned: string; current: string | null } | undefined {
+function networkState(
+  ctx: SetupContext,
+): { planned: NetworkKind; current: NetworkKind | null } | undefined {
   if (ctx.network === undefined) return undefined;
   return { planned: ctx.network, current: readNetworkRecord(ctx.volleydHome)?.kind ?? null };
 }

@@ -1367,6 +1367,8 @@ describe("volley peer doctor: network.private (informational)", () => {
     expect(check(none, "network.private")).toMatchObject({
       ok: false,
       detail: "none: reached on its own network only",
+      // A rerun with no flag keeps `none`; the fix names the kind that clears the warning.
+      fix: "volley setup --step network --network tailscale",
     });
     const missing = await report(machine({ trusted: true, network: { record: null } }));
     expect(check(missing, "network.private")).toMatchObject({
