@@ -1,6 +1,6 @@
 /**
  * `bun run lint`'s shell step: shellcheck over install.sh, the release tarball script and the install
- * tests' scripts (Layers 1–4, and the stand-ins Layers 2–4 are tested against). A contributor without shellcheck gets a notice and a pass; CI (which installs it)
+ * tests' scripts (Layers 1, 2 and 4, verify.sh, and the stand-ins Layers 2 and 4 are tested against). A contributor without shellcheck gets a notice and a pass; CI (which installs it)
  * requires it.
  */
 import { join } from "node:path";
@@ -12,13 +12,11 @@ const FILES = [
   "scripts/install-tests/systemctl-stand-in.sh",
   "scripts/install-tests/lib.sh",
   "scripts/install-tests/vm-linux.sh",
-  "scripts/install-tests/vm-macos.sh",
   "scripts/install-tests/vm-pair.sh",
   "scripts/install-tests/run-layer2.sh",
-  "scripts/install-tests/run-layer3.sh",
   "scripts/install-tests/run-layer4.sh",
+  "scripts/install-tests/verify.sh",
   "scripts/install-tests/stubs/multipass",
-  "scripts/install-tests/stubs/tart",
   "scripts/install-tests/stubs/ssh",
   "scripts/install-tests/stubs/gh",
 ];

@@ -1,5 +1,6 @@
-import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { type Env, isSimulated, passThrough, simHome } from "./env";
 import {
   type Issue,
@@ -17,8 +18,10 @@ import {
   deleteBranch,
   git,
   isAncestor,
+  isSshBase,
   mergeOnOrigin,
   nextNumber,
+  originOf,
   originsDir,
   refreshPr,
   repoOfCwd,
@@ -59,6 +62,19 @@ const fail = (stderr: string): Out => ({
   stdout: "",
   stderr: stderr.endsWith("\n") ? stderr : `${stderr}\n`,
 });
+
+/**
+ * `argv` run over ssh on the host of an scp-style `url` (`user@host:/path`), the path appended as
+ * its last argument; never throws.
+ */
+function overSsh(url: string, argv: string[]): { code: number; stdout: string; stderr: string } {
+  const i = url.indexOf(":");
+  const q = (x: string) => `'${x.replace(/'/g, `'\\''`)}'`;
+  const r = spawnSync("ssh", [url.slice(0, i), [...argv, url.slice(i + 1)].map(q).join(" ")], {
+    encoding: "utf8",
+  });
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
 
 /** Thrown for a shape no rule answers: becomes `unknown argv`. */
 class Unknown extends Error {}
@@ -305,6 +321,19 @@ const apiRunJson = (r: RunRec): Json => ({
   created_at: r.createdAt,
 });
 
+/**
+ * CI on `head`: `ciOf`'s run, or none at all under `VOLLEY_SIM_WORKFLOWS=0` (a repository with no
+ * workflows, as every real first wave's is: no run is ever created or listed).
+ */
+function ci(c: Call, repo: string, head: string, event: RunRec["event"], branch: string): RunRec[] {
+  return noWorkflows(c) ? [] : ciOf(c.w, repo, head, event, branch);
+}
+const noWorkflows = (c: Call) => c.ctx.env.VOLLEY_SIM_WORKFLOWS === "0";
+
+/** GitHub's answer for a repository that does not exist. */
+const noSuchRepo = (name: string) =>
+  fail(`GraphQL: Could not resolve to a Repository with the name '${name}'. (repository)`);
+
 const currentBranch = (cwd: string) => {
   const r = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
   return r.code === 0 ? r.stdout.trim() : "";
@@ -386,19 +415,26 @@ const COMMANDS: Record<string, Spec> = {
       const runs = /^repos\/([^/]+\/[^/]+)\/actions\/runs\?(.*)$/.exec(endpoint);
       const head = runs !== null ? new URLSearchParams(runs[2]).get("head_sha") : null;
       if (runs !== null && head !== null) {
-        const list = ciOf(c.w, runs[1] as string, head, "pull_request", "").map(apiRunJson);
+        const list = ci(c, runs[1] as string, head, "pull_request", "").map(apiRunJson);
         return reply({ total_count: list.length, workflow_runs: list });
       }
       // The CI queue (pressure/ci-queue.ts): a simulated run is done when it is first read.
       if (runs !== null && new URLSearchParams(runs[2]).get("status") === "queued")
         return reply({ total_count: 0, workflow_runs: [] });
       // The CI mode volleyd reads at admission (#602): one active workflow, no branch protection
-      // and no rulesets, so a simulated wave stays on `workflows`.
+      // and no rulesets, so a simulated wave stays on `workflows`; none under
+      // VOLLEY_SIM_WORKFLOWS=0, so the wave is on `none`.
       if (/^repos\/[^/]+\/[^/]+\/actions\/workflows(\?.*)?$/.test(endpoint))
-        return reply({
-          total_count: 1,
-          workflows: [{ id: 1, name: "ci", path: ".github/workflows/ci.yml", state: "active" }],
-        });
+        return reply(
+          noWorkflows(c)
+            ? { total_count: 0, workflows: [] }
+            : {
+                total_count: 1,
+                workflows: [
+                  { id: 1, name: "ci", path: ".github/workflows/ci.yml", state: "active" },
+                ],
+              },
+        );
       const branch = /^repos\/[^/]+\/[^/]+\/branches\/(.+)$/.exec(endpoint);
       if (branch !== null) return reply({ name: branch[1], protected: false });
       if (/^repos\/[^/]+\/[^/]+\/rules\/branches\/.+$/.test(endpoint)) return reply([]);
@@ -472,10 +508,14 @@ const COMMANDS: Record<string, Spec> = {
       if (vis.length !== 1) throw new Unknown();
       if (c.w.repos[slug] !== undefined)
         return fail("GraphQL: Name already exists on this account (createRepository)");
-      const origin = join(originsDir(c.home), `${slug}.git`);
-      mkdirSync(origin, { recursive: true });
-      const init = git(["init", "--bare", "-q", "-b", "main", origin]);
+      const at = originOf(originsDir(c.home, c.ctx.env), slug);
+      // An ssh base another machine serves: the origin is made there, and is not this world's.
+      const init =
+        at.local !== null
+          ? git(["init", "--bare", "-q", "-b", "main", at.local])
+          : overSsh(at.url, ["git", "init", "--bare", "-q", "-b", "main"]);
       if (init.code !== 0) return fail(init.stderr);
+      const origin = at.local;
       c.w.repos[slug] = {
         slug,
         visibility:
@@ -485,10 +525,27 @@ const COMMANDS: Record<string, Spec> = {
       };
       if (a.bools.has("--clone")) {
         const name = slug.split("/")[1] as string;
-        const cl = git(["clone", "-q", origin, join(c.ctx.cwd, name)], c.ctx.cwd);
+        const cl = git(["clone", "-q", at.url, join(c.ctx.cwd, name)], c.ctx.cwd);
         if (cl.code !== 0) return fail(cl.stderr);
       }
       return ok(`${repoUrl(slug)}\n`);
+    },
+  },
+  "repo clone": {
+    pos: [1, 2],
+    run: (a, c) => {
+      const raw = a.pos[0] as string;
+      const slug = raw.includes("/") ? slugOfFlag(raw) : `${SIM_LOGIN}/${raw}`;
+      if (slug === null) throw new Unknown();
+      const at = originOf(originsDir(c.home, c.ctx.env), slug);
+      if (at.local !== null && !existsSync(at.local)) return noSuchRepo(raw);
+      const dir = resolve(c.ctx.cwd, a.pos[1] ?? (slug.split("/")[1] as string));
+      const cl = git(["clone", "-q", at.url, dir], c.ctx.cwd);
+      if (cl.code !== 0)
+        return /does not appear to be a git repository|does not exist/.test(cl.stderr)
+          ? noSuchRepo(raw)
+          : fail(cl.stderr);
+      return ok();
     },
   },
   "repo delete": {
@@ -501,7 +558,8 @@ const COMMANDS: Record<string, Spec> = {
       if (r === undefined)
         return fail(`GraphQL: Could not resolve to a Repository with the name '${a.pos[0]}'.`);
       // Only an origin the simulator made is removed; an adopted one is the user's.
-      if (r.origin?.startsWith(`${originsDir(c.home)}/`))
+      const base = originsDir(c.home, c.ctx.env);
+      if (!isSshBase(base) && r.origin?.startsWith(`${base}/`))
         rmSync(r.origin, { recursive: true, force: true });
       delete c.w.repos[slug];
       delete c.w.labels[slug];
@@ -807,7 +865,7 @@ const COMMANDS: Record<string, Spec> = {
       const found = prOf(c, a, a.pos[0]);
       if (isOut(found)) return found;
       const pr = refreshPr(c.w, found);
-      const runs = ciOf(c.w, pr.repo, pr.headRefOid, "pull_request", pr.headRefName);
+      const runs = ci(c, pr.repo, pr.headRefOid, "pull_request", pr.headRefName);
       const checks = runs.map((r) => ({
         name: "test",
         state: r.conclusion === "success" ? "SUCCESS" : "FAILURE",
@@ -836,10 +894,10 @@ const COMMANDS: Record<string, Spec> = {
       let runs: RunRec[];
       if (commit !== undefined) {
         const pr = c.w.prs.find((p) => p.repo === repo.slug && p.headRefOid === commit);
-        runs = ciOf(c.w, repo.slug, commit, "pull_request", pr?.headRefName ?? "");
+        runs = ci(c, repo.slug, commit, "pull_request", pr?.headRefName ?? "");
       } else if (branch !== undefined) {
         const tip = repo.origin !== null ? branchTip(repo.origin, branch) : null;
-        runs = tip !== null ? ciOf(c.w, repo.slug, tip, "push", branch) : [];
+        runs = tip !== null ? ci(c, repo.slug, tip, "push", branch) : [];
       } else throw new Unknown();
       const event = one(a, "--event");
       if (event !== undefined) runs = runs.filter((r) => r.event === event);

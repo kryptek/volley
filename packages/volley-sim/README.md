@@ -110,6 +110,18 @@ A failure reports `failed` with the reason. After its terminal status it stays c
 idle session — acknowledging any mailbox message — until SIGTERM, SIGINT or SIGHUP, and then
 disconnects cleanly (so its will never fires). `VOLLEY_SIM_AGENT_LINGER=0` makes it exit at once.
 
+`VOLLEY_SIM_ORIGINS` moves the bare origins `gh repo create` makes and `gh repo clone <slug>
+[<dir>]` clones from: a directory, or an scp-style ssh base (`user@host:/path`) so that two
+machines' fake GitHubs share one set of origins (the pair install test sets it on its hub and its
+peer to the hub's directory). On the machine whose directory it names, the fake works on it
+locally; elsewhere `repo create` runs `git init --bare` there over ssh and `repo clone` clones over
+ssh. Unset: `$VOLLEY_SIM_HOME/origins`.
+
+`VOLLEY_SIM_WORKFLOWS=0` makes every repository one with no CI, as a new repository is: `gh api
+…/actions/workflows` lists none (so volleyd's CI mode is `none`), and no CI run is ever created or
+listed (`run list`, `pr checks`, `api …/actions/runs`). Unset or `1`: one active workflow, and
+every head's run is green. `volley sim env` carries both variables on when the shell has them.
+
 ## Running a wave by hand
 
 ```sh

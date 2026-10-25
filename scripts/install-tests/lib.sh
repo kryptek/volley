@@ -1,11 +1,12 @@
 # shellcheck shell=bash
-# What Layers 2–4 of the install tests share (scripts/install-tests/README.md), sourced by
-# vm-linux.sh, vm-macos.sh and vm-pair.sh: the run's VM names (`volley-it-<run id>-<what>`), the
-# run's ssh key, the cleanup trap that always deletes the run's VMs, waiting for ssh and for a
-# reboot, the metrics hand-off to metrics.ts and, on a failing run, the one tracking issue
-# labelled `install-tests` (a comment per failure, through `gh`).
+# What Layers 2 and 4 of the install tests share (scripts/install-tests/README.md), sourced by
+# vm-linux.sh and vm-pair.sh: the run's VM names (`volley-it-<run id>-<what>`), the run's ssh key,
+# the cleanup trap that always deletes the run's VMs, waiting for ssh and for a reboot, a test
+# wave's submission, the check that CLI output never says `undefined`, the metrics hand-off to
+# metrics.ts and, on a failing nightly, the one tracking issue labelled `install-tests` (a comment
+# per failure, through `gh`).
 #
-# The caller sets LAYER (2, 3 or 4) and LABEL, defines `vm_exists <name>` and `vm_delete <name>`
+# The caller sets LAYER (2 or 4) and LABEL, defines `vm_exists <name>` and `vm_delete <name>`
 # for its hypervisor, and calls `lib_init` first and `finish` last.
 #
 # The environment: VM_OUT (results, and the run's key and cloud-init under key/; default
@@ -13,7 +14,7 @@
 # directory of it: the snap reads nothing else), VM_RUN_ID (default $GITHUB_RUN_ID),
 # VM_POLL_S (seconds between polls; default 3), VM_MAX_WAIT_S (caps every wait; the tests' stand-ins
 # answer at once), VM_TRACK_ISSUE=1 (a failing run opens or comments
-# on the tracking issue; the nightly sets it), VM_MULTIPASS_IS_SNAP=1 (treat multipass as the snap
+# on the tracking issue; the scheduled nightly sets it, a dispatch never), VM_MULTIPASS_IS_SNAP=1 (treat multipass as the snap
 # wherever it is: the tests' seam, their stand-in is not under /snap/).
 # Bash 3.2 (a Mac's /bin/bash): no associative arrays, no mapfile.
 
@@ -21,15 +22,13 @@ LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$LIB_DIR/../.." && pwd)
 OUT="${VM_OUT:-$PWD/vm-results}"
 POLL_S=${VM_POLL_S:-3}
-# The account cloud-init makes (cloud-init.yaml); a Tart base image's own (README.md).
-VM_USER=${VM_USER:-volley}
+# The account cloud-init makes (cloud-init.yaml).
+VM_USER=volley
 # The tracking issue's label (one open issue carries it).
 TRACK_LABEL=install-tests
 FAILED=0
 TRANSCRIPT=''
 KEYDIR=''
-# The key ssh logs in with when not the run's (vm-macos.sh sets it).
-SSH_KEY=''
 # The run's VMs, deleted on exit whatever happened; one name per line.
 VMS=''
 # Timings for the summary: ` --timing <name>=<ms>` each.
@@ -87,8 +86,8 @@ multipass_can_read() {
 # accept only it (cloud-init.yaml), and it is removed with them. A snap multipass refuses an $OUT
 # it cannot read (exit 2) before anything is written.
 lib_init() {
-  # multipass is handed the cloud-init under $OUT (Layers 2 and 4); a snap one reads only so much.
-  if [ "$LAYER" != 3 ] && multipass_is_snap; then
+  # multipass is handed the cloud-init under $OUT; a snap one reads only so much.
+  if multipass_is_snap; then
     local real home
     real=$(realpath -m "$OUT") && home=$(realpath -m "$HOME") || exit 1
     if ! HOME=$home multipass_can_read "$real"; then
@@ -142,12 +141,12 @@ cleanup() {
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
   -o ConnectTimeout=5 -o LogLevel=ERROR)
 
-# One command on the VM at <addr>, with the run's key (or $SSH_KEY: a Tart VM's, which has no
-# cloud-init); stdin is the caller's (pass </dev/null when there is none).
+# One command on the VM at <addr>, with the run's key; stdin is the caller's (pass </dev/null when
+# there is none).
 vm_ssh() {
   local addr=$1
   shift
-  ssh -i "${SSH_KEY:-$KEYDIR/id_ed25519}" "${SSH_OPTS[@]}" "$VM_USER@$addr" "$*"
+  ssh -i "$KEYDIR/id_ed25519" "${SSH_OPTS[@]}" "$VM_USER@$addr" "$*"
 }
 
 # A command on the VM in a new terminal's PATH (the line install.sh adds); `on_sim` also with the
@@ -184,16 +183,19 @@ wait_ssh() {
 }
 
 # Run <command...> until it succeeds, at most <seconds>, its stderr quiet until the last try (which
-# prints why it still fails).
+# prints why it still fails). A command that exits 3 has failed for good: one more try prints why,
+# and the wait ends there instead of at the deadline.
 poll() {
-  local deadline
+  local deadline rc
   deadline=$(($(date +%s) + $(cap "$1")))
   shift
-  until "$@" 2>/dev/null; do
-    [ "$(date +%s)" -ge "$deadline" ] && {
+  while :; do
+    "$@" 2>/dev/null && return 0
+    rc=$?
+    if [ "$rc" -eq 3 ] || [ "$(date +%s)" -ge "$deadline" ]; then
       "$@"
       return
-    }
+    fi
     sleep "$POLL_S"
   done
 }
@@ -312,6 +314,58 @@ check_after_reboot() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# What a person reads, and the test waves
+
+# Fail the run when CLI output in <file> says `undefined`, `NaN`, `[object Object]` or `null on`
+# (metrics.ts text; JSON is a value, not text): `FAIL: <what> prints '<word>'`.
+check_text() {
+  local file=$1 what=$2 words
+  words=$(metrics text "$file" 2>>"$TRANSCRIPT") && return 0
+  if [ -n "$words" ]; then
+    fail "$what prints '$(printf '%s\n' "$words" | head -n 1)' ($(basename "$file"))"
+  else
+    fail "$what: could not read $(basename "$file")"
+  fi
+}
+
+# Run <command> on the VM at <addr> under the simulator (as setup ran), its output kept as <file>
+# under $OUT and checked as text a person reads; [what] names it in a failure (default: <command>
+# up to its first flag).
+capture() {
+  local addr=$1 cmd=$2 file=$3 what=${4:-}
+  on_sim "$addr" "$cmd" >"$OUT/$file" 2>>"$TRANSCRIPT" || fail "$cmd exited non-zero on $addr ($file)"
+  check_text "$OUT/$file" "${what:-${cmd%% -*}}"
+}
+
+# Submit the wave <wave> on the VM at <addr>, made from the newest wave file setup's first wave
+# wrote: its one task T1 a new issue titled <title>, pinned to [host] when given. <repo> is
+# `first-wave` (that wave's scratch repository, the file kept beside it), or an owner/name no clone
+# on the VM holds (the file kept under ~/.volley/it-waves, its release branch `release/<wave>`,
+# which the caller pushed). SUBMIT_ENV (`NAME=value ...`) is exported for `gh` and `volleyd run`.
+submit_wave() {
+  local addr=$1 repo=$2 wave=$3 title=$4 host=${5:-}
+  vm_ssh "$addr" "$PRELUDE eval \"\$(volley sim env)\"; ${SUBMIT_ENV:+export $SUBMIT_ENV; }bash -s '$repo' '$wave' '$title' '$host'" \
+    <<'EOF'
+set -eu
+repo=$1 wave=$2 title=$3 host=$4
+f=$(ls -t "$HOME"/.volley/volleyd/first-wave/*/.volley/waves/hello-*.yaml | head -n 1)
+if [ "$repo" = first-wave ]; then
+  dir=${f%/.volley/waves/*}/.volley/waves
+  url=$(cd "$dir" && gh issue create --title "$title" --body "The install test's wave $wave.")
+  sub=''
+else
+  dir=$HOME/.volley/it-waves
+  url=$(gh issue create --repo "$repo" --title "$title" --body "The install test's wave $wave.")
+  sub="s|^repo: .*|repo: \"$repo\"|; s|^release_branch: .*|release_branch: release/$wave|;"
+fi
+mkdir -p "$dir"
+sed -e "s/^wave: .*/wave: $wave/; $sub s/^  T1: .*/  T1: { issue: ${url##*/}${host:+, host: $host} }/" \
+  "$f" >"$dir/$wave.yaml"
+volleyd run "$dir/$wave.yaml"
+EOF
+}
+
+# ---------------------------------------------------------------------------------------------
 # multipass (Layers 2 and 4): a fresh VM from cloud-init
 
 # multipass ships Ubuntu's images; Debian's is its generic cloud image (VM_DEBIAN_IMAGE overrides).
@@ -368,11 +422,11 @@ track_failure() {
     [ -f "$OUT/summary.md" ] && printf '\n' && cat "$OUT/summary.md"
   } >"$body"
   gh label create "$TRACK_LABEL" --color B60205 \
-    --description "A nightly install test (Layers 2-4) failed" --force >/dev/null 2>&1
+    --description "A nightly install test (Layers 2 and 4) failed" --force >/dev/null 2>&1
   number=$(gh issue list --label "$TRACK_LABEL" --state open --json number --jq '.[0].number // empty')
   if [ -z "$number" ]; then
     url=$(gh issue create --label "$TRACK_LABEL" --title "Nightly install tests are failing" \
-      --body "The nightly install tests (scripts/install-tests/README.md, Layers 2-4) failed. Each failing run comments below; close this once a nightly passes.")
+      --body "The nightly install tests (scripts/install-tests/README.md, Layers 2 and 4) failed. Each failing run comments below; close this once a nightly passes.")
     number=${url##*/}
   fi
   [ -n "$number" ] && gh issue comment "$number" --body-file "$body" >/dev/null ||

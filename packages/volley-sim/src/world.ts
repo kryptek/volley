@@ -14,6 +14,7 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import type { Env } from "./env";
 
 /**
  * The simulated GitHub (and Claude sign-in) world: one JSON file under `$VOLLEY_SIM_HOME`, read
@@ -133,8 +134,33 @@ export const emptyWorld = (): World => ({
 export const worldPath = (home: string) => join(home, "world.json");
 export const lockPath = (home: string) => join(home, "world.json.lock");
 export const unknownPath = (home: string) => join(home, "unknown.jsonl");
-/** Where `gh repo create` puts a repository's bare origin. */
-export const originsDir = (home: string) => join(home, "origins");
+/**
+ * Where `gh repo create` puts a repository's bare origin and `gh repo clone` clones it from: the
+ * world's own `origins/`, or `$VOLLEY_SIM_ORIGINS` when set: a directory, or an scp-style ssh base
+ * (`user@host:/path`) so that two machines' fake GitHubs share one set of origins (the pair install
+ * test's hub and peer).
+ */
+export function originsDir(home: string, env: Env = process.env): string {
+  const set = env.VOLLEY_SIM_ORIGINS;
+  if (set === undefined || set === "") return join(home, "origins");
+  return isSshBase(set) ? set.replace(/\/+$/, "") : resolve(set);
+}
+
+/** Whether `s` is an scp-style ssh location (`user@host:path`), not a local path. */
+export const isSshBase = (s: string) => /^[^/:@\s]+@[^/:\s]+:/.test(s);
+
+/**
+ * `slug`'s bare origin under the origins base: `local` is its path on this machine (a local base,
+ * or an ssh base whose directory is here: the machine that serves it), `url` what git is handed.
+ */
+export function originOf(base: string, slug: string): { url: string; local: string | null } {
+  if (!isSshBase(base)) {
+    const p = join(base, `${slug}.git`);
+    return { url: p, local: p };
+  }
+  const dir = base.slice(base.indexOf(":") + 1);
+  return { url: `${base}/${slug}.git`, local: existsSync(dir) ? join(dir, `${slug}.git`) : null };
+}
 
 /** The world as it is on disk (an empty one when there is no file yet). Takes no lock. */
 export function readWorld(home: string): World {
@@ -348,9 +374,16 @@ export function repoOfCwd(w: World, cwd: string): Repo | null {
     const name = basename(path).replace(/\.git$/, "");
     return adopt(w, { slug: `${SIM_LOGIN}/${name}`, origin: path });
   }
-  const slug = slugOfUrl(url);
+  const slug = slugOfUrl(url) ?? slugOfSsh(url);
   if (slug === null) return null;
   return w.repos[slug] ?? adopt(w, { slug, origin: null });
+}
+
+/** `owner/name` of an scp-style URL's last two path parts (`user@host:/…/owner/name.git`), or null. */
+function slugOfSsh(url: string): string | null {
+  if (!isSshBase(url)) return null;
+  const m = /([^/:\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(url.slice(url.indexOf(":") + 1));
+  return m === null ? null : `${m[1]}/${m[2]}`;
 }
 
 function adopt(w: World, o: { slug: string; origin: string | null }): Repo {
