@@ -62,6 +62,8 @@ export interface MachineRecord {
   memory?: { total_mb: number; available_pct: number };
   disk?: { path: string; free_gb: number; free_pct: number };
   uptime_s?: number;
+  /** A battery is present (`isLaptop`): it sleeps and travels (SPEC §4.6.25). */
+  laptop?: boolean;
   versions?: {
     peer: string | null;
     volley: string | null;

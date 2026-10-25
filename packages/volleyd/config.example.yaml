@@ -173,3 +173,13 @@
 
 # --- CI reads (README "CI verification") ---
 # ci_rate_limit_backoff_ms: 300000  # after GitHub rate-limits a CI read (HTTP 403 / 429), no CI call for the wave for this long (or a Retry-After in gh's output, if longer)
+
+# --- The coordinator role (README "The coordinator role", SPEC §4.6.25) ---
+# coordinator:
+#   machine: null                # where volleyd keeps the owner's claude remote-control server
+#                                # alive: local, a paired machine's hosts.<name>, or null (off)
+#   dir: ~/.volley/coordinator   # its directory there (~: that machine's home)
+#   capacity: 4                  # the server's --capacity (concurrent sessions)
+#   permission_mode: acceptEdits # --permission-mode for the sessions it spawns
+#   restart_backoff_s: [5, 30, 120]  # waits before each restart; three quick deaths: failed
+#   allow_laptop: false          # a machine whose record says laptop: true may host it

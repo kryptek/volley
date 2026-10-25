@@ -30,6 +30,7 @@ import {
   defaultName,
   hostKeyHint,
   localNotAdmin,
+  machineEnvelope,
   machineTopic,
   peerDoctorStamp,
   peerFile,
@@ -1319,6 +1320,15 @@ describe("volley peer run (the service)", () => {
     mkdirSync(join(home, ".volley"), { recursive: true });
     writeFileSync(peerFile(home), JSON.stringify({ ...cfg, ...over }), { mode: 0o600 });
   };
+
+  it("the record carries laptop: true on a machine with a battery, nothing on one without", async () => {
+    const f = fakeExec(() => ({}));
+    const on = await machineEnvelope(deps(f.exec, { laptop: async () => true }), cfg, "up");
+    expect(parseEnvelope(on)?.payload).toMatchObject({ name: "box-a", laptop: true });
+    expectValidRecord(on);
+    const off = await machineEnvelope(deps(f.exec, { laptop: async () => false }), cfg, "up");
+    expect(parseEnvelope(off)?.payload).not.toHaveProperty("laptop");
+  });
 
   /** A retained readiness verdict for box-a, published as `agentId`. */
   async function readiness(agentId: string, payload: Record<string, unknown>) {

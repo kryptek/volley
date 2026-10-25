@@ -86,6 +86,10 @@
               }
             },
             "uptime_s": { "type": "integer", "minimum": 0 },
+            "laptop": {
+              "type": "boolean",
+              "description": "A battery is present (Linux /sys/class/power_supply/BAT*, macOS pmset -g batt naming InternalBattery): the machine sleeps and travels, so it hosts the coordinator role only under coordinator.allow_laptop (spec section 4.6.25)."
+            },
             "versions": {
               "type": "object",
               "additionalProperties": false,

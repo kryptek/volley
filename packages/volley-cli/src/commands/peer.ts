@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   statSync,
   statfsSync,
   writeFileSync,
@@ -37,6 +38,7 @@ import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
 import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { PMSET_BATT_ARGV, POWER_SUPPLY_DIR, isLaptop } from "../machine/laptop";
 import { isRepoTrusted } from "../peer/checks/claude";
 import { diskOf, memoryOf, reposWorktreeRoot, worktreeRoot } from "../peer/checks/machine";
 import {
@@ -328,6 +330,8 @@ export interface PeerDeps extends DoctorDeps {
   probePort?: (port: number) => Promise<boolean>;
   /** Where `cmd` is on this shell's PATH (for the fix join prints), or null. */
   which?: (cmd: string) => string | null;
+  /** Whether this machine is a laptop (`isLaptop`: a battery); absent: not reported. */
+  laptop?: () => Promise<boolean>;
 }
 
 /** `~/.volley/peer.json`: what `run` needs (mode 0600: it holds the peer's password). */
@@ -1601,6 +1605,7 @@ export async function machineEnvelope(
         load: deps.loadavg().map((l) => Math.max(0, Math.round(l * 100) / 100)),
         agents: await agentCount(deps),
         remote_port: cfg.remote_port,
+        ...((await deps.laptop?.()) === true ? { laptop: true } : {}),
         ...fleetFields(deps, cfg, doctorReport),
         last_seen: deps.now().toISOString(),
       },
@@ -2202,6 +2207,29 @@ export function currentUser(
 
 const PKG_JSON = fileURLToPath(new URL("../../package.json", import.meta.url));
 
+let laptopRead: Promise<boolean> | undefined;
+/** This machine's battery, read once (`isLaptop`): /sys/class/power_supply, or `pmset -g batt`. */
+function realLaptop(): Promise<boolean> {
+  laptopRead ??= (async () => {
+    if (process.platform === "darwin") {
+      const r = spawnSync(PMSET_BATT_ARGV[0] as string, PMSET_BATT_ARGV.slice(1), {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      return isLaptop({
+        platform: "darwin",
+        ...(r.status === 0 ? { pmsetOutput: r.stdout } : {}),
+      });
+    }
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(POWER_SUPPLY_DIR);
+    } catch {}
+    return isLaptop({ platform: process.platform, powerSupplies: entries });
+  })();
+  return laptopRead;
+}
+
 export function realDeps(): PeerDeps {
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   return {
@@ -2232,6 +2260,7 @@ export function realDeps(): PeerDeps {
     },
     volleyArgv: [process.execPath, cli],
     which: (cmd) => Bun.which(cmd),
+    laptop: realLaptop,
     // packages/volley-cli/src/commands → the checkout root.
     volleyDir: resolve(dirname(cli), "..", "..", ".."),
     // Where volleyd keeps the Claude account profiles (its claudeRoot()).

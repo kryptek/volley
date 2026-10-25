@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/coordinator-role.schema.json",
+  "title": "Volley Coordinator Role",
+  "description": "The retained state of the coordinator role: the owner's Claude Code Remote Control server, which the supervisor keeps alive in a fixed directory on the machine coordinator.machine names. Published by the supervisor to volley/_system/federation/coordinator at start and on every change, and cleared (an empty retained payload) while coordinator.machine is null. Accepted only from agent_id volleyd. See spec section 4.6.25.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "required": ["channel", "type", "payload"],
+      "properties": {
+        "agent_id": { "const": "volleyd" },
+        "channel": { "const": "_system/federation" },
+        "type": { "const": "coordinator" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["machine", "name", "state", "since", "restarts", "dir"],
+          "properties": {
+            "machine": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+              "description": "The machine it runs on: local (the supervisor's own) or a paired machine's name."
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+              "description": "The coordinator name the server runs under (--name), the one waves bind to: the phone's session list shows it."
+            },
+            "state": {
+              "enum": ["starting", "running", "restarting", "stopped", "failed"],
+              "description": "starting: launched, its link not read yet. running: its session is up. restarting: it died and starts again after its backoff. stopped: not running (the owner stopped it, its machine is down, or it could not be started: last_error says which). failed: it died three times in a row soon after starting; it stays down until coordinator_restart."
+            },
+            "since": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When it entered this state."
+            },
+            "session_url": {
+              "type": "string",
+              "pattern": "^https://claude\\.ai/code/",
+              "description": "The link the server printed on its screen; absent until read, or when it printed none (the name is the handle then)."
+            },
+            "restarts": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Restarts after a death since it last started fresh (a coordinator_restart counts from 0)."
+            },
+            "last_error": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Why it is stopped, restarting or failed (the server's last screen lines after a death), or the question it waits on."
+            },
+            "needs_terminal": {
+              "enum": ["trust", "consent"],
+              "description": "The server asks on its screen and nobody answers unattended: trust (Claude Code's folder trust for the directory) or consent (the first run's Enable Remote Control?). Someone attaches to its tmux session and answers."
+            },
+            "dir": {
+              "type": "string",
+              "pattern": "^/",
+              "description": "Its directory on that machine, absolute."
+            }
+          }
+        }
+      }
+    }
+  ]
+}

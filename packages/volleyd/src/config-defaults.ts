@@ -112,6 +112,15 @@ export const CONFIG_DEFAULTS: Tunables = {
   archive_ended_after_h: 24,
   archive_on_ack: true,
   ci_rate_limit_backoff_ms: 300_000,
+  // --- The coordinator role (SPEC §4.6.25): null machine runs nothing ---
+  coordinator: {
+    machine: null,
+    dir: "~/.volley/coordinator",
+    capacity: 4,
+    permission_mode: "acceptEdits",
+    restart_backoff_s: [5, 30, 120],
+    allow_laptop: false,
+  },
 };
 
 /**
@@ -488,4 +497,16 @@ export const DAEMON_DEFAULTS = {
   churn_merges_floor: 2,
   /** Gated members that make a cluster a train (the merge queue forms one under `autopilot.merge_train`). */
   churn_gated_train: 2,
+  // --- The coordinator role (SPEC §4.6.25, coordinator/) ---
+  /** A `claude remote-control --continue` that exits sooner than this fell through (nothing recorded): the full command starts. */
+  coordinator_continue_grace_ms: 10_000,
+  /** A coordinator server up this long before it died starts the backoff ladder again. */
+  coordinator_backoff_reset_s: 600,
+  /** After a start, how long the runner waits for the server's link on its screen before it reports `running` without one. */
+  coordinator_link_wait_ms: 60_000,
+  /** Screen lines read for the link, and kept (the last ones) in `last_error` after a failure. */
+  coordinator_screen_lines: 60,
+  /** While it runs with its link, how often its screen is read (what a death reports). */
+  coordinator_screen_read_ms: 30_000,
+  coordinator_error_lines: 8,
 } as const;
