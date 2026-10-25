@@ -334,7 +334,7 @@ export async function planBroker(
     layout: install?.layout ?? "brew-arm64",
     port,
     desk_broker_host: d.brokerHost,
-    desk_port: deskPortOf(d.roles.desk.url),
+    desk_port: deskPortOf(d.roles.desk.lan_url ?? d.roles.desk.url),
     peers: {},
     unit_url: b.brokerUrl,
   };

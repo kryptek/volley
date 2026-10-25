@@ -166,15 +166,18 @@ volley desk serve --host 0.0.0.0 --evidence ~/.volleyd   # also serve release ev
 volley desk serve --host 0.0.0.0 --broker-host box-a     # the broker runs on another machine (below)
 
 volley desk install --port 5199 --broker-host box-a      # build it and install it as a service
+volley desk install --tailscale                          # …and serve it on your tailnet over HTTPS
 volley desk uninstall                                    # stop and remove the service (keeps dist/)
 volley desk check --url http://127.0.0.1:5199 --version 0.11.0
 ```
 
 A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from, unless the server names another).
 
-**The broker on another machine.** `--broker-host <host>` (and `--broker-ws-port <n>`, default 9001) serves `GET /desk-config.json` as `{"broker":{"host":"box-a","ws_port":9001}}` with `Cache-Control: no-store`; without the flag that path is a 404. The page fetches it once before the sign-in form and connects to that broker (`wss` on an https page), so the broker can move while the Desk stays and no device signs in again; moving the Desk changes the page's origin, so devices sign in again there. The host is a bare name or IP address (an IPv6 one bare or in brackets): a scheme, a path, a port or a login exits 2. The page's own `VITE_VOLLEY_BROKER_URL` (a dev build) still wins over it.
+**The broker on another machine.** `--broker-host <host>` (and `--broker-ws-port <n>`, default 9001) serves `GET /desk-config.json` as `{"broker":{"host":"box-a","ws_port":9001}}` with `Cache-Control: no-store`; without the flag that path is a 404. The page fetches it once before the sign-in form and connects to that broker (`wss` on an https page), so the broker can move while the Desk stays and no device signs in again; moving the Desk changes the page's origin, so devices sign in again there. The host is a bare name or IP address (an IPv6 one bare or in brackets): a scheme, a path, a port or a login exits 2. The page's own `VITE_VOLLEY_BROKER_URL` (a dev build) still wins over it. `--ws-url <url>` adds `"ws_url"`, the full `ws://` or `wss://` URL the page opens (`{"broker":{…},"ws_url":"wss://studio.example.ts.net:8443"}`; without `--broker-host`, `broker` is that URL's host and port): a page served over HTTPS may not open `ws://`. The page prefers it when it is loaded over HTTPS or the URL is `ws://`; the same Desk opened at its LAN address over plain HTTP keeps its own host's broker, so a device on the LAN does not need the tailnet. A login, a path or a query in it exits 2.
 
-**`volley desk install | uninstall | check`.** The Desk's own install as commands, for a machine that serves the Desk without the rest of `volley setup` (volleyd runs them over ssh when it moves the Desk). `install [--port <n>] [--broker-host <host>] [--root <checkout>]` is the Services step's Desk part: it builds the Desk in the checkout (`--root`, default this one) without the `VITE_VOLLEY_BROKER_*` variables (an env file in `packages/volley-desk` that sets one refuses the install), writes `dist/.volley-build`, and installs `volley desk serve --host 0.0.0.0 --port <n> [--broker-host <host>]` as this platform's service (launchd on macOS, `systemd --user` on Linux). It records `desk_port` and `broker_host` in `$VOLLEYD_HOME/setup.json`, so a later `volley setup` renders the same unit (its `--check` names the Desk's broker under the Services row); a second run changes nothing. `uninstall` boots the service out and removes its unit file, keeping `dist/`. `check --url <u> --version <v>` exits 0 when `<u>/` answers 200 and `<u>/version.json` is `<v>`, else 1: volleyd makes no http calls itself, so the health check runs on the target.
+**On your private network (`--tailscale`).** `volley desk install --tailscale`, on a machine whose Network step recorded Tailscale (`volley setup --network tailscale`; without that record it refuses, naming that command), also serves the Desk at the machine's Tailscale name with a certificate Tailscale issues. It tells `tailscale serve` exactly two things, both loopback-only: `tailscale serve --bg --https=443 http://127.0.0.1:<port>` (the Desk) and `tailscale serve --bg --https=8443 http://127.0.0.1:9001` (the broker's WebSocket listener: mosquitto serves it at the root, so it gets its own port rather than a path). It never runs `tailscale funnel` (nothing is public) or `tailscale serve reset`, never replaces a serve someone else put on 443 or 8443 (it stops and names the port to free), and reads what is set with `tailscale serve status --json`. On Linux the serve changes run under `sudo`; the Desk's setup wizard leaves that change for a terminal. The service gets `--ws-url wss://<name>:8443`, setup.json records `desk_private_url: https://<name>`, and the machine roles record's `desk.url` becomes it, the LAN address kept as `desk.lan_url` (volleyd publishes the change at its next start). `volley setup`'s end and `volley auth token` print the private address first; `volley desk serve` logs it at start. A later `volley desk install` without the flag keeps the serve; `volley desk uninstall` takes off those two serves only, each while it still points at the Desk, and nothing else. `volley setup`'s Services step plans the same change (`Serve the Desk on your private network (https://<name>)`) whenever the Network step recorded Tailscale.
+
+**`volley desk install | uninstall | check`.** The Desk's own install as commands, for a machine that serves the Desk without the rest of `volley setup` (volleyd runs them over ssh when it moves the Desk). `install [--port <n>] [--broker-host <host>] [--root <checkout>] [--tailscale]` is the Services step's Desk part: it builds the Desk in the checkout (`--root`, default this one) without the `VITE_VOLLEY_BROKER_*` variables (an env file in `packages/volley-desk` that sets one refuses the install), writes `dist/.volley-build`, and installs `volley desk serve --host 0.0.0.0 --port <n> [--broker-host <host>]` as this platform's service (launchd on macOS, `systemd --user` on Linux). It records `desk_port` and `broker_host` in `$VOLLEYD_HOME/setup.json`, so a later `volley setup` renders the same unit (its `--check` names the Desk's broker under the Services row); a second run changes nothing. `uninstall` boots the service out and removes its unit file, keeping `dist/`. `check --url <u> --version <v>` exits 0 when `<u>/` answers 200 and `<u>/version.json` is `<v>`, else 1: volleyd makes no http calls itself, so the health check runs on the target.
 
 At start it warns on stderr, and still serves, when the build looks stale. Each line is printed only when it holds:
 
@@ -865,6 +868,26 @@ record is removed.
   Stop the broker on box-a there.
 
 ---
+
+## `volley coordinator`
+
+The coordinator role (SPEC §4.6.25): the Claude Code Remote Control server volleyd keeps alive
+on the machine `coordinator.machine` names (`volleyd config set coordinator.machine <name>`;
+`local` is the supervisor's machine, `null` turns it off). `status` and `open` read volleyd's
+retained `volley/_system/federation/coordinator`, so they need the broker, not an answer from
+volleyd; `restart` and `stop` are admin ops.
+
+```sh
+volley coordinator status          # coord-test on box-a: running since 2026-10-24T12:00:05.000Z · https://claude.ai/code/…
+volley coordinator status --json   # the retained state: machine, name, state, since, session_url, restarts, last_error, dir
+volley coordinator open            # prints the link; exit 1 with `no link yet: open the Claude app and pick "coord-test"`
+volley coordinator open --browser  # and opens it (open on macOS, xdg-open elsewhere)
+volley coordinator restart         # start it again: clears its backoff, a stop or a failure
+volley coordinator stop            # end it until the next restart
+```
+
+With the role off, `status` says so and `open` exits 1. `--broker-url`, `--namespace`,
+`--username`, `--password` and `--timeout` as everywhere.
 
 ## `volley lease`
 

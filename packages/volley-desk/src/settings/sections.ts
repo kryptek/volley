@@ -209,7 +209,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: Rocket01Icon,
     tint: "#ff453a",
     group: 2,
-    keywords: "setup wizard broker token security admin phone qr sign-in link",
+    keywords:
+      "setup wizard broker token security admin phone qr sign-in link getting started wizard onboarding",
   },
   {
     key: "about",

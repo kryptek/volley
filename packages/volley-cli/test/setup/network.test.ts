@@ -283,5 +283,14 @@ describe("the Network step", () => {
     );
     expect(privateDeskLine("192.0.2.10", 5199, { kind: "none" })).toBeNull();
     expect(privateDeskLine("192.0.2.10", 5199, null)).toBeNull();
+    // Served on the tailnet: its HTTPS address.
+    expect(
+      privateDeskLine(
+        "192.0.2.10",
+        5199,
+        { kind: "tailscale", name: "studio.example.ts.net", address: "100.64.0.2" },
+        "https://studio.example.ts.net",
+      ),
+    ).toBe("Desk: http://192.0.2.10:5199 · https://studio.example.ts.net");
   });
 });

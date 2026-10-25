@@ -33,9 +33,12 @@ const OPAQUE = new Set(["lease_pools", "weights", "per_machine", "per_machine_ov
 
 /**
  * Tunable names that are plain English words a line uses for other things (`placement.default`:
- * "default 30000" in a help text); their values are strings, so no number could hard-code them.
+ * "default 30000" in a help text; `coordinator.dir`, any directory); their values are strings,
+ * so no number could hard-code them. `coordinator.capacity` is numeric, but the word is every
+ * lease pool's own `capacity` (opaque above) and a slice's; its default is read in one place
+ * (coordinator/runner.ts, from the config).
  */
-const GENERIC = new Set(["default"]);
+const GENERIC = new Set(["default", "dir", "capacity"]);
 
 /** Every tunable key, including nested ones (admission.*, mailbox.*). */
 function tunableKeys(obj: Record<string, unknown>): string[] {

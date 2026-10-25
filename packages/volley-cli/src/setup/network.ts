@@ -10,7 +10,8 @@ import type { Change, SetupContext, StepPlan } from "./step";
  * MagicDNS name and tailnet IPv4 address recorded. `manual`: the person's own VPN, whose address
  * for this machine must be one of its interfaces'. `none`: this network only. The record goes to
  * setup.json's `network` (and from there into the machine record). Nothing here binds a listener,
- * and Volley never runs `tailscale funnel` or `tailscale serve`: nothing is exposed publicly.
+ * and Volley never runs `tailscale funnel`: nothing is exposed publicly. (The Desk's two
+ * loopback-only `tailscale serve` targets, private to the tailnet, are tailscale-serve.ts's.)
  */
 
 export const NETWORK_KINDS = ["tailscale", "manual", "none"] as const;
@@ -32,7 +33,7 @@ export const TAILSCALE_LINUX_INSTALL = "curl -fsSL https://tailscale.com/install
 
 export const BREW_TAILSCALE = ["brew", "install", "--cask", "tailscale"] as const;
 
-/** The Tailscale subcommands setup runs, exactly: never `funnel`, `serve`, or an `up` flag. */
+/** The Network step's Tailscale subcommands, exactly: never `funnel` or an `up` flag (`serve`: tailscale-serve.ts). */
 const TAILSCALE_ARGS = [["version"], ["status", "--json"], ["ip", "-4"], ["up"]];
 
 /**
@@ -101,14 +102,20 @@ export function describeNetwork(r: NetworkRecord): string {
   return r.kind === "manual" ? `manual: ${r.address ?? "?"}` : "none";
 }
 
-/** The end's Desk line with the private address beside the LAN one; null without one. */
+/**
+ * The end's Desk line with the private address beside the LAN one: the Desk's HTTPS address when
+ * it is served on the tailnet (`privateUrl`), else the record's address on the Desk's port; null
+ * without either.
+ */
 export function privateDeskLine(
   lanHost: string,
   port: number,
   r: NetworkRecord | null | undefined,
+  privateUrl: string | null = null,
 ): string | null {
-  if (r === null || r === undefined || r.kind === "none" || r.address === undefined) return null;
   const host = (h: string) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
+  if (privateUrl !== null) return `Desk: http://${host(lanHost)}:${port} · ${privateUrl}`;
+  if (r === null || r === undefined || r.kind === "none" || r.address === undefined) return null;
   return `Desk: http://${host(lanHost)}:${port} · on your private network: http://${host(r.address)}:${port}`;
 }
 

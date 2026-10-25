@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { CLAUDE_VERSION, runClaude } from "../src/claude";
+import { CLAUDE_VERSION, REMOTE_CONTROL_NOTHING_RECORDED, runClaude } from "../src/claude";
 import { SIM_BIN } from "../src/env";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { git, makeRepo } from "./helpers/repo";
@@ -145,5 +145,41 @@ describe("claude launched the way volleyd's launch.sh does", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/^unknown argv: claude -p hello/);
     expect(readFileSync(join(home, "unknown.jsonl"), "utf8")).toContain('"claude","-p","hello"');
+  });
+});
+
+describe("claude remote-control (the coordinator role, SPEC §4.6.25)", () => {
+  const BANNER = readFileSync(
+    new URL("../../volleyd/test/fixtures/remote-control-banner.txt", import.meta.url),
+    "utf8",
+  );
+
+  it("the full command prints volleyd's fixture banner and serves until killed", async () => {
+    const r = await claude([
+      "remote-control",
+      "--name",
+      "coord-test",
+      "--remote-control-session-name-prefix",
+      "coord-test",
+      "--spawn",
+      "same-dir",
+      "--capacity",
+      "4",
+      "--permission-mode",
+      "acceptEdits",
+    ]);
+    expect(r).toMatchObject({ code: 0, stdout: BANNER, serve: true });
+  });
+
+  it("--continue with nothing recorded exits 1 with Claude Code's error", async () => {
+    const r = await claude(["remote-control", "--continue"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe(`${REMOTE_CONTROL_NOTHING_RECORDED}\n`);
+    expect(
+      readFileSync(
+        new URL("../../volleyd/test/fixtures/remote-control-continue-none.txt", import.meta.url),
+        "utf8",
+      ),
+    ).toBe(`${REMOTE_CONTROL_NOTHING_RECORDED}\n`);
   });
 });

@@ -38,6 +38,7 @@ import {
   listenerUrls,
   setupFence,
 } from "volley-cli/setup/step";
+import { SERVE_SUMMARY } from "volley-cli/setup/tailscale-serve";
 import {
   type AuthOutcome,
   adminRefusal,
@@ -156,6 +157,7 @@ const CMUX_PASSWORD = "Give volleyd the cmux socket password";
 const CMUX_REACH = "Make volleyd's service reach cmux";
 const TAILSCALE_INSTALL = "Install Tailscale (";
 const TAILSCALE_SUDO_SIGNIN = "Sign in to Tailscale (sudo ";
+const TAILSCALE_SUDO_SERVE = `${SERVE_SUMMARY}sudo `;
 /** Every summary start `terminalOnly` keys on (a test proves the planners still make each). */
 export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   WRITE,
@@ -168,6 +170,7 @@ export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
   CMUX_REACH,
   TAILSCALE_INSTALL,
   TAILSCALE_SUDO_SIGNIN,
+  TAILSCALE_SUDO_SERVE,
 ];
 
 /**
@@ -176,7 +179,7 @@ export const TERMINAL_ONLY_PREFIXES: readonly string[] = [
  * (a root-owned or containerised broker's config, state file and restart), volleyd's own service
  * or password (either would stop the volleyd answering), the macOS keychain (the logged-in
  * session's), cmux's socket password and reach (a hidden prompt, a check from outside cmux), and
- * on Linux Tailscale's install and sign-in (both need sudo).
+ * on Linux Tailscale's install and sign-in and the Desk's `tailscale serve` (all need sudo).
  */
 export function terminalOnly(
   step: StepName,
@@ -251,6 +254,13 @@ export function terminalOnly(
         command: "sudo tailscale up",
       };
     }
+  }
+  if (step === "services" && summary.startsWith(TAILSCALE_SUDO_SERVE)) {
+    return {
+      reason:
+        "it needs sudo: on Linux `tailscale serve` changes need root (or Tailscale's operator)",
+      command: "volley desk install --tailscale",
+    };
   }
   if (step === "services" && summary.startsWith(CMUX_REACH)) {
     return {

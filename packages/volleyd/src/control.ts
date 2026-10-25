@@ -44,6 +44,8 @@ export const ADMISSION_TOPIC = "volley/_system/admission";
 export const ROLES_TOPIC = "volley/_system/roles";
 /** A role move's retained progress (SPEC §4.6.24). */
 export const roleMoveTopic = (moveId: string) => `volley/_system/roles/moves/${moveId}`;
+/** The coordinator role's retained state (SPEC §4.6.25), defined beside the role. */
+export { COORDINATOR_CHANNEL, COORDINATOR_TOPIC } from "./coordinator/role";
 export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
 export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
 
@@ -112,7 +114,11 @@ export type ControlOp =
   | "repo_remove"
   | "repo_list"
   | "repo_status"
-  | "repo_probe";
+  | "repo_probe"
+  // The coordinator role (SPEC §4.6.25): restart and stop are admin ops; status is also a read.
+  | "coordinator_restart"
+  | "coordinator_stop"
+  | "coordinator_status";
 
 /** A decision's answer it cannot apply (resolve, inbox_answer): the refusal's `code`. */
 export const BAD_ANSWER = "BAD_ANSWER";

@@ -4,6 +4,8 @@
  * normalised output of `wave-file.ts`.
  */
 
+import type { PermissionMode } from "./coordinator/role";
+
 export type TaskId = string;
 export type WaveId = string;
 
@@ -192,6 +194,24 @@ export interface Tunables {
    * `Retry-After` in `gh`'s output, if longer; `gh` prints no headers, so rarely).
    */
   ci_rate_limit_backoff_ms: number;
+  /** The coordinator role (SPEC §4.6.25): the Remote Control server volleyd keeps alive. */
+  coordinator: CoordinatorConfig;
+}
+
+/** Config `coordinator` (SPEC §4.6.25, coordinator/). */
+export interface CoordinatorConfig {
+  /** The machine that hosts it: `local`, a paired machine's name, or null (off). */
+  machine: string | null;
+  /** Its directory on that machine; a leading `~` is that machine's home. */
+  dir: string;
+  /** `--capacity`: the server's concurrent sessions. */
+  capacity: number;
+  /** `--permission-mode` for the sessions it spawns. */
+  permission_mode: PermissionMode;
+  /** The waits (s) before each restart after a death; three deaths inside their total: failed. */
+  restart_backoff_s: number[];
+  /** A machine whose record says `laptop: true` may host it. */
+  allow_laptop: boolean;
 }
 
 /** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */

@@ -81,7 +81,7 @@ export interface RoleArgs {
 interface RolesPayload {
   broker: { machine: string };
   supervisor: { machine: string };
-  desk: { machine: string; url: string };
+  desk: { machine: string; url: string; lan_url?: string };
 }
 
 export interface RoleDeps {
@@ -194,7 +194,7 @@ export async function runRole({ argv, env, io }: RoleArgs, deps: RoleDeps): Prom
       [
         `broker      on ${record.broker.machine}`,
         `supervisor  on ${record.supervisor.machine}`,
-        `desk        on ${record.desk.machine} (${record.desk.url})`,
+        `desk        on ${record.desk.machine} (${record.desk.url}${typeof record.desk.lan_url === "string" ? ` · LAN ${record.desk.lan_url}` : ""})`,
         "",
       ].join("\n"),
     );

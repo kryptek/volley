@@ -91,6 +91,11 @@ export function defaultBrokerUrl(
 /** What `volley desk serve --broker-host` serves at `/desk-config.json`. */
 export interface ServedDeskConfig {
   broker: { host: string; ws_port: number };
+  /**
+   * The full URL to open (`volley desk serve --ws-url`): `wss://<name>:8443` for a Desk served on
+   * the tailnet, where an https page may not open `ws://`.
+   */
+  ws_url?: string;
 }
 
 /** Where the live Desk's broker URL came from (Settings › About shows it). */
@@ -103,8 +108,11 @@ export const BrokerOriginContext = createContext<{ url: string; source: BrokerSo
 
 /**
  * The broker URL the live Desk connects to: the prop, else `VITE_VOLLEY_BROKER_URL`, else the
- * broker the server named (`served`: `/desk-config.json`), else the page host's. A served host
- * is bracketed when it is a bare IPv6 address; `wss` on an https page, as for the page host.
+ * broker the server named (`served`: `/desk-config.json`), else the page host's. A served
+ * `ws_url` is preferred on an https page, and when it is `ws://`; an http page given a `wss://`
+ * one (the tailnet Desk loaded at its LAN address) keeps its own host, which a device on the LAN
+ * reaches without the tailnet. A served host is bracketed when it is a bare IPv6 address; `wss`
+ * on an https page, as for the page host.
  */
 export function resolveBrokerUrl(
   urlProp?: string,
@@ -117,6 +125,11 @@ export function resolveBrokerUrl(
   const fromEnv = env.VITE_VOLLEY_BROKER_URL;
   if (urlProp !== undefined) return urlProp;
   if (typeof fromEnv === "string" && fromEnv !== "") return fromEnv;
+  if (served?.ws_url !== undefined) {
+    const https = page?.protocol === "https:";
+    if (https || served.ws_url.startsWith("ws://")) return served.ws_url;
+    return defaultBrokerUrl(page);
+  }
   if (served != null) {
     const { host, ws_port } = served.broker;
     const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -144,7 +157,8 @@ export const needsServedConfig = (urlProp: string | undefined, env: Record<strin
 /**
  * `GET /desk-config.json` (never from the HTTP cache), or null: a 404 (the server names no
  * broker), a network error, or a body that is not `{ broker: { host, ws_port } }` with a bare
- * host and a port.
+ * host and a port. A `ws_url` beside it is kept when it is a bare `ws://` or `wss://` URL (a host
+ * and maybe a port), dropped otherwise.
  */
 export async function fetchDeskConfig(
   fetchFn: typeof fetch = fetch,
@@ -152,13 +166,24 @@ export async function fetchDeskConfig(
   try {
     const r = await fetchFn("/desk-config.json", { cache: "no-store" });
     if (!r.ok) return null;
-    const broker = ((await r.json()) as { broker?: { host?: unknown; ws_port?: unknown } })?.broker;
+    const body = (await r.json()) as {
+      broker?: { host?: unknown; ws_port?: unknown };
+      ws_url?: unknown;
+    };
+    const broker = body?.broker;
     const host = broker?.host;
     const port = broker?.ws_port;
     if (typeof host !== "string" || !/^[A-Za-z0-9.:-]+$/.test(host)) return null;
     if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535)
       return null;
-    return { broker: { host, ws_port: port } };
+    const ws = body.ws_url;
+    return {
+      broker: { host, ws_port: port },
+      ...(typeof ws === "string" &&
+      /^wss?:\/\/([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?\/?$/.test(ws)
+        ? { ws_url: ws }
+        : {}),
+    };
   } catch {
     return null;
   }

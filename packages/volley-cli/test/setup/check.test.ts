@@ -102,7 +102,16 @@ describe("volley setup --check", () => {
     expect(done.stdout).toMatch(
       /✓ Network +done\n {6}tailscale: studio\.example\.ts\.net \(100\.64\.0\.2\)\n/,
     );
-    expect(done.code).toBe(0);
+    // With the Tailscale record the Services step serves the Desk on the tailnet: pending until
+    // that step runs.
+    expect(done.stdout).toContain(
+      "      → Serve the Desk on your private network (https://studio.example.ts.net)",
+    );
+    expect(done.code).toBe(1);
+    expect((await run(["--yes", "--step", "services"])).code).toBe(0);
+    const served = await run(["--check"]);
+    expect(served.stdout).toContain("on your private network: https://studio.example.ts.net");
+    expect(served.code).toBe(0);
   });
 
   it("after a --yes run every row is done and it exits 0", async () => {
