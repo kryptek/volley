@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { planFirstWave, readFirstWave } from "../../src/setup/first-wave";
+import { planSignin, simulatedExec } from "../../src/setup/signin";
 import type { SetupExec } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, HELLO_PR, fakeMachine } from "../helpers/setup-machine";
@@ -61,18 +62,26 @@ describe("setup: the test wave, --simulated against volley-sim's gh", () => {
         auth: {
           ...m.ctx.auth,
           env: {
-            HOME: dir,
+            // A fresh user: no git identity anywhere (not even the system's config).
+            HOME: m.ctx.home,
             PATH: process.env.PATH,
             VOLLEY_SIM_HOME: simHome,
-            GIT_AUTHOR_NAME: "Volley",
-            GIT_AUTHOR_EMAIL: "volley@example.com",
-            GIT_COMMITTER_NAME: "Volley",
-            GIT_COMMITTER_EMAIL: "volley@example.com",
+            GIT_CONFIG_NOSYSTEM: "1",
           },
         },
         firstWave: { simulated: true },
         deps: { ...m.deps, exec: real },
       };
+      // The test wave refuses a machine git cannot commit on; the Sign-ins step gives it one.
+      expect((await planFirstWave(ctx)).blocked).toContain("volley setup --step signin");
+      const signin = await planSignin({
+        ...ctx,
+        auth: { ...ctx.auth, env: { ...ctx.auth.env, VOLLEY_SIMULATED: "1" } },
+        deps: { ...ctx.deps, exec: simulatedExec(real) },
+      });
+      const identity = signin.changes.find((c) => c.summary.startsWith("Give git"));
+      expect(identity?.summary).toContain("1+volley-sim@users.noreply.github.com");
+      await identity?.apply();
       const plan = await planFirstWave(ctx);
       const lines: string[] = [];
       for (const c of plan.changes) lines.push(...(await c.apply()));
@@ -93,6 +102,11 @@ describe("setup: the test wave, --simulated against volley-sim's gh", () => {
       expect(lines).toContain(`Filed ${slug}#1 "Add HELLO.md"`);
       expect(lines).toContain(`Merged ${HELLO_PR} in 0 m 2 s`);
       expect(readFirstWave(m.ctx.volleydHome)).toMatchObject({ merged: true, scratch: slug });
+      const author = spawnSync("git", ["-C", clone, "log", "-1", "--format=%an <%ae>"], {
+        encoding: "utf-8",
+        env: ctx.auth.env as NodeJS.ProcessEnv,
+      }).stdout;
+      expect(author.trim()).toBe("Volley Sim <1+volley-sim@users.noreply.github.com>");
     },
   );
 });

@@ -27,6 +27,28 @@ describe("setupFence", () => {
     expect(() => fence(argv)).not.toThrow();
   });
 
+  it.each([
+    [["git", "var", "GIT_COMMITTER_IDENT"]],
+    [["gh", "api", "user"]],
+    [["git", "config", "--global", "user.name", "Octo Volley"]],
+    [["git", "config", "--global", "user.email", "1+octo-volley@users.noreply.github.com"]],
+  ])("allows git's commit identity: %j", (argv) => {
+    expect(() => fence(argv)).not.toThrow();
+  });
+
+  it.each([
+    [["git", "config", "--global", "user.email", "someone@example.com"]],
+    [["git", "config", "--global", "core.editor", "vi"]],
+    [["git", "config", "user.name", "x"]],
+    [["git", "config", "--global", "user.name", "-x"]],
+    [["git", "config", "--global", "user.name", "a\nb"]],
+    [["git", "config", "--global", "--replace-all", "user.name", "x"]],
+    [["git", "var", "GIT_AUTHOR_IDENT"]],
+    [["git", "commit"]],
+  ])("refuses any other git: %j", (argv) => {
+    expect(() => fence(argv)).toThrow(/volley setup does not run/);
+  });
+
   it("allows the Desk build only in the Desk's directory", () => {
     expect(() => fence(["/usr/local/bin/bun", "run", "build"], { cwd: desk })).not.toThrow();
     expect(() => fence(["/usr/local/bin/bun", "run", "build"], { cwd: "/elsewhere" })).toThrow();

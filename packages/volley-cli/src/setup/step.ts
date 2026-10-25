@@ -8,7 +8,7 @@ import type { FirstWaveMetrics, FirstWaveOptions, WaveView } from "./first-wave"
 import { isFirstWaveCommand } from "./first-wave-repo";
 import type { NetworkRecord } from "./journal";
 import { type NetworkKind, isTailscaleCommand } from "./network";
-import { isSigninCommand } from "./signin";
+import { isGitIdentityCommand, isSigninCommand } from "./signin";
 import { isTailscaleServeCommand } from "./tailscale-serve";
 import {
   CMUX_CHECK_OUT,
@@ -340,6 +340,8 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
       // The skills' installers, the sign-ins, and `claude mcp` for the volley entry only.
       (a0 === "bash" && argv.length === 2 && a1 !== undefined && skills.includes(a1)) ||
       isSigninCommand(argv) ||
+      // git's commit identity (the Sign-ins step): the probe, and the noreply identity's writes.
+      isGitIdentityCommand(argv) ||
       // The Network step: Tailscale's version, status, address and sign-in (never funnel).
       isTailscaleCommand(argv, { sudo: true }) ||
       // The Desk on the tailnet: the two loopback-only serves, their status and removal.

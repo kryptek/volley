@@ -16,6 +16,7 @@ import {
 } from "../../src/setup/first-wave";
 import { helloRelease, helloSuffix, isFirstWaveCommand } from "../../src/setup/first-wave-repo";
 import { completeLine } from "../../src/setup/metrics";
+import { GIT_IDENT_PROBE as PROBE } from "../../src/setup/signin";
 import { type StepPlan, fencedExec, setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, HELLO_PR, MERGING, NOW, fakeMachine } from "../helpers/setup-machine";
@@ -62,7 +63,8 @@ describe("setup: the test wave (first-wave)", () => {
       expect(FIRST_WAVE_QUESTION).toBe("Run a 1-issue test wave now?");
       expect(plan.confirmed).toBe(true);
       expect(plan.changes).toHaveLength(1);
-      expect(m.execCalls).toEqual([]);
+      // Planning only read git's identity.
+      expect(m.execCalls).toEqual([[...PROBE]]);
     });
 
     it("declined, the step is skipped with the command to run later: not an error", async () => {
@@ -88,7 +90,8 @@ describe("setup: the test wave (first-wave)", () => {
       expect(skip.skipped).toContain("--no-first-wave");
       const check = await planFirstWave({ ...m.ctx, check: true });
       expect(check.skipped).toContain("--check");
-      expect(m.execCalls).toEqual([]);
+      // --yes and --simulated read git's identity; --no-first-wave and --check run nothing.
+      expect(m.execCalls).toEqual([[...PROBE], [...PROBE]]);
     });
 
     it("the whole command asks it once and nothing else for the step", async () => {
@@ -122,7 +125,8 @@ describe("setup: the test wave (first-wave)", () => {
       const lines = await applyAll(plan);
       const work = join(m.ctx.volleydHome, "first-wave");
       const clone = join(work, "volley-hello-aaaa");
-      expect(m.execCalls[0]).toEqual([
+      expect(m.execCalls[0]).toEqual([...PROBE]);
+      expect(m.execCalls[1]).toEqual([
         "gh",
         "repo",
         "create",
@@ -214,6 +218,18 @@ describe("setup: the test wave (first-wave)", () => {
       expect(plan.blocked).toContain("volley setup --step claude-code");
     });
 
+    it("blocked when git has no commit identity, naming the Sign-ins step; nothing created", async () => {
+      m.git.identity = null;
+      const plan = await planFirstWave({ ...m.ctx, yes: true });
+      expect(plan.blocked).toContain("git has no commit identity (user.name/user.email)");
+      expect(plan.blocked).toContain("volley setup --step signin");
+      expect(plan.blocked).not.toContain("Author identity");
+      expect(plan.changes).toEqual([]);
+      expect(m.execCalls.some((a) => a.join(" ").startsWith("gh repo create"))).toBe(false);
+      const i = m.execCalls.findIndex((a) => a.join(" ") === "git var GIT_COMMITTER_IDENT");
+      expect(m.execEnvs[i]?.VOLLEY_BROKER_URL).toBe(m.ctx.tcpUrl);
+    });
+
     it("names the scratch repository with four characters [a-z0-9]", () => {
       expect(helloSuffix(() => 0)).toBe("aaaa");
       expect(helloSuffix(() => 0.999)).toBe("9999");
@@ -256,6 +272,7 @@ describe("setup: the test wave (first-wave)", () => {
       };
       await applyAll(await planFirstWave(ctx));
       expect(m.execCalls.length).toBeGreaterThan(8);
+      expect(m.execCalls).toContainEqual(["git", "var", "GIT_COMMITTER_IDENT"]);
       for (const bad of [
         ["gh", "repo", "create", "other", "--private", "--clone"],
         ["gh", "repo", "create", "volley-hello-aaaa", "--public", "--clone"],
@@ -438,9 +455,9 @@ describe("setup: the test wave (first-wave)", () => {
       expect(env.PATH).toBe(`${SIM_BIN}:/usr/bin`);
       expect(env.VOLLEY_SIMULATED).toBe("1");
       expect(env.VOLLEY_SIM_HOME).toBe("/sim");
-      // A fresh machine has no git identity: the scaffold commits as the simulated world does.
-      expect(env.GIT_AUTHOR_NAME).toBe("Volley Sim");
-      expect(env.GIT_COMMITTER_EMAIL).toBe("sim@volley.invalid");
+      // No identity is injected: the scaffold commits as the machine's git does (Sign-ins set it).
+      expect(env.GIT_AUTHOR_NAME).toBeUndefined();
+      expect(env.GIT_COMMITTER_EMAIL).toBeUndefined();
       await applyAll(await planFirstWave(ctx));
       expect(m.questions).toEqual([]);
       expect(ran(`bun ${volleyCli()} repo`)).toEqual([]);

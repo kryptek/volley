@@ -501,6 +501,36 @@ describe("volley peer doctor: GitHub and Claude", () => {
     ]);
   });
 
+  it("git.identity: a warn with setup's Sign-ins step as its fix when git cannot commit", async () => {
+    const none = await report(machine({ gitIdentity: null }));
+    const c = check(none, "git.identity");
+    expect(c).toMatchObject({ ok: false, severity: "warn" });
+    expect(c?.detail).toContain("git has no commit identity (user.name/user.email)");
+    expect(c?.detail).toContain("Author identity unknown");
+    expect(c?.fix).toBe("volley setup --peer --step signin");
+    box?.cleanup();
+    const m = machine();
+    const ok = check(await report(m), "git.identity");
+    expect(ok?.ok).toBe(true);
+    expect(ok?.detail).toBe("git commits as Octo Cat <1+octocat@users.noreply.github.com>");
+    expect(m.calls.map((c) => c.argv).find((a) => a.includes("GIT_COMMITTER_IDENT"))).toEqual([
+      "env",
+      "GIT_TERMINAL_PROMPT=0",
+      "/usr/bin/git",
+      "-C",
+      m.home,
+      "var",
+      "GIT_COMMITTER_IDENT",
+    ]);
+    box?.cleanup();
+    const noGit = check(
+      await report(machine({ tools: { git: { path: null, sshPath: null } } })),
+      "git.identity",
+    );
+    expect(noGit?.ok).toBe(false);
+    expect(noGit?.fix).toBeUndefined();
+  });
+
   it("gh states: ok with write, unauthenticated signed out, missing without gh", async () => {
     expect((await report(machine({ gh: { permission: "ADMIN" } }))).auth.gh).toBe("ok");
     box?.cleanup();

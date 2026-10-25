@@ -28,6 +28,8 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 export const WORLD_VERSION = 1;
 /** The GitHub login the fake `gh` is signed in as. */
 export const SIM_LOGIN = "volley-sim";
+/** The account `gh api user` answers (setup derives git's identity from it: name, id, login). */
+export const SIM_GH_USER = { login: SIM_LOGIN, id: 1, name: "Volley Sim" } as const;
 /** Every repository's web root. */
 export const WEB = "https://github.com";
 

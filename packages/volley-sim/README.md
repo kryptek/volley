@@ -55,7 +55,7 @@ Every argv shape volleyd's fence allows (the header of `packages/volleyd/src/fen
 `volley setup` and the install steps use:
 
 - `auth status` (signed out until `auth login`), `auth login --web --git-protocol https`,
-  `auth setup-git`, `api user [--jq .login]`
+  `auth setup-git`, `api user [--jq .login]` (the account's `login`, `id` 1 and `name` "Volley Sim": setup derives git's identity from them)
 - `repo view [<slug>] --json …`, `repo create <name> --private|--public|--internal [--clone]`,
   `repo delete <slug> --yes`
 - `issue create | view | list | edit --add-label/--remove-label | comment | close`;

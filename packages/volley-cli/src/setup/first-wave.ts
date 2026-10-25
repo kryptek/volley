@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SIM_BIN, simHome } from "volley-sim/env";
-import { GIT_IDENTITY } from "volley-sim/world";
 import { DEFAULT_MODEL } from "volleyd/config-defaults";
 import { recordRepoTrust } from "volleyd/trust";
 import { ADMIN_FILE, type AdminCredentials, readCredentials } from "../auth/context";
@@ -26,6 +25,7 @@ import {
 } from "./first-wave-repo";
 import { readSetupInstall } from "./journal";
 import { formatWall } from "./metrics";
+import { GIT_IDENT_PROBE } from "./signin";
 import type { SetupContext, StepPlan } from "./step";
 
 /**
@@ -181,8 +181,8 @@ export function withSimulator(
 /**
  * The environment the step's commands run with: the broker, the auth dir and $VOLLEYD_HOME
  * setup uses (so `volleyd run` reads the coordinator's login from coordinator.json); under
- * `--simulated` the fakes first on PATH, as `eval "$(volley sim env)"` would put them, and the
- * simulated world's git identity (a fresh machine has none for the scaffold's commit).
+ * `--simulated` the fakes first on PATH, as `eval "$(volley sim env)"` would put them. No git
+ * identity is injected: the scaffold commits as the machine's git does (the Sign-ins step).
  */
 export function firstWaveEnv(ctx: SetupContext): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {
@@ -194,7 +194,6 @@ export function firstWaveEnv(ctx: SetupContext): Record<string, string | undefin
   if (ctx.firstWave?.simulated !== true) return env;
   return {
     ...env,
-    ...GIT_IDENTITY,
     PATH: `${SIM_BIN}:${env.PATH ?? ""}`,
     VOLLEY_SIM_HOME: simHome(env),
     VOLLEY_SIMULATED: "1",
@@ -245,11 +244,17 @@ export async function planFirstWave(ctx: SetupContext): Promise<StepPlan> {
     plan.blocked = `no coordinator name yet (the wave's owner): run \`volley setup --step claude-code\` first`;
     return plan;
   }
+  const env = firstWaveEnv(ctx);
+  // The scratch README is a commit: git must have an identity here (no silent injected one).
+  if ((await deps.exec(GIT_IDENT_PROBE, { cwd: ctx.home, env })).code !== 0) {
+    plan.blocked =
+      "git has no commit identity (user.name/user.email) for the scratch repository's README commit: run `volley setup --step signin` (it sets one from your GitHub account), or set one yourself";
+    return plan;
+  }
   if (deps.waveState === undefined) {
     plan.blocked = "this setup cannot read the wave's state from the broker";
     return plan;
   }
-  const env = firstWaveEnv(ctx);
   if (o.repo !== undefined) {
     const origin = await deps.exec(gitOriginArgv(o.repo), { env });
     if (origin.code !== 0) {

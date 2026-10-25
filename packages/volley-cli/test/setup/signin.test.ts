@@ -6,15 +6,49 @@ import { makeBufferIO } from "../../src/io";
 import {
   CLAUDE_INSTALL,
   CLAUDE_LOGIN,
+  GH_API_USER,
   GH_LOGIN,
   GH_SETUP_GIT,
+  GH_USER,
+  GIT_IDENT_PROBE,
+  identityFromGhUser,
+  identityOf,
   maskLogin,
+  planGitIdentity,
   planSignin,
+  simulatedExec,
 } from "../../src/setup/signin";
 import { setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
-import { type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
+import { type FakeMachine, NOW, OCTO_IDENTITY, fakeMachine } from "../helpers/setup-machine";
 import { tempDir } from "../helpers/tmp";
+
+describe("git's commit identity, the pure parts", () => {
+  it("identityFromGhUser: the account's name and its noreply address; the login without a name", () => {
+    const sim = { login: "volley-sim", id: 1, name: "Volley Sim" };
+    expect(identityFromGhUser(JSON.stringify(sim))).toEqual({
+      name: "Volley Sim",
+      email: "1+volley-sim@users.noreply.github.com",
+    });
+    for (const name of [null, "", "   "]) {
+      expect(identityFromGhUser(JSON.stringify({ ...sim, name }))?.name).toBe("volley-sim");
+    }
+    expect(identityFromGhUser(JSON.stringify({ ...sim, name: "  Volley Sim " }))?.name).toBe(
+      "Volley Sim",
+    );
+    expect(identityFromGhUser(JSON.stringify({ login: "volley-sim", name: "x" }))).toBeNull();
+    expect(identityFromGhUser(JSON.stringify({ ...sim, id: "1" }))).toBeNull();
+    expect(identityFromGhUser(JSON.stringify({ ...sim, login: "volley_sim" }))).toBeNull();
+    expect(identityFromGhUser("not json")).toBeNull();
+  });
+
+  it("identityOf: `git var GIT_COMMITTER_IDENT` without its timestamp and zone", () => {
+    expect(
+      identityOf("Volley Sim <1+volley-sim@users.noreply.github.com> 1760000000 +0000\n"),
+    ).toBe("Volley Sim <1+volley-sim@users.noreply.github.com>");
+    expect(identityOf("")).toBeNull();
+  });
+});
 
 describe("the Sign-ins step", () => {
   let dir: string;
@@ -209,6 +243,141 @@ describe("the Sign-ins step", () => {
     }
   });
 
+  describe("git's commit identity", () => {
+    const SUMMARY =
+      'Give git a commit identity from your GitHub account: user.name "Octo Volley", user.email 1+octo-volley@users.noreply.github.com (git config --global)';
+    const ran = (argv: readonly string[]) =>
+      m.execCalls.filter((a) => a.join(" ") === argv.join(" "));
+    const gitConfigs = () => m.execCalls.filter((a) => a[0] === "git" && a[1] === "config");
+
+    it("none, gh signed in: one change named with the account's values; applied, verified, rerun is empty", async () => {
+      const today = await planSignin({ ...m.ctx, check: true });
+      m.git.identity = null;
+      const plan = await planSignin(m.ctx);
+      expect(plan.found).toContain("git has no commit identity (user.name/user.email)");
+      expect(plan.changes).toHaveLength(today.changes.length + 1);
+      const change = plan.changes.find((c) => c.summary.startsWith("Give git"));
+      expect(change?.summary).toBe(SUMMARY);
+      expect(change?.detail).toContain('git config --global user.name "Octo Volley"');
+      expect(change?.detail).toContain(
+        "git config --global user.email 1+octo-volley@users.noreply.github.com",
+      );
+      expect(plan.row).toContain("git has no commit identity (user.name/user.email)");
+      expect(gitConfigs()).toEqual([]);
+      await change?.apply();
+      expect(gitConfigs()).toEqual([
+        ["git", "config", "--global", "user.name", "Octo Volley"],
+        ["git", "config", "--global", "user.email", "1+octo-volley@users.noreply.github.com"],
+      ]);
+      const i = m.execCalls.findIndex((a) => a[0] === "git" && a[1] === "config");
+      expect(m.execEnvs[i]?.HOME).toBe(m.ctx.home);
+      expect(m.execEnvs[i]?.GIT_TERMINAL_PROMPT).toBe("0");
+      const gitconfig = readFileSync(join(m.ctx.home, ".gitconfig"), "utf-8");
+      expect(gitconfig).toContain("name = Octo Volley");
+      expect(gitconfig).toContain("email = 1+octo-volley@users.noreply.github.com");
+      for (const c of plan.changes) if (c !== change) await c.apply();
+      expect((await plan.verify?.()) ?? []).toEqual([]);
+      const again = await planSignin(m.ctx);
+      expect(again.changes).toEqual([]);
+      expect(again.row).toContain(`✓ git commits as ${OCTO_IDENTITY}`);
+    });
+
+    it("none, gh signed out: the GitHub sign-in first, then the identity, read after the sign-in", async () => {
+      m.git.identity = null;
+      m.gh.signedIn = false;
+      const plan = await planSignin(m.ctx);
+      const summaries = plan.changes.map((c) => c.summary);
+      const signin = summaries.findIndex((s) => s.startsWith("Sign in to GitHub"));
+      const identity = summaries.findIndex((s) => s.startsWith("Give git"));
+      expect(signin).toBe(0);
+      expect(identity).toBeGreaterThan(signin);
+      expect(summaries[identity]).toBe(
+        "Give git a commit identity from your GitHub account once signed in (user.name from its name, user.email its noreply address; git config --global)",
+      );
+      expect(ran(GH_API_USER)).toEqual([]);
+      for (const c of plan.changes) await c.apply();
+      expect(ran(GH_API_USER)).toHaveLength(1);
+      expect(m.git.identity).toBe(OCTO_IDENTITY);
+      expect(m.questions).toEqual([]);
+    });
+
+    it("none, and the sign-in left gh signed out: the identity's apply says to sign in first", async () => {
+      m.git.identity = null;
+      m.gh.signedIn = false;
+      const plan = await planSignin(m.ctx);
+      const change = plan.changes.find((c) => c.summary.startsWith("Give git"));
+      await expect(change?.apply()).rejects.toThrow(/gh auth login --web/);
+      expect(gitConfigs()).toEqual([]);
+    });
+
+    it("none, gh not installed: reported, with nothing to derive one from (no change)", async () => {
+      m.git.identity = null;
+      m.gh.installed = false;
+      const plan = await planSignin(m.ctx);
+      expect(plan.found).toContain("git has no commit identity (user.name/user.email)");
+      expect(plan.row).toContain(
+        "git has no commit identity (user.name/user.email): set one (git config --global user.name …; … user.email …) or install gh and rerun",
+      );
+      expect(plan.changes.some((c) => c.summary.startsWith("Give git"))).toBe(false);
+    });
+
+    it("present: no change, the ✓ row, and the account is not read", async () => {
+      const plan = await planSignin(m.ctx);
+      expect(plan.changes.some((c) => c.summary.startsWith("Give git"))).toBe(false);
+      expect(plan.row).toContain(`✓ git commits as ${OCTO_IDENTITY}`);
+      expect(ran(GIT_IDENT_PROBE)).toHaveLength(1);
+      const i = m.execCalls.findIndex((a) => a.join(" ") === GIT_IDENT_PROBE.join(" "));
+      expect(m.execEnvs[i]?.HOME).toBe(m.ctx.home);
+      expect(ran(GH_API_USER)).toEqual([]);
+    });
+
+    it("--check: pending with the change's summary, nothing written", async () => {
+      m.git.identity = null;
+      const plan = await planSignin({ ...m.ctx, check: true });
+      expect(plan.changes.map((c) => c.summary)).toContain(SUMMARY);
+      expect(gitConfigs()).toEqual([]);
+    });
+  });
+
+  describe("--git-identity (planGitIdentity): the identity alone (#595)", () => {
+    it("Claude Code signed out: only the identity's change, no sign-in, nothing of Claude Code's", async () => {
+      m.git.identity = null;
+      m.claude.signedIn = false;
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.skipped).toBeUndefined();
+      expect(plan.changes.map((c) => c.summary)).toEqual([
+        'Give git a commit identity from your GitHub account: user.name "Octo Volley", user.email 1+octo-volley@users.noreply.github.com (git config --global)',
+      ]);
+      expect(m.execCalls.some((a) => a[0] === "claude")).toBe(false);
+      await plan.changes[0]?.apply();
+      expect(m.git.identity).toBe(OCTO_IDENTITY);
+      expect((await plan.verify?.()) ?? []).toEqual([]);
+      expect(existsSync(m.settingsFile)).toBe(false);
+    });
+
+    it("Claude Code not installed: not blocked, the identity all the same", async () => {
+      m.git.identity = null;
+      m.claude.installed = false;
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.blocked).toBeUndefined();
+      expect(plan.changes).toHaveLength(1);
+    });
+
+    it("gh signed out: skipped with the sign-in to run first, nothing applied", async () => {
+      m.git.identity = null;
+      m.gh.signedIn = false;
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.skipped).toContain("gh auth login --web");
+      expect(plan.changes).toEqual([]);
+    });
+
+    it("present: nothing to change, the ✓ row", async () => {
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.changes).toEqual([]);
+      expect(plan.row).toBe(`✓ git commits as ${OCTO_IDENTITY}`);
+    });
+  });
+
   it("under VOLLEY_SIMULATED=1 the fakes answer the sign-ins and nothing opens", async () => {
     const deps = realSetupDeps({ VOLLEY_SIMULATED: "1", PATH: "" });
     expect((await deps.exec(["claude", "auth", "status"])).stdout).toContain('"loggedIn":true');
@@ -216,5 +385,20 @@ describe("the Sign-ins step", () => {
     expect((await deps.exec([...GH_LOGIN], { tty: true })).code).toBe(0);
     expect((await deps.exec(["gh", "auth", "status"])).code).toBe(0);
     expect(existsSync(dir)).toBe(true);
+  });
+
+  it("simulated, the account is volley-sim's; git's commands go through to the machine", async () => {
+    const sim = simulatedExec(m.deps.exec);
+    expect(JSON.parse((await sim([...GH_API_USER])).stdout)).toEqual({
+      login: "volley-sim",
+      id: 1,
+      name: "Volley Sim",
+    });
+    expect((await sim([...GH_USER])).stdout).toBe("volley-sim\n");
+    m.git.identity = null;
+    expect((await sim([...GIT_IDENT_PROBE])).code).toBe(128);
+    await sim(["git", "config", "--global", "user.name", "Volley Sim"]);
+    expect(m.execCalls).toContainEqual([...GIT_IDENT_PROBE]);
+    expect(m.execCalls).toContainEqual(["git", "config", "--global", "user.name", "Volley Sim"]);
   });
 });
