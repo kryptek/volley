@@ -34,7 +34,7 @@ LAYER=2
 LABEL=$DISTRO
 
 lib_init
-NAME=$(vm_name "$DISTRO")
+NAME=$(vm_name "$DISTRO") || exit 1
 refuse_existing "$NAME"
 track "$NAME"
 

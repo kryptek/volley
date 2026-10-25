@@ -139,12 +139,17 @@ the peer; `volley peer remove peer --now` stops `volley-peer.service` on the pee
 
 ### What every run does
 
-- Its VMs are named `volley-it-<run id>-<what>` (`$GITHUB_RUN_ID`, or `$VM_RUN_ID`). It refuses to
-  start when a VM of such a name exists: that VM is not this run's, so it is left alone.
+- Its VMs are named `volley-it-<run id>-<what>` (`$GITHUB_RUN_ID`, or `$VM_RUN_ID`), each part
+  lower-cased with every character outside `[a-z0-9-]` turned into `-` (`ubuntu-24.04` becomes
+  `ubuntu-24-04`): multipass's rule is a letter first, letters, digits and `-`, alphanumeric
+  last, at most 63 characters, and a run whose name breaks it stops before launching. It refuses
+  to start when a VM of such a name exists: that VM is not this run's, so it is left alone.
 - An EXIT trap deletes the run's VMs (`multipass delete --purge`, `tart stop` + `tart delete`)
   whatever happened, a launch that failed half way included, and the run's key with them.
-- Each VM accepts one ssh key, made for the run (`ssh-keygen`, in a temporary directory) and
-  written into cloud-init (Linux) and copied to the hub (Layer 4). A Tart VM has no cloud-init:
+- Each VM accepts one ssh key, made for the run (`ssh-keygen`, into `$VM_OUT/key/` with the
+  rendered `cloud-init.yaml`; never `/tmp`, which a snap multipass cannot read) and written into
+  cloud-init (Linux) and copied to the hub (Layer 4). The trap removes `key/`; the nightly's
+  uploads exclude it in case a killed run left it. A Tart VM has no cloud-init:
   it accepts the runner user's key, which its base image holds (the Mac, step 2.3).
 - Every check that fails prints `FAIL: …`; the run collects them all and exits 1 at the end.
 - The results land in `$VM_OUT`: `summary.md` (the step summary's table), `metrics.json` (the
@@ -156,6 +161,11 @@ the peer; `volley peer remove peer --now` stops `volley-peer.service` on the pee
   `install-tests` (creating the label and the issue when there is none) and comments on it: the
   layer, the run's URL, the failures and the table. One comment per failing run; close the issue
   once a nightly passes. Two runners failing within the same seconds may each open one.
+- The nightly's `report` job (a hosted runner, after the other three, whatever they did) fails the
+  workflow and comments on the same issue (same label, same title) when any job's result is not
+  `success`: a job that never found a runner, or stopped before the run's own reporting, is
+  reported too. A scripted failure therefore gets two comments: the run's, with the failures
+  and the table, and the report's one-line results.
 
 ### Running the tests
 
@@ -184,7 +194,7 @@ A run always deletes its VMs; one killed with SIGKILL, or a machine that lost po
 next run of the same run id then refuses to start. List what is left and delete it:
 
 ```sh
-multipass list | grep volley-it-     # then: multipass delete --purge <name>
+multipass list | grep volley-it-     # e.g. volley-it-<id>-ubuntu-24-04; then: multipass delete --purge <name>
 tart list | grep volley-it-          # then: tart delete <name>
 ```
 
@@ -195,7 +205,11 @@ memory (Layer 4 runs two 4 GB VMs; `VM_MEMORY`, `VM_CPUS` and `VM_DISK` change t
 about 50 GB of free disk.
 
 1. Install multipass: `sudo snap install multipass`. Check it: `multipass launch 24.04 --name
-   probe && multipass delete --purge probe`.
+   probe && multipass delete --purge probe`. The snap is confined: it reads only files under
+   your home directory that are not under a hidden directory of it (`~/.cache`, `~/.local`), and
+   never `/tmp`. Every file a run hands it lives under `$VM_OUT`, so keep `VM_OUT` (and the
+   runner's work directory, where the nightly puts it) under a non-hidden path of the home
+   directory; with a snap multipass a run refuses any other `VM_OUT` up front (exit 2).
 2. Install bun (`curl -fsSL https://bun.sh/install | bash`), git and the GitHub CLI.
 3. Images: Ubuntu 24.04 is multipass's own. Debian 13 is its generic cloud image,
    `https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-<amd64|arm64>.qcow2`,
@@ -204,7 +218,9 @@ about 50 GB of free disk.
 4. Register the runner: in the repository's Settings → Actions → Runners → New self-hosted
    runner, follow the Linux steps as an ordinary user (not root) in the multipass group, and give
    it the label `volley-linux-vm` (`./config.sh --labels volley-linux-vm`). Install it as a
-   service: `sudo ./svc.sh install && sudo ./svc.sh start`.
+   service: `sudo ./svc.sh install && sudo ./svc.sh start`. Until a runner with the label is
+   registered (none is today) the nightly's jobs never start; the `report` job is what tells
+   the tracking issue so.
 
 One runner runs one job at a time: Layer 2's two distributions and Layer 4 take turns.
 

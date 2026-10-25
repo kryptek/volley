@@ -15,7 +15,9 @@ usage() {
 Usage: install.sh [options]          (piped: curl -fsSL <url> | sh -s -- [options])
 
 Installs Volley's prerequisites (Homebrew on macOS; git, tmux, curl, bun, gh, mosquitto >= 2.1
-and Claude Code, each only when missing), clones Volley at a release tag into ~/.volley/src,
+and Claude Code, each only when missing; on Linux mosquitto is the snap, snapd installed with apt
+first when missing, and the install stops before Volley when no mosquitto 2.1 can be put on the
+machine), clones Volley at a release tag into ~/.volley/src,
 writes the `volley` and `volleyd` commands into ~/.volley/bin, adds that directory to PATH in
 your shell's startup file once, then runs `volley setup`. On macOS, when Homebrew resolves
 Volley's tap (kryptek/volley/volley), neither --version nor --source is given and ~/.volley/bin
@@ -42,8 +44,8 @@ Options:
   --purge            With --uninstall: remove ~/.volley/volleyd too
   -h, --help         Show this help
 
-Exit status: 0 done, 1 --check found something missing (or a step failed), 2 a usage error or an
-unsupported platform.
+Exit status: 0 done, 1 --check found something missing (or a step failed, or no mosquitto 2.1
+could be installed), 2 a usage error or an unsupported platform.
 EOF
 }
 
@@ -335,22 +337,29 @@ as_root() {
   if [ -n "$SUDO_OK" ]; then sudo "$@"; else "$@"; fi
 }
 
-snapd_active() {
-  have snap && have systemctl && systemctl is-active --quiet snapd 2>/dev/null
+# snapd can install a snap: running, or socket-activated (a fresh cloud image: snapd.service starts
+# on the first `snap` call).
+snapd_usable() {
+  have snap && have systemctl &&
+    { systemctl is-active --quiet snapd.socket 2>/dev/null ||
+      systemctl is-active --quiet snapd.service 2>/dev/null; }
 }
 
-mosquitto_options() {
+# No mosquitto 2.1 could be put on the machine: stop before Volley, with the fix (a machine
+# without a broker is not installed; rerunning once it is fixed is the designed path).
+broker_missing() {
   v=$(mosquitto_version)
   if [ -n "$v" ]; then
-    say "mosquitto $v is on PATH; Volley needs 2.1 or newer. Stop and remove it first (its broker"
-    say "holds port 1883, and its binary would shadow a newer one), e.g.  sudo apt-get remove mosquitto"
+    warn "mosquitto $v is on PATH; Volley needs 2.1 or newer. Stop and remove it first (its broker"
+    warn "holds port 1883, and its binary would shadow a newer one):  sudo apt-get remove mosquitto"
   else
-    say "mosquitto is not installed."
+    warn "mosquitto 2.1 or newer could not be installed (see the output above)."
   fi
-  say "Install mosquitto 2.1 or newer, either way (then rerun, or let \`volley setup\` check):"
-  say "  sudo snap install mosquitto               (needs snapd)"
-  say "  docker run eclipse-mosquitto:2.1-alpine"
-  say "\`volley setup\`'s Broker step stops with the same advice until one of them runs."
+  warn "Volley needs mosquitto 2.1 or newer. Fix it, then rerun the install:"
+  warn "  curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh"
+  warn "or run the broker in a container and set Volley up for that:"
+  warn "  docker run eclipse-mosquitto:2.1-alpine   then  volley setup --layout container"
+  die "stopped before installing Volley: no mosquitto 2.1."
 }
 
 install_linux() {
@@ -365,15 +374,24 @@ install_linux() {
   # `--network tailscale`: Tailscale's own apt repository, while sudo is held for the rest.
   need_ts=''
   if [ "$NETWORK" = tailscale ] && ! tailscale_ok; then need_ts=1; fi
-  # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883.
-  need_snap=''
-  if [ -z "$PEER" ] && ! have mosquitto && snapd_active; then need_snap=1; fi
+  # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883. No snap
+  # command (Debian's cloud image, a minimal Ubuntu): snapd from apt first.
+  need_snap='' need_snapd=''
+  if [ -z "$PEER" ] && ! have mosquitto; then
+    if ! have snap; then
+      need_snapd=1 need_snap=1
+    elif snapd_usable; then
+      need_snap=1
+    fi
+  fi
 
   if [ -n "$apt_pkgs$need_gh$need_snap$need_ts" ] && [ "$(id -u)" != 0 ]; then
     have sudo || die "sudo is needed to install the missing packages, and it is not installed."
     reasons=''
     [ -n "$apt_pkgs" ] && reasons="$reasons
   - apt-get install$apt_pkgs"
+    [ -n "$need_snapd" ] && reasons="$reasons
+  - apt-get install snapd (for the mosquitto snap)"
     [ -n "$need_gh" ] && reasons="$reasons
   - add GitHub's apt repository (cli.github.com) and install gh"
     [ -n "$need_snap" ] && reasons="$reasons
@@ -385,11 +403,17 @@ install_linux() {
     SUDO_OK=1
   fi
 
+  # snapd goes into the one apt-get call (its own reason line above).
+  [ -n "$need_snapd" ] && apt_pkgs="$apt_pkgs snapd"
   if [ -n "$apt_pkgs" ]; then
     say "apt-get install -y$apt_pkgs"
     as_root apt-get update
     # shellcheck disable=SC2086 # one word per package
-    as_root apt-get install -y $apt_pkgs
+    if ! as_root apt-get install -y $apt_pkgs; then
+      # Without snapd there is no broker; stop with the fix rather than at the next step.
+      [ -n "$need_snapd" ] && broker_missing
+      die "apt-get install failed; rerun once it is fixed."
+    fi
   fi
 
   if ! have bun; then
@@ -431,18 +455,17 @@ install_linux() {
     as_root apt-get install -y tailscale
   fi
 
-  if [ -n "$PEER" ] || mosquitto_ok; then
-    :
-  elif [ -n "$need_snap" ]; then
+  if [ -n "$need_snap" ]; then
+    # A fresh snapd seeds itself first; `snap install` before that fails.
+    [ -n "$need_snapd" ] && { as_root snap wait system seed.loaded || true; }
     say "Installing mosquitto with snap..."
-    as_root snap install mosquitto
+    as_root snap install mosquitto || warn "snap install mosquitto failed."
     path_add /snap/bin
-    mosquitto_ok || mosquitto_options
-  else
-    mosquitto_options
   fi
 
   install_claude
+
+  [ -n "$PEER" ] || mosquitto_ok || broker_missing
 }
 
 # ---------------------------------------------------------------------------------------------

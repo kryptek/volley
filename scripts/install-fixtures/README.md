@@ -6,7 +6,12 @@ and a few real file utilities. Every stub appends `<name> <args>` to `$STUB_LOG`
 
 - `base/`: `uname` (answers `$STUB_UNAME_S` / `$STUB_UNAME_M`), `sudo` (`-v` succeeds, `tee` swallows
   its input, other commands run), `bash` (runs the downloaded installer with `sh`), `apt-get`,
-  `dpkg`, `systemctl` (`snapd` is active when `$STUB_SNAPD=active`), `snap`, `launchctl`, `id` (`-u` answers `$STUB_UID`, default 1000).
+  `dpkg`, `systemctl` (`snapd.service` is active when `$STUB_SNAPD=active`; `snapd.socket` when it
+  is `active` or `socket`, a fresh cloud image's socket-activated snapd), `snap` (`install` provides
+  the tool, or fails when `$STUB_SNAP_FAIL` is set; `wait` succeeds), `launchctl`, `id` (`-u` answers
+  `$STUB_UID`, default 1000). `apt-get install` provides each package's tool (`snapd` the `snap`
+  stub) and exits 100 without installing anything when a package is `$STUB_APT_FAIL`. A test
+  removes a base stub for a machine without it (`without(w, "snap")`).
 - `tools/`: `curl` (serves the GitHub tags API, the Homebrew / bun / Claude Code installers and the
   gh keyring; a URL containing `$STUB_CURL_FAIL` fails with exit 22), `git` (a clone is a directory
   remembering its tag; the subcommand `$STUB_GIT_FAIL` fails with exit 128), `bun`, `brew` (`brew info`

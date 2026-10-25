@@ -6,7 +6,8 @@ name: Install (nightly)
 # install paths, launchd, the keychain, the Desk), and a hub VM pairing a peer VM (Layer 4:
 # `volley machine add`, readiness, a task placed on the peer, removal). Each job's metrics table
 # lands in its step summary; a failing job opens or comments on the one issue labelled
-# `install-tests`.
+# `install-tests`, and the `report` job does too when a job failed or never ran (no runner online,
+# a preflight that stopped before the run's own reporting).
 #
 # Never on pull_request: a public repository must not run a PR's code on self-hosted runners. The
 # schedule runs the default branch; a dispatch runs the branch it names (and, with `version`,
@@ -67,10 +68,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: layer2-${{ matrix.distro }}
-          # The raw transcript (unredacted) never leaves the machine.
+          # The raw transcript (unredacted) and the run's key (a killed run leaves it) never leave
+          # the machine.
           path: |
             ${{ runner.temp }}/layer2-${{ matrix.distro }}
             !${{ runner.temp }}/layer2-${{ matrix.distro }}/transcript.raw
+            !${{ runner.temp }}/layer2-${{ matrix.distro }}/**/key
           if-no-files-found: ignore
           retention-days: 14
 
@@ -105,10 +108,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: layer3-${{ matrix.path }}
-          # The raw transcript (unredacted) never leaves the machine.
+          # The raw transcript (unredacted) and the run's key (a killed run leaves it) never leave
+          # the machine.
           path: |
             ${{ runner.temp }}/layer3-${{ matrix.path }}
             !${{ runner.temp }}/layer3-${{ matrix.path }}/transcript.raw
+            !${{ runner.temp }}/layer3-${{ matrix.path }}/**/key
           if-no-files-found: ignore
           retention-days: 14
 
@@ -136,9 +141,49 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: layer4-pair
-          # The raw transcript (unredacted) never leaves the machine.
+          # The raw transcript (unredacted) and the run's key (a killed run leaves it) never leave
+          # the machine.
           path: |
             ${{ runner.temp }}/layer4
             !${{ runner.temp }}/layer4/transcript.raw
+            !${{ runner.temp }}/layer4/**/key
           if-no-files-found: ignore
           retention-days: 14
+
+  # A job that never started (no runner carries its labels, a runner offline) or stopped before
+  # lib.sh's track_failure reports nowhere by itself: this one does, on a hosted runner. Same label
+  # and title as lib.sh's, so the two share the one issue (a scripted failure gets both comments).
+  report:
+    name: Report
+    if: always() && github.repository == 'kryptek/volley'
+    needs: [linux-vm, macos-tart, pair]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fail, and tell the tracking issue, unless every job passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LINUX_VM: ${{ needs.linux-vm.result }}
+          MACOS_TART: ${{ needs.macos-tart.result }}
+          PAIR: ${{ needs.pair.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$LINUX_VM" = success ] && [ "$MACOS_TART" = success ] && [ "$PAIR" = success ]; then
+            echo "Every job passed."
+            exit 0
+          fi
+          body=$(printf '### The nightly did not pass\n\n%s\n\n| job | result |\n| --- | --- |\n| linux-vm (Layer 2) | %s |\n| macos-tart (Layer 3) | %s |\n| pair (Layer 4) | %s |\n\nA job that is `cancelled` or `failure` with no log of its own likely never found a runner (scripts/install-tests/README.md: the runners).\n' \
+            "$RUN_URL" "$LINUX_VM" "$MACOS_TART" "$PAIR")
+          printf '%s\n' "$body" >>"$GITHUB_STEP_SUMMARY"
+          label=install-tests
+          gh label create "$label" --color B60205 \
+            --description "A nightly install test (Layers 2-4) failed" --force >/dev/null 2>&1 || true
+          number=$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            url=$(gh issue create --label "$label" --title "Nightly install tests are failing" \
+              --body "The nightly install tests (scripts/install-tests/README.md, Layers 2-4) failed. Each failing run comments below; close this once a nightly passes.")
+            number=${url##*/}
+          fi
+          gh issue comment "$number" --body "$body" || echo "WARN: could not comment on the tracking issue" >&2
+          exit 1

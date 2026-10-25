@@ -37,8 +37,8 @@ PEER=peer
 WAVE=hello-peer
 
 lib_init
-HUB_VM=$(vm_name hub)
-PEER_VM=$(vm_name peer)
+HUB_VM=$(vm_name hub) || exit 1
+PEER_VM=$(vm_name peer) || exit 1
 refuse_existing "$HUB_VM"
 refuse_existing "$PEER_VM"
 track "$HUB_VM"

@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -147,6 +148,8 @@ function run(w: World, args: string[] = [], env: Record<string, string> = {}): R
 }
 
 const has = (r: Run, prefix: string) => r.calls.filter((c) => c.startsWith(prefix));
+/** Removes a base stub (a machine without that system tool). */
+const without = (w: World, tool: string) => rmSync(join(w.bin, tool));
 const installers = (r: Run) => has(r, "installer ");
 const src = (w: World) => join(w.home, ".volley", "src");
 const cli = (root: string, pkg: string) => join(root, "packages", pkg, "src", "cli.ts");
@@ -352,16 +355,78 @@ describe("Linux prerequisites", () => {
     expect(has(r, "apt-get install")).toEqual(["apt-get install -y curl"]);
   });
 
-  test("an old mosquitto without snapd: the two options are printed and the run goes on", () => {
+  test("an old mosquitto without snapd: the install stops before Volley; remove it first", () => {
     const w = world("ubuntu", LINUX_ALL, { STUB_MOSQUITTO_VERSION: "2.0.18" });
     const r = run(w, ["--no-setup"]);
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(1);
     expect(has(r, "snap")).toEqual([]);
     expect(has(r, "sudo")).toEqual([]);
     expect(r.out).toContain("mosquitto 2.0.18");
-    expect(r.out).toContain("sudo snap install mosquitto");
+    expect(r.out).toContain("remove it first");
+    expect(r.out).toContain("sudo apt-get remove mosquitto");
     expect(r.out).toContain("docker run eclipse-mosquitto:2.1-alpine");
+    expect(r.out).not.toContain("Volley is installed");
+    expect(has(r, "git clone")).toEqual([]);
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(false);
+  });
+
+  test("a fresh Ubuntu with socket-activated snapd installs the mosquitto snap", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "socket" });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("- snap install mosquitto");
+    expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
+    expect(r.out).not.toContain("mosquitto is not installed");
+  });
+
+  test("a fresh Debian without snapd installs snapd with apt, with consent, then the snap", () => {
+    const w = world("debian", ["curl"]);
+    without(w, "snap");
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    const reasons = r.out.slice(r.out.indexOf("sudo is needed"), r.out.indexOf("[stub] sudo -v"));
+    expect(reasons).toContain("- apt-get install snapd (for the mosquitto snap)");
+    expect(reasons).toContain("- snap install mosquitto");
+    expect(has(r, "apt-get install")).toEqual([
+      "apt-get install -y git tmux ca-certificates unzip snapd",
+      "apt-get install -y gh",
+    ]);
+    const wait = r.calls.indexOf("sudo snap wait system seed.loaded");
+    const install = r.calls.indexOf("sudo snap install mosquitto");
+    expect(wait).toBeGreaterThanOrEqual(0);
+    expect(install).toBeGreaterThan(wait);
     expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
+  });
+
+  test("no snapd and apt cannot install it: the install stops before Volley, with the fix", () => {
+    const w = world("debian", ["curl"], { STUB_APT_FAIL: "snapd" });
+    without(w, "snap");
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("mosquitto 2.1");
+    expect(r.out).toContain("rerun");
+    expect(r.out).not.toContain("Volley is installed");
+    expect(has(r, "git clone")).toEqual([]);
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(false);
+  });
+
+  test("snapd installed but the snap install fails: the install stops before Volley", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "socket", STUB_SNAP_FAIL: "1" });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
+    expect(r.out).toContain("rerun");
+    expect(r.out).not.toContain("Volley is installed");
+    expect(has(r, "git clone")).toEqual([]);
+  });
+
+  test("a mosquitto 2.1 on PATH and no snap command: nothing about snap", () => {
+    const w = world("debian", LINUX_ALL);
+    without(w, "snap");
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(r.calls.filter((c) => c.includes("snap"))).toEqual([]);
+    expect(r.out).not.toContain("snap");
   });
 
   test("a failed gh keyring download stops before the apt list is written", () => {
@@ -386,11 +451,14 @@ describe("Linux prerequisites", () => {
       STUB_SNAPD: "active",
     });
     const r = run(w, ["--no-setup"]);
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(1);
     expect(has(r, "snap")).toEqual([]);
     expect(has(r, "sudo")).toEqual([]);
     expect(r.out).toContain("mosquitto 2.0.22");
     expect(r.out).toContain("remove it first");
+    expect(r.out).toContain("sudo apt-get remove mosquitto");
+    expect(r.out).not.toContain("Volley is installed");
+    expect(has(r, "git clone")).toEqual([]);
   });
 
   test("a snap mosquitto that is still too old (or shadowed) is reported", () => {
@@ -400,9 +468,11 @@ describe("Linux prerequisites", () => {
       { STUB_SNAPD: "active", STUB_MOSQUITTO_VERSION: "2.0.9" },
     );
     const r = run(w, ["--no-setup"]);
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(1);
     expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
     expect(r.out).toContain("mosquitto 2.0.9 is on PATH");
+    expect(r.out).not.toContain("Volley is installed");
+    expect(has(r, "git clone")).toEqual([]);
   });
 
   test("a mosquitto 2.1 on PATH is accepted", () => {
@@ -420,6 +490,14 @@ describe("Linux prerequisites", () => {
     expect(has(r, "apt-get install")).toContain(
       "apt-get install -y git tmux ca-certificates unzip",
     );
+    expect(r.calls).toContain("snap install mosquitto");
+  });
+
+  test("root needs no sudo, with socket-activated snapd too", () => {
+    const w = world("debian", ["curl", "gh"], { STUB_UID: "0", STUB_SNAPD: "socket" });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "sudo")).toEqual([]);
     expect(r.calls).toContain("snap install mosquitto");
   });
 });
@@ -600,11 +678,12 @@ describe("--peer: a machine that joins a supervisor's fleet (no broker, no Desk)
   const MAC_PEER = MAC_ALL.filter((t) => t !== "mosquitto");
 
   test("a fresh Ubuntu: no mosquitto from snap, and no mosquitto advice", () => {
-    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active" });
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "socket" });
     const r = run(w, ["--peer", "--no-setup"]);
     expect(r.code).toBe(0);
     expect(has(r, "sudo snap")).toEqual([]);
     expect(r.out).not.toContain("snap install mosquitto");
+    expect(r.out).not.toContain("apt-get install snapd");
     expect(r.out).not.toContain("mosquitto is not installed");
     expect(has(r, "apt-get install")).toEqual([
       "apt-get install -y git tmux ca-certificates unzip",

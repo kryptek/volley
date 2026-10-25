@@ -8,10 +8,13 @@
 # The caller sets LAYER (2, 3 or 4) and LABEL, defines `vm_exists <name>` and `vm_delete <name>`
 # for its hypervisor, and calls `lib_init` first and `finish` last.
 #
-# The environment: VM_OUT (results; default ./vm-results), VM_RUN_ID (default $GITHUB_RUN_ID),
+# The environment: VM_OUT (results, and the run's key and cloud-init under key/; default
+# ./vm-results; with a snap multipass it must be under your home directory, not under a hidden
+# directory of it: the snap reads nothing else), VM_RUN_ID (default $GITHUB_RUN_ID),
 # VM_POLL_S (seconds between polls; default 3), VM_MAX_WAIT_S (caps every wait; the tests' stand-ins
 # answer at once), VM_TRACK_ISSUE=1 (a failing run opens or comments
-# on the tracking issue; the nightly sets it).
+# on the tracking issue; the nightly sets it), VM_MULTIPASS_IS_SNAP=1 (treat multipass as the snap
+# wherever it is: the tests' seam, their stand-in is not under /snap/).
 # Bash 3.2 (a Mac's /bin/bash): no associative arrays, no mapfile.
 
 LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -44,20 +47,63 @@ now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 metrics() { bun "$LIB_DIR/metrics.ts" "$@"; }
 timing() { TIMINGS="$TIMINGS --timing $1=$2"; }
 
-# `volley-it-<run id>-<what>`: lower case, [a-z0-9-] only (a VM's name is its hostname).
-run_id() {
-  printf '%s' "${VM_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-'
+# <text> as part of a VM name: lower case, every other character than [a-z0-9-] a `-`, runs of
+# `-` squeezed, none at either end.
+mp_name_part() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-' | sed 's/^-*//; s/-*$//'
 }
-vm_name() { printf 'volley-it-%s-%s' "$(run_id)" "$1"; }
+# multipass's instance-name rule (a VM's name is its hostname): a letter first, letters, digits
+# and `-`, alphanumeric last, at most 63 characters.
+mp_valid_name() {
+  [ "${#1}" -le 63 ] && [[ $1 =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+run_id() { mp_name_part "${VM_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}"; }
+# `volley-it-<run id>-<what>`, or exit 1 when that is no valid name.
+vm_name() {
+  local name
+  name="volley-it-$(run_id)-$(mp_name_part "$1")"
+  if ! mp_valid_name "$name"; then
+    echo "not a valid VM name: $name" >&2
+    return 1
+  fi
+  printf '%s' "$name"
+}
+
+# Whether multipass is the snap (confined: it reads only non-hidden paths under the home directory).
+multipass_is_snap() {
+  [ "${VM_MULTIPASS_IS_SNAP:-}" = 1 ] && return 0
+  case "$(command -v multipass 2>/dev/null)" in /snap/*) return 0 ;; esac
+  return 1
+}
+# Whether a snap multipass can read <path> (a real path): under $HOME, its first component there
+# not hidden.
+multipass_can_read() {
+  local rest
+  case "$1" in "$HOME"/*) rest=${1#"$HOME"/} ;; *) return 1 ;; esac
+  case "$rest" in '' | .*) return 1 ;; esac
+}
 
 # The run's results directory, its transcript, its key and the trap. A key per run: the VMs
-# accept only it (cloud-init.yaml), and it is removed with them.
+# accept only it (cloud-init.yaml), and it is removed with them. A snap multipass refuses an $OUT
+# it cannot read (exit 2) before anything is written.
 lib_init() {
+  # multipass is handed the cloud-init under $OUT (Layers 2 and 4); a snap one reads only so much.
+  if [ "$LAYER" != 3 ] && multipass_is_snap; then
+    local real home
+    real=$(realpath -m "$OUT") && home=$(realpath -m "$HOME") || exit 1
+    if ! HOME=$home multipass_can_read "$real"; then
+      echo "multipass is a snap and cannot read $OUT: set VM_OUT to a directory under your home directory that is not hidden" >&2
+      exit 2
+    fi
+  fi
   mkdir -p "$OUT"
   : >"$OUT/failures.md"
   TRANSCRIPT="$OUT/transcript.raw"
   : >"$TRANSCRIPT"
-  KEYDIR=$(mktemp -d "${TMPDIR:-/tmp}/volley-it-key.XXXXXX") || exit 1
+  # The run's key and cloud-init: under $OUT (a snap multipass cannot read /tmp), removed on exit.
+  KEYDIR="$OUT/key"
+  rm -rf "$KEYDIR"
+  mkdir -m 700 "$KEYDIR" || exit 1
   ssh-keygen -q -t ed25519 -N '' -C "volley-it-$(run_id)" -f "$KEYDIR/id_ed25519" || exit 1
   sed "s|@PUBKEY@|$(cat "$KEYDIR/id_ed25519.pub")|" "$LIB_DIR/cloud-init.yaml" >"$KEYDIR/cloud-init.yaml"
   trap cleanup EXIT

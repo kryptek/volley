@@ -30,9 +30,9 @@ It installs only what is missing, side by side:
 
 | | macOS (arm64, x86_64) | Ubuntu / Debian |
 | --- | --- | --- |
-| Package manager | Homebrew, with its own installer when `brew` is missing. That installer asks for your password: the only sudo on a Mac | apt. One `sudo -v` up front, after printing every reason it needs sudo (the apt packages, GitHub's apt repository for gh, the mosquitto snap); nothing else asks |
+| Package manager | Homebrew, with its own installer when `brew` is missing. That installer asks for your password: the only sudo on a Mac | apt. One `sudo -v` up front, after printing every reason it needs sudo (the apt packages, GitHub's apt repository for gh, snapd when it is missing, the mosquitto snap); nothing else asks |
 | Tools | `brew install` for whichever of bun, mosquitto, gh, git and tmux is missing | `apt-get install -y` for whichever of git, tmux, curl and ca-certificates is missing (unzip too when bun is); bun with its own installer (into `~/.bun`); gh from GitHub's apt repository |
-| Broker | mosquitto from Homebrew (2.1 or newer) | a mosquitto 2.1 or newer already on `PATH`; else the snap when snapd runs; else it prints the two ways to get one ([Linux notes](#linux-notes)) |
+| Broker | mosquitto from Homebrew (2.1 or newer) | a mosquitto 2.1 or newer already on `PATH`; else the snap, installing snapd with apt first when it is missing; else the install stops with the fix ([Linux notes](#linux-notes)) |
 | Claude Code | its native installer, when `claude` is missing | the same |
 | Volley | the Homebrew formula when Homebrew resolves Volley's tap ([below](#the-homebrew-path)), else the clone below | a clone of the release tag into `~/.volley/src`, then `bun install --frozen-lockfile` |
 | Services (by setup) | launchd agents | `systemd --user` units |
@@ -194,14 +194,21 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
   It needs none when everything is there or when it runs as root.
 - **mosquitto 2.1 or newer.** Distribution packages may still be 2.0, which Volley refuses
   (broker auth uses Dynamic Security roles with `%u`, which 2.0 does not substitute). The
-  installer takes a 2.1 already on `PATH`, else installs the snap when snapd runs. Otherwise it
-  prints both ways and goes on, and setup's Broker step stops with the same advice until one
-  runs:
+  installer takes a 2.1 already on `PATH`, else installs the mosquitto snap. snapd counts when
+  it runs or is socket-activated (a fresh Ubuntu cloud image); when the `snap` command is
+  missing (Debian's cloud image, a minimal Ubuntu) the installer adds `snapd` to its one
+  `apt-get install`, waits for snapd's first seed (`snap wait system seed.loaded`), then
+  installs the snap. When no mosquitto 2.1 can be put on the machine (an older one on `PATH`,
+  snapd that cannot be installed, a failed snap install), the install **stops with exit 1
+  before cloning Volley** and prints the fix; it never says "Volley is installed" without a
+  broker. Fix it and rerun the one command; or run the broker in a container:
 
   ```sh
-  sudo snap install mosquitto                 # needs snapd
-  docker run eclipse-mosquitto:2.1-alpine     # the container layout: examples/mosquitto-auth/
+  sudo apt-get remove mosquitto               # an older mosquitto holds 1883 and shadows the snap
+  docker run eclipse-mosquitto:2.1-alpine     # then volley setup --layout container (examples/mosquitto-auth/)
   ```
+
+  `--peer` installs no broker and is unaffected.
 
   A 2.0 broker already installed holds port 1883 and shadows the newer binary: remove it first
   (`sudo apt-get remove mosquitto`).

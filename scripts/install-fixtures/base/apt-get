@@ -5,7 +5,15 @@ if [ "${1:-}" = install ]; then
   for p in "$@"; do
     case "$p" in
       -*) ;;
+      "${STUB_APT_FAIL:-}") exit 100 ;;
+    esac
+  done
+  for p in "$@"; do
+    case "$p" in
+      -*) ;;
       ca-certificates) mkdir -p "$STUB_STATE/dpkg"; : >"$STUB_STATE/dpkg/$p" ;;
+      # snapd brings the snap command (the base stub's).
+      snapd) mkdir -p "$STUB_STATE/dpkg"; : >"$STUB_STATE/dpkg/$p"; cp "$STUB_FIXTURES/base/snap" "$STUB_BIN/snap" ;;
       *) mkdir -p "$STUB_STATE/dpkg"; : >"$STUB_STATE/dpkg/$p"; "$STUB_FIXTURES/provide" "$p" "$STUB_BIN" ;;
     esac
   done
