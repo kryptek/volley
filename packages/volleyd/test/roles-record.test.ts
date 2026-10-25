@@ -57,6 +57,25 @@ describe("the roles record (SPEC §4.6.24)", () => {
     expect(schemaErrors("roles.schema.json", payload(r))).toEqual([]);
   });
 
+  it("with a private address recorded, the default's desk.url is it and desk.lan_url the LAN one", () => {
+    const r = defaultRoles({ ...DEFAULTS, deskPrivateUrl: "https://mac.example.ts.net" });
+    expect(r.desk).toEqual({
+      machine: "mac",
+      url: "https://mac.example.ts.net",
+      lan_url: "http://192.0.2.20:5199",
+    });
+    expect(schemaErrors("roles.schema.json", payload(r))).toEqual([]);
+    expect(validateRoles(r, KNOWN)).toEqual({ ok: true, record: r });
+  });
+
+  it("desk.lan_url is optional and must be an http(s) URL", () => {
+    const r = defaultRoles(DEFAULTS);
+    expect(r.desk.lan_url).toBeUndefined();
+    const bad = validateRoles({ ...r, desk: { ...r.desk, lan_url: "ftp://x" } }, KNOWN);
+    expect(bad.ok).toBe(false);
+    expect(!bad.ok && bad.errors.map((e) => e.path)).toContain("desk.lan_url");
+  });
+
   it("a missing file yields the default, written so a restart reads the same record", () => {
     const first = readRoles(home, KNOWN, DEFAULTS);
     expect(first).toEqual({ ok: true, record: defaultRoles(DEFAULTS), created: true });
@@ -142,5 +161,11 @@ describe("the roles record (SPEC §4.6.24)", () => {
       false,
     );
     expect(sameRoles(a, { ...a, broker: { ...a.broker, lan: false } })).toBe(false);
+    expect(
+      sameRoles(a, {
+        ...a,
+        desk: { machine: "mac", url: "https://mac.example.ts.net", lan_url: a.desk.url },
+      }),
+    ).toBe(false);
   });
 });

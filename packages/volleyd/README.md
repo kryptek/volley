@@ -4747,7 +4747,10 @@ SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the
       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
     tailscale (on PATH, or /Applications/Tailscale.app/Contents/MacOS/Tailscale) version |
       status --json | ip -4 | up · brew install --cask tailscale (the Network step; never
-      `tailscale funnel`, `tailscale serve`, an `up` flag, or `sudo tailscale up`)
+      `tailscale funnel`, an `up` flag, or `sudo tailscale up`) · tailscale serve
+      status --json | --bg --https=443 http://127.0.0.1:<desk port> | --bg --https=8443
+      http://127.0.0.1:9001 (the Desk on the tailnet, macOS; Linux's needs sudo, a
+      terminal's; never `serve reset` or a target off loopback)
   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
   sudo, or the keychain (the logged-in session's): those stay terminal-only.
 

@@ -119,6 +119,8 @@ export interface FakeMachine {
     ips: string[];
     url: string;
     upCode: number;
+    /** `tailscale serve`'s config: each HTTPS port → its root proxy (`serve status --json`). */
+    serves: Map<number, string>;
   };
   /** The machine's interfaces (`deps.interfaces`). */
   interfaces: Record<string, { address: string; family: "IPv4" | "IPv6"; internal: boolean }[]>;
@@ -195,6 +197,7 @@ export function fakeMachine(
       ips: ["100.64.0.2", "fd7a:115c:a1e0::2"],
       url: "https://login.tailscale.com/a/0123abcd",
       upCode: 0,
+      serves: new Map(),
     },
     interfaces: {
       lo0: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
@@ -288,6 +291,34 @@ export function fakeMachine(
         );
       }
       if (sub === "ip -4") return ok(`${t.ips[0]}\n`);
+      // The Desk on the tailnet (setup/tailscale-serve.ts), as Tailscale 1.76 answers.
+      const name = t.name.replace(/\.$/, "");
+      if (sub === "serve status --json") {
+        if (t.serves.size === 0) return ok("{}\n");
+        return ok(
+          JSON.stringify({
+            TCP: Object.fromEntries([...t.serves.keys()].map((p) => [String(p), { HTTPS: true }])),
+            Web: Object.fromEntries(
+              [...t.serves].map(([p, proxy]) => [
+                `${name}:${p}`,
+                { Handlers: { "/": { Proxy: proxy } } },
+              ]),
+            ),
+          }),
+        );
+      }
+      const on = /^serve --bg --https=(\d+) (\S+)$/.exec(sub);
+      if (on !== null) {
+        t.serves.set(Number(on[1]), on[2] as string);
+        return ok(
+          `Available within your tailnet:\n\nhttps://${name}:${on[1]}/\n|-- proxy ${on[2]}\n`,
+        );
+      }
+      const off = /^serve --https=(\d+) off$/.exec(sub);
+      if (off !== null) {
+        t.serves.delete(Number(off[1]));
+        return ok();
+      }
       if (sub === "up") {
         if (t.upCode === 0) t.state = "Running";
         return {
