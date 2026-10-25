@@ -3007,8 +3007,8 @@ hosts:
 For a task on `box` in a wave whose repository is `owner/name` (its state's `github.slug`, else
 the supervisor clone's `origin`), the clone is, in order: `hosts.box.repos.<owner/name>`; the
 managed clone when `repos.<owner/name>.machines` includes `box` (at the path the box's record
-reports, `repos[].path`, else `<repo_root>/<owner>/<name>` there); the deprecated `hosts.box.repo`, unless the machine's record reports that clone's origin as
-another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
+reports, `repos[].path`, else `<repo_root>/<owner>/<name>` there); the deprecated
+`hosts.box.repo`, unless the machine's record reports that clone's origin as another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
 (`hosts.box.worktree_root` still wins; a legacy `repo` keeps `.volley-worktrees` beside it).
 That pin is host-wide: once a box's legacy `repo` migrates, every repository's worktrees on it
 stay under that `.volley-worktrees` until you unset `hosts.box.worktree_root`. A host with none

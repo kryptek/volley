@@ -64,7 +64,8 @@ export function remoteRepoRoot(root: string): string {
 
 /**
  * The path of `slug`'s clone a machine record reports existing (#596), compared
- * case-insensitively; undefined without a record or such a clone.
+ * case-insensitively; undefined without a record or such a clone. Any existing clone counts,
+ * managed or not (a legacy or adopted one the box reports is still where the repository is).
  */
 export function reportedClone(
   record: { repos?: readonly MachineRepoFacts[] | undefined } | undefined,

@@ -1166,11 +1166,11 @@ describe("resolveRemoteHost", () => {
           ctx({
             repos: { "o/r": { machines: ["box"] } },
             repo_root: "/sup/.volley/volleyd/repos",
-            clone: "/path/to/box-home/.volley/repos/o/r",
+            clone: "/path/to/home/.volley/repos/o/r",
           }),
         ),
       ).toMatchObject({
-        repo: "/path/to/box-home/.volley/repos/o/r",
+        repo: "/path/to/home/.volley/repos/o/r",
         worktree_root: "/path/to/home/.volley/worktrees/o/r",
       });
     });
