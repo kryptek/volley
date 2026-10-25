@@ -52,6 +52,8 @@ ADDR=$(mp_addr "$NAME")
 wait_ssh "$ADDR" 300 || finish
 timing launch_ms $(($(now_ms) - t0))
 
+say "A fresh user: no git identity before the install"
+assert_no_git_identity "$ADDR"
 say "install.sh --no-setup${VERSION:+ --version $VERSION}"
 install_volley "$ADDR" || {
   fail "install.sh exited non-zero"
@@ -60,6 +62,8 @@ install_volley "$ADDR" || {
 say "volley setup --yes --no-lan --simulated"
 setup_volley "$ADDR"
 TOTAL_MS=$(($(now_ms) - t0))
+say "git commits as the identity setup gave it"
+check_git_identity "$ADDR"
 
 say "Rebooting"
 t1=$(now_ms)

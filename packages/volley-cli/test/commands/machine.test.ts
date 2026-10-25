@@ -435,8 +435,9 @@ describe("volley machine add (#462)", () => {
     expect(tty).toHaveLength(2);
     expect(tty[0]?.argv.slice(0, 5)).toEqual(["ssh", "-t", "-o", "ConnectTimeout=10", TARGET]);
     expect(tty[0]?.argv[5]).toContain(
-      "gh auth login --web --git-protocol https && gh auth setup-git",
+      "gh auth login --web --git-protocol https && gh auth setup-git && volley setup --peer --yes --step signin",
     );
+    expect(tty[0]?.argv[5]).toMatch(/&& volley setup --peer --yes --step signin'?$/);
     expect(tty[1]?.argv).toEqual([
       ...VOLLEY_ARGV,
       "claude",

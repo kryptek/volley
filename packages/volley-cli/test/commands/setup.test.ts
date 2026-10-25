@@ -36,6 +36,8 @@ const READ_ONLY = (a: string[]) =>
   (a[0] === "claude" && a[1] === "auth" && a[2] === "status") ||
   (a[0] === "gh" && a[1] === "auth" && a[2] === "status") ||
   (a[0] === "gh" && a[1] === "api" && a[2] === "user") ||
+  // git's commit identity (the Sign-ins step, the test wave).
+  a.join(" ") === "git var GIT_COMMITTER_IDENT" ||
   // Who listens on the Desk's port.
   a[0] === "lsof" ||
   a[0] === "ss";

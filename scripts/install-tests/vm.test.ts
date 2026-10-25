@@ -59,6 +59,14 @@ const PASSING: Rule[] = [
   ],
   // After `volley peer remove` the peer's tunnel service is stopped.
   ["is-active --quiet volley-peer\\.service", 3],
+  // git's identity: none before the install (nothing printed), the simulated account's after.
+  ["git config --global --get user\\.name", 0, ""],
+  [
+    "git var GIT_COMMITTER_IDENT",
+    0,
+    "Volley Sim <1+volley-sim@users.noreply.github.com> 1760000000 +0000\n",
+  ],
+  ["first-wave/volley-hello-", 0, "Volley Sim,1+volley-sim@users.noreply.github.com\n"],
 ];
 
 function writeRules(w: World, rules: Rule[]) {
@@ -207,6 +215,8 @@ describe("Layer 2: vm-linux.sh", () => {
       new RegExp(`^multipass launch 24\\.04 --name ${vm} --cloud-init \\S+cloud-init\\.yaml`),
       new RegExp(`^multipass info ${vm} --format json$`),
       new RegExp(`^ssh ${vm}: true$`),
+      // A fresh user: no git identity before the install.
+      new RegExp(`^ssh ${vm}: .*git config --global --get user\\.email;`),
       // The checkout under test, then its install.sh.
       new RegExp(`^ssh ${vm}: rm -rf ~/volley .*tar -C ~/volley -xzf - \\(stdin \\d+ bytes\\)$`),
       new RegExp(`^ssh ${vm}: .*sh -s -- --source ~/volley --no-setup +<~/volley/install\\.sh$`),
@@ -216,6 +226,11 @@ describe("Layer 2: vm-linux.sh", () => {
       ),
       // The check sees the sign-ins and services setup made: under the simulator too.
       new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
+      // git commits as the identity setup gave it, and so did the scratch clone.
+      new RegExp(`^ssh ${vm}: .*git var GIT_COMMITTER_IDENT$`),
+      new RegExp(
+        `^ssh ${vm}: .*~/\\.volley/volleyd/first-wave/volley-hello-\\*.*git -C "\\$c" log -1`,
+      ),
       new RegExp(`^ssh ${vm}: sudo reboot$`),
       new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
       new RegExp(`^ssh ${vm}: .*systemctl --user is-active --quiet volleyd\\.service$`),
@@ -336,6 +351,29 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(r.out).toContain("Layer 2 (ubuntu-24.04) failed.");
     expect(r.calls.at(-1)).toBe("multipass delete --purge volley-it-42-ubuntu-24-04");
     expect(vmsLeft(w)).toEqual([]);
+  });
+
+  test("a VM with a git identity before the install fails the run (nothing may hide the bug)", () => {
+    const w = world();
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
+      rules: [["git config --global --get user\\.name", 0, "someone@example.com\n"]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "FAIL: the VM has a git identity before the install (the image or the harness pre-seeded one): someone@example.com",
+    );
+    expect(r.out).toContain("Layer 2 (ubuntu-24.04) failed.");
+  });
+
+  test("a scratch commit by another author fails the run", () => {
+    const w = world();
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
+      rules: [["first-wave/volley-hello-", 0, "Volley Sim,sim@volley.invalid\n"]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "FAIL: a scratch clone's last commit is by 'Volley Sim,sim@volley.invalid'",
+    );
   });
 
   test("volleyd's status from before the boot fails the run", () => {

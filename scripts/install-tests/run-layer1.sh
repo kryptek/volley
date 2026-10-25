@@ -231,6 +231,12 @@ linux_inside() {
   : >"$TRANSCRIPT"
   broker_start || finish
 
+  # A fresh user: no git identity before the install (setup's Sign-ins step gives the only one).
+  say "No git identity before the install"
+  if git config --global --get user.name || git config --global --get user.email || [ -e ~/.gitconfig ]; then
+    fail "the container has a git identity before the install (the image or the harness pre-seeded one)"
+  fi
+
   t0=$(date +%s%3N)
   say "install.sh --source $SRC --no-setup $NETWORK_FLAGS"
   # shellcheck disable=SC2086 # one word per flag
@@ -258,6 +264,18 @@ linux_inside() {
     fail "volley setup exited non-zero"
   fi
   total_ms=$(($(date +%s%3N) - t0))
+  say "git commits as the simulated account, and so did the test wave's scratch commit"
+  ident=$(git var GIT_COMMITTER_IDENT 2>>"$TRANSCRIPT")
+  case $ident in
+    "Volley Sim <1+volley-sim@users.noreply.github.com> "*) ;;
+    *) fail "git does not commit as the simulated account after setup: '$ident'" ;;
+  esac
+  for c in "$(volleyd_home)"/first-wave/volley-hello-*; do
+    [ -d "$c/.git" ] || continue
+    author=$(git -C "$c" log -1 --format=%an,%ae)
+    [ "$author" = "Volley Sim,1+volley-sim@users.noreply.github.com" ] ||
+      fail "the scratch clone $c's last commit is by '$author'"
+  done
   keep_metrics
   common_checks "$label" "$total_ms"
 

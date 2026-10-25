@@ -30,7 +30,8 @@ import {
  *                 Remote Login must be on
  *   5. Pairing    a code from `peer_invite { for: <name> }`, redeemed on the box with `volley peer
  *                 join <code> --to <hub> --name <name> --target <user@host>`
- *   6. Sign-ins   `gh auth login --web` over `ssh -t`; Claude through volleyd's remote sign-in
+ *   6. Sign-ins   `gh auth login --web` over `ssh -t`, then setup's Sign-ins step there (git's
+ *                 commit identity from that account); Claude through volleyd's remote sign-in
  *                 (`volley claude add <name> --machine <name> --wait`, which prints the link);
  *                 `--no-signin` defers both
  *   7. Doctor     `volley peer doctor --json` on the box: the readiness row; exit 1 when not ready
@@ -512,7 +513,13 @@ export async function machineAdd(
         `  → GitHub: ${GH_LOGIN.join(" ")} on ${name}, on this terminal (gh prints the code to enter in your browser)\n`,
       );
       const g = await run(
-        ttyArgv(target, scripts.command(`${GH_LOGIN.join(" ")} && ${GH_SETUP_GIT.join(" ")}`)),
+        // Then the Sign-ins step on the box: git's commit identity from the account just signed in.
+        ttyArgv(
+          target,
+          scripts.command(
+            `${GH_LOGIN.join(" ")} && ${GH_SETUP_GIT.join(" ")} && volley setup --peer --yes --step signin`,
+          ),
+        ),
         { tty: true },
       );
       if (g.code !== 0) out(`  ✗ the GitHub sign-in did not finish (exit ${g.code})\n`);
