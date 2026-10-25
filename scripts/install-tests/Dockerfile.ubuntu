@@ -37,6 +37,7 @@ RUN ldconfig \
   && test -n "$plugin" && ln -s "$plugin" /usr/lib/mosquitto_dynamic_security.so \
   && chmod 755 /usr/local/bin/systemctl \
   && useradd --create-home --shell /bin/bash owner \
+  && usermod -aG sudo owner \
   && printf 'owner ALL=(ALL) NOPASSWD:ALL\n' >/etc/sudoers.d/owner \
   && chmod 440 /etc/sudoers.d/owner \
   && mkdir -p /mosquitto/config /mosquitto/data /mosquitto/log \

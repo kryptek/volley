@@ -2,6 +2,23 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.13.1 — 2026-10-25
+
+### Fixed
+
+- **install.sh: the one command no longer dies at sudo on a stock cloud image.** It probes with
+  `sudo -n true` and runs `sudo -v` only when a password is really needed (sudo's `verifypw` made
+  `-v` ask on accounts that run every command without one); with a password needed and no
+  terminal it stops before asking and says so. The install tests' machines now have the stock
+  cloud-image sudoers shape. (#590)
+- **volley setup: on a Linux install whose broker files are root's (the snap, /etc/mosquitto), the
+  broker steps run through sudo by themselves.** Setup prints why, runs detect, security and
+  accounts as root (a silent `sudo -n true` probe first, so a cloud image's passwordless sudo asks
+  nothing, in any locale; one prompt otherwise), with the config and state file it planned with,
+  then continues as you; without a terminal it stops with the exact commands. The
+  one-command install no longer dies at `Security: … EACCES`, and the documented manual pre-step
+  is gone. (#591)
+
 ## 0.13.0 — 2026-10-25
 
 ### Added

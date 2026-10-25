@@ -19,7 +19,8 @@ and Claude Code, each only when missing; on Linux mosquitto is the snap, snapd i
 first when missing, and the install stops before Volley when no mosquitto 2.1 can be put on the
 machine), clones Volley at a release tag into ~/.volley/src,
 writes the `volley` and `volleyd` commands into ~/.volley/bin, adds that directory to PATH in
-your shell's startup file once, then runs `volley setup`. On macOS, when Homebrew resolves
+your shell's startup file once, then runs `volley setup` (on Linux it runs the broker's steps
+through sudo, saying why first, reusing the sudo this install asked for). On macOS, when Homebrew resolves
 Volley's tap (kryptek/volley/volley), neither --version nor --source is given and ~/.volley/bin
 has no volley yet, it runs `brew install kryptek/volley/volley` instead of the clone. Rerunning
 it is safe: what is already there is left alone.
@@ -420,7 +421,15 @@ install_linux() {
     [ -n "$need_ts" ] && reasons="$reasons
   - add Tailscale's apt repository (pkgs.tailscale.com) and install tailscale"
     say "sudo is needed to:$reasons"
-    sudo -v || die "sudo failed; rerun when you can sudo."
+    # `sudo -n true` runs a command as the installer will (the last matching sudoers entry), so it
+    # passes on a cloud image's NOPASSWD user, where `sudo -v` would still ask (verifypw=all).
+    if sudo -n true 2>/dev/null; then
+      :
+    elif tty_ok; then
+      sudo -v || die "sudo failed; rerun when you can sudo."
+    else
+      die "sudo needs your password and there is no terminal to ask on; run the install from a terminal."
+    fi
     SUDO_OK=1
   fi
 

@@ -22,7 +22,7 @@ questions under `--yes`, every `volley setup --check` row `done`.
 | File | What it is |
 | --- | --- |
 | `run-layer1.sh` | The run: `linux <ubuntu-24.04\|debian-13>` (on the host, with Docker) or `macos` |
-| `Dockerfile.ubuntu`, `Dockerfile.debian` | The fresh machine: a non-root user `owner` with password-less sudo and mosquitto 2.1 built from source, nothing else. CI caches each by its content |
+| `Dockerfile.ubuntu`, `Dockerfile.debian` | The fresh machine: a non-root user `owner` with password-less sudo in the stock cloud-image shape (group `sudo` plus a `NOPASSWD` drop-in) and mosquitto 2.1 built from source, nothing else. CI caches each by its content |
 | `systemctl-stand-in.sh` | `systemctl` in the containers, which have no systemd |
 | `metrics.ts` | The targets and the step summary's table (`summary`), the log scan for secrets (`scan`), redaction of setup's output (`redact`), and the VM layers' checks (`verdict`) |
 | `metrics.test.ts`, `fixtures/` | Its tests (`bun test scripts/install-tests`) |
@@ -99,13 +99,15 @@ process that exits stays down, and `is-active` says so. Anything else exits 1 na
 | `vm-macos.sh [--brew]` | Layer 3: one fresh macOS VM, the curl path or the Homebrew tap |
 | `vm-pair.sh` | Layer 4: a hub VM and a peer VM |
 | `lib.sh` | What they share: the VM names, the run's ssh key, the cleanup trap, the waits, the metrics hand-off, the tracking issue |
-| `cloud-init.yaml` | The Linux VMs' cloud-init: a user `volley` with password-less sudo, ssh with the run's key only |
+| `cloud-init.yaml` | The Linux VMs' cloud-init: a user `volley` with password-less sudo in the stock cloud-image shape (group `sudo` plus a `NOPASSWD` drop-in), ssh with the run's key only |
 | `vm.test.ts`, `stubs/` | The tests: each script end to end against stand-in `multipass`, `tart`, `ssh` (the fake VM) and `gh` |
 
 Each script takes `--version vX.Y.Z` to install that release (`install.sh` through curl, from the
 tag) instead of this checkout, which it otherwise copies into the VM (tracked and untracked files,
 not what `.gitignore` excludes) and installs with `--source`. Every VM runs
-`volley setup --yes --no-lan --simulated` against volley-sim, as Layer 1 does.
+`volley setup --yes --no-lan --simulated` against volley-sim, as Layer 1 does, and nothing
+before it: on the snap broker, setup runs its broker steps through sudo itself (`sudo -n`, the
+VMs' sudo being password-less), as it does for a person.
 
 ### What each layer checks
 

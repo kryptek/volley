@@ -30,7 +30,7 @@ It installs only what is missing, side by side:
 
 | | macOS (arm64, x86_64) | Ubuntu / Debian |
 | --- | --- | --- |
-| Package manager | Homebrew, with its own installer when `brew` is missing. That installer asks for your password: the only sudo on a Mac | apt. One `sudo -v` up front, after printing every reason it needs sudo (the apt packages, GitHub's apt repository for gh, snapd when it is missing, the mosquitto snap); nothing else asks |
+| Package manager | Homebrew, with its own installer when `brew` is missing. That installer asks for your password: the only sudo on a Mac | apt. After printing every reason it needs sudo (the apt packages, GitHub's apt repository for gh, snapd when it is missing, the mosquitto snap), it checks once whether sudo needs a password (`sudo -n true`) and asks for it once only when it does; none on a cloud image's password-less sudo. `volley setup` then runs the snap broker's steps through sudo too (it says why first; [Linux notes](#linux-notes)), within sudo's timestamp, so nothing else asks |
 | Tools | `brew install` for whichever of bun, mosquitto, gh, git and tmux is missing | `apt-get install -y` for whichever of git, tmux, curl and ca-certificates is missing (unzip too when bun is); bun with its own installer (into `~/.bun`); gh from GitHub's apt repository |
 | Broker | mosquitto from Homebrew (2.1 or newer) | a mosquitto 2.1 or newer already on `PATH`; else the snap, installing snapd with apt first when it is missing; else the install stops with the fix ([Linux notes](#linux-notes)) |
 | Claude Code | its native installer, when `claude` is missing | the same |
@@ -224,8 +224,11 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
 
 - **Ubuntu and Debian only for now**, any release with apt (CI runs Ubuntu 24.04 and Debian 13);
   other distributions exit 2 before changing anything.
-- **sudo once.** The installer prints why it needs sudo, runs `sudo -v` once, and reuses it.
-  It needs none when everything is there or when it runs as root.
+- **sudo at most once.** The installer prints why it needs sudo, then checks whether sudo needs a
+  password (`sudo -n true`). When sudo is password-less, as on a cloud image, nothing is asked;
+  otherwise it asks once at your terminal (`sudo -v`) and reuses it. Without a terminal it stops
+  before asking and says so: run the one command from a terminal. It needs no sudo when everything
+  is there or when it runs as root.
 - **mosquitto 2.1 or newer.** Distribution packages may still be 2.0, which Volley refuses
   (broker auth uses Dynamic Security roles with `%u`, which 2.0 does not substitute). The
   installer takes a 2.1 already on `PATH`, else installs the mosquitto snap. snapd counts when
@@ -252,12 +255,18 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
 
   A 2.0 broker already installed holds port 1883 and shadows the newer binary: remove it first
   (`sudo apt-get remove mosquitto`).
-- **The snap's config is root's.** Its files live under `/var/snap/mosquitto/common/`, so the
-  broker steps need root. When setup's Security step cannot write there, run them with sudo,
-  then the rest as yourself (the steps that belong to your user say so and skip under sudo):
+- **The snap's config is root's.** Its files live under `/var/snap/mosquitto/common/` (and
+  `/etc/mosquitto/`'s are root's too), so the broker steps need root. `volley setup` run as you
+  takes care of it: before its Security step it prints `sudo is needed to:` with each reason
+  (write the config and create the state file, restart the broker, create the Volley auth dir)
+  and the command, then runs Broker, Security and Accounts through sudo and continues as you.
+  On a cloud image's password-less sudo (or right after `install.sh` asked for the password on
+  the same terminal) nothing is asked; otherwise sudo asks for your password once, at the
+  terminal. From a script with no terminal, when sudo needs a password, setup stops before
+  Security, changes nothing, and prints the two commands to run in a terminal instead:
 
   ```sh
-  sudo ~/.volley/bin/volley setup --step detect --step security --step accounts
+  sudo ~/.volley/bin/volley setup --step detect --step security --step accounts --yes --no-lan
   volley setup
   ```
 
