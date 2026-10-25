@@ -63,7 +63,8 @@ describe("a wave the Desk claimed (P2-11)", () => {
     const coords = screen.getByRole("region", { name: "Wave coordinators" });
     expect(within(coords).getByText("★ yours")).toBeInTheDocument();
     expect(within(coords).queryByText(/No coordinator/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/No coordinator/)).not.toBeInTheDocument();
+    // The wave's own line (the top bar's Open coordinator says the coordinator role is not running).
+    expect(screen.queryByText(/No coordinator ·/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Claim/ })).not.toBeInTheDocument();
   });
 });

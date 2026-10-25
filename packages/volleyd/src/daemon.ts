@@ -108,6 +108,7 @@ import {
   type InboxItem,
   type InboxKind,
   type InboxWhere,
+  NOTICE_ANSWERS,
   type SessionSurface,
   answerEvent,
   decisionAnswerRefusal,
@@ -117,6 +118,7 @@ import {
   inboxTopic,
   itemForDecision,
   itemForHandoff,
+  itemForNotice,
   itemForPicker,
   openedEvent,
   parsePickerQuestions,
@@ -266,6 +268,8 @@ import {
   runningAgents,
   steerTarget,
 } from "./controls";
+import { renderHandoff } from "./coordinator/handoff";
+import { noticesFor } from "./coordinator/notices";
 import { type CoordinatorTarget, localTarget, remoteTarget } from "./coordinator/prepare";
 import type { CoordinatorRolePayload } from "./coordinator/role";
 import { CoordinatorRunner } from "./coordinator/runner";
@@ -930,6 +934,10 @@ export const laptopRefusal = (name: string) =>
 
 /** `$VOLLEYD_HOME/<this>`: the owner stopped the coordinator role (`coordinator_stop`). */
 const COORDINATOR_STOPPED = "coordinator-stopped";
+/** `$VOLLEYD_HOME/<this>`: the coordinator sessions volleyd sent the handoff text, newest last. */
+const COORDINATOR_SESSIONS = "coordinator-sessions.json";
+/** How many greeted coordinator sessions `COORDINATOR_SESSIONS` keeps. */
+const COORDINATOR_SESSIONS_KEPT = 50;
 /** The coordinator role's admin ops (SPEC §4.6.25), answered on the account-op topic. */
 const COORDINATOR_OPS: ReadonlySet<string> = new Set([
   "coordinator_restart",
@@ -1355,6 +1363,14 @@ export class Daemon {
   readonly inboxHandlers = new Map<InboxKind, InboxHandler>([
     ["picker", (item, req) => this.carryInboxAnswer(item, req, carryPicker)],
     ["handoff", (item, req) => this.carryInboxAnswer(item, req, carryHandoff)],
+    // A notice (SPEC §4.6.18) only records its answer: `open` acknowledges it, `dismiss`.
+    [
+      "notice",
+      async (_item, req) =>
+        (NOTICE_ANSWERS as readonly string[]).includes(req.answer)
+          ? null
+          : `a notice is answered open or dismiss, not '${req.answer}'`,
+    ],
   ]);
   /** Archived waves (archive.ts): out of the live set, kept for `status --all` and the index. */
   private readonly archived = new Map<WaveId, WaveLog>();
@@ -2557,13 +2573,14 @@ export class Daemon {
       await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
         const id = m.topic.split("/")[3] ?? "";
         const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        let hooks = false;
         if (entry?.agent_id === id) {
           const env = parseEnvelope(m.payload);
           // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
           const modelSource = (env?.payload as { model_source?: unknown } | undefined)
             ?.model_source;
           // Only the hooks' entry shows the session got past its screen.
-          const hooks = modelSource !== undefined;
+          hooks = modelSource !== undefined;
           if (env !== null) this.heard(id, this.sentAt(env.wall_time), !hooks, hooks);
         }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
@@ -2589,6 +2606,10 @@ export class Daemon {
         for (const name of new Set([before, entry?.coordinator])) {
           if (name !== undefined) void this.enqueue(() => this.rebind(name));
         }
+        // The hooks' entry (published once their mailbox session exists, so the mail is kept):
+        // a fresh coordinator session gets the handoff text (SPEC §4.6.25).
+        if (entry?.agent_id === id && entry.coordinator !== undefined && hooks)
+          void this.enqueue(() => this.greetCoordinator(entry));
       }),
     );
   }
@@ -5976,7 +5997,11 @@ export class Daemon {
     });
   }
 
-  /** `volley/_system/federation/coordinator`, retained; null clears it. */
+  /**
+   * `volley/_system/federation/coordinator`, retained; null clears it. Each change then opens
+   * or supersedes the owner-only notices (`noticesFor`), on the queue: the runner publishes
+   * beside it, and a `coordinator_restart` on the queue waits for its pass.
+   */
   private async publishCoordinator(p: CoordinatorRolePayload | null): Promise<void> {
     if (!this.running) return;
     if (p === null) await this.clearRetained(COORDINATOR_TOPIC);
@@ -5986,6 +6011,112 @@ export class Daemon {
         this.envelope(COORDINATOR_CHANNEL, "coordinator", p),
         true,
       );
+    const prev = this.coordinatorShown;
+    this.coordinatorShown = p;
+    void this.enqueue(() => this.coordinatorNotices(prev, p));
+  }
+  /** The role's payload as last published (the notices compare the next one with it). */
+  private coordinatorShown: CoordinatorRolePayload | null = null;
+
+  /** Supersede and open the coordinator notices `prev` → `next` calls for (SPEC §4.6.25). */
+  private async coordinatorNotices(
+    prev: CoordinatorRolePayload | null,
+    next: CoordinatorRolePayload | null,
+  ): Promise<void> {
+    const notices = [...this.inbox.values()].filter((i) => i.kind === "notice");
+    const actions = noticesFor(prev, next, notices);
+    for (const id of actions.supersede) {
+      const item = this.inbox.get(id);
+      if (item === undefined || item.answered !== undefined) continue;
+      await this.recordInboxAnswer(item, {
+        version: item.version,
+        answer: "superseded",
+        by: DAEMON_AGENT_ID,
+        where: { kind: "autopilot" },
+      });
+    }
+    for (const spec of actions.open) {
+      // A notice's id is fixed: an answered one is reopened at its next version.
+      const prior = this.inbox.get(`n-${spec.notice}`);
+      if (prior !== undefined && prior.answered === undefined) continue;
+      const item = itemForNotice(
+        spec,
+        dateOf(this.time).toISOString(),
+        prior !== undefined ? prior.version + 1 : 1,
+      );
+      this.inbox.set(item.id, item);
+      await this.journalInbox(item, openedEvent(item));
+      await this.publishInboxItem(item);
+      this.log(`inbox ${item.id}: ${item.title}`);
+    }
+  }
+
+  private get coordinatorSessionsFile(): string {
+    return join(this.opts.home, COORDINATOR_SESSIONS);
+  }
+
+  /** The coordinator sessions already sent the handoff text, newest last. */
+  private coordinatorSessions(): string[] {
+    try {
+      const v = JSON.parse(readFileSync(this.coordinatorSessionsFile, "utf-8")) as {
+        sessions?: unknown;
+      };
+      return Array.isArray(v.sessions)
+        ? v.sessions.filter((s): s is string => typeof s === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * A coordinator session's registry entry: the role's own (its name, its cwd under the role's
+   * directory) and not greeted before gets the handoff text once, as a mailbox `steering`
+   * message its hooks show at its next prompt; the previous greeted session is named in it.
+   */
+  private async greetCoordinator(entry: RegistryEntry): Promise<void> {
+    const role = this.coordinator.status();
+    if (role === null || role.dir === undefined || entry.cwd === undefined) return;
+    if (role.state !== "starting" && role.state !== "running") return;
+    if (entry.coordinator !== role.name) return;
+    const dir = role.dir.replace(/\/+$/, "");
+    if (entry.cwd !== dir && !entry.cwd.startsWith(`${dir}/`)) return;
+    const sessions = this.coordinatorSessions();
+    if (sessions.includes(entry.agent_id)) return;
+    const previous = sessions.at(-1);
+    const text = renderHandoff({
+      name: role.name,
+      machine: role.machine,
+      dir,
+      waves: this.runningWaves().map(([wave, log]) => {
+        const tasks = log.record.state?.tasks ?? [];
+        return {
+          id: wave,
+          repo: log.record.state?.repo ?? "",
+          done: tasks.filter((t) => t.stage === "done").length,
+          total: tasks.length,
+        };
+      }),
+      inbox: [...this.inbox.values()]
+        .filter((i) => i.answered === undefined)
+        .map((i) => ({ id: i.id, title: i.title })),
+      ...(previous !== undefined ? { previousSessionId: previous } : {}),
+    });
+    await this.publish(
+      buildTopic(entry.namespace ?? this.opts.namespace, entry.agent_id, "mailbox"),
+      this.envelope(
+        "mailbox",
+        "steering",
+        { text, from_agent_id: DAEMON_AGENT_ID, seq: 1 },
+        randomUUID(),
+      ),
+      false,
+    );
+    writeFileAtomic(
+      this.coordinatorSessionsFile,
+      `${JSON.stringify({ sessions: [...sessions, entry.agent_id].slice(-COORDINATOR_SESSIONS_KEPT) })}\n`,
+    );
+    this.log(`coordinator: handoff text sent to ${entry.agent_id}`);
   }
 
   /** `coordinator_restart` / `coordinator_stop` / `coordinator_status` (an admin's, or the read). */
@@ -11308,12 +11439,20 @@ export class Daemon {
   }
 
   /**
-   * null when `by` may answer a picker or handoff; else the refusal. A coordinator session's own
-   * (`owner_only`) is answered only by that session's owner: its agent id, or the coordinator
-   * name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   * null when `by` may answer a picker, handoff or notice; else the refusal. A coordinator
+   * session's own (`owner_only`) is answered only by that session's owner: its agent id, or the
+   * coordinator name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   * A notice is the owner's (SPEC §4.6.18): its coordinator name (`source.name`) or the agent
+   * bound to it; a Desk login never gets here.
    */
   private guardSessionAnswer(item: InboxItem, by: string): string | null {
-    if (!item.owner_only || (item.kind !== "picker" && item.kind !== "handoff")) return null;
+    if (!item.owner_only) return null;
+    if (item.kind === "notice") {
+      const owner = typeof item.source.name === "string" ? item.source.name : DAEMON_AGENT_ID;
+      if (this.actsAs(by, owner)) return null;
+      return `inbox item '${item.id}' is ${owner}'s own: only its owner answers it, not ${by}`;
+    }
+    if (item.kind !== "picker" && item.kind !== "handoff") return null;
     if (this.actsAs(item.agent_id, by)) return null;
     return `inbox item '${item.id}' is ${item.agent_id}'s own: only its owner answers it, not ${by}`;
   }

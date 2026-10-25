@@ -1,6 +1,10 @@
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "volley-mcp/broker";
+import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { registryTopic } from "volley-mcp/topics";
+import type { InboxItem } from "../src/autopilot/inbox";
 import { COORDINATOR_TOPIC } from "../src/control";
 import {
   type CoordinatorRolePayload,
@@ -9,6 +13,7 @@ import {
 } from "../src/coordinator/role";
 import type { RemoteStep } from "../src/fence";
 import { eventually } from "./helpers/broker-wait";
+import { NS } from "./helpers/daemon-env";
 import { fakeExec } from "./helpers/fake-exec";
 import { type Fleet, PEER, makeFleet } from "./helpers/fleet-env";
 import { runCli } from "./helpers/run-cli";
@@ -25,7 +30,9 @@ const SESSION = coordinatorSession("coord-test");
 const LOGIN = `${JSON.stringify({ username: "coordinator", password: "pw-coordinator" })}\n`;
 
 let fleet: Fleet | undefined;
+const clients: VolleyBroker[] = [];
 afterEach(async () => {
+  for (const c of clients.splice(0)) await c.disconnect();
   await fleet?.close();
   fleet = undefined;
 });
@@ -174,5 +181,192 @@ describe("the coordinator role in the daemon (SPEC §4.6.25)", () => {
     await f.tick();
     await eventually(async () => (await topic())?.session_url === LINK);
     expect(await topic()).toMatchObject({ machine: "local", state: "running", dir });
+  });
+});
+
+describe("the coordinator role's entry points (SPEC §4.6.25)", () => {
+  const opened = (f: Fleet, id: string) =>
+    f
+      .system()
+      .filter((e) => e.type === "inbox_opened" && (e.data.item as InboxItem).id === id)
+      .map((e) => e.data.item as InboxItem);
+  const answered = (f: Fleet, id: string) =>
+    f.system().filter((e) => e.type === "inbox_answered" && e.data.id === id);
+
+  it("a new link opens the owner-only n-coordinator-link notice; the next link supersedes it", async () => {
+    const { f, box, topic, set } = await coordinatorFleet();
+    expect((await set({ coordinator: { machine: PEER } })).ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.session_url === LINK);
+    await eventually(() => opened(f, "n-coordinator-link").length === 1);
+    const [first] = opened(f, "n-coordinator-link");
+    expect(first).toMatchObject({
+      kind: "notice",
+      version: 1,
+      owner_only: true,
+      title: `Coordinator on ${PEER}: open it`,
+      question: LINK,
+      pointers: { link: LINK },
+    });
+    // A republish of the same link (a heartbeat-like tick) opens nothing more.
+    await f.tick();
+    expect(opened(f, "n-coordinator-link")).toHaveLength(1);
+
+    const LINK2 = LINK.replace(/0000$/, "0001");
+    box.screens = [BANNER.replaceAll(LINK, LINK2)];
+    expect(await f.adminOp({ op: "coordinator_restart" })).toMatchObject({ ok: true });
+    await f.tick();
+    await eventually(async () => (await topic())?.session_url === LINK2);
+    await eventually(() => opened(f, "n-coordinator-link").length === 2);
+    expect(answered(f, "n-coordinator-link")).toMatchObject([
+      { data: { answer: "superseded", by: "volleyd", where: { kind: "autopilot" }, version: 2 } },
+    ]);
+    expect(opened(f, "n-coordinator-link")[1]).toMatchObject({
+      version: 3,
+      pointers: { link: LINK2 },
+    });
+    expect(f.daemon.inboxItem("n-coordinator-link")?.answered).toBeUndefined();
+  });
+
+  it("failed opens n-coordinator-failed with the last error", async () => {
+    const { f, box, topic, set } = await coordinatorFleet();
+    const r = await set({ coordinator: { machine: PEER, restart_backoff_s: [1, 1, 1] } });
+    expect(r.ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.state === "running");
+    // Every start dies at once: three quick deaths are failed.
+    box.onLaunch = () => {};
+    box.screens = ["Error: something broke\n"];
+    delete box.workspaceTitles[SESSION];
+    for (let i = 0; i < 20 && (await topic())?.state !== "failed"; i++) await f.tick(1000);
+    expect((await topic())?.state).toBe("failed");
+    await eventually(() => opened(f, "n-coordinator-failed").length === 1);
+    expect(opened(f, "n-coordinator-failed")[0]).toMatchObject({
+      owner_only: true,
+      title: `Coordinator on ${PEER} stopped`,
+    });
+    expect(opened(f, "n-coordinator-failed")[0]?.question).toContain("volley coordinator restart");
+    expect(answered(f, "n-coordinator-link")).toMatchObject([{ data: { answer: "superseded" } }]);
+  });
+
+  it("a fresh coordinator session gets the handoff text once; the next names the previous", async () => {
+    const { f, topic, set } = await coordinatorFleet();
+    expect((await set({ coordinator: { machine: PEER } })).ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.state === "running");
+    const dir = (await topic())?.dir as string;
+    const texts: Record<string, string[]> = {};
+    const session = async (id: string) => {
+      const c = new VolleyBroker();
+      await c.connect({ url: f.env.broker.url, agentId: id });
+      clients.push(c);
+      texts[id] = [];
+      await c.subscribeStream(`volley/${NS}/${id}/mailbox`, ({ payload }) => {
+        const env = parseEnvelope(payload);
+        if (env?.type === "steering") texts[id]?.push((env.payload as { text: string }).text);
+      });
+      const register = () =>
+        c.publish(
+          registryTopic(id),
+          JSON.stringify({
+            ...buildEnvelope({
+              agentId: id,
+              parentId: null,
+              channel: "_system/registry",
+              type: "registered",
+              payload: {
+                capabilities: [],
+                cwd: dir,
+                started_at: new Date().toISOString(),
+                coordinator: "coord-test",
+                model_source: "harness-hook",
+              },
+            }),
+            namespace: NS,
+          }),
+          { qos: 1, retain: true },
+        );
+      return { register };
+    };
+    const a = await session("coordinator-ab12");
+    await a.register();
+    await eventually(() => texts["coordinator-ab12"]?.length === 1);
+    const first = texts["coordinator-ab12"]?.[0] ?? "";
+    expect(first).toContain(
+      `You are the coordinator \`coord-test\` of this Volley fleet, running on \`${PEER}\` in \`${dir}\``,
+    );
+    expect(first).toContain("Open needs-you items: `n-coordinator-link` Coordinator on");
+    expect(first).not.toContain("previous coordinator session");
+    // The same entry again sends nothing.
+    await a.register();
+    await f.tick();
+    expect(texts["coordinator-ab12"]).toHaveLength(1);
+    expect(
+      JSON.parse(readFileSync(join(f.env.home, "coordinator-sessions.json"), "utf-8")),
+    ).toEqual({ sessions: ["coordinator-ab12"] });
+
+    const b = await session("coordinator-cd34");
+    await b.register();
+    await eventually(() => texts["coordinator-cd34"]?.length === 1);
+    expect(texts["coordinator-cd34"]?.[0]).toContain(
+      "The previous coordinator session was `coordinator-ab12`",
+    );
+  });
+
+  it("a notice is answered open or dismiss only", async () => {
+    const { f, topic, set } = await coordinatorFleet();
+    expect((await set({ coordinator: { machine: PEER } })).ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.session_url === LINK);
+    await eventually(() => f.daemon.inboxItem("n-coordinator-link") !== undefined);
+    const where = { kind: "desk" as const, device: "phone" };
+    const bad = await f.daemon.answerInboxItem("n-coordinator-link", {
+      version: 1,
+      answer: "maybe",
+      by: "owner",
+      where,
+      desk_login: true,
+    });
+    expect(bad).toEqual({ refused: "a notice is answered open or dismiss, not 'maybe'" });
+    const ok = await f.daemon.answerInboxItem("n-coordinator-link", {
+      version: 1,
+      answer: "dismiss",
+      by: "owner",
+      where,
+      desk_login: true,
+    });
+    expect("item" in ok && ok.item.answered?.answer).toBe("dismiss");
+  });
+
+  it("a notice is the owner's: a wave worker on the mailbox is refused, the coordinator name answers", async () => {
+    const { f, topic, set } = await coordinatorFleet();
+    expect((await set({ coordinator: { machine: PEER } })).ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.session_url === LINK);
+    await eventually(() => f.daemon.inboxItem("n-coordinator-link") !== undefined);
+    const where = { kind: "terminal" as const };
+    const worker = await f.daemon.answerInboxItem("n-coordinator-link", {
+      version: 1,
+      answer: "dismiss",
+      by: "w1-implementer-1",
+      where,
+    });
+    expect(worker).toEqual({
+      refused:
+        "inbox item 'n-coordinator-link' is coord-test's own: only its owner answers it, not w1-implementer-1",
+    });
+    expect(f.daemon.inboxItem("n-coordinator-link")?.answered).toBeUndefined();
+    const owner = await f.daemon.answerInboxItem("n-coordinator-link", {
+      version: 1,
+      answer: "open",
+      by: "coord-test",
+      where,
+    });
+    expect("item" in owner && owner.item.answered?.answer).toBe("open");
   });
 });

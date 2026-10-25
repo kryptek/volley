@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-25T12:00:00.000Z",
+  "channel": "_inbox",
+  "type": "inbox_item",
+  "payload": {
+    "id": "n-coordinator-link",
+    "kind": "notice",
+    "version": 1,
+    "owner_only": true,
+    "agent_id": "volleyd",
+    "title": "Coordinator on box-a: open it",
+    "question": "https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE0000",
+    "options": [{ "label": "open" }, { "label": "dismiss" }],
+    "pointers": { "link": "https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE0000" },
+    "opened_at": "2026-10-25T12:00:00.000Z",
+    "source": { "notice": "coordinator-link", "machine": "box-a", "name": "coord-test" }
+  }
+}

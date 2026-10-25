@@ -354,3 +354,19 @@ html[data-tone="light"] .ny-pill {
 html[data-tone="light"] .st-chip--needs {
   color: var(--hot-ink);
 }
+
+/* The top bar's Open coordinator (SPEC §4.6.25): a link while the coordinator has one, else a
+   disabled chip saying why. */
+.open-coord {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.open-coord--off {
+  cursor: default;
+  opacity: 0.7;
+}

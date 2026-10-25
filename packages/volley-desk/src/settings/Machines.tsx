@@ -37,16 +37,21 @@
  * (`broker · studio — supervisor · studio — desk · box-a`), from volleyd's record, and each card
  * chips its own; an admin moves a role to a machine from its card (`RoleMoveSheet`), and a
  * finished move leaves its notice here.
+ *
+ * The coordinator role (SPEC §4.6.25): the Coordinator card (`CoordinatorCard`) comes first, where
+ * the owner picks the machine that runs it, turns it off, opens it and (an admin) restarts it.
  */
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SwitchToAdmin } from "../auth/AccountActions";
 import { plural } from "../lib/plural";
 import { type AccountGroup, LOCAL_MACHINE, configuredMachines, machineRows } from "../store/claude";
+import type { AuthOps } from "../store/control";
 import { type AdminStatus, type PeerOps, pairingSupported } from "../store/peerOps";
 import type { RoleOps } from "../store/roleOps";
 import {
   type ClaudeSignin,
   type ConfigPayload,
+  type CoordinatorRolePayload,
   MACHINE_ROLES,
   type MachinePayload,
   type ReadinessPayload,
@@ -57,6 +62,7 @@ import {
 import { AddMachineByCode, useNow } from "./AddMachineByCode";
 import { AddMachineSheet } from "./AddMachineSheet";
 import { type ControlFn, SignInOnDialog, type SignInPreset, signInPreset } from "./ClaudeAccounts";
+import { CoordinatorCard } from "./CoordinatorCard";
 import { type MachineAccountRow, MachineCard } from "./MachineCard";
 import type { ConfigTransport } from "./configTransport";
 import "../styles/machines.css";
@@ -108,6 +114,10 @@ export interface MachinesProps {
   roleMoves?: Record<string, RoleMovePayload> | undefined;
   /** The role ops (admin): Move a role here… on the cards; `null` = none. */
   roleOps?: RoleOps | null | undefined;
+  /** The coordinator role's retained state (`volley/_system/federation/coordinator`). */
+  coordinatorRole?: CoordinatorRolePayload | null | undefined;
+  /** The admin channel, for the Coordinator card's Restart (an admin only); `null` = none. */
+  coordinatorOps?: AuthOps | null | undefined;
   /** The Claude account groups (App's `deskAccountGroups`), the sign-ins and volleyd's control. */
   claude?: {
     groups: AccountGroup[];
@@ -343,6 +353,15 @@ export function Machines(p: MachinesProps) {
         private tunnel.
       </p>
       {p.roles && <p className="m-roles-summary mono">{rolesSummary(p.roles)}</p>}
+      <CoordinatorCard
+        coordinatorRole={p.coordinatorRole}
+        machines={p.machines}
+        hosts={p.hosts}
+        localName={p.localName}
+        coordinator={p.waveConfig?.coordinator}
+        transport={p.configTransport ?? null}
+        ops={canPair ? (p.coordinatorOps ?? null) : null}
+      />
       {notice && <output className="s-hint m-notice">{notice}</output>}
       <div className="machines" ref={list}>
         {own ? card(own, true) : <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />}

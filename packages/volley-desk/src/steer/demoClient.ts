@@ -82,14 +82,28 @@ export function withWaveAccount(s: WaveStatePayload, acct: string | null): WaveS
   return { ...s, account };
 }
 
+/** The demo writer; `close` cancels its pending answers when the Desk unmounts. */
+export interface DemoSteerClient extends SteerClient {
+  close(): void;
+}
+
 export function createDemoSteerClient(
   apply: (msgs: DeskMessage[]) => void,
   isCoordinator: (agentId: string) => boolean,
   now: () => number = Date.now,
   /** The demo's current wave state, for `wave_account_set` to re-publish. */
   waveState: (wave: string) => WaveStatePayload | null = () => null,
-): SteerClient {
+): DemoSteerClient {
   const handlers = new Set<(m: DeskMessage) => void>();
+  /** The answers still to come, so `close` can cancel them. */
+  const pending = new Set<ReturnType<typeof setTimeout>>();
+  const later = (fn: () => void, ms: number) => {
+    const t = setTimeout(() => {
+      pending.delete(t);
+      fn();
+    }, ms);
+    pending.add(t);
+  };
   const emit = (topic: string, envelope: Envelope | null) => {
     const m: DeskMessage = { topic, envelope, receivedAt: now() };
     apply([m]);
@@ -190,7 +204,7 @@ export function createDemoSteerClient(
                     ? { acct: signinAcct, signed_in: true, email: DEMO_SIGNIN_EMAIL }
                     : edited?.result;
         const answer = { text: "ACKED", ok: true, ...(result ? { result } : {}) };
-        setTimeout(() => {
+        later(() => {
           // The new account is in the wave state before the answer, as volleyd journals first.
           if (moved !== null)
             emit(
@@ -213,7 +227,7 @@ export function createDemoSteerClient(
             );
           emit(self, reply(DAEMON_AGENT_ID, ns, "mailbox", "ack", answer, id));
           if (req?.op === "claude_signin_entry")
-            setTimeout(
+            later(
               () =>
                 emit(
                   `volley/_system/claude/${signinAcct}/signin`,
@@ -241,10 +255,10 @@ export function createDemoSteerClient(
         return;
       }
       emit(topic, env);
-      setTimeout(() => {
+      later(() => {
         emit(self, reply(to, ns, "mailbox", "ack", { text: "ACKED", acked_type: env.type }, id));
       }, DELIVER_MS);
-      setTimeout(() => {
+      later(() => {
         const text = String((env.payload as { text?: unknown } | undefined)?.text ?? "");
         emit(
           `volley/${ns}/${to}/progress`,
@@ -260,6 +274,10 @@ export function createDemoSteerClient(
               ),
         );
       }, ACT_MS);
+    },
+    close() {
+      for (const t of pending) clearTimeout(t);
+      pending.clear();
     },
     onMessage(h) {
       handlers.add(h);
