@@ -224,7 +224,7 @@ stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
 
 - **Ubuntu and Debian only for now**, any release with apt (CI runs Ubuntu 24.04 and Debian 13);
   other distributions exit 2 before changing anything.
-- **sudo once.** The installer prints why it needs sudo, then checks whether sudo needs a
+- **sudo at most once.** The installer prints why it needs sudo, then checks whether sudo needs a
   password (`sudo -n true`). When sudo is password-less, as on a cloud image, nothing is asked;
   otherwise it asks once at your terminal (`sudo -v`) and reuses it. Without a terminal it stops
   before asking and says so: run the one command from a terminal. It needs no sudo when everything
