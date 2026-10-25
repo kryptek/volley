@@ -183,16 +183,19 @@ wait_ssh() {
 }
 
 # Run <command...> until it succeeds, at most <seconds>, its stderr quiet until the last try (which
-# prints why it still fails).
+# prints why it still fails). A command that exits 3 has failed for good: one more try prints why,
+# and the wait ends there instead of at the deadline.
 poll() {
-  local deadline
+  local deadline rc
   deadline=$(($(date +%s) + $(cap "$1")))
   shift
-  until "$@" 2>/dev/null; do
-    [ "$(date +%s)" -ge "$deadline" ] && {
+  while :; do
+    "$@" 2>/dev/null && return 0
+    rc=$?
+    if [ "$rc" -eq 3 ] || [ "$(date +%s)" -ge "$deadline" ]; then
       "$@"
       return
-    }
+    fi
     sleep "$POLL_S"
   done
 }

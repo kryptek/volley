@@ -312,7 +312,7 @@ describe("text a person reads (the text command, #597)", () => {
   test("the command: 0 on a clean --check and status, 1 listing the line, 2 without a file", () => {
     const dir = tempDir("volley-metrics-text-");
     const clean = join(dir, "status.txt");
-    writeFileSync(clean, "wave hello-1 (complete)\ncoordinator: coordinator on athena\n");
+    writeFileSync(clean, "wave hello-1 (complete)\ncoordinator: coordinator on hub\n");
     expect(run(["text", join(FIXTURES, "check-pass.json"), clean]).code).toBe(0);
     const json = join(dir, "status.json");
     writeFileSync(json, JSON.stringify({ note: "undefined is a word here" }));

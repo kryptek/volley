@@ -63,7 +63,7 @@ field() {
 if (v !== undefined && v !== null) console.log(typeof v === 'object' ? JSON.stringify(v) : String(v));"
 }
 latest() {
-  gh run list --workflow "$WORKFLOW" --branch "$BRANCH" --limit 1 --json databaseId 2>/dev/null |
+  gh run list --workflow "$WORKFLOW" --branch "$BRANCH" --limit 1 --event workflow_dispatch --json databaseId 2>/dev/null |
     field 'j?.[0]?.databaseId'
 }
 

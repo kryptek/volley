@@ -117,14 +117,15 @@ bun -e 'const j = JSON.parse(await Bun.file(process.argv[1]).text()); process.ex
 capture "$HUB" 'volley peer list' peer-list.txt
 
 # <wave> complete on the hub, its task T1 placed on the peer (`<wave>-status.json`,
-# `<wave>-events.jsonl`); a REMOTE_REPO_MISSING in its journal says so at once (#596).
+# `<wave>-events.jsonl`); a REMOTE_REPO_MISSING in its journal says so at once (#596) and ends the
+# poll (exit 3).
 done_on_peer() {
   local wave=$1
   on "$HUB" "volleyd status $wave --json" >"$OUT/$wave-status.json" 2>/dev/null &&
     on "$HUB" "volleyd events $wave --cursor vm-pair" >"$OUT/$wave-events.jsonl" 2>/dev/null || return 1
   if grep -qi remote_repo_missing "$OUT/$wave-events.jsonl"; then
     echo "the wave $wave hit REMOTE_REPO_MISSING: volleyd found no clone of its repository on $PEER" >&2
-    return 1
+    return 3
   fi
   metrics verdict wave --status "$OUT/$wave-status.json" --events "$OUT/$wave-events.jsonl" \
     --task T1 --host "$PEER"
@@ -157,15 +158,19 @@ else
   SIM_ORIGINS="$VM_USER@$HUB:$ORIGINS"
   # The line both machines' shells (and the agents' launches) read first.
   SIM_LINE="export VOLLEY_SIM_ORIGINS=$SIM_ORIGINS; eval \"\$(\$HOME/.volley/bin/volley sim env)\""
-  # git over ssh to the hub without a question: the run's key on the peer, a new host key accepted.
-  vm_ssh "$PEER_ADDR" 'umask 077 && mkdir -p ~/.ssh && cat >~/.ssh/id_ed25519' <"$KEYDIR/id_ed25519" ||
+  # git over ssh to the hub without a question, a new host key accepted. On the peer, the run's key
+  # goes beside the key `volley machine add` made (which stays the pairing's), named for the hub alone.
+  # Only the hub makes the origins directory: the fake gh treats an ssh base whose directory exists
+  # here as this machine's own.
+  vm_ssh "$PEER_ADDR" 'umask 077 && mkdir -p ~/.ssh && cat >~/.ssh/volley-it' <"$KEYDIR/id_ed25519" ||
     fail "could not copy the run's key to the peer"
-  for addr in "$HUB" "$PEER_ADDR"; do
-    # shellcheck disable=SC2016 # expanded on the VM
-    vm_ssh "$addr" "mkdir -p $ORIGINS && printf 'Host $HUB\\n  StrictHostKeyChecking accept-new\\n' >>~/.ssh/config &&" \
-      'chmod 600 ~/.ssh/config && cat - ~/.bashrc >~/.bashrc.it && mv ~/.bashrc.it ~/.bashrc' \
-      <<<"$SIM_LINE" || fail "could not set VOLLEY_SIM_ORIGINS on $addr"
-  done
+  SET_ENV='chmod 600 ~/.ssh/config && cat - ~/.bashrc >~/.bashrc.it && mv ~/.bashrc.it ~/.bashrc'
+  # shellcheck disable=SC2016 # expanded on the VM
+  vm_ssh "$HUB" "mkdir -p $ORIGINS && printf 'Host $HUB\\n  StrictHostKeyChecking accept-new\\n' >>~/.ssh/config &&" \
+    "$SET_ENV" <<<"$SIM_LINE" || fail "could not set VOLLEY_SIM_ORIGINS on $HUB"
+  # shellcheck disable=SC2016 # expanded on the VM
+  vm_ssh "$PEER_ADDR" "printf 'Host $HUB\\n  StrictHostKeyChecking accept-new\\n  IdentityFile ~/.ssh/volley-it\\n' >>~/.ssh/config &&" \
+    "$SET_ENV" <<<"$SIM_LINE" || fail "could not set VOLLEY_SIM_ORIGINS on $PEER_ADDR"
   # volleyd's peer clone fetches https://github.com/<slug>.git: on the peer, that is the hub's origin.
   on "$PEER_ADDR" "git config --global url.$SIM_ORIGINS/$SLUG.git.insteadOf https://github.com/$SLUG.git" ||
     fail "could not point the peer's git at the hub's origin of $SLUG"
@@ -186,10 +191,12 @@ else
   say "The wave $SLUG_WAVE on $SLUG, host: $PEER"
   submit_wave "$HUB" "$SLUG" "$SLUG_WAVE" "Add SLUG.md" "$PEER" >>"$TRANSCRIPT" 2>&1 ||
     fail "could not submit the wave $SLUG_WAVE"
-  poll 900 done_on_peer "$SLUG_WAVE" ||
-    fail "the wave $SLUG_WAVE did not complete on $PEER (the line above)"
-  grep -qi remote_repo_missing "$OUT/$SLUG_WAVE-events.jsonl" 2>/dev/null &&
-    fail "the wave $SLUG_WAVE hit REMOTE_REPO_MISSING: volleyd found no clone of $SLUG on $PEER"
+  poll 900 done_on_peer "$SLUG_WAVE"
+  case $? in
+  0) ;;
+  3) fail "the wave $SLUG_WAVE hit REMOTE_REPO_MISSING: volleyd found no clone of $SLUG on $PEER" ;;
+  *) fail "the wave $SLUG_WAVE did not complete on $PEER (the line above)" ;;
+  esac
   timing slug_wave_ms $(($(now_ms) - t3))
   capture "$HUB" "volleyd status $SLUG_WAVE" "$SLUG_WAVE-status.txt" "volleyd status"
   check_text "$OUT/$SLUG_WAVE-status.json" "volleyd status --json"

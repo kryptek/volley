@@ -641,13 +641,13 @@ describe("Layer 4: vm-pair.sh", () => {
       // reaches it, the hub creates it and holds no clone, volleyd clones it on the peer.
       new RegExp(`^ssh ${HUB}: .*printf "%s/origins" "\\$VOLLEY_SIM_HOME"$`),
       new RegExp(
-        `^ssh ${PEER}: umask 077 && mkdir -p ~/\\.ssh && cat >~/\\.ssh/id_ed25519 \\(stdin \\d+ bytes\\)$`,
+        `^ssh ${PEER}: umask 077 && mkdir -p ~/\\.ssh && cat >~/\\.ssh/volley-it \\(stdin \\d+ bytes\\)$`,
       ),
       new RegExp(
         `^ssh ${HUB}: mkdir -p /path/to/home/\\.volley/sim/origins .*cat - ~/\\.bashrc .*\\(stdin \\d+ bytes\\)$`,
       ),
       new RegExp(
-        `^ssh ${PEER}: mkdir -p /path/to/home/\\.volley/sim/origins .*cat - ~/\\.bashrc .*\\(stdin \\d+ bytes\\)$`,
+        `^ssh ${PEER}: printf 'Host 10\\.20\\.0\\.11\\\\n  StrictHostKeyChecking accept-new\\\\n  IdentityFile ~/\\.ssh/volley-it\\\\n' .*cat - ~/\\.bashrc .*\\(stdin \\d+ bytes\\)$`,
       ),
       new RegExp(
         `^ssh ${PEER}: .*git config --global url\\.volley@10\\.20\\.0\\.11:/path/to/home/\\.volley/sim/origins/volley-sim/volley-slug-42\\.git\\.insteadOf https://github\\.com/volley-sim/volley-slug-42\\.git$`,
@@ -688,8 +688,9 @@ describe("Layer 4: vm-pair.sh", () => {
 
   test("hello-slug: a REMOTE_REPO_MISSING fails naming it (#596)", () => {
     const w = world();
+    // A miss is terminal: the poll stops at the first look, not at the (here, long) deadline.
     const r = run(w, "vm-pair.sh", [], {
-      env: { VM_MAX_WAIT_S: "1" },
+      env: { VM_MAX_WAIT_S: "600", VM_POLL_S: "1" },
       rules: [
         [
           "volleyd events hello-slug",
@@ -703,6 +704,10 @@ describe("Layer 4: vm-pair.sh", () => {
     expect(r.out).toContain(
       "FAIL: the wave hello-slug hit REMOTE_REPO_MISSING: volleyd found no clone of volley-sim/volley-slug-42 on peer",
     );
+    expect(r.out.match(/^FAIL: .*REMOTE_REPO_MISSING/gm)).toHaveLength(1);
+    expect(
+      r.calls.filter((c) => c.includes("volleyd events hello-slug")).length,
+    ).toBeLessThanOrEqual(2);
     expect(vmsLeft(w)).toEqual([]);
   }, 15_000);
 
@@ -1008,11 +1013,11 @@ describe("verify.sh", () => {
     expectInOrder(r.calls, [
       /^gh auth status$/,
       new RegExp(
-        `^gh run list --workflow install-vm\\.yml --branch ${b} --limit 1 --json databaseId$`,
+        `^gh run list --workflow install-vm\\.yml --branch ${b} --limit 1 --event workflow_dispatch --json databaseId$`,
       ),
       new RegExp(`^gh workflow run install-vm\\.yml --ref ${b}$`),
       new RegExp(
-        `^gh run list --workflow install-vm\\.yml --branch ${b} --limit 1 --json databaseId$`,
+        `^gh run list --workflow install-vm\\.yml --branch ${b} --limit 1 --event workflow_dispatch --json databaseId$`,
       ),
       /^gh run view 1001 --json status,conclusion,url,jobs$/,
       /^gh run watch 1001 --exit-status$/,
