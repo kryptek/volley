@@ -249,6 +249,12 @@ export const DAEMON_DEFAULTS = {
    * wait; the Desk keeps listening for a late answer.
    */
   setup_apply_timeout_ms: 110_000,
+  /**
+   * The Desk's Tailscale sign-in (the Network step): `tailscale up` runs this long, captured, so
+   * its sign-in link can be reported (a phone opens it); it keeps waiting for the sign-in no
+   * longer than that, and the step is planned again once Tailscale runs.
+   */
+  network_signin_timeout_ms: 20_000,
   /** Lifetime of a `signin_link` whose request names no `ttl_s`. */
   signin_link_ttl_s: 600,
   /** The longest a sign-in link may live (`volley auth` enforces the same bound). */

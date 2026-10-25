@@ -86,6 +86,27 @@
               }
             },
             "uptime_s": { "type": "integer", "minimum": 0 },
+            "network": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "description": "How the machine is reached from outside its own network, from its setup.json (the Network step of volley setup, spec section 4.6.14): tailscale with its MagicDNS name and tailnet IPv4 address, manual with the address the owner's own VPN gives it, or none.",
+              "properties": {
+                "kind": { "enum": ["tailscale", "manual", "none"] },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "description": "tailscale: the MagicDNS name, without its trailing dot."
+                },
+                "address": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253,
+                  "description": "tailscale: the tailnet IPv4 address. manual: the VPN's address (a host or IP)."
+                }
+              }
+            },
             "versions": {
               "type": "object",
               "additionalProperties": false,

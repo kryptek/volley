@@ -4,6 +4,7 @@ import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
 import { withoutLogin } from "../peer/profile-checks";
 import { parseBrokerHost } from "./desk-build";
+import { type NetworkKind, isNetworkKind } from "./network";
 import type { SetupContext, StepName } from "./step";
 import {
   type CmuxSocketMode,
@@ -107,6 +108,64 @@ export interface SetupInstall {
    * `volley desk serve --broker-host <it>` (set by `volley desk install --broker-host`).
    */
   broker_host?: string;
+  /**
+   * How this machine is reached from outside its network (the Network step): the kind, and for
+   * `tailscale` its MagicDNS name and tailnet IPv4 address, for `manual` the VPN's address.
+   */
+  network?: NetworkRecord;
+}
+
+/** setup.json's `network` (SPEC §4.6.14 carries the same object in the machine record). */
+export interface NetworkRecord {
+  kind: NetworkKind;
+  name?: string;
+  address?: string;
+}
+
+/** A `network` object as setup.json has it, or null when it is not one. */
+export function parseNetworkRecord(v: unknown): NetworkRecord | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  if (!isNetworkKind(r.kind)) return null;
+  const str = (k: string) => (typeof r[k] === "string" && r[k] !== "" ? (r[k] as string) : null);
+  if (r.kind === "none") return { kind: "none" };
+  return {
+    kind: r.kind,
+    ...(str("name") !== null ? { name: str("name") as string } : {}),
+    ...(str("address") !== null ? { address: str("address") as string } : {}),
+  };
+}
+
+/**
+ * setup.json's `network`, read on its own like `broker_host`: a paired machine's setup.json holds
+ * little else (`volley setup --peer` writes no install record). Null when there is none.
+ */
+export function readNetworkRecord(volleydHome: string): NetworkRecord | null {
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as {
+      network?: unknown;
+    };
+    return parseNetworkRecord(v.network);
+  } catch {
+    return null;
+  }
+}
+
+/** Record `network` in setup.json, keeping every other key (a machine without one gets one). */
+export function recordNetwork(ctx: SetupContext, network: NetworkRecord): void {
+  saveInstall(ctx, { ...rawInstall(ctx.volleydHome), network });
+}
+
+/** setup.json as an object, whatever it holds; empty when there is none or it is unreadable. */
+function rawInstall(volleydHome: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as unknown;
+    if (typeof v === "object" && v !== null && !Array.isArray(v))
+      return v as Record<string, unknown>;
+  } catch {
+    // none yet, or unreadable
+  }
+  return {};
 }
 
 /** The namespace the coordinator's MCP server registers in. */
@@ -127,6 +186,8 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
   // And a run that skipped the Terminal step keeps its choice; and the coordinator's name.
   const terminal = ctx.terminal ?? prior?.terminal;
   const coordinator = ctx.coordinator ?? prior?.coordinator;
+  // The Network step's record, read on its own: it may be all a fresh run's setup.json holds yet.
+  const network = ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome);
   const brokerHost = deskBrokerHost(ctx);
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
@@ -149,6 +210,7 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
         ? { metrics: prior.metrics }
         : {}),
     ...(brokerHost !== null ? { broker_host: brokerHost } : {}),
+    ...(network !== null ? { network } : {}),
   };
   saveInstall(ctx, install);
 }
@@ -210,14 +272,7 @@ export function recordDeskInstall(
   ctx: SetupContext,
   desk: { port: number; brokerHost: string | null },
 ): void {
-  let prior: Record<string, unknown> = {};
-  try {
-    const v = JSON.parse(readFileSync(setupInstallFile(ctx.volleydHome), "utf-8")) as unknown;
-    if (typeof v === "object" && v !== null && !Array.isArray(v)) prior = v as typeof prior;
-  } catch {
-    // none yet, or unreadable: start a record
-  }
-  const { broker_host: _old, ...rest } = prior;
+  const { broker_host: _old, ...rest } = rawInstall(ctx.volleydHome);
   saveInstall(ctx, {
     ...rest,
     desk_port: desk.port,
@@ -276,6 +331,9 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
       ...(str("metrics") !== null ? { metrics: str("metrics") as string } : {}),
       ...(str("broker_host") !== null && parseBrokerHost(str("broker_host") as string) !== null
         ? { broker_host: parseBrokerHost(str("broker_host") as string) as string }
+        : {}),
+      ...(parseNetworkRecord(v.network) !== null
+        ? { network: parseNetworkRecord(v.network) as NetworkRecord }
         : {}),
     };
   } catch {

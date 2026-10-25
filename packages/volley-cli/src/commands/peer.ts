@@ -32,6 +32,7 @@ import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
 import { isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
 import pkg from "../../package.json";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { volleydHome } from "../auth/context";
 import { withSetupAuthDir } from "../auth/coordinator-login";
 import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
 import { openClient, reportConnectError } from "../connect";
@@ -54,6 +55,7 @@ import {
 } from "../peer/doctor";
 import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
 import { PROBE_DEFAULTS, realUsageFetch } from "../peer/usage-probe";
+import { readNetworkRecord } from "../setup/journal";
 import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
@@ -879,6 +881,7 @@ interface MachineRow {
   reason?: string;
   load: number[];
   agents: number;
+  network?: { kind: string; name?: string; address?: string };
   last_seen: string;
 }
 
@@ -893,8 +896,13 @@ async function list(v: Values, env: Record<string, string | undefined>, io: IO):
   if (r.machines.length === 0 && r.hosts.length === 0) io.stdout("no paired machines\n");
   for (const m of r.machines) {
     const why = m.reason !== undefined ? ` (${m.reason})` : "";
+    const where = m.network?.name ?? m.network?.address;
+    const network =
+      m.network !== undefined
+        ? `\tnetwork ${m.network.kind}${where !== undefined ? ` (${where})` : ""}`
+        : "";
     io.stdout(
-      `${m.name}\ttunnel ${m.tunnel}${why}\t${m.os} ${m.cores} cores\tload ${m.load.map((l) => l.toFixed(2)).join(" ")}\t${m.agents} agents\tlast seen ${m.last_seen}\n`,
+      `${m.name}\ttunnel ${m.tunnel}${why}\t${m.os} ${m.cores} cores\tload ${m.load.map((l) => l.toFixed(2)).join(" ")}\t${m.agents} agents\tlast seen ${m.last_seen}${network}\n`,
     );
   }
   for (const h of r.hosts.filter((h) => !r.machines.some((m) => m.name === h))) {
@@ -1578,6 +1586,12 @@ function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
   };
 }
 
+/** This machine's setup.json network record (the Network step), as the record carries it. */
+function peerNetwork(deps: PeerDeps) {
+  const network = readNetworkRecord(volleydHome(deps.env ?? {}, deps.home));
+  return network !== null ? { network } : {};
+}
+
 /** The `machine.schema.json` envelope for this machine, with the last doctor run's result. */
 export async function machineEnvelope(
   deps: PeerDeps,
@@ -1602,6 +1616,7 @@ export async function machineEnvelope(
         agents: await agentCount(deps),
         remote_port: cfg.remote_port,
         ...fleetFields(deps, cfg, doctorReport),
+        ...peerNetwork(deps),
         last_seen: deps.now().toISOString(),
       },
     }),

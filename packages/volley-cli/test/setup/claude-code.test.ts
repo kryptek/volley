@@ -187,11 +187,11 @@ describe("the Claude Code step", () => {
   });
 
   it("the whole run counts the name as a question and the hooks are not planned twice", async () => {
-    m.answers = [true, true, true, true, true, true, true, true, true];
-    m.typed = ["coord-main"];
+    m.answers = [true, true, true, true, true, true, true, true, true, true];
+    m.typed = ["no", "coord-main"];
     const r = await run([]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("(10 questions, 0 sign-ins, 0 sudo)");
+    expect(r.stdout).toContain("(12 questions, 0 sign-ins, 0 sudo)");
     expect(
       m.execCalls.filter(
         (a) =>

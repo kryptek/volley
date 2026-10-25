@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "box-a",
+  "wall_time": "2026-10-24T09:30:00.000Z",
+  "channel": "_system/machines",
+  "type": "machine",
+  "payload": {
+    "name": "box-a",
+    "os": "linux",
+    "cores": 16,
+    "tunnel": "up",
+    "load": [1.25, 0.9, 0.7],
+    "agents": 3,
+    "network": { "kind": "funnel", "address": "203.0.113.7" },
+    "last_seen": "2026-10-24T09:30:00.000Z"
+  }
+}

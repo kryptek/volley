@@ -31,7 +31,7 @@ import { BrokerVersionError } from "volley-cli/auth/version";
 import { defaultAuthDir } from "volley-cli/commands/auth";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
 import { countLiveAgents, probeAnonymous } from "volley-cli/setup/broker";
-import { readSetupInstall } from "volley-cli/setup/journal";
+import { readNetworkRecord, readSetupInstall } from "volley-cli/setup/journal";
 import { cmuxInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
@@ -5774,6 +5774,8 @@ export class Daemon {
       available === null
         ? undefined
         : { total_mb: Math.max(1, Math.round(total / (1024 * 1024))), available_pct: available };
+    // The Network step's record (setup.json): how this machine is reached from outside.
+    const network = readNetworkRecord(this.opts.home);
     const base: MachineRecord = {
       name,
       kind: "supervisor",
@@ -5785,6 +5787,7 @@ export class Daemon {
       agents: this.placedOn(name),
       ...(memory !== undefined ? { memory } : {}),
       uptime_s: Math.floor(uptime()),
+      ...(network !== null ? { network } : {}),
       last_seen: dateOf(this.time).toISOString(),
     };
     const report = this.localReport;
