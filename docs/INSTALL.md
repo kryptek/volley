@@ -54,7 +54,7 @@ Then, for the clone:
 
 ## What `volley setup` does
 
-Nine steps; each prints what it found and what it would change, diffs included, **before**
+Ten steps; each prints what it found and what it would change, diffs included, **before**
 changing anything, and is safe to rerun (a rerun reports each step `already done`). The volley-cli
 README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has every detail.
 
@@ -63,23 +63,27 @@ README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has eve
    check that both listeners refuse anonymous clients.
 3. **Accounts**: the `volleyd`, `desk` and `coordinator` logins and their credential files, the
    coordinator's login in the macOS keychain on a Mac, and a one-time admin token for the Desk.
-4. **Sign-ins**: Claude Code and GitHub, each in your browser when signed out.
-5. **Claude Code**: your coordinator name; the volley MCP server registered at user scope with
+4. **Network**: how you reach this machine from outside your network: Tailscale (installed and
+   signed in, its private name and address recorded), your own VPN's address, or none
+   ([below](#reach-it-from-outside-your-network)).
+5. **Sign-ins**: Claude Code and GitHub, each in your browser when signed out.
+6. **Claude Code**: your coordinator name; the volley MCP server registered at user scope with
    **no password in it** (it logs in with `coordinator.json` from the auth dir it names); the
    `/volley`, `/volley-issues` and `/wait` skills; the Volley hooks.
-6. **Terminal**: where volleyd starts agents here: cmux on a Mac that has it, else tmux.
-7. **Services**: volleyd and the Desk (`http://localhost:5199`) as services.
-8. **Phone**: a one-time sign-in QR for the Desk on your phone, when you let your network reach
+7. **Terminal**: where volleyd starts agents here: cmux on a Mac that has it, else tmux.
+8. **Services**: volleyd and the Desk (`http://localhost:5199`) as services.
+9. **Phone**: a one-time sign-in QR for the Desk on your phone, when you let your network reach
    the broker's WebSocket listener.
-9. **Test wave**: a 1-issue wave on a scratch private repository, `volley-hello-<4>`, followed
+10. **Test wave**: a 1-issue wave on a scratch private repository, `volley-hello-<4>`, followed
    until volleyd merged its PR (at most 15 minutes). The end prints the `gh repo delete …` line
    that removes it.
 
-**What it asks.** Three questions, each with a default, so Enter alone answers it:
+**What it asks.** Four questions, each with a default, so Enter alone answers it:
 
 | Question | Enter means | Decided up front by |
 | --- | --- | --- |
 | Let devices on your network reach the WebSocket listener (the Desk on a phone)? | yes | `--lan` / `--no-lan` (`--yes` alone: no) |
+| `Reach this machine from outside this network? [Tailscale (recommended) / my own VPN / no]` | Tailscale | `--network tailscale\|manual\|none` (`--yes` alone: no) |
 | `Coordinator name [coord-<this machine>]:` | the default shown | `--yes` takes the default |
 | `Run a 1-issue test wave now?` | yes | `--yes` runs it, `--no-first-wave` skips it |
 
@@ -121,6 +125,8 @@ curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
 | `--version vX.Y.Z` | Install this release tag (default: `$VOLLEY_VERSION`, else the latest tag). A rerun with another tag moves `~/.volley/src` to it |
 | `--source <dir>` | Use this Volley checkout instead of cloning one (CI tests its own) |
 | `--peer` | This machine joins a supervisor's fleet: no broker (mosquitto is neither installed nor checked), no Homebrew tap; runs `volley setup --peer` ([Add a bare machine](#add-a-bare-machine)) |
+| `--network <kind>` | `tailscale`, `manual` or `none`, passed to `volley setup --network` ([Reach it from outside your network](#reach-it-from-outside-your-network)). `tailscale` also installs Tailscale: on Linux from Tailscale's apt repository (`pkgs.tailscale.com`), under the same `sudo` as the other packages; on macOS `brew install --cask tailscale`. `--check` then lists `tailscale` too |
+| `--network-address <host-or-ip>` | With `--network manual`: this machine's address on your own VPN, passed to `volley setup` |
 | `--no-setup` | Stop before `volley setup`; it prints the command to run |
 | `--check` | Print each prerequisite as found or missing, and where Volley is; exit 1 if anything is missing. Changes nothing |
 | `--uninstall` | Remove the services, the commands, the `PATH` line and `~/.volley/src` ([below](#uninstalling---uninstall)) |
@@ -130,6 +136,23 @@ curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
 Exit status: 0 done, 1 `--check` found something missing (or a step failed), 2 a usage error or
 an unsupported platform (anything but macOS and Ubuntu/Debian, which it says before changing
 anything).
+
+## Reach it from outside your network
+
+At home, your phone reaches the Desk over your Wi-Fi. Away from it, Volley uses a private network
+you set up once, never a public listener, a relay or Tailscale Funnel:
+
+- **Tailscale** (the default): `install.sh --network tailscale` (or `volley setup --network
+  tailscale`) installs Tailscale and signs this machine in through a link it prints. Do the same
+  on every machine you pair (`install.sh --peer --network tailscale`), and install the Tailscale
+  app on your phone, signed in to the same account. Setup records this machine's Tailscale name
+  and address and prints the Desk's address on it: `on your private network: http://<address>:5199`.
+- **Your own VPN**: `volley setup --network manual --network-address <host-or-ip>`, the address
+  your VPN gives this machine (it must be one of this machine's addresses). Nothing is installed.
+- **Neither**: `--network none` (what `--yes` alone means) keeps the Desk on this network.
+
+`volley peer doctor` reports the choice as `network.private` (a warning when nothing is set up or
+Tailscale is signed out; the fix is `volley setup --step network`).
 
 ## Checking an install: `--check`
 
