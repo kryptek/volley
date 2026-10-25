@@ -329,6 +329,7 @@ describe("the coordinator role's entry points (SPEC §4.6.25)", () => {
       answer: "maybe",
       by: "owner",
       where,
+      desk_login: true,
     });
     expect(bad).toEqual({ refused: "a notice is answered open or dismiss, not 'maybe'" });
     const ok = await f.daemon.answerInboxItem("n-coordinator-link", {
@@ -336,7 +337,36 @@ describe("the coordinator role's entry points (SPEC §4.6.25)", () => {
       answer: "dismiss",
       by: "owner",
       where,
+      desk_login: true,
     });
     expect("item" in ok && ok.item.answered?.answer).toBe("dismiss");
+  });
+
+  it("a notice is the owner's: a wave worker on the mailbox is refused, the coordinator name answers", async () => {
+    const { f, topic, set } = await coordinatorFleet();
+    expect((await set({ coordinator: { machine: PEER } })).ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.session_url === LINK);
+    await eventually(() => f.daemon.inboxItem("n-coordinator-link") !== undefined);
+    const where = { kind: "terminal" as const };
+    const worker = await f.daemon.answerInboxItem("n-coordinator-link", {
+      version: 1,
+      answer: "dismiss",
+      by: "w1-implementer-1",
+      where,
+    });
+    expect(worker).toEqual({
+      refused:
+        "inbox item 'n-coordinator-link' is coord-test's own: only its owner answers it, not w1-implementer-1",
+    });
+    expect(f.daemon.inboxItem("n-coordinator-link")?.answered).toBeUndefined();
+    const owner = await f.daemon.answerInboxItem("n-coordinator-link", {
+      version: 1,
+      answer: "open",
+      by: "coord-test",
+      where,
+    });
+    expect("item" in owner && owner.item.answered?.answer).toBe("open");
   });
 });

@@ -6020,10 +6020,8 @@ export class Daemon {
     prev: CoordinatorRolePayload | null,
     next: CoordinatorRolePayload | null,
   ): Promise<void> {
-    const open = [...this.inbox.values()].filter(
-      (i) => i.kind === "notice" && i.answered === undefined,
-    );
-    const actions = noticesFor(prev, next, open);
+    const notices = [...this.inbox.values()].filter((i) => i.kind === "notice");
+    const actions = noticesFor(prev, next, notices);
     for (const id of actions.supersede) {
       const item = this.inbox.get(id);
       if (item === undefined || item.answered !== undefined) continue;
@@ -11438,12 +11436,20 @@ export class Daemon {
   }
 
   /**
-   * null when `by` may answer a picker or handoff; else the refusal. A coordinator session's own
-   * (`owner_only`) is answered only by that session's owner: its agent id, or the coordinator
-   * name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   * null when `by` may answer a picker, handoff or notice; else the refusal. A coordinator
+   * session's own (`owner_only`) is answered only by that session's owner: its agent id, or the
+   * coordinator name (VOLLEY_COORDINATOR) bound to it, as `guardMutation` reads a wave's owner.
+   * A notice is the owner's (SPEC §4.6.18): its coordinator name (`source.name`) or the agent
+   * bound to it; a Desk login never gets here.
    */
   private guardSessionAnswer(item: InboxItem, by: string): string | null {
-    if (!item.owner_only || (item.kind !== "picker" && item.kind !== "handoff")) return null;
+    if (!item.owner_only) return null;
+    if (item.kind === "notice") {
+      const owner = typeof item.source.name === "string" ? item.source.name : DAEMON_AGENT_ID;
+      if (this.actsAs(by, owner)) return null;
+      return `inbox item '${item.id}' is ${owner}'s own: only its owner answers it, not ${by}`;
+    }
+    if (item.kind !== "picker" && item.kind !== "handoff") return null;
     if (this.actsAs(item.agent_id, by)) return null;
     return `inbox item '${item.id}' is ${item.agent_id}'s own: only its owner answers it, not ${by}`;
   }

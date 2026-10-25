@@ -464,11 +464,6 @@ export interface Tunables {
     [key: string]: unknown;
   };
   /**
-   * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
-   * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
-   * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
-   */
-  /**
    * The coordinator role (SPEC §4.6.25): the machine it runs on (null: off) and whether a laptop
    * may host it; absent from a supervisor that predates it.
    */
@@ -478,6 +473,11 @@ export interface Tunables {
     allow_laptop?: boolean;
     [key: string]: unknown;
   };
+  /**
+   * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
+   * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
+   * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
+   */
   fleet?: {
     local_name?: string | null;
     /** Where managed clones live on every machine (`~` is that machine's home). */

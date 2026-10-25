@@ -33,17 +33,20 @@ export interface NoticeActions {
 export const RESTART_HINT = "Run `volley coordinator restart` (or Restart in Settings › Machines).";
 
 /**
- * What `prev` → `next` (null: the role off) opens and supersedes. `open` is the notices open now
- * (unanswered): only those are superseded, and one already saying the same (a volleyd restart
- * adopting the running session, a failure republished) is not opened again. Without `open`,
- * every notice the change would supersede is listed.
+ * What `prev` → `next` (null: the role off) opens and supersedes. `notices` is the notice items
+ * as they stand, answered or not: only the open (unanswered) ones are superseded, and one the
+ * owner was already shown (open, or answered other than `superseded`: a volleyd restart adopting
+ * the running session, a failure republished) is not opened again. Without `notices`, every
+ * notice the change would supersede is listed.
  */
 export function noticesFor(
   prev: CoordinatorRolePayload | null,
   next: CoordinatorRolePayload | null,
-  open?: readonly InboxItem[],
+  notices?: readonly InboxItem[],
 ): NoticeActions {
-  const isOpen = (id: string) => open === undefined || open.some((i) => i.id === id);
+  const isOpen = (id: string) =>
+    notices === undefined || notices.some((i) => i.id === id && i.answered === undefined);
+  const shown = (i: InboxItem) => i.answered === undefined || i.answered.answer !== "superseded";
   const supersede = new Set<string>();
   const opened: NoticeSpec[] = [];
   if (next === null) {
@@ -51,7 +54,8 @@ export function noticesFor(
   } else {
     const link = next.session_url;
     if (link !== undefined && link !== prev?.session_url) {
-      const same = open?.some((i) => i.id === NOTICE_LINK && i.pointers.link === link) === true;
+      const same =
+        notices?.some((i) => i.id === NOTICE_LINK && i.pointers.link === link && shown(i)) === true;
       if (!same) {
         supersede.add(NOTICE_LINK);
         supersede.add(NOTICE_FAILED);
@@ -66,7 +70,13 @@ export function noticesFor(
       }
     }
     if (next.state === "failed" && prev?.state !== "failed") {
-      const already = open?.some((i) => i.id === NOTICE_FAILED) === true;
+      // Open, or shown for this failure (opened once it began).
+      const already =
+        notices?.some(
+          (i) =>
+            i.id === NOTICE_FAILED &&
+            (i.answered === undefined || (shown(i) && i.opened_at >= next.since)),
+        ) === true;
       if (!already) {
         supersede.add(NOTICE_LINK);
         const why = next.last_error?.trim();

@@ -7,8 +7,8 @@
  * pill (`volleyd · working · 4s`, red when it is not running or absent), and
  * the `N need you` pill (click → go to the first). On the right: **Open
  * coordinator** (`coordinatorLink`: the coordinator role's link in a new tab,
- * else disabled with why; not in demo), the coordinators window toggle and the notification and chime switches
- * (volley-dash's settings).
+ * else disabled with why; not in demo), the coordinators window toggle and
+ * the notification and chime switches (volley-dash's settings).
  */
 import {
   Notification01Icon,

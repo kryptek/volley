@@ -97,6 +97,9 @@ export function CoordinatorCard(p: CoordinatorCardProps) {
         return false;
       }
       return true;
+    } catch (e) {
+      setError(String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -115,6 +118,8 @@ export function CoordinatorCard(p: CoordinatorCardProps) {
     try {
       const a = await p.ops.request("coordinator_restart");
       if (!a.ok) setError(a.error ?? "volleyd refused the restart");
+    } catch (e) {
+      setError(String(e));
     } finally {
       setBusy(false);
     }

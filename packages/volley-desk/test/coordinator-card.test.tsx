@@ -100,6 +100,25 @@ describe("the Coordinator card", () => {
     await waitFor(() => expect(calls.map((c) => c.op)).toEqual(["coordinator_restart"]));
   });
 
+  it("a rejected write or restart shows its error", async () => {
+    const t: ConfigTransport = {
+      identity: "desk-0123abcd",
+      send: vi.fn(async () => {
+        throw new Error("volleyd did not answer in time");
+      }),
+    };
+    const { ops } = fakeOps({
+      coordinator_restart: () => {
+        throw new Error("disconnected");
+      },
+    });
+    card({ transport: t, ops });
+    fireEvent.click(screen.getByRole("switch", { name: /coordinator/i }));
+    expect(await screen.findByText(/did not answer in time/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /restart/i }));
+    expect(await screen.findByText(/disconnected/)).toBeInTheDocument();
+  });
+
   it("Open is the role's link", () => {
     card();
     const a = screen.getByRole("link", { name: /^open$/i });

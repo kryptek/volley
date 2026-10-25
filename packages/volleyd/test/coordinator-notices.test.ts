@@ -73,6 +73,25 @@ describe("noticesFor (SPEC §4.6.25)", () => {
     });
   });
 
+  it("a volleyd restart does not reopen a notice the owner already answered", () => {
+    const answered = (id: string, link?: string, answer = "dismiss"): InboxItem => ({
+      ...openItem(id, link),
+      answered: { answer, by: "coord-test", where: { kind: "desk" }, at: AT },
+    });
+    expect(noticesFor(null, running(), [answered(NOTICE_LINK, LINK, "open")])).toEqual({
+      supersede: [],
+      open: [],
+    });
+    const { session_url: _, ...rest } = running();
+    const failed = { ...rest, state: "failed" as const, since: AT, last_error: "x" };
+    expect(noticesFor(null, failed, [answered(NOTICE_FAILED)]).open).toEqual([]);
+    // A later failure, or a link that was only superseded (never seen through), opens again.
+    const later = { ...failed, since: "2026-10-25T12:30:00.000Z" };
+    expect(noticesFor(null, later, [answered(NOTICE_FAILED)]).open).toHaveLength(1);
+    const superseded = answered(NOTICE_LINK, LINK, "superseded");
+    expect(noticesFor(null, running(), [superseded]).open).toHaveLength(1);
+  });
+
   it("failed opens n-coordinator-failed with the last error and supersedes the link notice", () => {
     const { session_url: _, ...rest } = running();
     const failed = { ...rest, state: "failed" as const, last_error: "claude: exited 1" };

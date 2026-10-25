@@ -15,8 +15,9 @@
  * nothing fires, so whatever needed you when the page loaded or the Desk
  * reconnected stays quiet, and so do the transient tiers of a resync.
  *
- * An item with a `link` (an owner-only `notice`, `inboxNotification`) opens it in a new tab when
- * its notification is clicked: the coordinator's new link, from the phone's lock screen.
+ * An item with a `link` (an owner-only `notice`, `inboxNotification`) opens
+ * it in a new tab when its notification is clicked: the coordinator's new
+ * link, from the phone's lock screen.
  */
 import { useEffect, useRef } from "react";
 import type { Tier } from "../attention";
@@ -36,12 +37,13 @@ export interface AttentionItem {
 
 /**
  * An inbox item as an attention item: owner-only items push to the phone (only the owner answers
- * them) until answered; a `notice` carries its link.
+ * them) until answered; a `notice` carries its link. The key names the opening (`id@opened_at`):
+ * a notice's id is fixed and reopened, so a new link is a new entry into `you`.
  */
 export function inboxNotification(i: InboxItem): AttentionItem {
   const link = i.kind === "notice" ? i.pointers.link : undefined;
   return {
-    key: `inbox:${i.id}`,
+    key: `inbox:${i.id}@${i.opened_at}`,
     tier: i.owner_only && i.answered === undefined ? "you" : "none",
     title: `Needs you · ${i.title}`,
     body: i.question,

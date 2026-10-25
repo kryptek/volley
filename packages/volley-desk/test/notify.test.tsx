@@ -245,7 +245,7 @@ describe("an owner-only notice's notification (SPEC §4.6.18)", () => {
 
   it("carries the title and the link; an answered one is not pushed", () => {
     expect(inboxNotification(notice)).toEqual({
-      key: "inbox:n-coordinator-link",
+      key: "inbox:n-coordinator-link@2026-10-25T12:00:00.000Z",
       tier: "you",
       title: "Needs you · Coordinator on box-a: open it",
       body: LINK,
@@ -267,5 +267,23 @@ describe("an owner-only notice's notification (SPEC §4.6.18)", () => {
     const n = notificationCtor.mock.instances[0] as { onclick: (() => void) | null };
     n.onclick?.();
     expect(open).toHaveBeenCalledWith(LINK, "_blank", "noopener");
+  });
+
+  it("a notice reopened with a new link in the same update pushes again", () => {
+    const { rerender } = setup(on);
+    rerender({ items: [inboxNotification(notice)], s: on });
+    expect(notificationCtor).toHaveBeenCalledTimes(1);
+    // superseded and reopened on the same retained topic: the store delivers only the new opening
+    const NEW = "https://claude.ai/code/session_fake02";
+    const reopened: InboxItem = {
+      ...notice,
+      version: 3,
+      question: NEW,
+      pointers: { link: NEW },
+      opened_at: "2026-10-25T12:05:00.000Z",
+    };
+    rerender({ items: [inboxNotification(reopened)], s: on });
+    expect(notificationCtor).toHaveBeenCalledTimes(2);
+    expect(notificationCtor.mock.calls[1]?.[1]).toMatchObject({ body: NEW });
   });
 });
