@@ -217,9 +217,10 @@ describe("Layer 2: vm-linux.sh", () => {
       new RegExp(
         `^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --yes --no-lan --simulated$`,
       ),
-      new RegExp(`^ssh ${vm}: .*volley setup --check --json$`),
+      // The check sees the sign-ins and services setup made: under the simulator too.
+      new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
       new RegExp(`^ssh ${vm}: sudo reboot$`),
-      new RegExp(`^ssh ${vm}: .*volley setup --check --json$`),
+      new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
       new RegExp(`^ssh ${vm}: .*systemctl --user is-active --quiet volleyd\\.service$`),
       new RegExp(`^ssh ${vm}: .*systemctl --user is-active --quiet volley-desk\\.service$`),
       new RegExp(`^ssh ${vm}: .*volley sub --pattern volley/default/volleyd/status`),

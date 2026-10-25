@@ -262,7 +262,8 @@ setup_volley() {
   fi
   on "$addr" 'cat ~/.volley/volleyd/setup-metrics.json' >"$OUT/setup-metrics.json" 2>/dev/null ||
     fail "setup wrote no setup-metrics.json on $addr"
-  on "$addr" 'volley setup --check --json' >"$OUT/check-setup.json" 2>>"$TRANSCRIPT" ||
+  # Under the simulator, like setup: its sign-ins and the services' env are the simulated ones.
+  on_sim "$addr" 'volley setup --check --json' >"$OUT/check-setup.json" 2>>"$TRANSCRIPT" ||
     fail "volley setup --check exited non-zero after setup (check-setup.json)"
 }
 
@@ -272,7 +273,7 @@ check_after_reboot() {
   local addr=$1 t0
   t0=$(now_ms)
   # shellcheck disable=SC2317 # called through poll
-  check() { on "$addr" 'volley setup --check --json' >"$OUT/check.json" 2>>"$TRANSCRIPT"; }
+  check() { on_sim "$addr" 'volley setup --check --json' >"$OUT/check.json" 2>>"$TRANSCRIPT"; }
   poll 120 check || fail "volley setup --check was not green within 2 min of the reboot (check.json)"
   timing reboot_check_ms $(($(now_ms) - t0))
 }
