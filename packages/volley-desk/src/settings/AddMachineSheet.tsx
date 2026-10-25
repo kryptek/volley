@@ -14,6 +14,12 @@
  * The passwords are masked, go to volleyd only (its admin channel, which no
  * other account reads), and are dropped from the form once a run starts: a
  * retry asks for them again. The sheet cannot be closed while a run is going.
+ * volleyd uses the box's password once, to install the supervisor's key there,
+ * and every later step signs in with the key.
+ *
+ * `AddMachineBody` is the sheet's content in a `frame` of the caller's
+ * (Getting started › Your machines embeds it with the sign-in already chosen,
+ * `initialAuth`); `AddMachineSheet` frames it in a `MachineSheet`.
  */
 import { type ReactNode, useId, useState } from "react";
 import type { MachineAddAnswer, MachineAddRequest, PeerOps } from "../store/peerOps";
@@ -74,19 +80,46 @@ const GLYPH: Record<StepView["state"], string> = {
   failed: "✗",
 };
 
-export function AddMachineSheet({
-  ops,
-  onClose,
-  signIn,
-}: {
+/** What frames the sheet's content: its label, whether it may close now, and the content. */
+export type AddMachineFrame = (p: {
+  label: string;
+  closable: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) => ReactNode;
+
+const sheetFrame: AddMachineFrame = ({ label, closable, onClose, children }) => (
+  <MachineSheet label={label} onClose={onClose} closable={closable}>
+    {children}
+  </MachineSheet>
+);
+
+export interface AddMachineProps {
   ops: PeerOps;
   onClose: () => void;
   /** The Machines window's remote Claude sign-in button for a machine. */
   signIn?: ((machine: string) => ReactNode) | undefined;
-}) {
+  /** How volleyd's first ssh signs in, chosen before the form opens (default: password). */
+  initialAuth?: "key" | "password";
+  /** The run ended with the machine paired. */
+  onAdded?: (answer: Extract<MachineAddAnswer, { ok: true }>) => void;
+}
+
+export function AddMachineSheet(p: AddMachineProps) {
+  return <AddMachineBody {...p} frame={sheetFrame} />;
+}
+
+export function AddMachineBody({
+  ops,
+  onClose,
+  signIn,
+  initialAuth = "password",
+  onAdded,
+  frame: Frame,
+}: AddMachineProps & { frame: AddMachineFrame }) {
   const id = useId();
   const [address, setAddress] = useState("");
-  const [how, setHow] = useState<"password" | "key">("password");
+  const [how, setHow] = useState<"password" | "key">(initialAuth);
   const [password, setPassword] = useState("");
   const [key, setKey] = useState("");
   const [sudo, setSudo] = useState("");
@@ -124,6 +157,7 @@ export function AddMachineSheet({
     setPhase({ k: "running" });
     const a = await ops.machineAdd(req, (r) => setRows((rs) => [...rs, r]));
     setPhase(a.ok ? { k: "done", answer: a } : { k: "failed", error: a.error });
+    if (a.ok) onAdded?.(a);
   };
 
   const running = phase.k === "running";
@@ -131,7 +165,7 @@ export function AddMachineSheet({
 
   if (phase.k === "form") {
     return (
-      <MachineSheet label={label} onClose={onClose}>
+      <Frame label={label} closable onClose={onClose}>
         <p className="dim">
           A box with ssh and nothing else (macOS or Ubuntu/Debian): volleyd installs Volley there,
           pairs it and checks it, as <code className="mono">volley machine add</code> does.
@@ -184,9 +218,14 @@ export function AddMachineSheet({
                 className="recessed"
                 type="password"
                 autoComplete="off"
+                aria-describedby={`${id}-password-hint`}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
+              <p id={`${id}-password-hint`} className="s-hint m-add-hint">
+                Volley swaps it for a key and forgets the password: it signs in once to install this
+                machine's key there, and every later step uses the key.
+              </p>
             </>
           ) : (
             <>
@@ -240,13 +279,13 @@ export function AddMachineSheet({
             </button>
           </div>
         </form>
-      </MachineSheet>
+      </Frame>
     );
   }
 
   const views = stepViews(rows, phase.k);
   return (
-    <MachineSheet label={label} onClose={onClose} closable={!running}>
+    <Frame label={label} closable={!running} onClose={onClose}>
       <div aria-live="polite">
         <ol className="m-add-steps" aria-label="Steps">
           {views.map((v, i) => (
@@ -285,7 +324,7 @@ export function AddMachineSheet({
         </>
       )}
       {phase.k === "done" && <Ready answer={phase.answer} signIn={signIn} onClose={onClose} />}
-    </MachineSheet>
+    </Frame>
   );
 }
 
