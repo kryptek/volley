@@ -14,6 +14,7 @@
  * probed (volleyd refuses it), so its clones stay a path in the wave file. Each repository added is
  * listed under the form with what GitHub said of it, and goes into the summary's `repos`.
  */
+import "../../styles/agent.css";
 import { useEffect, useId, useMemo, useState } from "react";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import {
