@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
+import { networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
 import { managedClonePath, originToSlug, sameSlug } from "volleyd/repos";
+import { volleydHome } from "../auth/context";
 import type { PeerExec } from "../commands/peer";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { type NetworkRecord, readNetworkRecord } from "../setup/journal";
+import { TAILSCALE_APP_CLI, type TailscaleStatus, parseTailscaleStatus } from "../setup/network";
 import { claudeChecks, isRepoTrusted, loginIdentity, parseClaudeStatus } from "./checks/claude";
 import { canonicalSlug, ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import {
@@ -16,6 +22,7 @@ import {
   vmStatAvailablePct,
   worktreeRoot,
 } from "./checks/machine";
+import { networkChecks } from "./checks/network";
 import {
   type AccountProfile,
   accountProfilesCheck,
@@ -259,6 +266,16 @@ export interface Facts {
   };
   /** The machine's own Claude profile (provision.ts). */
   profile: ProfileFacts;
+  /** The private network (checks/network.ts): setup.json's record and what the machine says now. */
+  network: {
+    record: NetworkRecord | null;
+    /** `tailscale status --json` (a `tailscale` record only); null when Tailscale is missing. */
+    tailscale: TailscaleStatus | null;
+    /** The interface the manual address is bound to (a `manual` record only), or null. */
+    bound: string | null;
+    /** A paired machine (`~/.volley/peer.json`): its Network step runs under `--peer`. */
+    peer: boolean;
+  };
 }
 
 /** sha256 of `<dir>/bun.lock`; null without one. */
@@ -318,6 +335,11 @@ export interface DoctorDeps {
   env?: Record<string, string | undefined>;
   /** The Claude account profiles' root (default `<home>/.volley/claude`). */
   claudeRoot?: string;
+  /** This machine's interfaces (`network.private`'s manual address). Unset: `os.networkInterfaces`. */
+  interfaces?: () => Record<
+    string,
+    readonly { address: string; family: string; internal: boolean }[] | undefined
+  >;
 }
 
 export interface DoctorOptions {
@@ -755,6 +777,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     opts.profile ?? defaultTarget(),
   );
 
+  const network = await gatherNetwork(deps, sh);
+
   return {
     platform: deps.platform,
     shell,
@@ -805,7 +829,49 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       },
     },
     profile,
+    network,
   };
+}
+
+/** The Network step's record (setup.json) and whether the machine is reachable that way now. */
+async function gatherNetwork(
+  deps: DoctorDeps,
+  sh: (argv: string[]) => Promise<{ code: number; stdout: string }>,
+): Promise<Facts["network"]> {
+  const record = readNetworkRecord(volleydHome(deps.env ?? {}, deps.home));
+  const peer = existsSync(join(deps.home, ".volley", "peer.json"));
+  let tailscale: TailscaleStatus | null = null;
+  let bound: string | null = null;
+  if (record?.kind === "tailscale") {
+    let r = await sh(["tailscale", "status", "--json"]);
+    if (r.code === 127 && deps.platform === "darwin" && existsSync(TAILSCALE_APP_CLI)) {
+      r = await sh([TAILSCALE_APP_CLI, "status", "--json"]);
+    }
+    tailscale = r.code === 127 ? null : parseTailscaleStatus(r.stdout);
+    // Installed, but tailscaled does not answer: not signed in, as far as anyone here can tell.
+    if (r.code !== 127 && tailscale === null) {
+      tailscale = { state: "tailscaled not answering", running: false, name: null, address: null };
+    }
+  }
+  if (record?.kind === "manual" && record.address !== undefined) {
+    const host = record.address;
+    let addrs: string[] = [host];
+    if (isIP(host) === 0) {
+      try {
+        addrs = (await lookup(host, { all: true })).map((a) => a.address);
+      } catch {
+        addrs = [];
+      }
+    }
+    const ifs = (deps.interfaces ?? networkInterfaces)();
+    for (const [name, list] of Object.entries(ifs)) {
+      if ((list ?? []).some((a) => !a.internal && addrs.includes(a.address))) {
+        bound = name;
+        break;
+      }
+    }
+  }
+  return { record, tailscale, bound, peer };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -822,6 +888,7 @@ export function checksOf(f: Facts): Check[] {
     ...profileChecks(f.profile),
     accountProfilesCheck(f),
     ...machineChecks(f),
+    ...networkChecks(f),
   ].map((c) => ({ ...c, detail: c.detail.slice(0, 200) }));
 }
 

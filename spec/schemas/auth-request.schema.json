@@ -182,12 +182,22 @@
               "description": "repo_probe: the adopted-clone path read on the machine, as repo_add's paths take it (absolute, no `..` segment, no control character)."
             },
             "step": {
-              "enum": ["detect", "security", "accounts", "services", "phone"],
+              "enum": ["detect", "security", "accounts", "network", "services", "phone"],
               "description": "setup_apply: the `volley setup` step to apply."
             },
             "lan": {
               "type": "boolean",
               "description": "setup_plan / setup_apply: whether devices on the LAN may reach the broker's WebSocket listener, as `volley setup --lan` / `--no-lan`; omitted, the security step keeps what the broker config has."
+            },
+            "network": {
+              "enum": ["tailscale", "manual", "none"],
+              "description": "setup_plan / setup_apply: how this machine is reached from outside its network, as `volley setup --network`; omitted, the network step keeps setup.json's record, else plans tailscale."
+            },
+            "network_address": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "description": "setup_plan / setup_apply with network `manual`: this machine's address on the owner's own VPN (a host or IP), as `volley setup --network-address`; it must be one of this machine's."
             },
             "repair": {
               "type": "boolean",

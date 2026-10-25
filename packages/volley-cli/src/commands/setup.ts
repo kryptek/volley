@@ -21,11 +21,13 @@ import { ghRepoDeleteLine } from "../setup/first-wave-repo";
 import {
   appendSetupLog,
   readDeskPort,
+  readNetworkRecord,
   readSetupInstall,
   setupLogFile,
   writeSetupInstall,
 } from "../setup/journal";
 import { SetupMeter, completeLine, setupMetricsFile, writeSetupMetrics } from "../setup/metrics";
+import { NETWORK_KINDS, isNetworkKind, planNetwork, privateDeskLine } from "../setup/network";
 import { peerBrokerUrl, planPeerService } from "../setup/peer-service";
 import { planServices } from "../setup/services";
 import { planSignin, simulatedExec } from "../setup/signin";
@@ -47,7 +49,7 @@ import { DESK_PORT } from "./desk-serve";
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
 /**
- * `volley setup`: the first-run (and repair) wizard. Nine steps, each planned (what it found,
+ * `volley setup`: the first-run (and repair) wizard. Ten steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
  *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
@@ -56,17 +58,19 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Sign-ins  Claude Code and GitHub signed in (a browser each), the checkout readable by
+ *   4. Network   how this machine is reached from outside its network: Tailscale (installed and
+ *                signed in), the person's own VPN (`manual`), or none; recorded in setup.json
+ *   5. Sign-ins  Claude Code and GitHub signed in (a browser each), the checkout readable by
  *                Claude Code (`permissions.additionalDirectories`)
- *   5. Claude Code  the coordinator name, the volley MCP server registered without a secret,
+ *   6. Claude Code  the coordinator name, the volley MCP server registered without a secret,
  *                the skills, the hooks
- *   6. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
+ *   7. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
  *                socket checked the way the service reaches it) or tmux, put on record in
  *                config.yaml (`fleet.local_terminal`) and setup.json
- *   7. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *   8. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
- *   8. Phone     a one-time steer sign-in link as a QR code
- *   9. Test wave  a 1-issue wave on a scratch private repository (or `--repo`), followed until
+ *   9. Phone     a one-time steer sign-in link as a QR code
+ *  10. Test wave  a 1-issue wave on a scratch private repository (or `--repo`), followed until
  *                volleyd merged its PR (first-wave.ts); `--simulated` against volley-sim's fakes
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
@@ -78,6 +82,7 @@ const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],
   ["accounts", planAccounts],
+  ["network", planNetwork],
   ["signin", planSignin],
   ["claude-code", planClaudeCode],
   ["terminal", planTerminal],
@@ -88,12 +93,13 @@ const STEPS: [StepName, Planner][] = [
 
 /**
  * `volley setup --peer`: a machine that joins a supervisor's fleet (`install.sh --peer`, `volley
- * machine add`). No broker, accounts, Desk or phone of its own: the sign-ins, Claude Code's
- * profile (the skills, the hooks at the tunnel; no coordinator), the Terminal, and `volley peer
- * run` as the service in place of volleyd.
+ * machine add`). No broker, accounts, Desk or phone of its own: the sign-ins, the Network,
+ * Claude Code's profile (the skills, the hooks at the tunnel; no coordinator), the Terminal, and
+ * `volley peer run` as the service in place of volleyd.
  */
 const PEER_STEPS: [StepName, Planner][] = [
   ["signin", planSignin],
+  ["network", planNetwork],
   ["claude-code", planClaudeCode],
   ["terminal", planTerminal],
   ["peer-service", planPeerService],
@@ -261,6 +267,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         "show-email": { type: "boolean" },
         lan: { type: "boolean" },
         "no-lan": { type: "boolean" },
+        network: { type: "string" },
+        "network-address": { type: "string" },
         step: { type: "string", multiple: true },
         dir: { type: "string" },
         layout: { type: "string" },
@@ -389,6 +397,17 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     io.stderr("volley setup: --lan and --no-lan contradict each other\n");
     return EXIT.USAGE;
   }
+  const network = str("network");
+  if (network !== undefined && !isNetworkKind(network)) {
+    io.stderr(`volley setup: --network must be one of ${NETWORK_KINDS.join(", ")}\n`);
+    return EXIT.USAGE;
+  }
+  if (str("network-address") !== undefined && network !== "manual") {
+    io.stderr(
+      "volley setup: --network-address is your own VPN's address for this machine: it goes with --network manual\n",
+    );
+    return EXIT.USAGE;
+  }
 
   // The broker: --broker-url, else the env's, else the one the last finished run used.
   // A peer's: the tunnel `volley peer join` sets up (peer.json's port, else its default).
@@ -437,6 +456,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     repair: values.repair === true,
     yes: values.yes === true,
     ...(values.lan === true ? { lan: true } : values["no-lan"] === true ? { lan: false } : {}),
+    ...(isNetworkKind(network) ? { network } : {}),
+    ...(str("network-address") !== undefined
+      ? { networkAddress: str("network-address") as string }
+      : {}),
     deskHost: str("desk-host") ?? deps.lanHost(),
     deskPort: Number(portText),
     ...(check ? { check: true } : {}),
@@ -600,10 +623,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.OK;
   }
   writeSetupInstall(ctx, metricsFile);
+  const reach = ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome);
   io.stdout(
     [
       "",
       finished,
+      privateDeskLine(ctx.deskHost, ctx.deskPort, reach) ??
+        `Desk: http://${ctx.deskHost.includes(":") ? `[${ctx.deskHost}]` : ctx.deskHost}:${ctx.deskPort}`,
       ...(ctx.firstWaveScratch !== undefined
         ? [
             `The test wave's scratch repository is ${ctx.firstWaveScratch}: delete it with \`${ghRepoDeleteLine(ctx.firstWaveScratch)}\`.`,
@@ -627,7 +653,7 @@ export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
        volley setup --check [--json] [--step <name>]...
        volley setup --peer [--yes] [--check] [--step <name>]...
 
-First-run (and repair) wizard: nine steps, each showing what it found and what it will change
+First-run (and repair) wizard: ten steps, each showing what it found and what it will change
 before changing anything.
 
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
@@ -641,26 +667,35 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Sign-ins  Claude Code and GitHub signed in (each opens your browser: \`claude auth
+  4. Network   how this machine is reached from outside your network (--network, else asked
+               once: "Reach this machine from outside this network? [Tailscale (recommended) /
+               my own VPN / no]"; --yes alone means no): tailscale installs Tailscale (macOS:
+               brew install --cask tailscale; Linux: needs sudo, so install.sh --network
+               tailscale installs it, or the step prints the command) and signs it in
+               (\`tailscale up\` prints a link to open), then records its MagicDNS name and
+               address in setup.json; manual records your own VPN's address for this machine
+               (--network-address; it must be one of this machine's); none records that. Never
+               a public listener, a relay or Tailscale Funnel
+  5. Sign-ins  Claude Code and GitHub signed in (each opens your browser: \`claude auth
                login\`, \`gh auth login --web\` then \`gh auth setup-git\`), and Claude Code
                allowed to read this checkout (permissions.additionalDirectories, the old
                settings.json backed up); skipped under --yes with nobody at the terminal
-  5. Claude Code  the coordinator name (asked once, saved in setup.json), the volley MCP server
+  6. Claude Code  the coordinator name (asked once, saved in setup.json), the volley MCP server
                registered at user scope with no password in it (its login is coordinator.json
                in the auth dir it names; an entry with settings of your own is left as is),
                the volley, volley-issues and volley-wait skills, the Volley hooks
-  6. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
+  7. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
                way volleyd's service reaches it; the socket password it needs is asked for,
                hidden), else tmux (stops, printing the install line, when tmux is missing);
                recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
-  7. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+  8. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
                PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
                --user), the Volley hooks for coordinator sessions (your status line keeps
                working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
                (stops if another program listens on that port)
-  8. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
+  9. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
-  9. Test wave a 1-issue test wave, asked once ("Run a 1-issue test wave now?", Enter: yes):
+  10. Test wave a 1-issue test wave, asked once ("Run a 1-issue test wave now?", Enter: yes):
                a scratch private repository volley-hello-<4> (gh repo create), a README, one
                issue, a release branch, \`volley repo add … --wait\`, .volley/waves/hello-<4>.yaml
                (volleyd validate, volleyd run --owner <coordinator>; every run its own wave),
@@ -673,10 +708,10 @@ issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log, and every r
 time, questions, sign-ins, sudo prompts, each step's time) to $VOLLEYD_HOME/setup-metrics.json.
 
 --peer sets up a machine that joins a supervisor's fleet (\`install.sh --peer\`, \`volley machine
-add\`): no broker, accounts, Desk or phone of its own. Its steps: Sign-ins, Claude Code (the
-profile only: the skills, and the hooks for the tunnel \`volley peer join\` sets up; no coordinator
-name, no MCP registration), Terminal, and Peer service (\`volley peer run\` as the user service in
-place of volleyd; skipped until the machine is paired, since join installs it).
+add\`): no broker, accounts, Desk or phone of its own. Its steps: Sign-ins, Network, Claude Code
+(the profile only: the skills, and the hooks for the tunnel \`volley peer join\` sets up; no
+coordinator name, no MCP registration), Terminal, and Peer service (\`volley peer run\` as the
+user service in place of volleyd; skipped until the machine is paired, since join installs it).
 
 --check plans every step without changing or asking anything and prints each as done, pending
 (with the changes a run would make), blocked (and why) or skipped (and why); it exits 0 only
@@ -692,9 +727,13 @@ Options:
   --show-email         The Sign-ins step names the Claude login's e-mail
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
-  --step <name>        Only this step (repeatable): detect, security, accounts, signin,
-                       claude-code, terminal, services, phone, first-wave (--peer: signin,
-                       claude-code, terminal, peer-service)
+  --network <kind>     tailscale | manual | none: how this machine is reached from outside
+                       your network (default: the last run's, else asked; none under --yes)
+  --network-address <host-or-ip>
+                       With --network manual: this machine's address on your own VPN
+  --step <name>        Only this step (repeatable): detect, security, accounts, network,
+                       signin, claude-code, terminal, services, phone, first-wave (--peer:
+                       signin, network, claude-code, terminal, peer-service)
   --no-first-wave      Skip the test wave (run it later: volley setup --step first-wave)
   --repo <path>        The test wave on this clone (its origin's repository) instead of a
                        scratch repository

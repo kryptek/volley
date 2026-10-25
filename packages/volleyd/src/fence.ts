@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, posix, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
 import { PMSET_BATT_ARGV } from "volley-cli/machine/laptop";
+import { isTailscaleCommand } from "volley-cli/setup/network";
 import { COMPACT_MAX, COMPACT_MIN } from "./claude/context-window";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
 import { parseSigninEntry } from "./claude/signin-entry";
@@ -215,6 +216,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     bash <repo>/packages/volley-hooks/scripts/install.sh [--dry-run]
  *     <bun> <repo>/packages/volleyd/src/cli.ts install --broker-url mqtt://… --dry-run (the
  *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
+ *     tailscale (on PATH, or /Applications/Tailscale.app/Contents/MacOS/Tailscale) version |
+ *       status --json | ip -4 | up · brew install --cask tailscale (the Network step; never
+ *       `tailscale funnel`, `tailscale serve`, an `up` flag, or `sudo tailscale up`)
  *   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
  *   sudo, or the keychain (the logged-in session's): those stay terminal-only.
  *
@@ -1347,7 +1351,8 @@ function setupVerdict(argv: readonly string[], t: SetupFenceInputs, cwd?: string
       argv[5] === "--dry-run") ||
     (same(argv, [t.bun, "run", "build"]) &&
       t.repoRoot !== null &&
-      cwd === repo("packages", "volley-desk"));
+      cwd === repo("packages", "volley-desk")) ||
+    isTailscaleCommand(argv, { sudo: false });
   return ok ? ALLOW : deny(`${line.slice(0, 60)} (not a setup command volleyd runs for the Desk)`);
 }
 

@@ -634,6 +634,13 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     [["bash", hooks, "--dry-run"]],
     [[inputs.bun, volleydCli, "install", "--broker-url", "mqtt://127.0.0.1:1883", "--dry-run"]],
     [[inputs.bun, "run", "build"], desk],
+    // The Network step: Tailscale's version, status, address and sign-in; its macOS install.
+    [["tailscale", "version"]],
+    [["tailscale", "status", "--json"]],
+    [["tailscale", "ip", "-4"]],
+    [["tailscale", "up"]],
+    [["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "up"]],
+    [["brew", "install", "--cask", "tailscale"]],
   ];
   const SETUP_DENIED: [string[], string?][] = [
     // No setup step runs it (the accounts step issues the token in-process; admin_token runs it
@@ -658,6 +665,12 @@ describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup to
     [["sudo", "systemctl", "restart", "mosquitto"]],
     [["sudo", "snap", "restart", "mosquitto"]],
     [["sudo", "volley", "setup"]],
+    [["sudo", "tailscale", "up"]],
+    // Never exposed publicly, and never Tailscale's other settings.
+    [["tailscale", "funnel", "443"]],
+    [["tailscale", "serve", "5199"]],
+    [["tailscale", "up", "--ssh"]],
+    [["tailscale", "set", "--ssh"]],
     // The keychain is a terminal's (the logged-in session's).
     [["security", "find-generic-password", "-s", "volley-broker", "-a", "coordinator", "-w"]],
     [["security", "-i"]],

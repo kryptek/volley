@@ -691,6 +691,85 @@ describe("--check", () => {
   });
 });
 
+describe("--network: how the machine is reached from outside its network", () => {
+  test("Linux --network tailscale: Tailscale's apt repository under the one sudo, then apt install", () => {
+    const w = world(
+      "ubuntu",
+      LINUX_ALL.filter((t) => t !== "git"),
+    );
+    const r = run(w, ["--no-setup", "--network", "tailscale"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "sudo -v")).toEqual(["sudo -v"]);
+    expect(r.out).toContain(
+      "add Tailscale's apt repository (pkgs.tailscale.com) and install tailscale",
+    );
+    expect(has(r, "curl -fsSL https://pkgs.tailscale.com/")).toEqual([
+      expect.stringContaining("https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg -o "),
+      expect.stringContaining(
+        "https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list -o ",
+      ),
+    ]);
+    expect(has(r, "sudo tee")).toContain("sudo tee /etc/apt/sources.list.d/tailscale.list");
+    expect(has(r, "apt-get install")).toEqual([
+      "apt-get install -y git",
+      "apt-get install -y tailscale",
+    ]);
+    // Installed now: a rerun asks for nothing.
+    const again = run(w, ["--no-setup", "--network", "tailscale"]);
+    expect(has(again, "sudo")).toEqual([]);
+    expect(has(again, "curl -fsSL https://pkgs.tailscale.com/")).toEqual([]);
+  });
+
+  test("Debian reads Tailscale's repository by its codename", () => {
+    const w = world("debian", LINUX_ALL);
+    const r = run(w, ["--no-setup", "--network=tailscale"]);
+    expect(r.code).toBe(0);
+    expect(
+      has(r, "curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg"),
+    ).toHaveLength(1);
+  });
+
+  test("without --network (or with manual or none) nothing of Tailscale's is installed or checked", () => {
+    for (const args of [[], ["--network", "none"], ["--network", "manual"]]) {
+      const w = world("ubuntu", LINUX_ALL);
+      const r = run(w, ["--no-setup", ...args]);
+      expect(r.code).toBe(0);
+      expect(has(r, "curl -fsSL https://pkgs.tailscale.com/")).toEqual([]);
+      expect(has(r, "sudo")).toEqual([]);
+      expect(run(w, ["--check", ...args]).out).not.toContain("tailscale");
+    }
+  });
+
+  test("macOS --network tailscale: brew install --cask tailscale", () => {
+    const w = world("macos-arm64", MAC_ALL);
+    const r = run(w, ["--no-setup", "--network", "tailscale"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "brew install --cask")).toEqual(["brew install --cask tailscale"]);
+  });
+
+  test("--check lists tailscale only with --network tailscale, found or missing", () => {
+    const w = world("ubuntu", LINUX_ALL);
+    const missing = run(w, ["--check", "--network", "tailscale"]);
+    expect(missing.code).toBe(1);
+    expect(missing.out).toMatch(/missing\s+tailscale/);
+    const ok = world("ubuntu", [...LINUX_ALL, "tailscale"]);
+    const found = run(ok, ["--check", "--network", "tailscale"]);
+    expect(found.out).toMatch(/found\s+tailscale/);
+  });
+
+  test("the flags are passed to volley setup; a bad kind or a stray address is a usage error", () => {
+    const w = world("ubuntu", LINUX_ALL, { VOLLEY_INSTALL_TTY: "/dev/null" });
+    const r = run(w, ["--network", "manual", "--network-address", "192.0.2.10"]);
+    expect(r.calls.at(-1)).toBe(
+      `bun ${cli(src(w), "volley-cli")} setup --network manual --network-address 192.0.2.10`,
+    );
+    const peer = run(w, ["--peer", "--network", "none"]);
+    expect(peer.calls.at(-1)).toBe(`bun ${cli(src(w), "volley-cli")} setup --peer --network none`);
+    expect(run(w, ["--network", "funnel"]).code).toBe(2);
+    expect(run(w, ["--network-address", "192.0.2.10"]).code).toBe(2);
+  });
+});
+
 describe("--uninstall", () => {
   function installed(platform: Platform, env: Record<string, string> = {}) {
     const w = world(platform, platform.startsWith("macos") ? MAC_ALL : LINUX_ALL, env);

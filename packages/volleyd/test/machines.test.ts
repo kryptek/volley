@@ -1023,6 +1023,24 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
     expect(schemaErrors("readiness.schema.json", v)).toEqual([]);
   });
 
+  it("its own record carries setup.json's network record from the next heartbeat on", async () => {
+    const network = {
+      kind: "tailscale",
+      name: "supervisor.example.ts.net",
+      address: "100.64.0.1",
+    };
+    writeFileSync(join(env.home, "setup.json"), JSON.stringify({ network }));
+    await clock.advance(DAEMON_DEFAULTS.machine_heartbeat_ms);
+    await daemon.tick();
+    await eventually(async () => {
+      const r = (await env.retained(machineTopic(LOCAL))) as { payload: MachineRecord } | null;
+      return r?.payload.network?.kind === "tailscale";
+    });
+    const own = (await env.retained(machineTopic(LOCAL))) as { payload: MachineRecord };
+    expect(own.payload.network).toEqual(network);
+    expect(schemaErrors("machine.schema.json", own)).toEqual([]);
+  });
+
   it("its usage is its best login's 5-hour window: work at 12% beats primary at 95%", async () => {
     mkdirSync(join(claudeRoot, "work"), { recursive: true });
     writeFileSync(
