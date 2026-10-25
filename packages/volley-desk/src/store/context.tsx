@@ -179,7 +179,8 @@ export async function fetchDeskConfig(
     const ws = body.ws_url;
     return {
       broker: { host, ws_port: port },
-      ...(typeof ws === "string" && /^wss?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?\/?$/.test(ws)
+      ...(typeof ws === "string" &&
+      /^wss?:\/\/([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?\/?$/.test(ws)
         ? { ws_url: ws }
         : {}),
     };

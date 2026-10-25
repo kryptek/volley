@@ -14,12 +14,12 @@ import { installedBrokerUrl, withoutLogin } from "../peer/profile-checks";
 import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
 import { withSimulator } from "./first-wave";
-import { deskBrokerHost, readNetworkRecord } from "./journal";
+import { deskBrokerHost, readDeskPrivateUrl, readNetworkRecord } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
 import { serviceEnv, servicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
-import { planServeChange } from "./tailscale-serve";
+import { planServeChange, privateWsUrl } from "./tailscale-serve";
 import { planCmux } from "./terminal";
 
 export { DESK_STAMP, deskStamp } from "./desk-build";
@@ -562,15 +562,33 @@ async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise
   let wsUrl: string | null = null;
   ctx.deskPrivateUrl = null;
   if (servesPrivately(ctx)) {
-    const p = await planServeChange(ctx, ctx.deskPort, out.found);
+    // 8443 proxies this machine's WebSocket listener: with the broker elsewhere nothing answers
+    // there, and an https page may not open the broker's ws:// (P0 gives a member its own broker).
+    const p =
+      brokerHost !== null
+        ? {
+            blocked: `the Desk names a broker on ${brokerHost}, and the private network serves only this machine's broker; run it without --broker-host on the broker's machine, or without --tailscale`,
+          }
+        : await planServeChange(ctx, ctx.deskPort, out.found);
     if ("blocked" in p && ctx.deskServe === true) {
       out.blocked = p.blocked;
       return;
     }
     if ("blocked" in p) {
-      // `volley setup`: the rest of the step (and every later one) still runs; the Desk stays
-      // on the LAN until this is fixed and the step runs again.
-      out.found.push(`The Desk on your private network: not served (${p.blocked})`);
+      const recorded = "unread" in p ? readDeskPrivateUrl(ctx.volleydHome) : null;
+      if (recorded !== null) {
+        // Tailscale not answering for now: the serves set up before still stand, so the service
+        // keeps its --ws-url and the records keep the private address.
+        out.found.push(
+          `The Desk on your private network: not checked (${p.blocked}); keeping ${recorded}`,
+        );
+        wsUrl = privateWsUrl(new URL(recorded).hostname);
+        ctx.deskPrivateUrl = recorded;
+      } else {
+        // `volley setup`: the rest of the step (and every later one) still runs; the Desk stays
+        // on the LAN until this is fixed and the step runs again.
+        out.found.push(`The Desk on your private network: not served (${p.blocked})`);
+      }
     } else {
       serve = p.change;
       wsUrl = p.wsUrl;

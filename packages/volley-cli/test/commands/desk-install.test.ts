@@ -232,6 +232,15 @@ describe("volley desk install | uninstall", () => {
       expect(existsSync(unit())).toBe(false);
     });
 
+    it("refuses --tailscale together with a broker on another machine (no broker behind 8443 here)", async () => {
+      onTailnet("linux");
+      const r = await run(["install", "--tailscale", "--broker-host", "box-a"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("broker on box-a");
+      expect(m.execCalls.some((a) => a.includes("serve") && a.includes("--bg"))).toBe(false);
+      expect(existsSync(unit())).toBe(false);
+    });
+
     it("never replaces the owner's own serve on 443", async () => {
       onTailnet("linux");
       m.tailscale.serves.set(443, "http://127.0.0.1:3000");

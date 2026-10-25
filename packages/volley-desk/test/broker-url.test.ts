@@ -149,7 +149,19 @@ describe("fetchDeskConfig", () => {
     expect(
       await fetchDeskConfig(ok({ ...both, ws_url: "wss://desk.example.ts.net:8443" })),
     ).toEqual({ ...both, ws_url: "wss://desk.example.ts.net:8443" });
-    for (const ws_url of ["https://x:8443", "wss://u:p@x:8443", "wss://x:8443/p", 7, ""]) {
+    // An IPv6 literal in brackets, as `volley desk serve --ws-url` accepts and serves it.
+    expect(await fetchDeskConfig(ok({ ...both, ws_url: "ws://[::1]:9001" }))).toEqual({
+      ...both,
+      ws_url: "ws://[::1]:9001",
+    });
+    for (const ws_url of [
+      "https://x:8443",
+      "wss://u:p@x:8443",
+      "wss://x:8443/p",
+      "ws://::1:9001",
+      7,
+      "",
+    ]) {
       expect(await fetchDeskConfig(ok({ ...both, ws_url })), String(ws_url)).toEqual(both);
     }
   });

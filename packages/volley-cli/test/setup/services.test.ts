@@ -518,6 +518,36 @@ describe("setup: services", () => {
       expect(m.ctx.deskPrivateUrl).toBeNull();
     });
 
+    it("with a broker on another machine the serve is not offered and the service has no --ws-url", async () => {
+      record({ kind: "tailscale", name: NAME });
+      m.ctx.brokerHost = "box-a";
+      const p = await planServices(m.ctx);
+      expect(p.blocked).toBeUndefined();
+      expect(p.changes.some((c) => c.summary.startsWith("Serve the Desk"))).toBe(false);
+      expect(p.found.join("\n")).toContain("The Desk on your private network: not served (");
+      expect(p.found.join("\n")).toContain("broker on box-a");
+      expect(m.ctx.deskPrivateUrl).toBeNull();
+      await applyAll(p);
+      const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist");
+      expect(readFileSync(plist, "utf-8")).not.toContain("--ws-url");
+    });
+
+    it("Tailscale briefly not answering keeps the recorded private address and --ws-url", async () => {
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(
+        join(m.ctx.volleydHome, "setup.json"),
+        `${JSON.stringify({ network: { kind: "tailscale", name: NAME }, desk_private_url: `https://${NAME}` })}\n`,
+      );
+      m.tailscale.installed = false;
+      const p = await planServices(m.ctx);
+      expect(p.blocked).toBeUndefined();
+      expect(p.found.join("\n")).toContain("The Desk on your private network: not checked (");
+      expect(m.ctx.deskPrivateUrl).toBe(`https://${NAME}`);
+      await applyAll(p);
+      const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist");
+      expect(readFileSync(plist, "utf-8")).toContain(`<string>wss://${NAME}:8443</string>`);
+    });
+
     it("on Linux the change runs under sudo and says so", async () => {
       m = fakeMachine(fake, dir, { platform: "linux" });
       m.tailscale.installed = true;

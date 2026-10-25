@@ -741,6 +741,15 @@ describe("volley auth", () => {
         expect(s.stdout).toContain(`  ${url}\n`);
         expect(s.stdout).toContain(renderQr(encodeQr(url)));
         expect(s.stdout).toContain(`On your LAN: http://192.0.2.7:5288/#signin=${token}`);
+        // Without a recorded LAN address there is no LAN link to give (never localhost as "LAN").
+        const { desk_host: _lan, ...rec } = JSON.parse(
+          readFileSync(join(home, "setup.json"), "utf-8"),
+        );
+        writeFileSync(join(home, "setup.json"), JSON.stringify(rec));
+        const t = await run(["signin-link", "--role", "steer", "--label", "tablet"], deps);
+        expect(t.stdout).toContain("  https://studio.example.ts.net/#signin=vly_signin_");
+        expect(t.stdout).not.toContain("On your LAN");
+        expect(t.stdout).not.toContain("localhost");
       });
 
       it("signin-link prints the ready-to-open link on setup's LAN address, and its QR code", async () => {

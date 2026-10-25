@@ -248,7 +248,7 @@ function signinLines(desk: DeskAt, token: string): string[] {
     ...(desk.privateUrl !== undefined
       ? [
           "(on your private network: the device needs the Tailscale app, signed in to your account)",
-          `On your LAN: ${lan}`,
+          ...(host !== undefined ? [`On your LAN: ${lan}`] : []),
           "",
         ]
       : []),

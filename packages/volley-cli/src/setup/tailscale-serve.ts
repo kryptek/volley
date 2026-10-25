@@ -233,14 +233,16 @@ async function readServed(
 /**
  * The Desk's serve, planned for the Desk on `deskPort`: its private address and `ws_url`, and
  * the change that adds the serves missing (null: both in place, said in `found`). Blocked
- * without a Tailscale record, without Tailscale answering here, or with one of the two ports
- * serving something else.
+ * without a Tailscale record, without Tailscale answering here (`unread`: what is served is not
+ * known, so nothing recorded changes), or with one of the two ports serving something else.
  */
 export async function planServeChange(
   ctx: SetupContext,
   deskPort: number,
   found: string[],
-): Promise<{ blocked: string } | { url: string; wsUrl: string; change: Change | null }> {
+): Promise<
+  { blocked: string; unread?: true } | { url: string; wsUrl: string; change: Change | null }
+> {
   const record = ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome);
   if (record?.kind !== "tailscale")
     return planDeskServe(record, new Map(), deskPort) as { blocked: string };
@@ -248,10 +250,11 @@ export async function planServeChange(
   if (bin === null) {
     return {
       blocked: `Tailscale does not answer here (\`tailscale version\`): ${NEEDS_TAILSCALE}`,
+      unread: true,
     };
   }
   const served = await readServed(ctx, bin);
-  if ("error" in served) return { blocked: served.error };
+  if ("error" in served) return { blocked: served.error, unread: true };
   const p = planDeskServe(record, served, deskPort);
   if ("blocked" in p) return p;
   if (p.missing.length === 0) {
