@@ -4,8 +4,10 @@
 every machine has, stubbed), the tools a test says are already installed (copied from `tools/`),
 and a few real file utilities. Every stub appends `<name> <args>` to `$STUB_LOG`.
 
-- `base/`: `uname` (answers `$STUB_UNAME_S` / `$STUB_UNAME_M`), `sudo` (`-v` succeeds, `tee` swallows
-  its input, other commands run), `bash` (runs the downloaded installer with `sh`), `apt-get`,
+- `base/`: `uname` (answers `$STUB_UNAME_S` / `$STUB_UNAME_M`), `sudo` (`-n true` and `-v` succeed;
+  `$STUB_SUDO=nopasswd-only` makes `-v` fail with `sudo: a password is required`, a stock cloud
+  image's sudoers, and `password` makes `-n true` fail so; `tee` swallows its input, other commands
+  run, `-n` first or not), `bash` (runs the downloaded installer with `sh`), `apt-get`,
   `dpkg`, `systemctl` (`snapd.service` is active when `$STUB_SNAPD=active`; `snapd.socket` when it
   is `active` or `socket`, a fresh cloud image's socket-activated snapd), `snap` (`install mosquitto`
   records the snap and, as the real one, puts nothing on PATH: its broker is a service; `list

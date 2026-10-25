@@ -316,14 +316,15 @@ describe("macOS: the Homebrew tap", () => {
 });
 
 describe("Linux prerequisites", () => {
-  test("a fresh Ubuntu: one sudo -v after the reason, apt, bun, gh, snap mosquitto, Claude Code", () => {
+  test("a fresh Ubuntu: one sudo probe after the reason, apt, bun, gh, snap mosquitto, Claude Code", () => {
     const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active" });
     const r = run(w, ["--no-setup"]);
     expect(r.code).toBe(0);
-    expect(has(r, "sudo -v")).toEqual(["sudo -v"]);
+    expect(has(r, "sudo -n true")).toEqual(["sudo -n true"]);
+    expect(has(r, "sudo -v")).toEqual([]);
     const reason = r.out.indexOf("sudo is needed");
     expect(reason).toBeGreaterThanOrEqual(0);
-    expect(reason).toBeLessThan(r.out.indexOf("[stub] sudo -v"));
+    expect(reason).toBeLessThan(r.out.indexOf("[stub] sudo -n true"));
     expect(has(r, "apt-get install")).toEqual([
       "apt-get install -y git tmux ca-certificates unzip",
       "apt-get install -y gh",
@@ -340,6 +341,61 @@ describe("Linux prerequisites", () => {
     expect(has(again, "sudo")).toEqual([]);
     expect(has(again, "apt-get")).toEqual([]);
     expect(installers(again)).toEqual([]);
+  });
+
+  test("a stock cloud image: sudo runs commands without a password but sudo -v would ask", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active", STUB_SUDO: "nopasswd-only" });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "sudo -n true")).toEqual(["sudo -n true"]);
+    expect(has(r, "sudo -v")).toEqual([]);
+    const reason = r.out.indexOf("sudo is needed");
+    expect(reason).toBeGreaterThanOrEqual(0);
+    expect(reason).toBeLessThan(r.out.indexOf("[stub] sudo -n true"));
+    expect(has(r, "apt-get install")).toEqual([
+      "apt-get install -y git tmux ca-certificates unzip",
+      "apt-get install -y gh",
+    ]);
+    expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
+  });
+
+  test("sudo needs a password: asked once, at the terminal", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active", STUB_SUDO: "password" });
+    const tty = join(w.dir, "tty");
+    writeFileSync(tty, "");
+    const r = run(w, ["--no-setup"], { VOLLEY_INSTALL_TTY: tty });
+    expect(r.code).toBe(0);
+    expect(r.calls.filter((c) => c === "sudo -n true" || c === "sudo -v")).toEqual([
+      "sudo -n true",
+      "sudo -v",
+    ]);
+    const reason = r.out.indexOf("sudo is needed");
+    expect(reason).toBeGreaterThanOrEqual(0);
+    expect(reason).toBeLessThan(r.out.indexOf("[stub] sudo -n true"));
+    expect(reason).toBeLessThan(r.out.indexOf("[stub] sudo -v"));
+    expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
+  });
+
+  test("sudo needs a password and there is no terminal: stop before asking, and say so", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active", STUB_SUDO: "password" });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(has(r, "sudo")).toEqual(["sudo -n true"]);
+    expect(r.out).toContain("sudo needs your password and there is no terminal");
+    expect(has(r, "apt-get")).toEqual([]);
+    expect(has(r, "snap install")).toEqual([]);
+    expect(installers(r)).toEqual([]);
+  });
+
+  test("no sudo at all: the install stops and says sudo is not installed", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active" });
+    without(w, "sudo");
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "sudo is needed to install the missing packages, and it is not installed.",
+    );
+    expect(has(r, "apt-get")).toEqual([]);
   });
 
   test("Debian without curl installs it with apt first", () => {
@@ -386,7 +442,10 @@ describe("Linux prerequisites", () => {
     without(w, "snap");
     const r = run(w, ["--no-setup"]);
     expect(r.code).toBe(0);
-    const reasons = r.out.slice(r.out.indexOf("sudo is needed"), r.out.indexOf("[stub] sudo -v"));
+    const reasons = r.out.slice(
+      r.out.indexOf("sudo is needed"),
+      r.out.indexOf("[stub] sudo -n true"),
+    );
     expect(reasons).toContain("- apt-get install snapd (for the mosquitto snap)");
     expect(reasons).toContain("- snap install mosquitto");
     expect(has(r, "apt-get install")).toEqual([
@@ -896,7 +955,8 @@ describe("--network: how the machine is reached from outside its network", () =>
     );
     const r = run(w, ["--no-setup", "--network", "tailscale"]);
     expect(r.code).toBe(0);
-    expect(has(r, "sudo -v")).toEqual(["sudo -v"]);
+    expect(has(r, "sudo -n true")).toEqual(["sudo -n true"]);
+    expect(has(r, "sudo -v")).toEqual([]);
     expect(r.out).toContain(
       "add Tailscale's apt repository (pkgs.tailscale.com) and install tailscale",
     );

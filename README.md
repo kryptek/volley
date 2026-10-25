@@ -141,7 +141,7 @@ which ends with a 1-issue test wave merged on a scratch repository: proof the wh
 
 | | macOS | Ubuntu / Debian |
 | --- | --- | --- |
-| Prerequisites | Homebrew (its installer asks for your password: the only sudo), then bun, mosquitto, gh, git, tmux and Claude Code | one sudo prompt, reasons printed first: apt packages, bun, gh, mosquitto 2.1 (the snap) and Claude Code |
+| Prerequisites | Homebrew (its installer asks for your password: the only sudo), then bun, mosquitto, gh, git, tmux and Claude Code | at most one sudo prompt, reasons printed first; none when sudo is password-less, as on a cloud image: apt packages, bun, gh, mosquitto 2.1 (the snap) and Claude Code |
 | Volley | `~/.volley/src` (or the Homebrew formula), commands in `~/.volley/bin` | `~/.volley/src`, commands in `~/.volley/bin` |
 | `PATH` | one line in your shell's startup file (zsh, bash; fish is told the line) | the same |
 | Services | launchd | `systemd --user` |

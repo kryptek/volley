@@ -260,6 +260,13 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(ci).not.toContain("@PUBKEY@");
   });
 
+  test("cloud-init's user has a stock cloud image's sudoers: group sudo plus the NOPASSWD drop-in", () => {
+    // `%sudo ALL=(ALL:ALL) ALL` as well makes `sudo -v` ask while `sudo <command>` does not (#590).
+    const ci = readFileSync(join(HERE, "cloud-init.yaml"), "utf8");
+    expect(ci).toMatch(/- name: volley\n(?: {4}\S.*\n)*? {4}groups: \[sudo\]\n/);
+    expect(ci).toContain("    sudo: ALL=(ALL) NOPASSWD:ALL\n");
+  });
+
   test("Debian 13's image; a launch that fails half way is deleted too", () => {
     const w = world();
     const r = run(w, "vm-linux.sh", ["debian-13"], {
