@@ -58,6 +58,8 @@ interface Placed {
  */
 export class CoordinatorRunner {
   private placed: Placed | null = null;
+  /** Sessions left behind (a machine change or `null`) whose kill failed: retried each pass. */
+  private orphans: Placed[] = [];
   private payload: CoordinatorRolePayload | null = null;
   /** The topic was published (or cleared) since this runner started. */
   private published = false;
@@ -120,6 +122,7 @@ export class CoordinatorRunner {
   }
 
   private async pass(): Promise<void> {
+    await this.sweep();
     const cfg = this.deps.config();
     const name = this.deps.name();
     const want = desiredState({
@@ -129,7 +132,7 @@ export class CoordinatorRunner {
     if (want === "off") {
       if (cfg.machine !== null && name === null)
         this.deps.log("coordinator: no coordinator name recorded by volley setup; nothing runs");
-      if (this.placed !== null) await this.killPlaced(this.placed);
+      if (this.placed !== null) await this.retire(this.placed);
       this.placed = null;
       this.reset();
       await this.set(null);
@@ -142,7 +145,7 @@ export class CoordinatorRunner {
       this.placed !== null &&
       (this.placed.machine !== machine || this.placed.name !== coord || !this.dirMatches(cfg))
     ) {
-      await this.killPlaced(this.placed);
+      await this.retire(this.placed);
       this.placed = null;
       this.reset();
       this.payload = null;
@@ -150,7 +153,7 @@ export class CoordinatorRunner {
     if (want === "waiting") {
       const why = `${machine} is not up`;
       const cur = this.payload;
-      if (cur === null) await this.set(this.fresh(machine, coord, cfg.dir, "stopped", why));
+      if (cur === null) await this.set(this.fresh(machine, coord, "stopped", why));
       else if (cur.state !== "failed" && (cur.state !== "stopped" || cur.last_error !== why)) {
         // Nothing reaches a server there: its link is not handed out while the machine is down.
         const { session_url: _u, needs_terminal: _n, ...rest } = cur;
@@ -162,7 +165,10 @@ export class CoordinatorRunner {
     }
     const target = this.deps.target(machine);
     if (typeof target === "string") {
-      await this.set(this.fresh(machine, coord, cfg.dir, "stopped", target));
+      // Unchanged, it is not republished: `since` stays when it entered this state.
+      const cur = this.payload;
+      if (cur?.machine !== machine || cur.state !== "stopped" || cur.last_error !== target)
+        await this.set(this.fresh(machine, coord, "stopped", target));
       return;
     }
     let placed = this.placed;
@@ -178,6 +184,16 @@ export class CoordinatorRunner {
       this.home = home;
     }
     if (this.deps.stopped.get()) {
+      // Stopped is reported only once no session runs: a kill that failed (or a session still
+      // there after a volleyd restart) is killed on a later pass.
+      let alive: boolean;
+      try {
+        alive = (await target.host.findWorkspace(placed.session, placed.session)) !== null;
+      } catch (e) {
+        this.deps.log(`coordinator: has-session on ${machine}: ${String(e)}`);
+        return;
+      }
+      if (alive && !(await this.killPlaced(placed))) return;
       if (this.payload?.state !== "stopped" || this.payload.machine !== machine)
         await this.set({ ...this.base(placed), state: "stopped", since: this.iso() });
       return;
@@ -354,6 +370,10 @@ export class CoordinatorRunner {
           since: this.iso(),
           restarts: this.payload?.restarts ?? 0,
         });
+      // A session of this name left behind is this one now, not one to kill.
+      this.orphans = this.orphans.filter(
+        (o) => o.machine !== placed.machine || o.session !== placed.session,
+      );
       await target.host.launch({
         cwd: placed.dir,
         name: placed.session,
@@ -368,12 +388,35 @@ export class CoordinatorRunner {
     this.lastScreen = "";
   }
 
-  private async killPlaced(placed: Placed): Promise<void> {
+  /** End the session; false when it could not be (the machine unreachable, the kill refused). */
+  private async killPlaced(placed: Placed): Promise<boolean> {
     const target = this.deps.target(placed.machine);
-    if (typeof target === "string") return;
-    await target.kill(placed.session, mintCoordinatorKill(placed.name)).catch((e: unknown) => {
-      this.deps.log(`coordinator: kill-session on ${placed.machine}: ${String(e)}`);
-    });
+    if (typeof target === "string") {
+      this.deps.log(`coordinator: kill-session on ${placed.machine}: ${target}`);
+      return false;
+    }
+    return target.kill(placed.session, mintCoordinatorKill(placed.name)).then(
+      () => true,
+      (e: unknown) => {
+        this.deps.log(`coordinator: kill-session on ${placed.machine}: ${String(e)}`);
+        return false;
+      },
+    );
+  }
+
+  /** A placement given up: its session ends now, or is kept to retry until it does. */
+  private async retire(placed: Placed): Promise<void> {
+    if (await this.killPlaced(placed)) return;
+    if (!this.orphans.some((o) => o.machine === placed.machine && o.session === placed.session))
+      this.orphans.push(placed);
+  }
+
+  /** Retry the kill of every session left behind whose machine is up again. */
+  private async sweep(): Promise<void> {
+    const left: Placed[] = [];
+    for (const o of this.orphans)
+      if (!this.deps.up(o.machine) || !(await this.killPlaced(o))) left.push(o);
+    this.orphans = left;
   }
 
   private base(placed: Placed): Omit<CoordinatorRolePayload, "state" | "since"> {
@@ -385,14 +428,23 @@ export class CoordinatorRunner {
     };
   }
 
+  /** A payload before (or without) a placement: `dir` only once it is expanded on that machine. */
   private fresh(
     machine: string,
     name: string,
-    dir: string,
     state: CoordinatorRolePayload["state"],
     lastError: string,
   ): CoordinatorRolePayload {
-    return { machine, name, state, since: this.iso(), restarts: 0, last_error: lastError, dir };
+    const p: CoordinatorRolePayload = {
+      machine,
+      name,
+      state,
+      since: this.iso(),
+      restarts: 0,
+      last_error: lastError,
+    };
+    if (this.placed?.machine === machine) p.dir = this.placed.dir;
+    return p;
   }
 
   /** Publish when it changed (or for the first time since this runner started). */

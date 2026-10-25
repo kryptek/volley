@@ -19,6 +19,7 @@ import {
 import { CoordinatorRunner, type CoordinatorRunnerDeps } from "../src/coordinator/runner";
 import type { RemoteStep } from "../src/fence";
 import { type RemoteHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
+import { validator } from "../src/schemas";
 import type { CoordinatorConfig } from "../src/types";
 import { fakeExec } from "./helpers/fake-exec";
 import { tempDir } from "./helpers/tmp";
@@ -35,6 +36,8 @@ const LINK = "https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE0000";
 const HOME = "/path/to/home";
 const DIR = `${HOME}/.volley/coordinator`;
 const SESSION = "volley-coordinator-coord-test";
+/** Every payload the runner publishes must hold to the schema the topic promises. */
+const rolePayload = validator("coordinator-role.schema.json#/allOf/1/properties/payload");
 const LOGIN = `${JSON.stringify({ username: "coordinator", password: "pw-coordinator" })}\n`;
 
 const SPEC: RemoteHostSpec = {
@@ -71,6 +74,8 @@ function fakeBox() {
     steps: [] as RemoteStep[],
     launches: [] as string[][],
     kills: 0,
+    /** kill-sessions still to fail as an unreachable machine does (the session stays). */
+    failKills: 0,
   };
   const fx = fakeExec().on(["ssh", "-T"], (_argv, opts) => {
     let out = "";
@@ -101,6 +106,13 @@ function fakeBox() {
           if (!box.session) return { code: 1 };
           out += box.screen;
         } else if (sub === "kill-session") {
+          if (box.failKills > 0) {
+            box.failKills--;
+            return {
+              code: 255,
+              stderr: "ssh: connect to host box-a port 22: Connection refused\n",
+            };
+          }
           box.kills++;
           const had = box.session;
           box.session = false;
@@ -151,6 +163,8 @@ function rig(
     repos: (m, home) =>
       m === "box-a" ? [{ slug: "acme/app", target: `${home}/.volley/repos/acme/app` }] : [],
     publish: async (p) => {
+      if (p !== null && !rolePayload(p))
+        throw new Error(`schema: ${JSON.stringify(rolePayload.errors)} in ${JSON.stringify(p)}`);
       published.push(p);
     },
     stopped: {
@@ -374,6 +388,78 @@ describe("the coordinator on a paired machine (box-a)", () => {
     expect(a.box.session).toBe(false);
     expect(b.box.launches).toHaveLength(1);
     expect(r.last()).toMatchObject({ machine: "box-b", state: "starting" });
+  });
+
+  it("a stop whose kill fails is not reported stopped; the kill is retried until the session is gone", async () => {
+    const { box, host } = fakeBox();
+    const r = rig({ "box-a": remoteTarget(host) });
+    await r.tick();
+    await r.tick();
+    // The stop's own kill and its pass's retry both fail.
+    box.failKills = 2;
+    const p = await r.runner.stop();
+    expect(box.session).toBe(true);
+    expect(p?.state).not.toBe("stopped");
+    await r.tick();
+    expect(box.session).toBe(false);
+    expect(r.last()).toMatchObject({ state: "stopped" });
+    expect(box.launches).toHaveLength(1);
+  });
+
+  it("a volleyd restart with the stop persisted kills a session still running", async () => {
+    const { box, host } = fakeBox();
+    const first = rig({ "box-a": remoteTarget(host) });
+    await first.tick();
+    await first.tick();
+    const second = rig({ "box-a": remoteTarget(host) });
+    second.stopped.v = true;
+    await second.tick();
+    expect(box.session).toBe(false);
+    expect(second.last()).toMatchObject({ state: "stopped" });
+  });
+
+  it("a machine change while the old machine is unreachable kills the old session once it answers", async () => {
+    const a = fakeBox();
+    const b = fakeBox();
+    const r = rig({ "box-a": remoteTarget(a.host), "box-b": remoteTarget(b.host) });
+    await r.tick();
+    await r.tick();
+    a.box.failKills = 1;
+    r.cfg.machine = "box-b";
+    await r.tick();
+    expect(a.box.session).toBe(true);
+    expect(b.box.launches).toHaveLength(1);
+    await r.tick();
+    expect(a.box.session).toBe(false);
+    const kills = a.box.kills;
+    await r.tick();
+    expect(a.box.kills).toBe(kills);
+  });
+
+  it("machine: null while the machine is unreachable kills the session once it answers", async () => {
+    const { box, host } = fakeBox();
+    const r = rig({ "box-a": remoteTarget(host) });
+    await r.tick();
+    await r.tick();
+    box.failKills = 1;
+    r.cfg.machine = null;
+    await r.tick();
+    expect(box.session).toBe(true);
+    expect(r.last()).toBeNull();
+    await r.tick();
+    expect(box.session).toBe(false);
+  });
+
+  it("a machine it cannot drive is reported once, not republished every tick", async () => {
+    const r = rig({});
+    r.cfg.machine = "box-x";
+    r.up.add("box-x");
+    await r.tick();
+    expect(r.last()).toMatchObject({ state: "stopped", last_error: "no machine 'box-x'" });
+    const n = r.published.length;
+    await r.advance(10);
+    await r.tick();
+    expect(r.published).toHaveLength(n);
   });
 
   it("its machine going down while it runs is stopped, not left running with a dead link", async () => {

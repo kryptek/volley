@@ -3350,7 +3350,8 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
 /**
  * A local agent's tmux session (hosts/local-tmux.ts `localSessionName`):
  * `volley-<wave>-<task>-<role>[-<n>]`, at least three words after `volley-`. A sign-in's
- * `volley-signin-*` never is one, so a wave named `signin` cannot run in local tmux.
+ * `volley-signin-*` and the coordinator's `volley-coordinator-*` never are one, so a wave named
+ * `signin`, `coordinator` or `coordinator-…` cannot run in local tmux.
  */
 const AGENT_SESSION = /^volley-[a-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9_]+-[A-Za-z0-9_]+$/;
 const isAgentSession = (s: string | undefined): s is string =>

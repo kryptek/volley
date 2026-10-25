@@ -15,7 +15,7 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["machine", "name", "state", "since", "restarts", "dir"],
+          "required": ["machine", "name", "state", "since", "restarts"],
           "properties": {
             "machine": {
               "type": "string",
@@ -58,7 +58,7 @@
             "dir": {
               "type": "string",
               "pattern": "^/",
-              "description": "Its directory on that machine, absolute."
+              "description": "Its directory on that machine, absolute (coordinator.dir expanded there); absent until the supervisor has expanded it, as while its machine is down before the role was first placed there."
             }
           }
         }

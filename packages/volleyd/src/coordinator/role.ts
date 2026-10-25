@@ -220,7 +220,8 @@ export interface CoordinatorRolePayload {
   last_error?: string;
   /** The server waits for an answer on its screen (screenPrompt): someone attaches and answers. */
   needs_terminal?: "trust" | "consent";
-  dir: string;
+  /** Absolute, expanded on that machine; absent until it is (a machine down before it was placed). */
+  dir?: string;
 }
 
 /**
