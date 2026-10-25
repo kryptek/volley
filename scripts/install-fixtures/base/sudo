@@ -1,8 +1,23 @@
 #!/bin/sh
+# $STUB_SUDO: unset or `nopasswd` (`-n true` and `-v` succeed), `nopasswd-only` (a stock cloud
+# image: `-n true` succeeds, `-v` asks), `password` (`-n true` fails; `-v` is a person typing it).
 printf '%s\n' "sudo $*" >>"$STUB_LOG"
-printf '[stub] sudo %s\n' "$*" >&2
+# install.sh silences the probe's stderr, so its marker goes to stdout (`true` prints nothing).
+if [ "$*" = "-n true" ]; then
+  printf '[stub] sudo %s\n' "$*"
+else
+  printf '[stub] sudo %s\n' "$*" >&2
+fi
+asks() { printf 'sudo: a password is required\n' >&2; exit 1; }
+if [ "${1:-}" = -n ]; then
+  shift
+  if [ "${1:-}" = true ]; then
+    [ "${STUB_SUDO:-}" = password ] && asks
+    exit 0
+  fi
+fi
 case "${1:-}" in
-  -v) exit 0 ;;
+  -v) [ "${STUB_SUDO:-}" = nopasswd-only ] && asks; exit 0 ;;
   tee) cat >/dev/null ;;
   mkdir | chmod) exit 0 ;;
   *) exec "$@" ;;

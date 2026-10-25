@@ -420,7 +420,15 @@ install_linux() {
     [ -n "$need_ts" ] && reasons="$reasons
   - add Tailscale's apt repository (pkgs.tailscale.com) and install tailscale"
     say "sudo is needed to:$reasons"
-    sudo -v || die "sudo failed; rerun when you can sudo."
+    # `sudo -n true` runs a command as the installer will (the last matching sudoers entry), so it
+    # passes on a cloud image's NOPASSWD user, where `sudo -v` would still ask (verifypw=all).
+    if sudo -n true 2>/dev/null; then
+      :
+    elif tty_ok; then
+      sudo -v || die "sudo failed; rerun when you can sudo."
+    else
+      die "sudo needs your password and there is no terminal to ask on; run the install from a terminal."
+    fi
     SUDO_OK=1
   fi
 
