@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 
-import "./PrismaticBurst.css";
+import './PrismaticBurst.css';
 
 const BLOOM_LEVELS = 4;
 const MAX_PULSES = 4;
@@ -12,7 +12,7 @@ export interface PrismaticBurstProps {
   colors?: string[];
   intensity?: number;
   speed?: number;
-  animationType?: "rotate" | "rotate3d" | "hover";
+  animationType?: 'rotate' | 'rotate3d' | 'hover';
   distort?: number;
   rayCount?: number;
   rayWidth?: number;
@@ -29,10 +29,10 @@ export interface PrismaticBurstProps {
   clickBurst?: boolean;
   intro?: boolean;
   fade?: number;
-  quality?: "low" | "medium" | "high";
+  quality?: 'low' | 'medium' | 'high';
   resolution?: number;
   lightMode?: boolean;
-  mixBlendMode?: CSSProperties["mixBlendMode"] | "none";
+  mixBlendMode?: CSSProperties['mixBlendMode'] | 'none';
   paused?: boolean;
   dpr?: number;
   className?: string;
@@ -379,8 +379,8 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 
 const toPx = (value?: number | string | null): number => {
   if (value == null) return 0;
-  if (typeof value === "number") return value;
-  const parsed = Number.parseFloat(String(value).trim().replace("px", ""));
+  if (typeof value === 'number') return value;
+  const parsed = parseFloat(String(value).trim().replace('px', ''));
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 
@@ -406,8 +406,7 @@ const multiply = (a: ArrayLike<number>, b: ArrayLike<number>): Float32Array => {
   const out = new Float32Array(9);
   for (let col = 0; col < 3; col++) {
     for (let row = 0; row < 3; row++) {
-      out[col * 3 + row] =
-        a[row] * b[col * 3] + a[3 + row] * b[col * 3 + 1] + a[6 + row] * b[col * 3 + 2];
+      out[col * 3 + row] = a[row] * b[col * 3] + a[3 + row] * b[col * 3 + 1] + a[6 + row] * b[col * 3 + 2];
     }
   }
   return out;
@@ -430,7 +429,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -442,7 +441,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -451,7 +450,7 @@ const PrismaticBurst = ({
   colors,
   intensity = 2,
   speed = 0.5,
-  animationType = "rotate3d",
+  animationType = 'rotate3d',
   distort = 0,
   rayCount = 0,
   rayWidth = 1,
@@ -468,14 +467,14 @@ const PrismaticBurst = ({
   clickBurst = true,
   intro = true,
   fade = 0,
-  quality = "high",
+  quality = 'high',
   resolution,
   lightMode = false,
   mixBlendMode,
   paused = false,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: PrismaticBurstProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -507,23 +506,23 @@ const PrismaticBurst = ({
     scale: clamp(resolution ?? QUALITY[quality] ?? QUALITY.high, MIN_SCALE, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
 
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
     const burstProgram = link(gl, BURST);
     const downProgram = link(gl, DOWNSAMPLE);
     const blurProgram = link(gl, BLUR);
@@ -533,9 +532,9 @@ const PrismaticBurst = ({
     const onContextLost = (event: Event) => {
       event.preventDefault();
     };
-    const onContextRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onContextLost);
-    canvas.addEventListener("webglcontextrestored", onContextRestored);
+    const onContextRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onContextLost);
+    canvas.addEventListener('webglcontextrestored', onContextRestored);
 
     const buffer = gl.createBuffer();
     const vao = gl.createVertexArray();
@@ -547,12 +546,7 @@ const PrismaticBurst = ({
 
     const format = floatTargets ? gl.RGBA16F : gl.RGBA8;
     const encode = floatTargets ? 1 : 0.25;
-    const createTarget = (): Target => ({
-      texture: null,
-      framebuffer: gl.createFramebuffer(),
-      width: 0,
-      height: 0,
-    });
+    const createTarget = (): Target => ({ texture: null, framebuffer: gl.createFramebuffer(), width: 0, height: 0 });
     const scene = createTarget();
     const levels = Array.from({ length: BLOOM_LEVELS }, () => [createTarget(), createTarget()]);
 
@@ -569,23 +563,12 @@ const PrismaticBurst = ({
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.framebufferTexture2D(
-        gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
-        gl.TEXTURE_2D,
-        target.texture,
-        0,
-      );
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.texture, 0);
     };
 
     const pass = (target: Target | null, program: Program) => {
       gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.framebuffer : null);
-      gl.viewport(
-        0,
-        0,
-        target ? target.width : canvas.width,
-        target ? target.height : canvas.height,
-      );
+      gl.viewport(0, 0, target ? target.width : canvas.width, target ? target.height : canvas.height);
       gl.useProgram(program.program);
       return program.uniforms;
     };
@@ -597,18 +580,18 @@ const PrismaticBurst = ({
 
     const gradient = gl.createTexture();
     let gradientKey: string | null = null;
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
     const toRgb = (value: string): number[] => {
       if (!probe) return [255, 255, 255];
       probe.clearRect(0, 0, 1, 1);
-      probe.fillStyle = "#ffffff";
+      probe.fillStyle = '#ffffff';
       probe.fillStyle = value;
       probe.fillRect(0, 0, 1, 1);
       const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
       return [r, g, b];
     };
     const uploadGradient = (list: string[]) => {
-      const key = list.join("|");
+      const key = list.join('|');
       if (key === gradientKey) return;
       gradientKey = key;
       const count = Math.max(1, list.length);
@@ -623,7 +606,7 @@ const PrismaticBurst = ({
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     };
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const pointer = { x: 0, y: 0, inside: false };
     const state = {
       time: 0,
@@ -638,7 +621,7 @@ const PrismaticBurst = ({
       touch: 0,
       governor: 1,
       slow: 0,
-      quick: 0,
+      quick: 0
     };
     const pulses: { age: number }[] = [];
     const pulseData = new Float32Array(MAX_PULSES * 4);
@@ -696,20 +679,14 @@ const PrismaticBurst = ({
       pulses.forEach((pulse, index) => {
         const life = pulse.age / PULSE_LIFE;
         pulseData.set(
-          [
-            pulse.age * 1.7,
-            1.6 * Math.pow(1 - life, 1.6),
-            0.2 + pulse.age * 0.16,
-            0.35 * Math.exp(-pulse.age * 7),
-          ],
-          index * 4,
+          [pulse.age * 1.7, 1.6 * Math.pow(1 - life, 1.6), 0.2 + pulse.age * 0.16, 0.35 * Math.exp(-pulse.age * 7)],
+          index * 4
         );
       });
 
       const unit = 0.5 * Math.min(sceneWidth, sceneHeight);
       const reach =
-        Math.hypot(sceneWidth * 0.5 + Math.abs(offsetX), sceneHeight * 0.5 + Math.abs(offsetY)) /
-        Math.max(unit, 1);
+        Math.hypot(sceneWidth * 0.5 + Math.abs(offsetX), sceneHeight * 0.5 + Math.abs(offsetY)) / Math.max(unit, 1);
       const rise = 1 - Math.pow(1 - state.intro, 3);
 
       const b = pass(scene, burstProgram);
@@ -735,15 +712,10 @@ const PrismaticBurst = ({
         state.smoothX * toScene,
         (cssHeight - state.smoothY) * toScene,
         s.mouseInteraction ? 0.7 * s.mouseStrength * engaged : 0,
-        0.45,
+        0.45
       );
       gl.uniform4fv(b.uPulses, pulseData);
-      gl.uniform3f(
-        b.uIntro,
-        (rise * (reach + 0.6)) / 0.7,
-        1.6 * (1 - state.intro),
-        state.intro < 1 ? 1 : 0,
-      );
+      gl.uniform3f(b.uIntro, (rise * (reach + 0.6)) / 0.7, 1.6 * (1 - state.intro), state.intro < 1 ? 1 : 0);
       gl.uniform1f(b.uEncode, encode);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -860,8 +832,7 @@ const PrismaticBurst = ({
         state.kick > 0 ||
         Math.abs((engaged ? 1 : 0) - state.touch) > 0.002 ||
         Math.abs(pointer.x - state.smoothX) + Math.abs(pointer.y - state.smoothY) > 0.2;
-      if ((running && (s.speed !== 0 || s.grain > 0 || s.flow !== 0)) || settling)
-        raf = requestAnimationFrame(frame);
+      if ((running && (s.speed !== 0 || s.grain > 0 || s.flow !== 0)) || settling) raf = requestAnimationFrame(frame);
       else last = 0;
     };
 
@@ -922,18 +893,18 @@ const PrismaticBurst = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -951,25 +922,23 @@ const PrismaticBurst = ({
     return () => {
       cancelAnimationFrame(raf);
       wakeRef.current = null;
-      canvas.removeEventListener("webglcontextlost", onContextLost);
-      canvas.removeEventListener("webglcontextrestored", onContextRestored);
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      [scene, ...levels.flat()].forEach((target) => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      [scene, ...levels.flat()].forEach(target => {
         if (target.texture) gl.deleteTexture(target.texture);
         gl.deleteFramebuffer(target.framebuffer);
       });
       gl.deleteTexture(gradient);
-      [burstProgram, downProgram, blurProgram, compositeProgram].forEach((item) =>
-        gl.deleteProgram(item.program),
-      );
+      [burstProgram, downProgram, blurProgram, compositeProgram].forEach(item => gl.deleteProgram(item.program));
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      if (!gl.isContextLost()) gl.getExtension("WEBGL_lose_context")?.loseContext();
+      if (!gl.isContextLost()) gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, [generation]);
 
@@ -978,15 +947,11 @@ const PrismaticBurst = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`prismatic-burst-container${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`prismatic-burst-container${className ? ` ${className}` : ''}`} style={style}>
       <canvas
         ref={canvasRef}
         className="prismatic-burst-canvas"
-        style={mixBlendMode && mixBlendMode !== "none" ? { mixBlendMode } : undefined}
+        style={mixBlendMode && mixBlendMode !== 'none' ? { mixBlendMode } : undefined}
         aria-hidden="true"
       />
     </div>

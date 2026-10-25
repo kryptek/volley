@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import "./LiquidEther.css";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import './LiquidEther.css';
 
 export interface LiquidEtherProps {
   colors?: string[];
@@ -68,15 +68,8 @@ interface Splat {
 }
 
 type Point = [number, number];
-type TargetName = "velocity" | "velocityNext" | "divergence" | "pressure" | "pressureNext";
-type ProgramName =
-  | "splat"
-  | "smooth"
-  | "divergence"
-  | "pressure"
-  | "project"
-  | "advect"
-  | "display";
+type TargetName = 'velocity' | 'velocityNext' | 'divergence' | 'pressure' | 'pressureNext';
+type ProgramName = 'splat' | 'smooth' | 'divergence' | 'pressure' | 'project' | 'advect' | 'display';
 
 const PIXEL_BUDGET = 2.4e6;
 const MAX_CELLS = 140000;
@@ -261,33 +254,30 @@ void main() {
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-const keepFor = (persistence: number, dt: number) =>
-  Math.pow(0.5, dt / (0.35 + persistence * persistence * 12));
+const keepFor = (persistence: number, dt: number) => Math.pow(0.5, dt / (0.35 + persistence * persistence * 12));
 
 const parseColor = (value: string): number[] | null => {
-  const text = String(value || "").trim();
+  const text = String(value || '').trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
-    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb)
-    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
   return null;
 };
 
-const toLinear = (channel: number) =>
-  channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+const toLinear = (channel: number) => (channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4));
 
 const buildPalette = (colors: string[]) => {
   const stops: number[][] = [];
-  colors.forEach((color) => {
+  colors.forEach(color => {
     const parsed = parseColor(color);
     if (parsed) stops.push(parsed);
   });
   if (!stops.length) stops.push([1, 1, 1]);
-  const values = stops.map((color) => color.map(toLinear));
+  const values = stops.map(color => color.map(toLinear));
   const data = new Uint8Array(PALETTE_SIZE * 4);
   for (let index = 0; index < PALETTE_SIZE; index++) {
     const t = clamp((index / (PALETTE_SIZE - 1)) * values.length - 0.5, 0, values.length - 1);
@@ -336,7 +326,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program["uniforms"] = {};
+  const uniforms: Program['uniforms'] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
@@ -346,7 +336,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
 };
 
 const LiquidEther = ({
-  colors = ["#5227FF", "#FF9FFC", "#B497CF"],
+  colors = ['#5227FF', '#FF9FFC', '#B497CF'],
   intensity = 1,
   mouseForce = 20,
   cursorSize = 100,
@@ -361,21 +351,21 @@ const LiquidEther = ({
   autoResumeDelay = 1000,
   intro = true,
   lightMode = false,
-  backgroundColor = "transparent",
+  backgroundColor = 'transparent',
   maxDevicePixelRatio = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: LiquidEtherProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const [generation, setGeneration] = useState(0);
   const palette = Array.isArray(colors) ? colors : [colors];
-  const background = backgroundColor === "transparent" ? null : parseColor(backgroundColor);
+  const background = backgroundColor === 'transparent' ? null : parseColor(backgroundColor);
 
   const settings: Settings = {
     colors: palette,
-    paletteKey: palette.join(","),
+    paletteKey: palette.join(','),
     intensity: Math.max(0, intensity),
     force: Math.max(0, mouseForce),
     radius: clamp(cursorSize, 4, 600),
@@ -391,7 +381,7 @@ const LiquidEther = ({
     intro,
     light: lightMode,
     background: background ? [...background, 1] : [0, 0, 0, 0],
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -405,20 +395,16 @@ const LiquidEther = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!gl) return;
-    if (
-      !gl.getExtension("EXT_color_buffer_float") &&
-      !gl.getExtension("EXT_color_buffer_half_float")
-    )
-      return;
+    if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float')) return;
 
     const programs = {
       splat: link(gl, SPLAT),
@@ -427,11 +413,11 @@ const LiquidEther = ({
       pressure: link(gl, PRESSURE),
       project: link(gl, PROJECT),
       advect: link(gl, ADVECT),
-      display: link(gl, DISPLAY),
+      display: link(gl, DISPLAY)
     } as Record<ProgramName, Program>;
-    if (Object.values(programs).some((entry) => !entry)) return;
+    if (Object.values(programs).some(entry => !entry)) return;
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const vao = gl.createVertexArray();
     const size = { width: 1, height: 1 };
     const grid = { width: 0, height: 0 };
@@ -446,20 +432,20 @@ const LiquidEther = ({
       inside: false,
       ready: false,
       moved: false,
-      last: 0,
+      last: 0
     };
     const auto = { phase: Math.random() * 100, x: 0, y: 0, ready: false, ramp: 0 };
     const opening = { active: settingsRef.current.intro && !reduced && generation === 0, time: 0 };
     const splats: Splat[] = [];
     const puffs: Splat[] = [];
     let energy = 1;
-    let lastInput = Number.NEGATIVE_INFINITY;
+    let lastInput = -Infinity;
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== "hidden";
+    let pageVisible = document.visibilityState !== 'hidden';
     let lost = false;
-    let paletteKey = "";
+    let paletteKey = '';
 
     const paletteTexture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, paletteTexture);
@@ -472,17 +458,7 @@ const LiquidEther = ({
       if (s.paletteKey === paletteKey) return;
       paletteKey = s.paletteKey;
       gl.bindTexture(gl.TEXTURE_2D, paletteTexture);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA8,
-        PALETTE_SIZE,
-        1,
-        0,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        buildPalette(s.colors),
-      );
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, PALETTE_SIZE, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, buildPalette(s.colors));
     };
 
     const makeTarget = (width: number, height: number, channels: number): Target => {
@@ -497,7 +473,7 @@ const LiquidEther = ({
         0,
         channels === 2 ? gl.RG : gl.RED,
         gl.HALF_FLOAT,
-        null,
+        null
       );
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -512,7 +488,7 @@ const LiquidEther = ({
     };
 
     const dropTargets = () => {
-      (Object.keys(targets) as TargetName[]).forEach((key) => {
+      (Object.keys(targets) as TargetName[]).forEach(key => {
         gl.deleteTexture(targets[key].texture);
         gl.deleteFramebuffer(targets[key].framebuffer);
         delete targets[key];
@@ -527,7 +503,7 @@ const LiquidEther = ({
       const ratio = Math.min(
         window.devicePixelRatio || 1,
         s.maxRatio,
-        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight)),
+        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight))
       );
       const width = Math.max(1, Math.round(cssWidth * ratio));
       const height = Math.max(1, Math.round(cssHeight * ratio));
@@ -559,21 +535,13 @@ const LiquidEther = ({
       targets[b] = held;
     };
 
-    const bindTexture = (
-      unit: number,
-      texture: WebGLTexture | null,
-      location: WebGLUniformLocation | null,
-    ) => {
+    const bindTexture = (unit: number, texture: WebGLTexture | null, location: WebGLUniformLocation | null) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(location, unit);
     };
 
-    const run = (
-      entry: Program,
-      output: Target | null,
-      bind: (uniforms: Program["uniforms"]) => void,
-    ) => {
+    const run = (entry: Program, output: Target | null, bind: (uniforms: Program['uniforms']) => void) => {
       gl.useProgram(entry.program);
       gl.uniform2f(entry.uniforms.uTexel, 1 / grid.width, 1 / grid.height);
       bind(entry.uniforms);
@@ -584,70 +552,61 @@ const LiquidEther = ({
     const simulate = (s: Settings, dt: number) => {
       gl.viewport(0, 0, grid.width, grid.height);
       const walls = s.walls ? 1 : 0;
-      splats.forEach((splat) => {
-        run(programs.splat, targets.velocityNext, (u) => {
+      splats.forEach(splat => {
+        run(programs.splat, targets.velocityNext, u => {
           bindTexture(0, targets.velocity.texture, u.uVelocity);
           gl.uniform2f(u.uSize, size.width, size.height);
           gl.uniform4f(u.uSegment, splat.ax, splat.ay, splat.bx, splat.by);
           gl.uniform2f(u.uForce, splat.vx, splat.vy);
           gl.uniform1f(u.uRadius, splat.radius);
         });
-        swap("velocity", "velocityNext");
+        swap('velocity', 'velocityNext');
       });
       splats.length = 0;
       const passes = Math.ceil(s.viscosity * 4);
       for (let pass = 0; pass < passes; pass++) {
-        run(programs.smooth, targets.velocityNext, (u) => {
+        run(programs.smooth, targets.velocityNext, u => {
           bindTexture(0, targets.velocity.texture, u.uVelocity);
           gl.uniform1f(u.uAmount, Math.min(1, s.viscosity * 4 - pass) * 0.9);
         });
-        swap("velocity", "velocityNext");
+        swap('velocity', 'velocityNext');
       }
-      run(programs.divergence, targets.divergence, (u) => {
+      run(programs.divergence, targets.divergence, u => {
         bindTexture(0, targets.velocity.texture, u.uVelocity);
         gl.uniform1f(u.uWalls, walls);
       });
       for (let iteration = 0; iteration < PRESSURE_STEPS; iteration++) {
-        run(programs.pressure, targets.pressureNext, (u) => {
+        run(programs.pressure, targets.pressureNext, u => {
           bindTexture(0, targets.pressure.texture, u.uPressure);
           bindTexture(1, targets.divergence.texture, u.uDivergence);
           gl.uniform1f(u.uWalls, walls);
         });
-        swap("pressure", "pressureNext");
+        swap('pressure', 'pressureNext');
       }
-      run(programs.project, targets.velocityNext, (u) => {
+      run(programs.project, targets.velocityNext, u => {
         bindTexture(0, targets.pressure.texture, u.uPressure);
         bindTexture(1, targets.velocity.texture, u.uVelocity);
         gl.uniform1f(u.uWalls, walls);
       });
-      swap("velocity", "velocityNext");
-      run(programs.advect, targets.velocityNext, (u) => {
+      swap('velocity', 'velocityNext');
+      run(programs.advect, targets.velocityNext, u => {
         bindTexture(0, targets.velocity.texture, u.uVelocity);
         gl.uniform2f(u.uStep, dt / size.width, dt / size.height);
         gl.uniform1f(u.uKeep, keepFor(s.persistence, dt));
         gl.uniform1f(u.uWalls, walls);
       });
-      swap("velocity", "velocityNext");
+      swap('velocity', 'velocityNext');
     };
 
     const render = (s: Settings) => {
       gl.viewport(0, 0, canvas.width, canvas.height);
-      run(programs.display, null, (u) => {
+      run(programs.display, null, u => {
         bindTexture(0, targets.velocity.texture, u.uVelocity);
         bindTexture(1, paletteTexture, u.uPalette);
         gl.uniform2f(u.uSimSize, grid.width, grid.height);
-        gl.uniform1f(
-          u.uSpeedScale,
-          (1.25 * s.intensity) / (0.84 * Math.max(size.width, size.height)),
-        );
+        gl.uniform1f(u.uSpeedScale, (1.25 * s.intensity) / (0.84 * Math.max(size.width, size.height)));
         gl.uniform1f(u.uLight, s.light ? 1 : 0);
-        gl.uniform4f(
-          u.uBackground,
-          s.background[0],
-          s.background[1],
-          s.background[2],
-          s.background[3],
-        );
+        gl.uniform4f(u.uBackground, s.background[0], s.background[1], s.background[2], s.background[3]);
       });
     };
 
@@ -664,7 +623,7 @@ const LiquidEther = ({
       const reach = 0.08 + 0.3 * eased;
       return [
         (0.5 + Math.cos(angle) * reach * 1.1) * size.width,
-        (0.5 + Math.sin(angle) * reach * (size.width / size.height) * 0.75) * size.height,
+        (0.5 + Math.sin(angle) * reach * (size.width / size.height) * 0.75) * size.height
       ];
     };
 
@@ -676,7 +635,7 @@ const LiquidEther = ({
         by: to[1],
         vx: clamp(((to[0] - from[0]) / dt) * scale, -6000, 6000),
         vy: clamp(((to[1] - from[1]) / dt) * scale, -6000, 6000),
-        radius,
+        radius
       });
     };
 
@@ -703,8 +662,7 @@ const LiquidEther = ({
         const spot = wander(auto.phase);
         if (auto.ready) {
           const gust = 0.3 + 0.7 * Math.pow(0.5 + 0.5 * Math.sin(auto.phase * 2.6), 2);
-          const scale =
-            (s.force / 20) * 0.45 * s.autoIntensity * auto.ramp * auto.ramp * gust * pace;
+          const scale = (s.force / 20) * 0.45 * s.autoIntensity * auto.ramp * auto.ramp * gust * pace;
           addStroke([auto.x, auto.y], spot, dt, scale, s.radius);
         }
         auto.x = spot[0];
@@ -718,13 +676,7 @@ const LiquidEther = ({
       if (pointer.moved && dt > 0) {
         pointer.moved = false;
         const span = Math.max(now - pointer.last, 8) / 1000;
-        addStroke(
-          [pointer.fromX, pointer.fromY],
-          [pointer.x, pointer.y],
-          span,
-          (s.force / 20) * 0.15 * pace,
-          s.radius,
-        );
+        addStroke([pointer.fromX, pointer.fromY], [pointer.x, pointer.y], span, (s.force / 20) * 0.15 * pace, s.radius);
         pointer.fromX = pointer.x;
         pointer.fromY = pointer.y;
         pointer.last = now;
@@ -740,12 +692,7 @@ const LiquidEther = ({
       render(s);
 
       energy *= keepFor(s.persistence, dt);
-      const busy =
-        opening.active ||
-        (s.autoDemo && !reduced) ||
-        energy > 0.002 ||
-        puffs.length > 0 ||
-        pointer.moved;
+      const busy = opening.active || (s.autoDemo && !reduced) || energy > 0.002 || puffs.length > 0 || pointer.moved;
       if (busy && visible && pageVisible) raf = requestAnimationFrame(frame);
     };
 
@@ -768,7 +715,7 @@ const LiquidEther = ({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -808,9 +755,7 @@ const LiquidEther = ({
       lastInput = performance.now();
       if (!s.clickBurst || reduced) return;
       const angle =
-        Math.hypot(pointer.dx, pointer.dy) > 1
-          ? Math.atan2(pointer.dy, pointer.dx)
-          : Math.random() * Math.PI * 2;
+        Math.hypot(pointer.dx, pointer.dy) > 1 ? Math.atan2(pointer.dy, pointer.dx) : Math.random() * Math.PI * 2;
       const dirX = Math.cos(angle);
       const dirY = Math.sin(angle);
       const reach = s.radius * 0.5;
@@ -822,7 +767,7 @@ const LiquidEther = ({
         by: spot.y + dirY * reach,
         vx: dirX * push,
         vy: dirY * push,
-        radius: s.radius * 0.9,
+        radius: s.radius * 0.9
       });
       if (puffs.length > 4) puffs.shift();
       energy = 1;
@@ -835,14 +780,14 @@ const LiquidEther = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") onLeave();
+      if (event.pointerType !== 'mouse') onLeave();
     };
 
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -850,9 +795,9 @@ const LiquidEther = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    const onRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -860,17 +805,17 @@ const LiquidEther = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== "hidden";
+      pageVisible = document.visibilityState !== 'hidden';
       wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     wake();
@@ -880,29 +825,25 @@ const LiquidEther = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       if (!gl.isContextLost()) {
         dropTargets();
         gl.deleteTexture(paletteTexture);
         gl.deleteVertexArray(vao);
-        Object.values(programs).forEach((entry) => gl.deleteProgram(entry.program));
+        Object.values(programs).forEach(entry => gl.deleteProgram(entry.program));
       }
     };
   }, [generation]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`liquid-ether${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`liquid-ether${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="liquid-ether__canvas" aria-hidden="true" />
     </div>
   );

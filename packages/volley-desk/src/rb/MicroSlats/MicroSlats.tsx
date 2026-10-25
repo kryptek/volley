@@ -1,13 +1,13 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { Mesh, Program, RenderTarget, Renderer, Texture, Triangle } from "ogl";
-import { useEffect, useMemo, useRef } from "react";
-import type { CSSProperties } from "react";
+import { useEffect, useMemo, useRef } from 'react';
+import type { CSSProperties } from 'react';
+import { Renderer, Program, Mesh, Triangle, RenderTarget, Texture } from 'ogl';
 
-import "./MicroSlats.css";
+import './MicroSlats.css';
 
-type SwellPreset = "swell" | "tide" | "storm" | "signal";
+type SwellPreset = 'swell' | 'tide' | 'storm' | 'signal';
 type Rgba = [number, number, number, number];
 
 interface WaveValues {
@@ -99,7 +99,7 @@ const SWELL_PRESETS: Record<SwellPreset, WaveValues> = {
     glint: 0.7,
     contrast: 1.25,
     perspective: 0.55,
-    fog: 0.55,
+    fog: 0.55
   },
   tide: {
     scale: 1.3,
@@ -110,7 +110,7 @@ const SWELL_PRESETS: Record<SwellPreset, WaveValues> = {
     glint: 0.45,
     contrast: 1.1,
     perspective: 0.5,
-    fog: 0.4,
+    fog: 0.4
   },
   storm: {
     scale: 0.55,
@@ -121,7 +121,7 @@ const SWELL_PRESETS: Record<SwellPreset, WaveValues> = {
     glint: 1.3,
     contrast: 1.8,
     perspective: 0.8,
-    fog: 0.35,
+    fog: 0.35
   },
   signal: {
     scale: 0.85,
@@ -132,8 +132,8 @@ const SWELL_PRESETS: Record<SwellPreset, WaveValues> = {
     glint: 0.25,
     contrast: 1.2,
     perspective: 0,
-    fog: 0,
-  },
+    fog: 0
+  }
 };
 
 const FLUID_SIZE = 96;
@@ -146,23 +146,18 @@ const clamp = (value: number, min: number, max: number) => Math.min(Math.max(val
 
 const parseColor = (value: string, fallback: Rgba): Rgba => {
   try {
-    const ctx = document.createElement("canvas").getContext("2d");
+    const ctx = document.createElement('canvas').getContext('2d');
     if (!ctx) return fallback;
-    ctx.fillStyle = "#000000";
+    ctx.fillStyle = '#000000';
     ctx.fillStyle = value;
     const resolved = ctx.fillStyle;
-    if (resolved.startsWith("#")) {
-      const n = Number.parseInt(resolved.slice(1), 16);
+    if (resolved.startsWith('#')) {
+      const n = parseInt(resolved.slice(1), 16);
       return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1];
     }
     const parts = resolved.match(/[\d.]+/g);
     if (!parts || parts.length < 3) return fallback;
-    return [
-      Number(parts[0]) / 255,
-      Number(parts[1]) / 255,
-      Number(parts[2]) / 255,
-      parts[3] ? Number(parts[3]) : 1,
-    ];
+    return [Number(parts[0]) / 255, Number(parts[1]) / 255, Number(parts[2]) / 255, parts[3] ? Number(parts[3]) : 1];
   } catch {
     return fallback;
   }
@@ -439,10 +434,10 @@ void main() {
 `;
 
 const MicroSlats = ({
-  preset = "swell",
-  color = "#A855F7",
-  glintColor = "#ffffff",
-  backgroundColor = "#000000",
+  preset = 'swell',
+  color = '#A855F7',
+  glintColor = '#ffffff',
+  backgroundColor = '#000000',
   slatWidth = 10,
   slatHeight = 25,
   gap = 3,
@@ -465,26 +460,24 @@ const MicroSlats = ({
   intro = true,
   introDuration = 1.5,
   paused = false,
-  className = "",
-  style,
+  className = '',
+  style
 }: MicroSlatsProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<Settings | null>(null);
   const wakeRef = useRef<(() => void) | null>(null);
 
   const base = SWELL_PRESETS[preset] || SWELL_PRESETS.swell;
-  const pick = <K extends keyof WaveValues>(
-    value: WaveValues[K] | undefined,
-    key: K,
-  ): WaveValues[K] => (value === undefined || value === null ? base[key] : value);
+  const pick = <K extends keyof WaveValues>(value: WaveValues[K] | undefined, key: K): WaveValues[K] =>
+    value === undefined || value === null ? base[key] : value;
 
   const colors = useMemo(
     () => ({
       color: parseColor(color, [0.66, 0.33, 0.97, 1]),
       glintColor: parseColor(glintColor, [1, 1, 1, 1]),
-      backgroundColor: parseColor(backgroundColor, [0, 0, 0, 1]),
+      backgroundColor: parseColor(backgroundColor, [0, 0, 0, 1])
     }),
-    [color, glintColor, backgroundColor],
+    [color, glintColor, backgroundColor]
   );
 
   useEffect(() => {
@@ -494,15 +487,15 @@ const MicroSlats = ({
       slatHeight,
       gap,
       roundness,
-      scale: pick(scale, "scale"),
-      speed: pick(speed, "speed"),
-      direction: pick(direction, "direction"),
-      chop: pick(chop, "chop"),
-      stretch: pick(stretch, "stretch"),
-      glint: pick(glint, "glint"),
-      contrast: pick(contrast, "contrast"),
-      perspective: pick(perspective, "perspective"),
-      fog: pick(fog, "fog"),
+      scale: pick(scale, 'scale'),
+      speed: pick(speed, 'speed'),
+      direction: pick(direction, 'direction'),
+      chop: pick(chop, 'chop'),
+      stretch: pick(stretch, 'stretch'),
+      glint: pick(glint, 'glint'),
+      contrast: pick(contrast, 'contrast'),
+      perspective: pick(perspective, 'perspective'),
+      fog: pick(fog, 'fog'),
       interactive,
       cursorStrength,
       cursorSize,
@@ -511,7 +504,7 @@ const MicroSlats = ({
       lean,
       intro,
       introDuration,
-      paused,
+      paused
     };
     wakeRef.current?.();
   });
@@ -520,29 +513,24 @@ const MicroSlats = ({
     const container = containerRef.current;
     if (!container) return undefined;
 
-    const renderer = new Renderer({
-      alpha: true,
-      premultipliedAlpha: true,
-      antialias: false,
-      depth: false,
-    });
+    const renderer = new Renderer({ alpha: true, premultipliedAlpha: true, antialias: false, depth: false });
     const gl = renderer.gl;
     if (!renderer.isWebgl2) {
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       return undefined;
     }
     gl.clearColor(0, 0, 0, 0);
     const canvas = gl.canvas;
-    canvas.style.display = "block";
-    canvas.style.width = "100%";
-    canvas.style.height = "100%";
-    canvas.setAttribute("aria-hidden", "true");
+    canvas.style.display = 'block';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.setAttribute('aria-hidden', 'true');
     container.appendChild(canvas);
 
     const geometry = new Triangle(gl);
     const blank = new Texture(gl);
     const floatTargets = !!(
-      gl.getExtension("EXT_color_buffer_float") || gl.getExtension("EXT_color_buffer_half_float")
+      gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float')
     );
 
     const dispose = (target: RenderTarget) => {
@@ -555,7 +543,7 @@ const MicroSlats = ({
       height: 1,
       depth: false,
       minFilter: gl.NEAREST,
-      magFilter: gl.NEAREST,
+      magFilter: gl.NEAREST
     });
 
     const fieldUniforms = {
@@ -578,7 +566,7 @@ const MicroSlats = ({
       uFluidTexel: { value: [1, 1] },
       uFluid: { value: 0 },
       uInk: { value: 1 },
-      uLean: { value: 0.5 },
+      uLean: { value: 0.5 }
     };
     const fieldMesh = new Mesh(gl, {
       geometry,
@@ -587,8 +575,8 @@ const MicroSlats = ({
         fragment: fieldFragment,
         uniforms: fieldUniforms,
         depthTest: false,
-        depthWrite: false,
-      }),
+        depthWrite: false
+      })
     });
 
     const slatUniforms = {
@@ -602,7 +590,7 @@ const MicroSlats = ({
       uTilt: { value: 0 },
       uColor: { value: [1, 1, 1] },
       uGlintColor: { value: [1, 1, 1] },
-      uBackground: { value: [0, 0, 0, 1] },
+      uBackground: { value: [0, 0, 0, 1] }
     };
     const slatMesh = new Mesh(gl, {
       geometry,
@@ -611,8 +599,8 @@ const MicroSlats = ({
         fragment: slatFragment,
         uniforms: slatUniforms,
         depthTest: false,
-        depthWrite: false,
-      }),
+        depthWrite: false
+      })
     });
 
     const fluidTexel = { value: [1, 1] };
@@ -624,41 +612,35 @@ const MicroSlats = ({
           fragment,
           uniforms: { uTexel: fluidTexel, ...uniforms },
           depthTest: false,
-          depthWrite: false,
-        }),
+          depthWrite: false
+        })
       });
     const splatPass = fluidPass(splatFragment, {
       uTarget: { value: blank },
       uAspect: { value: 1 },
       uPoint: { value: [0, 0] },
       uValue: { value: [0, 0, 0] },
-      uRadius: { value: 0.01 },
+      uRadius: { value: 0.01 }
     });
     const curlPass = fluidPass(curlFragment, { uVelocity: { value: blank } });
     const vorticityPass = fluidPass(vorticityFragment, {
       uVelocity: { value: blank },
       uCurl: { value: blank },
       uSwirl: { value: 20 },
-      uDt: { value: 0.016 },
+      uDt: { value: 0.016 }
     });
     const divergencePass = fluidPass(divergenceFragment, { uVelocity: { value: blank } });
-    const pressurePass = fluidPass(pressureFragment, {
-      uPressure: { value: blank },
-      uDivergence: { value: blank },
-    });
-    const projectPass = fluidPass(projectFragment, {
-      uPressure: { value: blank },
-      uVelocity: { value: blank },
-    });
+    const pressurePass = fluidPass(pressureFragment, { uPressure: { value: blank }, uDivergence: { value: blank } });
+    const projectPass = fluidPass(projectFragment, { uPressure: { value: blank }, uVelocity: { value: blank } });
     const advectPass = fluidPass(advectFragment, {
       uVelocity: { value: blank },
       uSource: { value: blank },
       uDt: { value: 0.016 },
-      uFade: { value: 1 },
+      uFade: { value: 1 }
     });
     const scalePass = fluidPass(scaleFragment, { uSource: { value: blank }, uValue: { value: 0 } });
 
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
     let width = 1;
     let height = 1;
@@ -675,8 +657,7 @@ const MicroSlats = ({
     const splats: Splat[] = [];
     const pointer = { x: 0, y: 0, tracked: false };
 
-    const run = (mesh: Mesh, target?: RenderTarget) =>
-      renderer.render({ scene: mesh, target, clear: false });
+    const run = (mesh: Mesh, target?: RenderTarget) => renderer.render({ scene: mesh, target, clear: false });
 
     const floatTarget = (w: number, h: number) =>
       new RenderTarget(gl, {
@@ -687,7 +668,7 @@ const MicroSlats = ({
         format: gl.RGBA,
         internalFormat: (gl as unknown as WebGL2RenderingContext).RGBA16F,
         minFilter: gl.LINEAR,
-        magFilter: gl.LINEAR,
+        magFilter: gl.LINEAR
       });
 
     const swapPair = (w: number, h: number): Pair => ({
@@ -697,12 +678,12 @@ const MicroSlats = ({
         const next = this.read;
         this.read = this.write;
         this.write = next;
-      },
+      }
     });
 
     const disposeFluid = () => {
       if (!fluid) return;
-      [fluid.velocity, fluid.ink, fluid.pressure].forEach((pair) => {
+      [fluid.velocity, fluid.ink, fluid.pressure].forEach(pair => {
         dispose(pair.read);
         dispose(pair.write);
       });
@@ -725,7 +706,7 @@ const MicroSlats = ({
         ink: swapPair(w, h),
         pressure: swapPair(w, h),
         divergence: floatTarget(w, h),
-        curl: floatTarget(w, h),
+        curl: floatTarget(w, h)
       };
       fluidTexel.value = [1 / w, 1 / h];
     };
@@ -733,11 +714,7 @@ const MicroSlats = ({
     const resize = () => {
       width = Math.max(1, container.clientWidth);
       height = Math.max(1, container.clientHeight);
-      renderer.dpr = Math.min(
-        window.devicePixelRatio || 1,
-        2,
-        Math.sqrt(PIXEL_BUDGET / (width * height)),
-      );
+      renderer.dpr = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(PIXEL_BUDGET / (width * height)));
       renderer.setSize(width, height);
       buildFluid();
       start();
@@ -760,14 +737,11 @@ const MicroSlats = ({
           height: rows,
           depth: false,
           minFilter: gl.NEAREST,
-          magFilter: gl.NEAREST,
+          magFilter: gl.NEAREST
         });
         slatUniforms.tField.value = fieldTarget.texture;
       }
-      const tilt = Math.min(
-        0.42,
-        Math.asin(clamp((pitchX * 1.5 - slatW * 0.5) / (slatH * 0.5), 0, 1)),
-      );
+      const tilt = Math.min(0.42, Math.asin(clamp((pitchX * 1.5 - slatW * 0.5) / (slatH * 0.5), 0, 1)));
       return { slatW, slatH, tilt, grid: [cols, rows, pitchX, pitchY], origin: [originX, originY] };
     };
 
@@ -834,7 +808,7 @@ const MicroSlats = ({
 
     const clearFluid = (f: Fluid) => {
       scalePass.program.uniforms.uValue.value = 0;
-      [f.velocity, f.ink, f.pressure].forEach((pair) => {
+      [f.velocity, f.ink, f.pressure].forEach(pair => {
         scalePass.program.uniforms.uSource.value = pair.read.texture;
         run(scalePass, pair.write);
         pair.swap();
@@ -853,9 +827,7 @@ const MicroSlats = ({
       introClock = s.intro && !reducedMotion ? introClock + dt / Math.max(0.2, s.introDuration) : 1;
       const introLinear = Math.min(introClock, 1);
       const introEase =
-        introLinear < 0.5
-          ? 4 * introLinear * introLinear * introLinear
-          : 1 - Math.pow(-2 * introLinear + 2, 3) / 2;
+        introLinear < 0.5 ? 4 * introLinear * introLinear * introLinear : 1 - Math.pow(-2 * introLinear + 2, 3) / 2;
 
       if (fluid && splats.length) {
         const radius = Math.pow(clamp(s.cursorSize, 4, 600) / height, 2) * 0.35;
@@ -990,11 +962,11 @@ const MicroSlats = ({
       if (!document.hidden) start();
     };
 
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerout", onPointerOut, { passive: true });
-    window.addEventListener("blur", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerout', onPointerOut, { passive: true });
+    window.addEventListener('blur', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
@@ -1013,15 +985,15 @@ const MicroSlats = ({
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
       intersectionObserver.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerout", onPointerOut);
-      window.removeEventListener("blur", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerout', onPointerOut);
+      window.removeEventListener('blur', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       wakeRef.current = null;
       disposeFluid();
       dispose(fieldTarget);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
     };
   }, []);

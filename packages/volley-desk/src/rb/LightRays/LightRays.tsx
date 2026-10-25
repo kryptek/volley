@@ -1,18 +1,18 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import "./LightRays.css";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import './LightRays.css';
 
 export type RaysOrigin =
-  | "top-center"
-  | "top-left"
-  | "top-right"
-  | "right"
-  | "left"
-  | "bottom-center"
-  | "bottom-right"
-  | "bottom-left";
+  | 'top-center'
+  | 'top-left'
+  | 'top-right'
+  | 'right'
+  | 'left'
+  | 'bottom-center'
+  | 'bottom-right'
+  | 'bottom-left';
 
 export interface LightRaysProps {
   raysOrigin?: RaysOrigin;
@@ -86,14 +86,14 @@ const PIXEL_BUDGET = 2.4e6;
 const MAX_PULSES = 4;
 
 const ORIGINS: Record<RaysOrigin, Origin> = {
-  "top-left": { anchor: [0, -0.2], dir: [0, 1] },
-  "top-center": { anchor: [0.5, -0.2], dir: [0, 1] },
-  "top-right": { anchor: [1, -0.2], dir: [0, 1] },
+  'top-left': { anchor: [0, -0.2], dir: [0, 1] },
+  'top-center': { anchor: [0.5, -0.2], dir: [0, 1] },
+  'top-right': { anchor: [1, -0.2], dir: [0, 1] },
   left: { anchor: [-0.2, 0.5], dir: [1, 0] },
   right: { anchor: [1.2, 0.5], dir: [-1, 0] },
-  "bottom-left": { anchor: [0, 1.2], dir: [0, -1] },
-  "bottom-center": { anchor: [0.5, 1.2], dir: [0, -1] },
-  "bottom-right": { anchor: [1, 1.2], dir: [0, -1] },
+  'bottom-left': { anchor: [0, 1.2], dir: [0, -1] },
+  'bottom-center': { anchor: [0.5, 1.2], dir: [0, -1] },
+  'bottom-right': { anchor: [1, 1.2], dir: [0, -1] }
 };
 
 const VERTEX = `#version 300 es
@@ -242,15 +242,14 @@ void main() {
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const parseColor = (value: string): number[] | null => {
-  const text = String(value || "").trim();
+  const text = String(value || '').trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
-    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb)
-    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
   return null;
 };
 
@@ -286,11 +285,11 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program["uniforms"] = {};
+  const uniforms: Program['uniforms'] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
-    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -301,8 +300,8 @@ const smoother = (t: number) => {
 };
 
 const LightRays = ({
-  raysOrigin = "top-center",
-  raysColor = "#ffffff",
+  raysOrigin = 'top-center',
+  raysColor = '#ffffff',
   raysSpeed = 1,
   lightSpread = 0.5,
   rayLength = 3,
@@ -326,8 +325,8 @@ const LightRays = ({
   lightMode = false,
   opacity = 1,
   maxDevicePixelRatio = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: LightRaysProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -335,7 +334,7 @@ const LightRays = ({
   const [generation, setGeneration] = useState(0);
 
   const settings: Settings = {
-    origin: ORIGINS[raysOrigin] || ORIGINS["top-center"],
+    origin: ORIGINS[raysOrigin] || ORIGINS['top-center'],
     color: parseColor(raysColor) || [1, 1, 1],
     speed: Math.max(0, raysSpeed),
     spread: Math.max(0.001, lightSpread),
@@ -359,7 +358,7 @@ const LightRays = ({
     intro,
     light: lightMode,
     opacity: clamp(opacity, 0, 1),
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -373,18 +372,18 @@ const LightRays = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     const shader = gl ? link(gl) : null;
     if (!gl || !shader) return;
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const vao = gl.createVertexArray();
     const size = { width: 1, height: 1, ratio: 1 };
     const pointer = { x: 0.5, y: 0.5, inside: false, seen: false };
@@ -397,7 +396,7 @@ const LightRays = ({
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== "hidden";
+    let pageVisible = document.visibilityState !== 'hidden';
     let lost = false;
 
     const resize = () => {
@@ -411,7 +410,7 @@ const LightRays = ({
         window.devicePixelRatio || 1,
         s.maxRatio,
         sampling,
-        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight)),
+        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight))
       );
       const width = Math.max(1, Math.round(cssWidth * ratio));
       const height = Math.max(1, Math.round(cssHeight * ratio));
@@ -442,8 +441,7 @@ const LightRays = ({
       shade.x += (pointer.x - shade.x) * glide;
       shade.y += (pointer.y - shade.y) * glide;
       const shading = pointer.inside && s.cursorShadow && !reduced;
-      shade.presence +=
-        ((shading ? 1 : 0) - shade.presence) * (1 - Math.exp(-dt / (shading ? 0.25 : 0.5)));
+      shade.presence += ((shading ? 1 : 0) - shade.presence) * (1 - Math.exp(-dt / (shading ? 0.25 : 0.5)));
 
       for (let index = pulses.length - 1; index >= 0; index--) {
         pulses[index].age += dt;
@@ -513,8 +511,7 @@ const LightRays = ({
       const settling =
         Math.abs(aim.x - aimX) > 1e-4 ||
         Math.abs(aim.y - aimY) > 1e-4 ||
-        (shade.presence > 1e-3 &&
-          Math.abs(shade.x - pointer.x) + Math.abs(shade.y - pointer.y) > 1e-4) ||
+        (shade.presence > 1e-3 && Math.abs(shade.x - pointer.x) + Math.abs(shade.y - pointer.y) > 1e-4) ||
         Math.abs((shading ? 1 : 0) - shade.presence) > 1e-3 ||
         pulses.length > 0;
       const busy = s.speed > 0 || opening < 1 || settling;
@@ -540,7 +537,7 @@ const LightRays = ({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -569,13 +566,13 @@ const LightRays = ({
       wake();
     };
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") onLeave();
+      if (event.pointerType !== 'mouse') onLeave();
     };
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -583,9 +580,9 @@ const LightRays = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    const onRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -593,17 +590,17 @@ const LightRays = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== "hidden";
+      pageVisible = document.visibilityState !== 'hidden';
       wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     wake();
@@ -613,14 +610,14 @@ const LightRays = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       if (!gl.isContextLost()) {
         gl.deleteVertexArray(vao);
         gl.deleteProgram(shader.program);
@@ -629,11 +626,7 @@ const LightRays = ({
   }, [generation]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`light-rays${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`light-rays${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="light-rays__canvas" aria-hidden="true" />
     </div>
   );

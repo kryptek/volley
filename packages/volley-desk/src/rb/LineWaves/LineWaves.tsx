@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import "./LineWaves.css";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import './LineWaves.css';
 
 export interface LineWavesProps {
   color1?: string;
@@ -226,15 +226,14 @@ void main() {
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const parseColor = (value: string): number[] => {
-  const text = String(value || "").trim();
+  const text = String(value || '').trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
-    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb)
-    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
   return [1, 1, 1];
 };
 
@@ -270,19 +269,19 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program["uniforms"] = {};
+  const uniforms: Program['uniforms'] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
-    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 const LineWaves = ({
-  color1 = "#ffffff",
-  color2 = "#ffffff",
-  color3 = "#ffffff",
+  color1 = '#ffffff',
+  color2 = '#ffffff',
+  color3 = '#ffffff',
   colorCycleSpeed = 1,
   speed = 0.3,
   lineCount = 72,
@@ -302,8 +301,8 @@ const LineWaves = ({
   lightMode = false,
   opacity = 1,
   maxDevicePixelRatio = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: LineWavesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -332,7 +331,7 @@ const LineWaves = ({
     intro,
     light: lightMode,
     opacity: clamp(opacity, 0, 1),
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -346,18 +345,18 @@ const LineWaves = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     const shader = gl ? link(gl) : null;
     if (!gl || !shader) return;
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const vao = gl.createVertexArray();
     const size = { width: 1, height: 1, ratio: 1 };
     const pointer = { x: 0, y: 0, inside: false };
@@ -370,7 +369,7 @@ const LineWaves = ({
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== "hidden";
+    let pageVisible = document.visibilityState !== 'hidden';
     let lost = false;
 
     const resize = () => {
@@ -381,7 +380,7 @@ const LineWaves = ({
       const ratio = Math.min(
         window.devicePixelRatio || 1,
         s.maxRatio,
-        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight)),
+        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight))
       );
       const width = Math.max(1, Math.round(cssWidth * ratio));
       const height = Math.max(1, Math.round(cssHeight * ratio));
@@ -394,10 +393,7 @@ const LineWaves = ({
       size.ratio = width / cssWidth;
     };
 
-    const toField = (x: number, y: number) => [
-      (x - size.width / 2) / size.height,
-      (size.height / 2 - y) / size.height,
-    ];
+    const toField = (x: number, y: number) => [(x - size.width / 2) / size.height, (size.height / 2 - y) / size.height];
 
     const frame = (now: number) => {
       raf = 0;
@@ -467,8 +463,7 @@ const LineWaves = ({
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       const settling = Math.abs(presence - lens.presence) > 0.002;
-      const busy =
-        (s.speed > 0 && !reduced) || reveal < 1 || settling || ripples.length > 0 || tracking;
+      const busy = (s.speed > 0 && !reduced) || reveal < 1 || settling || ripples.length > 0 || tracking;
       if (busy && visible && pageVisible) raf = requestAnimationFrame(frame);
     };
 
@@ -491,7 +486,7 @@ const LineWaves = ({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -516,13 +511,13 @@ const LineWaves = ({
       wake();
     };
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") onLeave();
+      if (event.pointerType !== 'mouse') onLeave();
     };
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -530,9 +525,9 @@ const LineWaves = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    const onRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -540,17 +535,17 @@ const LineWaves = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== "hidden";
+      pageVisible = document.visibilityState !== 'hidden';
       wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     wake();
@@ -560,14 +555,14 @@ const LineWaves = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       if (!gl.isContextLost()) {
         gl.deleteVertexArray(vao);
         gl.deleteProgram(shader.program);
@@ -576,11 +571,7 @@ const LineWaves = ({
   }, [generation]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`line-waves${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`line-waves${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="line-waves__canvas" aria-hidden="true" />
     </div>
   );

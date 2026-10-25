@@ -1,10 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
-import "./Waves.css";
+import { useEffect, useRef, type CSSProperties } from 'react';
+import './Waves.css';
 
-export type WavesLineStyle = "solid" | "dashed";
+export type WavesLineStyle = 'solid' | 'dashed';
 
 export interface WavesProps {
   lineColor?: string;
@@ -290,10 +290,10 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
 };
 
 const Waves = ({
-  lineColor = "#ffffff",
+  lineColor = '#ffffff',
   accentColor,
-  backgroundColor = "transparent",
-  lineStyle = "solid",
+  backgroundColor = 'transparent',
+  lineStyle = 'solid',
   spacing = 10,
   lineWidth = 1,
   rotation = 0,
@@ -314,15 +314,15 @@ const Waves = ({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: WavesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const settings: Settings = {
     lineColor: String(lineColor),
-    accentColor: accentColor ? String(accentColor) : "",
+    accentColor: accentColor ? String(accentColor) : '',
     lineStyle: STYLES[lineStyle] ?? 0,
     spacing: Math.max(2, spacing),
     lineWidth: Math.max(0.25, lineWidth),
@@ -343,7 +343,7 @@ const Waves = ({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -351,12 +351,12 @@ const Waves = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -373,8 +373,8 @@ const Waves = ({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colors = new Map<string, number[]>();
     const parse = (value: string): number[] => {
       const cached = colors.get(value);
@@ -382,7 +382,7 @@ const Waves = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#ffffff";
+        probe.fillStyle = '#ffffff';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -392,10 +392,10 @@ const Waves = ({
       return rgb;
     };
     const ink = (rgb: number[]): number[] => {
-      const linear = rgb.map((v) => Math.pow(v, 2.2));
+      const linear = rgb.map(v => Math.pow(v, 2.2));
       const tone = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
       const depth = Math.min(1, 0.045 / Math.max(tone, 0.0001));
-      return linear.map((v) => Math.pow(v * depth, 1 / 2.2));
+      return linear.map(v => Math.pow(v * depth, 1 / 2.2));
     };
 
     const view = { width: 1, height: 1, ratio: 1 };
@@ -407,7 +407,7 @@ const Waves = ({
       top: 0,
       bottom: -1,
       left: 0,
-      right: -1,
+      right: -1
     };
     const pointer = { x: 0, y: 0, sx: 0, sy: 0, vx: 0, vy: 0, inside: false };
     const ripples: Ripple[] = [];
@@ -428,17 +428,7 @@ const Waves = ({
       grid.left = 0;
       grid.right = -1;
       gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RG32F,
-        grid.cols,
-        grid.rows,
-        0,
-        gl.RG,
-        gl.FLOAT,
-        grid.shift,
-      );
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, grid.cols, grid.rows, 0, gl.RG, gl.FLOAT, grid.shift);
     };
 
     const include = (x0: number, y0: number, x1: number, y1: number) => {
@@ -469,11 +459,8 @@ const Waves = ({
       const radius = s.mouseRadius;
       const speedNow = Math.hypot(pointer.vx, pointer.vy);
       const drive =
-        s.mouseInteraction && pointer.inside && !reduce
-          ? 26000 * Math.tanh(speedNow / 1400) * s.mouseStrength
-          : 0;
-      if (drive > 1)
-        include(pointer.sx - radius, pointer.sy - radius, pointer.sx + radius, pointer.sy + radius);
+        s.mouseInteraction && pointer.inside && !reduce ? 26000 * Math.tanh(speedNow / 1400) * s.mouseStrength : 0;
+      if (drive > 1) include(pointer.sx - radius, pointer.sy - radius, pointer.sx + radius, pointer.sy + radius);
 
       const live: Front[] = [];
       for (let i = ripples.length - 1; i >= 0; i--) {
@@ -491,7 +478,7 @@ const Waves = ({
           x: ripple.x,
           y: ripple.y,
           front,
-          power: (150 * omega * life * Math.sqrt(life)) / RIPPLE_IMPULSE,
+          power: (150 * omega * life * Math.sqrt(life)) / RIPPLE_IMPULSE
         });
       }
 
@@ -527,8 +514,7 @@ const Waves = ({
             const distance = Math.hypot(ex, ey);
             const offset = (distance - ripple.front) / RIPPLE_WIDTH;
             if (distance > 0.001 && Math.abs(offset) < 3) {
-              const push =
-                ripple.power * Math.exp(-offset * offset * 2) * smootherstep(distance / 56);
+              const push = ripple.power * Math.exp(-offset * offset * 2) * smootherstep(distance / 56);
               ax += (ex / distance) * push;
               ay += (ey / distance) * push;
             }
@@ -571,7 +557,7 @@ const Waves = ({
         height,
         gl.RG,
         gl.FLOAT,
-        shift.subarray(top * cols * 2, (top + height) * cols * 2),
+        shift.subarray(top * cols * 2, (top + height) * cols * 2)
       );
       return grid.bottom >= grid.top;
     };
@@ -597,10 +583,7 @@ const Waves = ({
       const halfWidth = Math.max(0.5, width / 2);
       const reach = halfWidth + 1;
       const progress = state.intro;
-      const reveal =
-        s.intro && !reduce
-          ? (1 - Math.pow(1 - clamp(progress / 0.7, 0, 1), 3)) * reachU * 1.3
-          : 1e6;
+      const reveal = s.intro && !reduce ? (1 - Math.pow(1 - clamp(progress / 0.7, 0, 1), 3)) * reachU * 1.3 : 1e6;
       const swell = s.intro && !reduce ? smootherstep((progress - 0.1) / 0.9) : 1;
       const base = parse(s.lineColor);
       const tone = s.lightMode ? ink(base) : base;
@@ -665,10 +648,8 @@ const Waves = ({
       else if (state.intro < 1) state.intro = Math.min(1, state.intro + dt / INTRO_SECONDS);
       const awake = simulate(dt);
       render();
-      const engaged =
-        pointer.inside && s.mouseInteraction && Math.hypot(pointer.vx, pointer.vy) > 1;
-      if (!reduce || awake || engaged || ripples.length || state.intro < 1)
-        raf = requestAnimationFrame(frame);
+      const engaged = pointer.inside && s.mouseInteraction && Math.hypot(pointer.vx, pointer.vy) > 1;
+      if (!reduce || awake || engaged || ripples.length || state.intro < 1) raf = requestAnimationFrame(frame);
       else last = 0;
     };
 
@@ -715,21 +696,16 @@ const Waves = ({
 
     const onPointerDown = (event: PointerEvent) => {
       const s = settingsRef.current;
-      const { x, y, rect, inside } = place(event, event.pointerType !== "mouse");
+      const { x, y, rect, inside } = place(event, event.pointerType !== 'mouse');
       if (inside && s.clickRipple && !s.paused && !reduce) {
-        ripples.push({
-          x,
-          y,
-          age: 0,
-          range: Math.max(360, Math.hypot(rect.width, rect.height) * 0.55),
-        });
+        ripples.push({ x, y, age: 0, range: Math.max(360, Math.hypot(rect.width, rect.height) * 0.55) });
         if (ripples.length > 6) ripples.shift();
       }
       wake();
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") pointer.inside = false;
+      if (event.pointerType !== 'mouse') pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -744,20 +720,20 @@ const Waves = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -777,16 +753,16 @@ const Waves = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteProgram(program.program);
       gl.deleteVertexArray(vao);
       gl.deleteTexture(texture);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -797,7 +773,7 @@ const Waves = ({
   return (
     <div
       ref={containerRef}
-      className={`waves${className ? ` ${className}` : ""}`}
+      className={`waves${className ? ` ${className}` : ''}`}
       style={{ backgroundColor, ...style }}
     >
       <canvas ref={canvasRef} className="waves__canvas" aria-hidden="true" />

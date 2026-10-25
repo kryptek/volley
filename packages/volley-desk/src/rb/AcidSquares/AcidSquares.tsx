@@ -1,19 +1,19 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 
-import "./AcidSquares.css";
+import './AcidSquares.css';
 
-export type AcidSquaresShape = "square" | "round";
+export type AcidSquaresShape = 'square' | 'round';
 
-export type AcidSquaresDetail = "low" | "medium" | "high";
+export type AcidSquaresDetail = 'low' | 'medium' | 'high';
 
-export type AcidSquaresLighting = "split" | "backlit" | "overhead";
+export type AcidSquaresLighting = 'split' | 'backlit' | 'overhead';
 
-export type AcidSquaresHoverEffect = "press" | "lift" | "none";
+export type AcidSquaresHoverEffect = 'press' | 'lift' | 'none';
 
-export type AcidSquaresPulseOrigin = "center" | "random";
+export type AcidSquaresPulseOrigin = 'center' | 'random';
 
 export interface AcidSquaresProps extends HTMLAttributes<HTMLDivElement> {
   color?: string;
@@ -101,13 +101,7 @@ type Surface = { program: WebGLProgram; uniforms: Record<string, WebGLUniformLoc
 
 type Ripple = { x: number; z: number; start: number; strength: number };
 
-type Camera = {
-  eye: number[];
-  target: number[];
-  viewProj: number[];
-  inverse: number[];
-  distance: number;
-};
+type Camera = { eye: number[]; target: number[]; viewProj: number[]; inverse: number[]; distance: number };
 
 const MAX_RIPPLES = 8;
 const MESH: Record<AcidSquaresDetail, number> = { low: 150, medium: 210, high: 280 };
@@ -121,16 +115,16 @@ const HOVER_EFFECTS: Record<AcidSquaresHoverEffect, number> = { press: 1, lift: 
 const LIGHTING: Record<AcidSquaresLighting, Light[]> = {
   split: [
     [7, 4.2, -4, 4, 4],
-    [-8, 3.6, 3, 4, 4],
+    [-8, 3.6, 3, 4, 4]
   ],
   backlit: [
     [6, 1.6, -15, 5, 3],
-    [-7, 1.4, -13, 5, 3],
+    [-7, 1.4, -13, 5, 3]
   ],
   overhead: [
     [3, 7.5, -4, 3, 3],
-    [-3, 7, -1, 3, 3],
-  ],
+    [-3, 7, -1, 3, 3]
+  ]
 };
 const DEG = Math.PI / 180;
 
@@ -384,38 +378,38 @@ void main() {
 }`;
 
 const UNIFORMS = [
-  "uRipples",
-  "uWave",
-  "uSquare",
-  "uClock",
-  "uSwell",
-  "uHover",
-  "uIntro",
-  "uViewProj",
-  "uArea",
-  "uEye",
-  "uColor",
-  "uAccent",
-  "uSecond",
-  "uLightA",
-  "uLightB",
-  "uTile",
-  "uAngle",
-  "uGap",
-  "uRound",
-  "uSoftness",
-  "uBulge",
-  "uGloss",
-  "uRange",
-  "uBrightness",
-  "uGrain",
-  "uGrainScale",
-  "uLightMode",
-  "uOpacity",
-  "uReveal",
-  "uView",
-  "uFade",
-  "uFrame",
+  'uRipples',
+  'uWave',
+  'uSquare',
+  'uClock',
+  'uSwell',
+  'uHover',
+  'uIntro',
+  'uViewProj',
+  'uArea',
+  'uEye',
+  'uColor',
+  'uAccent',
+  'uSecond',
+  'uLightA',
+  'uLightB',
+  'uTile',
+  'uAngle',
+  'uGap',
+  'uRound',
+  'uSoftness',
+  'uBulge',
+  'uGloss',
+  'uRange',
+  'uBrightness',
+  'uGrain',
+  'uGrainScale',
+  'uLightMode',
+  'uOpacity',
+  'uReveal',
+  'uView',
+  'uFade',
+  'uFrame'
 ];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -445,11 +439,7 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
   return null;
 };
 
-const link = (
-  gl: WebGL2RenderingContext,
-  vertexSource: string,
-  fragmentSource: string,
-): Surface | null => {
+const link = (gl: WebGL2RenderingContext, vertexSource: string, fragmentSource: string): Surface | null => {
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
   const program = gl.createProgram();
@@ -471,24 +461,7 @@ const link = (
 const perspective = (fov: number, aspect: number, near: number, far: number) => {
   const f = 1 / Math.tan(fov / 2);
   const nf = 1 / (near - far);
-  return [
-    f / aspect,
-    0,
-    0,
-    0,
-    0,
-    f,
-    0,
-    0,
-    0,
-    0,
-    (far + near) * nf,
-    -1,
-    0,
-    0,
-    2 * far * near * nf,
-    0,
-  ];
+  return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0];
 };
 
 const lookAt = (eye: number[], target: number[]) => {
@@ -523,7 +496,7 @@ const lookAt = (eye: number[], target: number[]) => {
     -(xx * eye[0] + xz * eye[2]),
     -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
     -(zx * eye[0] + zy * eye[1] + zz * eye[2]),
-    1,
+    1
   ];
 };
 
@@ -532,10 +505,7 @@ const multiply = (a: number[], b: number[]) => {
   for (let col = 0; col < 4; col += 1) {
     for (let row = 0; row < 4; row += 1) {
       out[col * 4 + row] =
-        a[row] * b[col * 4] +
-        a[4 + row] * b[col * 4 + 1] +
-        a[8 + row] * b[col * 4 + 2] +
-        a[12 + row] * b[col * 4 + 3];
+        a[row] * b[col * 4] + a[4 + row] * b[col * 4 + 1] + a[8 + row] * b[col * 4 + 2] + a[12 + row] * b[col * 4 + 3];
     }
   }
   return out;
@@ -572,14 +542,14 @@ const invert = (a: number[]) => {
     (a[5] * b07 - a[4] * b09 - a[6] * b06) * k,
     (a[0] * b09 - a[1] * b07 + a[2] * b06) * k,
     (a[13] * b01 - a[12] * b03 - a[14] * b00) * k,
-    (a[8] * b03 - a[9] * b01 + a[10] * b00) * k,
+    (a[8] * b03 - a[9] * b01 + a[10] * b00) * k
   ];
 };
 
 const AcidSquares = ({
-  color = "#120f17",
-  accentColor = "#ff4fb8",
-  secondaryColor = "#3b6bff",
+  color = '#120f17',
+  accentColor = '#ff4fb8',
+  secondaryColor = '#3b6bff',
   tileSize = 1,
   gap = 0.12,
   roundness = 0.25,
@@ -590,14 +560,14 @@ const AcidSquares = ({
   waves = 1,
   waveScale = 1,
   speed = 0.6,
-  shape = "square",
+  shape = 'square',
   pulse = 1,
   pulseSpeed = 0.45,
   pulseSpacing = 1,
   pulseWidth = 1,
-  pulseOrigin = "center",
+  pulseOrigin = 'center',
   brightness = 1,
-  lighting = "split",
+  lighting = 'split',
   tilt = 0.7,
   zoom = 1,
   depth = 10,
@@ -606,11 +576,11 @@ const AcidSquares = ({
   opacity = 1,
   intro = true,
   mouseInteraction = true,
-  hoverEffect = "press",
+  hoverEffect = 'press',
   mouseStrength = 1,
   mouseRadius = 0.35,
   pulseOnClick = true,
-  detail = "medium",
+  detail = 'medium',
   lightMode = false,
   paused = false,
   dpr,
@@ -633,12 +603,12 @@ const AcidSquares = ({
     waves: Math.max(0, waves),
     waveScale: clamp(waveScale, 0.1, 5),
     speed: Math.max(0, speed),
-    square: shape === "round" ? 0 : 1,
+    square: shape === 'round' ? 0 : 1,
     pulse: Math.max(0, pulse),
     pulseSpeed: Math.max(0, pulseSpeed),
     pulseSpacing: clamp(pulseSpacing, 0.2, 6),
     pulseWidth: clamp(pulseWidth, 0.1, 5),
-    randomOrigin: pulseOrigin === "random",
+    randomOrigin: pulseOrigin === 'random',
     brightness: Math.max(0, brightness),
     lights: LIGHTING[lighting] || LIGHTING.split,
     tilt: clamp(tilt, 0, 1),
@@ -656,7 +626,7 @@ const AcidSquares = ({
     mesh: MESH[detail] || MESH.medium,
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -664,12 +634,12 @@ const AcidSquares = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: true,
       depth: true,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -721,11 +691,11 @@ const AcidSquares = ({
       gl.bindVertexArray(null);
     };
 
-    const probe = document.createElement("canvas");
+    const probe = document.createElement('canvas');
     probe.width = 1;
     probe.height = 1;
-    const probeContext = probe.getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probeContext = probe.getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const state = {
       clock: 0,
       swell: 0,
@@ -736,7 +706,7 @@ const AcidSquares = ({
       intro: settingsRef.current.intro && !reduce ? 0 : INTRO_SECONDS,
       width: 1,
       height: 1,
-      colorKey: "",
+      colorKey: '',
       color: [0.07, 0.06, 0.09] as number[],
       accent: [1, 0.31, 0.72] as number[],
       second: [0.23, 0.42, 1] as number[],
@@ -744,7 +714,7 @@ const AcidSquares = ({
       hover: { x: 0, z: 0, vx: 0, vz: 0, presence: 0, placed: false },
       look: { x: 0, y: 0, vx: 0, vy: 0 },
       seed: 1,
-      camera: null as Camera | null,
+      camera: null as Camera | null
     };
     let raf = 0;
     let last = 0;
@@ -755,7 +725,7 @@ const AcidSquares = ({
       if (!probeContext || !value) return fallback;
       const css = /^[0-9a-f]{3,8}$/i.test(value) ? `#${value}` : value;
       probeContext.clearRect(0, 0, 1, 1);
-      probeContext.fillStyle = "#000000";
+      probeContext.fillStyle = '#000000';
       probeContext.fillStyle = css;
       probeContext.fillRect(0, 0, 1, 1);
       const [r, g, b] = probeContext.getImageData(0, 0, 1, 1).data;
@@ -785,7 +755,7 @@ const AcidSquares = ({
       const eye = [
         target[0] + Math.sin(yaw) * Math.cos(pitch) * distance,
         target[1] + Math.sin(pitch) * distance,
-        target[2] + Math.cos(yaw) * Math.cos(pitch) * distance,
+        target[2] + Math.cos(yaw) * Math.cos(pitch) * distance
       ];
       const projection = perspective(0.8, aspect, 0.1, 400);
       const view = lookAt(eye, target);
@@ -821,35 +791,23 @@ const AcidSquares = ({
       const revealRadius = glide(introAge / REVEAL_SECONDS) * REVEAL_REACH;
       const settle = ease(introAge / INTRO_SECONDS);
       gl.uniform4fv(u.uRipples, rippleData);
-      gl.uniform4f(
-        u.uWave,
-        0.55 * s.pulse,
-        3 * Math.max(s.pulseSpeed, 0.05) + 1.2,
-        1.6 * s.pulseWidth,
-        46,
-      );
+      gl.uniform4f(u.uWave, 0.55 * s.pulse, 3 * Math.max(s.pulseSpeed, 0.05) + 1.2, 1.6 * s.pulseWidth, 46);
       gl.uniform1f(u.uSquare, s.square);
       gl.uniform1f(u.uClock, state.clock);
-      gl.uniform4f(
-        u.uSwell,
-        1.3 * s.waves * (0.25 + 0.75 * settle),
-        1.9 / s.waveScale,
-        0,
-        state.swell,
-      );
+      gl.uniform4f(u.uSwell, 1.3 * s.waves * (0.25 + 0.75 * settle), 1.9 / s.waveScale, 0, state.swell);
       gl.uniform4f(
         u.uHover,
         state.hover.x,
         state.hover.z,
         (3 * s.mouseRadius) / 0.35,
-        0.7 * state.hover.presence * s.mouseStrength * s.hover,
+        0.7 * state.hover.presence * s.mouseStrength * s.hover
       );
       gl.uniform4f(
         u.uIntro,
         ORIGIN[0],
         ORIGIN[1],
         revealRadius,
-        revealing ? 0.9 * (1 - smoothstep(0.55, 1, introAge / INTRO_SECONDS)) : 0,
+        revealing ? 0.9 * (1 - smoothstep(0.55, 1, introAge / INTRO_SECONDS)) : 0
       );
       gl.uniformMatrix4fv(u.uViewProj, false, camera.viewProj);
       gl.uniform4f(u.uArea, AREA[0] + ORIGIN[0], AREA[1] + ORIGIN[1], AREA[2], AREA[3]);
@@ -865,13 +823,13 @@ const AcidSquares = ({
         u.uLightA,
         camera.target[0] + (first[0] + Math.sin(orbit * 0.7) * first[3]) * reach,
         first[1] * reach * lightLevel + 0.6,
-        camera.target[2] + (first[2] + Math.cos(orbit * 0.5) * first[4]) * reach,
+        camera.target[2] + (first[2] + Math.cos(orbit * 0.5) * first[4]) * reach
       );
       gl.uniform3f(
         u.uLightB,
         camera.target[0] + (second[0] + Math.cos(orbit * 0.6) * second[3]) * reach,
         second[1] * reach * lightLevel + 0.6,
-        camera.target[2] + (second[2] + Math.sin(orbit * 0.45) * second[4]) * reach,
+        camera.target[2] + (second[2] + Math.sin(orbit * 0.45) * second[4]) * reach
       );
       gl.uniform1f(u.uTile, 1.2 * s.tileSize);
       gl.uniform1f(u.uAngle, s.rotation);
@@ -956,10 +914,7 @@ const AcidSquares = ({
         const interval = (10 * s.pulseSpacing) / travel;
         if (s.pulse > 0 && state.clock >= state.nextRipple) {
           if (s.randomOrigin) {
-            const spot = groundPoint(
-              (0.15 + random() * 0.7) * state.width,
-              (0.25 + random() * 0.6) * state.height,
-            );
+            const spot = groundPoint((0.15 + random() * 0.7) * state.width, (0.25 + random() * 0.6) * state.height);
             if (spot) spawn(spot.x, spot.z, 1);
           } else {
             spawn(ORIGIN[0], ORIGIN[1], 1);
@@ -967,7 +922,7 @@ const AcidSquares = ({
           state.nextRipple = state.clock + interval * (s.randomOrigin ? 0.6 : 1);
         }
         const lifetime = 46 / travel + 1;
-        state.ripples = state.ripples.filter((ripple) => state.clock - ripple.start < lifetime);
+        state.ripples = state.ripples.filter(ripple => state.clock - ripple.start < lifetime);
       } else if (state.intro < INTRO_SECONDS) {
         state.intro = INTRO_SECONDS;
       }
@@ -989,8 +944,7 @@ const AcidSquares = ({
         hover.z += hover.vz * dt;
       }
       const goal = spot ? 1 : 0;
-      hover.presence +=
-        (goal - hover.presence) * (1 - Math.exp(-dt / (goal > hover.presence ? 0.35 : 0.6)));
+      hover.presence += (goal - hover.presence) * (1 - Math.exp(-dt / (goal > hover.presence ? 0.35 : 0.6)));
       if (!spot && hover.presence < 0.001) hover.placed = false;
       const lookX = active ? (pointer.x / state.width - 0.5) * 0.5 : 0;
       const lookY = active ? (0.5 - pointer.y / state.height) * 0.5 : 0;
@@ -1052,18 +1006,18 @@ const AcidSquares = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown);
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown);
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
     wake();
 
@@ -1078,10 +1032,10 @@ const AcidSquares = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteBuffer(gridBuffer);
       gl.deleteBuffer(indexBuffer);
       gl.deleteVertexArray(vao);
@@ -1093,14 +1047,10 @@ const AcidSquares = ({
     wakeRef.current?.();
   });
 
-  const { className = "", ...attributes } = rest;
+  const { className = '', ...attributes } = rest;
 
   return (
-    <div
-      ref={containerRef}
-      className={`acid-squares-container${className ? ` ${className}` : ""}`}
-      {...attributes}
-    >
+    <div ref={containerRef} className={`acid-squares-container${className ? ` ${className}` : ''}`} {...attributes}>
       <canvas ref={canvasRef} className="acid-squares-canvas" aria-hidden="true" />
     </div>
   );

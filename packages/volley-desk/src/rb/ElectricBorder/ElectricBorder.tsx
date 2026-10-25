@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
-import "./ElectricBorder.css";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import './ElectricBorder.css';
 
 export interface ElectricBorderProps {
   children?: ReactNode;
@@ -23,7 +23,7 @@ export interface ElectricBorderProps {
   intro?: boolean;
   interactive?: boolean;
   cursorRadius?: number;
-  theme?: "dark" | "light";
+  theme?: 'dark' | 'light';
   className?: string;
   style?: CSSProperties;
 }
@@ -334,22 +334,21 @@ void main() {
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const parseColor = (value: string): number[] => {
-  const text = String(value || "").trim();
+  const text = String(value || '').trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
-    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb)
-    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
-  if (typeof document !== "undefined") {
-    const context = document.createElement("canvas").getContext("2d");
+  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
+  if (typeof document !== 'undefined') {
+    const context = document.createElement('canvas').getContext('2d');
     if (context) {
-      context.fillStyle = "#000000";
+      context.fillStyle = '#000000';
       context.fillStyle = text;
       const normal = String(context.fillStyle);
-      if (normal !== "#000000" || /^(#0{3}|#0{6}|black)$/i.test(text)) return parseColor(normal);
+      if (normal !== '#000000' || /^(#0{3}|#0{6}|black)$/i.test(text)) return parseColor(normal);
     }
   }
   return [0.49, 0.98, 1];
@@ -387,11 +386,11 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program["uniforms"] = {};
+  const uniforms: Program['uniforms'] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
-    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -466,7 +465,7 @@ const nearestOn = (path: BorderPath, x: number, y: number) => {
 
 const ElectricBorder = ({
   children,
-  color = "#7df9ff",
+  color = '#7df9ff',
   glowColor,
   speed = 1,
   chaos = 0.5,
@@ -483,9 +482,9 @@ const ElectricBorder = ({
   intro = true,
   interactive = true,
   cursorRadius = 90,
-  theme = "dark",
-  className = "",
-  style,
+  theme = 'dark',
+  className = '',
+  style
 }: ElectricBorderProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -494,7 +493,7 @@ const ElectricBorder = ({
 
   const base = parseColor(color);
   const settings: Settings = {
-    core: base.map((channel) => channel + (1 - channel) * 0.55),
+    core: base.map(channel => channel + (1 - channel) * 0.55),
     glowColor: glowColor ? parseColor(glowColor) : base,
     speed: Math.max(0, speed),
     chaos: clamp(chaos, 0, 2),
@@ -511,7 +510,7 @@ const ElectricBorder = ({
     intro,
     interactive,
     cursorRadius: Math.max(1, cursorRadius),
-    light: theme === "light",
+    light: theme === 'light'
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -525,18 +524,18 @@ const ElectricBorder = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "default",
+      powerPreference: 'default'
     });
     const program = gl ? link(gl) : null;
     if (!gl || !program) return;
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const vao = gl.createVertexArray();
     const arcEnds = new Float32Array(ARCS * 4);
     const arcShape = new Float32Array(ARCS * 4);
@@ -556,7 +555,7 @@ const ElectricBorder = ({
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== "hidden";
+    let pageVisible = document.visibilityState !== 'hidden';
     let lost = false;
 
     const resize = () => {
@@ -565,11 +564,7 @@ const ElectricBorder = ({
       const height = Math.max(1, container.offsetHeight);
       const canvasWidth = width + MARGIN * 2;
       const canvasHeight = height + MARGIN * 2;
-      const ratio = Math.min(
-        window.devicePixelRatio || 1,
-        2,
-        Math.sqrt(PIXEL_BUDGET / (canvasWidth * canvasHeight)),
-      );
+      const ratio = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(PIXEL_BUDGET / (canvasWidth * canvasHeight)));
       const pixelWidth = Math.max(1, Math.round(canvasWidth * ratio));
       const pixelHeight = Math.max(1, Math.round(canvasHeight * ratio));
       if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
@@ -603,7 +598,7 @@ const ElectricBorder = ({
         bow: side >= 0 ? bow : -bow,
         seed: 1 + Math.random() * 60,
         born: now,
-        life: 0.35 + Math.random() * 0.45,
+        life: 0.35 + Math.random() * 0.45
       };
     };
 
@@ -628,12 +623,12 @@ const ElectricBorder = ({
         Math.max(1, Math.round(path.perimeter / 75)),
         Math.max(2, Math.round(path.perimeter / 25)),
         Math.max(3, Math.round(path.perimeter / 9)),
-        Math.max(4, Math.round(path.perimeter / 4)),
+        Math.max(4, Math.round(path.perimeter / 4))
       );
       gl.uniform2f(
         u.uSoft,
         Math.max(1, Math.round(path.perimeter / 150)),
-        Math.max(1, Math.round(path.perimeter / 50)),
+        Math.max(1, Math.round(path.perimeter / 50))
       );
       gl.uniform1f(u.uTime, time);
       gl.uniform1f(u.uPower, power * power * (3 - 2 * power));
@@ -683,8 +678,7 @@ const ElectricBorder = ({
       hover.vy += ((pointer.y - hover.y) * 120 - hover.vy * 19) * dt;
       hover.x += hover.vx * dt;
       hover.y += hover.vy * dt;
-      hover.power +=
-        ((engaged ? 1 : 0) - hover.power) * (1 - Math.exp(-dt / (engaged ? 0.3 : 0.55)));
+      hover.power += ((engaged ? 1 : 0) - hover.power) * (1 - Math.exp(-dt / (engaged ? 0.3 : 0.55)));
 
       for (let index = sparks.length - 1; index >= 0; index--) {
         if (time - sparks[index].born > sparks[index].life) sparks.splice(index, 1);
@@ -692,9 +686,7 @@ const ElectricBorder = ({
       if (!reduced && s.active && reveal >= 1 && s.arcs > 0 && sparks.length < ARCS) {
         const chance = dt * s.speed * s.arcs;
         if (Math.random() < chance * 5 * hover.power) {
-          sparks.push(
-            spawnArc(time, nearestOn(path, hover.x - size.width / 2, hover.y - size.height / 2)),
-          );
+          sparks.push(spawnArc(time, nearestOn(path, hover.x - size.width / 2, hover.y - size.height / 2)));
         } else if (Math.random() < chance * (0.6 + path.perimeter / 2400)) {
           sparks.push(spawnArc(time, null));
         }
@@ -752,8 +744,7 @@ const ElectricBorder = ({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.over =
-        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.over = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       pointer.near =
         pointer.x >= -MARGIN / 2 &&
         pointer.y >= -MARGIN / 2 &&
@@ -782,9 +773,9 @@ const ElectricBorder = ({
       pointer.near = false;
     };
 
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -792,9 +783,9 @@ const ElectricBorder = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    const onRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -802,17 +793,17 @@ const ElectricBorder = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== "hidden";
+      pageVisible = document.visibilityState !== 'hidden';
       wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     wake();
@@ -822,12 +813,12 @@ const ElectricBorder = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       if (!gl.isContextLost()) {
         gl.deleteVertexArray(vao);
         gl.deleteProgram(program.program);
@@ -838,7 +829,7 @@ const ElectricBorder = ({
   return (
     <div
       ref={containerRef}
-      className={`electric-border${className ? ` ${className}` : ""}`}
+      className={`electric-border${className ? ` ${className}` : ''}`}
       style={{ borderRadius, ...style }}
     >
       {children}

@@ -1,10 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import "./SideRays.css";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import './SideRays.css';
 
-type Origin = "top-right" | "top-left" | "bottom-right" | "bottom-left" | "right" | "left";
+type Origin = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'right' | 'left';
 
 export interface SideRaysProps {
   rayColor1?: string;
@@ -69,12 +69,12 @@ const PIXEL_BUDGET = 2.4e6;
 const TAU = Math.PI * 2;
 
 const ORIGINS: Record<Origin, Frame> = {
-  "top-right": { flipX: 0, flipY: 0, side: 0 },
-  "top-left": { flipX: 1, flipY: 0, side: 0 },
-  "bottom-right": { flipX: 0, flipY: 1, side: 0 },
-  "bottom-left": { flipX: 1, flipY: 1, side: 0 },
+  'top-right': { flipX: 0, flipY: 0, side: 0 },
+  'top-left': { flipX: 1, flipY: 0, side: 0 },
+  'bottom-right': { flipX: 0, flipY: 1, side: 0 },
+  'bottom-left': { flipX: 1, flipY: 1, side: 0 },
   right: { flipX: 0, flipY: 0, side: 1 },
-  left: { flipX: 1, flipY: 0, side: 1 },
+  left: { flipX: 1, flipY: 0, side: 1 }
 };
 
 const VERTEX = `#version 300 es
@@ -199,21 +199,20 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 const wrapAngle = (angle: number) => ((((angle + Math.PI) % TAU) + TAU) % TAU) - Math.PI;
 
 const parseColor = (value: string): number[] => {
-  const text = String(value || "").trim();
+  const text = String(value || '').trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
-    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb)
-    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
   return [1, 1, 1];
 };
 
 const geometryFor = (frame: Frame, aspect: number) => ({
   source: frame.side ? [aspect * 0.5 + 0.42, 0.3] : [aspect * 0.5 + 0.1, 0.62],
-  heading: frame.side ? 3.42 : -2.48,
+  heading: frame.side ? 3.42 : -2.48
 });
 
 const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
@@ -248,7 +247,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program["uniforms"] = {};
+  const uniforms: Program['uniforms'] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
@@ -258,10 +257,10 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
 };
 
 const SideRays = ({
-  rayColor1 = "#FFC46B",
-  rayColor2 = "#96c8ff",
+  rayColor1 = '#FFC46B',
+  rayColor2 = '#96c8ff',
   blend = 0.6,
-  origin = "top-right",
+  origin = 'top-right',
   speed = 2.5,
   intensity = 2,
   spread = 2,
@@ -278,8 +277,8 @@ const SideRays = ({
   lightMode = false,
   opacity = 1,
   maxDevicePixelRatio = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: SideRaysProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -290,7 +289,7 @@ const SideRays = ({
     colorA: parseColor(rayColor1),
     colorB: parseColor(rayColor2),
     blend: clamp(blend, 0, 1),
-    frame: ORIGINS[origin] ?? ORIGINS["top-right"],
+    frame: ORIGINS[origin] ?? ORIGINS['top-right'],
     speed: Math.max(0, speed) * 0.4,
     intensity: Math.max(0, intensity) * 0.75,
     spread: clamp(spread, 0.1, 8) * 0.225,
@@ -306,7 +305,7 @@ const SideRays = ({
     intro,
     light: lightMode,
     opacity: clamp(opacity, 0, 1),
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -320,18 +319,18 @@ const SideRays = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     const shader = gl ? link(gl) : null;
     if (!gl || !shader) return;
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const vao = gl.createVertexArray();
     const size = { width: 1, height: 1 };
     const pointer = { x: 0, y: 0, inside: false };
@@ -342,7 +341,7 @@ const SideRays = ({
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== "hidden";
+    let pageVisible = document.visibilityState !== 'hidden';
     let lost = false;
 
     const resize = () => {
@@ -353,7 +352,7 @@ const SideRays = ({
       const ratio = Math.min(
         window.devicePixelRatio || 1,
         s.maxRatio,
-        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight)),
+        Math.sqrt(PIXEL_BUDGET / (cssWidth * cssHeight))
       );
       const width = Math.max(1, Math.round(cssWidth * ratio));
       const height = Math.max(1, Math.round(cssHeight * ratio));
@@ -388,9 +387,7 @@ const SideRays = ({
       const target = tracking ? clamp(pointed, -s.spread, s.spread) * s.mouseInfluence : 0;
       const focusTarget = tracking ? s.mouseInfluence : 0;
       const ease = 1 - Math.exp(-dt * 6);
-      if (tracking)
-        focus.angle +=
-          (clamp(pointed - aim.value, -s.spread * 1.5, s.spread * 1.5) - focus.angle) * ease;
+      if (tracking) focus.angle += (clamp(pointed - aim.value, -s.spread * 1.5, s.spread * 1.5) - focus.angle) * ease;
       focus.strength += (focusTarget - focus.strength) * ease;
       const stiffness = 18;
       const damping = 2 * Math.sqrt(stiffness);
@@ -457,12 +454,12 @@ const SideRays = ({
       wake();
     };
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") onLeave();
+      if (event.pointerType !== 'mouse') onLeave();
     };
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -470,9 +467,9 @@ const SideRays = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    const onRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -480,17 +477,17 @@ const SideRays = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== "hidden";
+      pageVisible = document.visibilityState !== 'hidden';
       wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     wake();
@@ -500,13 +497,13 @@ const SideRays = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       if (!gl.isContextLost()) {
         gl.deleteVertexArray(vao);
         gl.deleteProgram(shader.program);
@@ -515,11 +512,7 @@ const SideRays = ({
   }, [generation]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`side-rays${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`side-rays${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="side-rays__canvas" aria-hidden="true" />
     </div>
   );

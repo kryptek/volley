@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from 'react';
 
-import "./Lightning.css";
+import './Lightning.css';
 
 const MAX_BOLTS = 4;
 const MAX_STRIKES = 4;
@@ -318,12 +318,8 @@ interface Strike {
 const toRgb = (color: string): [number, number, number] => {
   const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(color).trim());
   if (!match) return [0.5, 0.6, 1];
-  const hex = match[1].length === 3 ? match[1].replace(/./g, (digit) => digit + digit) : match[1];
-  return [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16) / 255) as [
-    number,
-    number,
-    number,
-  ];
+  const hex = match[1].length === 3 ? match[1].replace(/./g, digit => digit + digit) : match[1];
+  return [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255) as [number, number, number];
 };
 
 const smootherstep = (t: number) => {
@@ -339,31 +335,31 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
 };
 
 const UNIFORMS = [
-  "uResolution",
-  "uPhase",
-  "uColor",
-  "uIntensity",
-  "uSize",
-  "uThickness",
-  "uGlow",
-  "uFlicker",
-  "uBranches",
-  "uXOffset",
-  "uAngle",
-  "uSpread",
-  "uBolts",
-  "uPointer",
-  "uStrikes",
-  "uStrikeInfo",
-  "uFlash",
-  "uIntro",
-  "uLight",
-  "uFade",
-  "uOpacity",
+  'uResolution',
+  'uPhase',
+  'uColor',
+  'uIntensity',
+  'uSize',
+  'uThickness',
+  'uGlow',
+  'uFlicker',
+  'uBranches',
+  'uXOffset',
+  'uAngle',
+  'uSpread',
+  'uBolts',
+  'uPointer',
+  'uStrikes',
+  'uStrikeInfo',
+  'uFlash',
+  'uIntro',
+  'uLight',
+  'uFade',
+  'uOpacity'
 ];
 
 const Lightning = ({
-  color = "#4d6bff",
+  color = '#4d6bff',
   bolts = 1,
   spread = 0.6,
   branches = 0.5,
@@ -384,8 +380,8 @@ const Lightning = ({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: LightningProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<{ refresh: () => void } | null>(null);
@@ -410,7 +406,7 @@ const Lightning = ({
     opacity,
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -418,11 +414,7 @@ const Lightning = ({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const gl = canvas.getContext("webgl2", {
-      alpha: true,
-      premultipliedAlpha: true,
-      antialias: false,
-    });
+    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false });
     if (!gl) return;
 
     const program = gl.createProgram() as WebGLProgram;
@@ -430,24 +422,16 @@ const Lightning = ({
     gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
-    const uniforms = Object.fromEntries(
-      UNIFORMS.map((name) => [name, gl.getUniformLocation(program, name)]),
-    );
+    const uniforms = Object.fromEntries(UNIFORMS.map(name => [name, gl.getUniformLocation(program, name)]));
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    const position = gl.getAttribLocation(program, "aPosition");
+    const position = gl.getAttribLocation(program, 'aPosition');
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const view = { width: 1, height: 1, left: 0, top: 0 };
     const pointer = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0, presence: 0, inside: false };
-    const strikes: Strike[] = Array.from({ length: MAX_STRIKES }, () => ({
-      x: 0,
-      y: 0,
-      born: -1,
-      seed: 0,
-      reach: 2,
-    }));
+    const strikes: Strike[] = Array.from({ length: MAX_STRIKES }, () => ({ x: 0, y: 0, born: -1, seed: 0, reach: 2 }));
     const strikeData = new Float32Array(MAX_STRIKES * 4);
     const infoData = new Float32Array(MAX_STRIKES * 4);
     let next = 0;
@@ -475,7 +459,7 @@ const Lightning = ({
 
     const toUv = (x: number, y: number): [number, number] => [
       (2 * x - view.width) / view.height,
-      (view.height - 2 * y) / view.height,
+      (view.height - 2 * y) / view.height
     ];
 
     const draw = (now: number) => {
@@ -511,8 +495,7 @@ const Lightning = ({
         infoData[base + 2] = since >= 0 ? 1 : 0;
         infoData[base + 3] = 0;
       }
-      const introAmount =
-        introStart === null ? 1 : introStart < 0 ? 0 : Math.min(1, (now - introStart) / 420);
+      const introAmount = introStart === null ? 1 : introStart < 0 ? 0 : Math.min(1, (now - introStart) / 420);
       const [px, py] = toUv(pointer.x, pointer.y);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.clearColor(0, 0, 0, 0);
@@ -562,17 +545,12 @@ const Lightning = ({
         pointer.y += pointer.vy * h;
       }
       const goal = s.mouseInteraction && pointer.inside && !reduced ? 1 : 0;
-      pointer.presence +=
-        (goal - pointer.presence) * (1 - Math.exp(-dt / (goal > pointer.presence ? 0.3 : 0.55)));
+      pointer.presence += (goal - pointer.presence) * (1 - Math.exp(-dt / (goal > pointer.presence ? 0.3 : 0.55)));
       draw(now);
-      const striking = strikes.some(
-        (strike) => strike.born >= 0 && now - strike.born < LIFE * 1000 + 50,
-      );
+      const striking = strikes.some(strike => strike.born >= 0 && now - strike.born < LIFE * 1000 + 50);
       const introducing = introStart !== null && now - introStart < 450;
       const moving = !s.paused && !reduced && s.speed > 0;
-      const settling =
-        Math.abs(goal - pointer.presence) > 0.002 ||
-        Math.abs(pointer.vx) + Math.abs(pointer.vy) > 0.5;
+      const settling = Math.abs(goal - pointer.presence) > 0.002 || Math.abs(pointer.vx) + Math.abs(pointer.vy) > 0.5;
       if (moving || striking || introducing || settling) raf = requestAnimationFrame(frame);
     };
 
@@ -627,9 +605,9 @@ const Lightning = ({
       wake();
     };
 
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown, { passive: true });
-    window.addEventListener("pointerout", onLeave);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onDown, { passive: true });
+    window.addEventListener('pointerout', onLeave);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -647,7 +625,7 @@ const Lightning = ({
     const onVisibility = () => {
       if (!document.hidden) wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     draw(performance.now());
@@ -658,7 +636,7 @@ const Lightning = ({
         resize();
         draw(performance.now());
         wake();
-      },
+      }
     };
 
     return () => {
@@ -666,10 +644,10 @@ const Lightning = ({
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("pointerout", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerout', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
       engineRef.current = null;
@@ -695,12 +673,10 @@ const Lightning = ({
     opacity,
     lightMode,
     paused,
-    dpr,
+    dpr
   ]);
 
-  return (
-    <canvas ref={canvasRef} className={`lightning-container ${className}`.trim()} style={style} />
-  );
+  return <canvas ref={canvasRef} className={`lightning-container ${className}`.trim()} style={style} />;
 };
 
 export default Lightning;

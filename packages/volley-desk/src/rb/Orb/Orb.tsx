@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
-import "./Orb.css";
+import { useEffect, useRef, type CSSProperties } from 'react';
+import './Orb.css';
 
 export interface OrbProps {
   colors?: string[];
@@ -231,7 +231,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -249,9 +249,9 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
 };
 
 const Orb = ({
-  colors = ["#9c43fe", "#4cc2e9", "#101499"],
+  colors = ['#9c43fe', '#4cc2e9', '#101499'],
   hue = 0,
-  backgroundColor = "#000000",
+  backgroundColor = '#000000',
   size = 1,
   glow = 1,
   bleed = 1,
@@ -270,19 +270,15 @@ const Orb = ({
   opacity = 1,
   paused = false,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: OrbProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const palette: string[] = Array.isArray(colors) ? colors : [];
   const settings: Settings = {
-    colors: [
-      palette[0] ?? "#9c43fe",
-      palette[1] ?? palette[0] ?? "#4cc2e9",
-      palette[2] ?? "#101499",
-    ].map(String),
+    colors: [palette[0] ?? '#9c43fe', palette[1] ?? palette[0] ?? '#4cc2e9', palette[2] ?? '#101499'].map(String),
     hue,
     backgroundColor: String(backgroundColor),
     size: clamp(size, 0.1, 3),
@@ -302,7 +298,7 @@ const Orb = ({
     intro,
     opacity: clamp(opacity, 0, 1),
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -310,12 +306,12 @@ const Orb = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -331,8 +327,8 @@ const Orb = ({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const cache = new Map<string, number[]>();
     const parse = (value: string): number[] => {
       const cached = cache.get(value);
@@ -340,7 +336,7 @@ const Orb = ({
       let rgb: number[] = [0, 0, 0];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#000000";
+        probe.fillStyle = '#000000';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b, a] = probe.getImageData(0, 0, 1, 1).data;
@@ -360,11 +356,7 @@ const Orb = ({
       const q = 0.211 * r - 0.523 * g + 0.312 * b;
       const ni = i * cos - q * sin;
       const nq = i * sin + q * cos;
-      return [
-        y + 0.956 * ni + 0.621 * nq,
-        y - 0.272 * ni - 0.647 * nq,
-        y - 1.106 * ni + 1.703 * nq,
-      ];
+      return [y + 0.956 * ni + 0.621 * nq, y - 0.272 * ni - 0.647 * nq, y - 1.106 * ni + 1.703 * nq];
     };
 
     const view = { width: 1, height: 1 };
@@ -384,7 +376,7 @@ const Orb = ({
       pulse: 0,
       pulseSpeed: 0,
       kick: settingsRef.current.intro && !reduce ? 2.5 : 0,
-      reveal: settingsRef.current.intro && !reduce ? 0 : 1,
+      reveal: settingsRef.current.intro && !reduce ? 0 : 1
     };
     let raf = 0;
     let last = 0;
@@ -416,7 +408,7 @@ const Orb = ({
 
     const render = () => {
       const s = settingsRef.current;
-      const [c1, c2, c3] = s.colors.map((value) => shiftHue(parse(value), s.hue));
+      const [c1, c2, c3] = s.colors.map(value => shiftHue(parse(value), s.hue));
       const reveal = state.reveal;
       const back = reveal - 1;
       const grow = 1 + 2.2 * back * back * back + 1.2 * back * back;
@@ -438,18 +430,12 @@ const Orb = ({
       gl.uniform1f(u.uGlow, s.glow);
       gl.uniform1f(u.uBleed, s.bleed);
       gl.uniform1f(u.uHighlight, s.highlight);
-      gl.uniform2f(
-        u.uEcho,
-        state.echo * 0.55,
-        state.echo < 1 ? (1 - state.echo) * (1 - state.echo) : 0,
-      );
+      gl.uniform2f(u.uEcho, state.echo * 0.55, state.echo < 1 ? (1 - state.echo) * (1 - state.echo) : 0);
       gl.uniform1f(u.uSwirl, state.swirl);
       gl.uniform1f(u.uOrbit, state.orbit);
       gl.uniform1f(
         u.uReveal,
-        Math.min(1, reveal / 0.55) *
-          Math.min(1, reveal / 0.55) *
-          (3 - 2 * Math.min(1, reveal / 0.55)),
+        Math.min(1, reveal / 0.55) * Math.min(1, reveal / 0.55) * (3 - 2 * Math.min(1, reveal / 0.55))
       );
       gl.uniform1f(u.uOpacity, s.opacity);
       gl.uniform1f(u.uTrail, s.trail);
@@ -534,8 +520,7 @@ const Orb = ({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.inside =
-        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -556,7 +541,7 @@ const Orb = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") pointer.inside = false;
+      if (event.pointerType !== 'mouse') pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -570,20 +555,20 @@ const Orb = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -603,16 +588,16 @@ const Orb = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteProgram(program.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -621,11 +606,7 @@ const Orb = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`orb-container${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`orb-container${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="orb-canvas" aria-hidden="true" />
     </div>
   );

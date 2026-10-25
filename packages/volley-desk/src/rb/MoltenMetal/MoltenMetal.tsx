@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useMemo, useRef } from "react";
-import "./MoltenMetal.css";
+import { useEffect, useMemo, useRef, type CSSProperties } from 'react';
+import './MoltenMetal.css';
 
 export interface MoltenMetalProps {
   colors?: string[];
@@ -18,7 +18,7 @@ export interface MoltenMetalProps {
   turbulence?: number;
   haze?: number;
   brightness?: number;
-  colorMode?: "molten" | "ember" | "frost";
+  colorMode?: 'molten' | 'ember' | 'frost';
   rotation?: number;
   offsetX?: number;
   offsetY?: number;
@@ -50,8 +50,8 @@ interface Flare {
   time: number;
 }
 
-const ROOT = "molten-metal-container";
-const CANVAS = "molten-metal-canvas";
+const ROOT = 'molten-metal-container';
+const CANVAS = 'molten-metal-canvas';
 
 const MAX_COLORS = 6;
 const TRAIL = 16;
@@ -232,15 +232,15 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 let probe: CanvasRenderingContext2D | null = null;
 
 const parseColor = (value: string, fallback: RGB | null): RGB | null => {
-  if (value === "transparent") return null;
-  if (typeof document === "undefined") return fallback;
-  if (!probe) probe = document.createElement("canvas").getContext("2d");
+  if (value === 'transparent') return null;
+  if (typeof document === 'undefined') return fallback;
+  if (!probe) probe = document.createElement('canvas').getContext('2d');
   if (!probe) return fallback;
-  probe.fillStyle = "#000000";
+  probe.fillStyle = '#000000';
   probe.fillStyle = value;
   const text = probe.fillStyle;
-  if (text.startsWith("#")) {
-    const hex = Number.parseInt(text.slice(1), 16);
+  if (text.startsWith('#')) {
+    const hex = parseInt(text.slice(1), 16);
     return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
   }
   const match = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?/.exec(text);
@@ -262,13 +262,12 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
 };
 
 const prefersReduced = () =>
-  typeof window !== "undefined" &&
-  (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
+  typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
 
 export default function MoltenMetal({
-  colors = ["#5227FF", "#FF9FFC"],
-  coreColor = "#FFFFFF",
-  backgroundColor = "transparent",
+  colors = ['#5227FF', '#FF9FFC'],
+  coreColor = '#FFFFFF',
+  backgroundColor = 'transparent',
   lightMode = false,
   speed = 0.35,
   scale = 4,
@@ -279,7 +278,7 @@ export default function MoltenMetal({
   turbulence = 0.2,
   haze = 0.75,
   brightness = 1.3,
-  colorMode = "molten",
+  colorMode = 'molten',
   rotation = 0,
   offsetX = 0,
   offsetY = 0,
@@ -292,14 +291,14 @@ export default function MoltenMetal({
   flareOnClick = true,
   paused = false,
   dpr = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: MoltenMetalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const colorKey = [...colors.slice(0, MAX_COLORS - 1), coreColor].join("|");
+  const colorKey = [...colors.slice(0, MAX_COLORS - 1), coreColor].join('|');
   const palette = useMemo(
-    () => colorKey.split("|").map((value): RGB => parseColor(value, [1, 1, 1]) ?? [1, 1, 1]),
-    [colorKey],
+    () => colorKey.split('|').map((value): RGB => parseColor(value, [1, 1, 1]) ?? [1, 1, 1]),
+    [colorKey]
   );
   const paper = useMemo(() => parseColor(backgroundColor, null), [backgroundColor]);
 
@@ -320,14 +319,14 @@ export default function MoltenMetal({
     rotation: (rotation * Math.PI) / 180,
     offset: [offsetX, offsetY],
     drift: Math.max(0, drift),
-    grain: typeof grain === "number" ? Math.max(0, grain) : grain ? 0.05 : 0,
+    grain: typeof grain === 'number' ? Math.max(0, grain) : grain ? 0.05 : 0,
     opacity: clamp(opacity, 0, 1),
     intro,
     mouseInteraction,
     mouseStrength: clamp(mouseStrength, 0, 1),
     flareOnClick,
     paused,
-    dpr: Math.max(0.5, dpr),
+    dpr: Math.max(0.5, dpr)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -335,16 +334,16 @@ export default function MoltenMetal({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    const canvas = document.createElement("canvas");
+    const canvas = document.createElement('canvas');
     canvas.className = CANVAS;
     container.appendChild(canvas);
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       antialias: false,
       depth: false,
       stencil: false,
       premultipliedAlpha: true,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!gl) {
       canvas.remove();
@@ -360,7 +359,7 @@ export default function MoltenMetal({
     }
     gl.attachShader(program, vertex);
     gl.attachShader(program, fragment);
-    gl.bindAttribLocation(program, 0, "aPosition");
+    gl.bindAttribLocation(program, 0, 'aPosition');
     gl.linkProgram(program);
     gl.deleteShader(vertex);
     gl.deleteShader(fragment);
@@ -370,38 +369,38 @@ export default function MoltenMetal({
       return undefined;
     }
     const names = [
-      "uResolution",
-      "uTime",
-      "uClock",
-      "uScale",
-      "uDetail",
-      "uGlow",
-      "uThickness",
-      "uSwirl",
-      "uFold",
-      "uBlackPoint",
-      "uBrightness",
-      "uBalance",
-      "uGrain",
-      "uOpacity",
-      "uOffset",
-      "uRotation",
-      "uDrift",
-      "uColors",
-      "uColorCount",
-      "uBackground",
-      "uOpaque",
-      "uLight",
-      "uReveal",
-      "uTrail",
-      "uTrailWeight",
-      "uTrailCount",
-      "uFlares",
-      "uFlareCount",
-      "uHeat",
+      'uResolution',
+      'uTime',
+      'uClock',
+      'uScale',
+      'uDetail',
+      'uGlow',
+      'uThickness',
+      'uSwirl',
+      'uFold',
+      'uBlackPoint',
+      'uBrightness',
+      'uBalance',
+      'uGrain',
+      'uOpacity',
+      'uOffset',
+      'uRotation',
+      'uDrift',
+      'uColors',
+      'uColorCount',
+      'uBackground',
+      'uOpaque',
+      'uLight',
+      'uReveal',
+      'uTrail',
+      'uTrailWeight',
+      'uTrailCount',
+      'uFlares',
+      'uFlareCount',
+      'uHeat'
     ];
     const u: Record<string, WebGLUniformLocation | null> = {};
-    names.forEach((name) => {
+    names.forEach(name => {
       u[name] = gl.getUniformLocation(program, name);
     });
 
@@ -434,7 +433,7 @@ export default function MoltenMetal({
       trail: [] as TrailPoint[],
       flares: [] as Flare[],
       quiet: 0,
-      seen: null as typeof settings | null,
+      seen: null as typeof settings | null
     };
 
     const resize = () => {
@@ -450,10 +449,7 @@ export default function MoltenMetal({
       canvas.height = height;
     };
 
-    const toView = (point: number[]) => [
-      (point[0] - 0.5) * (state.width / Math.max(state.height, 1)),
-      0.5 - point[1],
-    ];
+    const toView = (point: number[]) => [(point[0] - 0.5) * (state.width / Math.max(state.height, 1)), 0.5 - point[1]];
 
     const introProgress = (s: typeof settings, reduced: boolean) => {
       if (!s.intro || reduced || state.introAt < 0) return 1;
@@ -490,12 +486,7 @@ export default function MoltenMetal({
       gl.uniform3f(u.uBackground, paperColor[0], paperColor[1], paperColor[2]);
       gl.uniform1f(u.uOpaque, s.paper ? 1 : 0);
       gl.uniform1f(u.uLight, s.lightMode ? 1 : 0);
-      gl.uniform3f(
-        u.uReveal,
-        Math.log(1.6) + Math.log(0.01 / 1.6) * progress,
-        progress < 1 ? 1 : 0,
-        progress,
-      );
+      gl.uniform3f(u.uReveal, Math.log(1.6) + Math.log(0.01 / 1.6) * progress, progress < 1 ? 1 : 0, progress);
       trailData.fill(0);
       weightData.fill(0);
       state.trail.forEach((point, index) => {
@@ -524,9 +515,7 @@ export default function MoltenMetal({
     const updateTrail = (s: typeof settings, dt: number) => {
       const wanted = s.mouseInteraction && state.inside && s.mouseStrength > 0;
       state.presence += ((wanted ? 1 : 0) - state.presence) * (1 - Math.exp(-dt / 0.25));
-      state.trail = state.trail.filter(
-        (point) => point.live || state.clock - point.time < TRAIL_SECONDS,
-      );
+      state.trail = state.trail.filter(point => point.live || state.clock - point.time < TRAIL_SECONDS);
       const head = state.trail[0];
       if (!wanted) {
         if (head?.live) head.live = false;
@@ -538,14 +527,12 @@ export default function MoltenMetal({
           time: state.clock,
           arrive: state.clock,
           weight: state.presence,
-          live: true,
+          live: true
         });
       } else {
         if (head.at[0] !== state.pointer[0] || head.at[1] !== state.pointer[1]) {
           const last = state.trail[1];
-          const gap = last
-            ? Math.hypot(last.at[0] - head.at[0], last.at[1] - head.at[1])
-            : Number.POSITIVE_INFINITY;
+          const gap = last ? Math.hypot(last.at[0] - head.at[0], last.at[1] - head.at[1]) : Infinity;
           const settled = state.clock - head.arrive > SAMPLE_SECONDS;
           if (gap > 0.004 && (!last || settled || state.clock - last.time >= SAMPLE_SECONDS)) {
             state.trail.splice(1, 0, { ...head, at: [...head.at], time: state.clock, live: false });
@@ -583,11 +570,10 @@ export default function MoltenMetal({
       const drifting = Math.abs(goalX - state.drift[0]) + Math.abs(goalY - state.drift[1]) > 0.0005;
 
       const heating = updateTrail(s, dt);
-      state.flares = state.flares.filter((flare) => state.clock - flare.time < FLARE_SECONDS);
+      state.flares = state.flares.filter(flare => state.clock - flare.time < FLARE_SECONDS);
 
       const still = s.paused || reduced;
-      const transient =
-        heating || drifting || state.flares.length > 0 || introProgress(s, reduced) < 1;
+      const transient = heating || drifting || state.flares.length > 0 || introProgress(s, reduced) < 1;
       if (state.seen !== s || transient || !still) state.quiet = 0;
       else state.quiet += 1;
       state.seen = s;
@@ -606,7 +592,7 @@ export default function MoltenMetal({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -634,34 +620,32 @@ export default function MoltenMetal({
       if (state.flares.length > MAX_FLARES) state.flares.shift();
     };
 
-    const visibility = new IntersectionObserver((entries) => {
-      state.visible = entries.some((entry) => entry.isIntersecting);
+    const visibility = new IntersectionObserver(entries => {
+      state.visible = entries.some(entry => entry.isIntersecting);
     });
     visibility.observe(container);
     const sizes = new ResizeObserver(resize);
     sizes.observe(container);
     resize();
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown);
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onDown);
+    document.documentElement.addEventListener('pointerleave', onLeave);
     state.raf = requestAnimationFrame(tick);
 
     return () => {
       cancelAnimationFrame(state.raf);
       visibility.disconnect();
       sizes.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onDown);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDown);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
       gl.deleteProgram(program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       canvas.remove();
     };
   }, []);
 
-  return (
-    <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(" ")} style={style} />
-  );
+  return <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(' ')} style={style} />;
 }

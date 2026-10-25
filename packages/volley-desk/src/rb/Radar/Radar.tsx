@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 
-import "./Radar.css";
+import './Radar.css';
 
-export type RadarMode = "sweep" | "pulse";
+export type RadarMode = 'sweep' | 'pulse';
 
 export interface RadarProps extends HTMLAttributes<HTMLDivElement> {
   color?: string;
@@ -67,23 +67,11 @@ type Settings = {
 
 type Program = { program: WebGLProgram; uniforms: Record<string, WebGLUniformLocation | null> };
 
-type Target = {
-  texture: WebGLTexture | null;
-  framebuffer: WebGLFramebuffer | null;
-  width: number;
-  height: number;
-};
+type Target = { texture: WebGLTexture | null; framebuffer: WebGLFramebuffer | null; width: number; height: number };
 
 type Echo = { x: number; y: number; time: number };
 
-type Contact = {
-  x: number;
-  y: number;
-  heading: number;
-  velocity: number;
-  turn: number;
-  echoes: Echo[];
-};
+type Contact = { x: number; y: number; heading: number; velocity: number; turn: number; echoes: Echo[] };
 
 const QUAD_VERTEX = `#version 300 es
 in vec2 aPosition;
@@ -441,7 +429,7 @@ const link = (
   gl: WebGL2RenderingContext,
   vertexSource: string,
   fragmentSource: string,
-  attributes: string[],
+  attributes: string[]
 ): Program | null => {
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -475,14 +463,14 @@ const spawnTarget = (rng: () => number, inward: boolean) => {
     y: Math.cos(angle) * radius,
     heading,
     velocity: 0.012 + rng() * 0.03,
-    turn: (rng() - 0.5) * 0.18,
+    turn: (rng() - 0.5) * 0.18
   };
 };
 
 export default function Radar({
-  color = "#3ef09a",
-  backgroundColor = "transparent",
-  mode = "sweep",
+  color = '#3ef09a',
+  backgroundColor = 'transparent',
+  mode = 'sweep',
   speed = 1,
   trail = 0.35,
   scale = 0.9,
@@ -506,7 +494,7 @@ export default function Radar({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
+  className = '',
   ...rest
 }: RadarProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -515,7 +503,7 @@ export default function Radar({
   const settings: Settings = {
     color: String(color),
     backgroundColor: String(backgroundColor),
-    mode: mode === "pulse" ? "pulse" : "sweep",
+    mode: mode === 'pulse' ? 'pulse' : 'sweep',
     speed,
     trail: clamp(trail, 0.02, 1),
     scale: Math.max(0.05, scale),
@@ -538,7 +526,7 @@ export default function Radar({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -546,25 +534,25 @@ export default function Radar({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
     const range = floatTargets ? 1 : 0.25;
     const programs = {
-      scene: link(gl, QUAD_VERTEX, SCENE, ["aPosition"]),
-      sprite: link(gl, SPRITE_VERTEX, SPRITE_FRAGMENT, ["aCorner", "aSprite", "aStyle"]),
-      down: link(gl, QUAD_VERTEX, DOWN, ["aPosition"]),
-      up: link(gl, QUAD_VERTEX, UP, ["aPosition"]),
-      composite: link(gl, QUAD_VERTEX, COMPOSITE, ["aPosition"]),
+      scene: link(gl, QUAD_VERTEX, SCENE, ['aPosition']),
+      sprite: link(gl, SPRITE_VERTEX, SPRITE_FRAGMENT, ['aCorner', 'aSprite', 'aStyle']),
+      down: link(gl, QUAD_VERTEX, DOWN, ['aPosition']),
+      up: link(gl, QUAD_VERTEX, UP, ['aPosition']),
+      composite: link(gl, QUAD_VERTEX, COMPOSITE, ['aPosition'])
     } as Record<string, Program>;
-    if (Object.values(programs).some((entry) => !entry)) return undefined;
+    if (Object.values(programs).some(entry => !entry)) return undefined;
 
     const quadBuffer = gl.createBuffer();
     const quadVao = gl.createVertexArray();
@@ -594,7 +582,7 @@ export default function Radar({
       texture: gl.createTexture(),
       framebuffer: gl.createFramebuffer(),
       width: 0,
-      height: 0,
+      height: 0
     });
     const sizeTarget = (target: Target, width: number, height: number) => {
       if (target.width === width && target.height === height) return;
@@ -611,20 +599,14 @@ export default function Radar({
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.framebufferTexture2D(
-        gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
-        gl.TEXTURE_2D,
-        target.texture,
-        0,
-      );
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.texture, 0);
     };
     const scene = createTarget();
     const down = Array.from({ length: BLOOM_LEVELS + 1 }, createTarget);
     const up = Array.from({ length: BLOOM_LEVELS }, createTarget);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colorCache = new Map<string, number[]>();
     const parseColor = (value: string): number[] => {
       const cached = colorCache.get(value);
@@ -632,7 +614,7 @@ export default function Radar({
       let rgba = [1, 1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "rgba(0, 0, 0, 0)";
+        probe.fillStyle = 'rgba(0, 0, 0, 0)';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b, a] = probe.getImageData(0, 0, 1, 1).data;
@@ -644,13 +626,10 @@ export default function Radar({
     const toLinear = (value: string) =>
       parseColor(value)
         .slice(0, 3)
-        .map((v) => Math.pow(v, 2.2));
+        .map(v => Math.pow(v, 2.2));
 
     const rng = seeded(7919);
-    const contacts: Contact[] = Array.from({ length: MAX_TARGETS }, () => ({
-      ...spawnTarget(rng, false),
-      echoes: [],
-    }));
+    const contacts: Contact[] = Array.from({ length: MAX_TARGETS }, () => ({ ...spawnTarget(rng, false), echoes: [] }));
     const cursor = { x: 0, y: 0, inside: false, echoes: [] as Echo[] };
     const pointer = { x: 0, y: 0, inside: false };
     const view = { width: 1, height: 1, ratio: 1 };
@@ -663,7 +642,7 @@ export default function Radar({
       heat: 0,
       heatVelocity: 0,
       heatX: 0,
-      heatY: 0,
+      heatY: 0
     };
     const instances = new Float32Array(8 * 160);
     let raf = 0;
@@ -672,11 +651,7 @@ export default function Radar({
 
     const fit = (s: Settings) => (s.scale * Math.min(view.width, view.height)) / view.height;
 
-    const camera = (s: Settings) => ({
-      distance: (2 * FOCAL) / fit(s),
-      focal: FOCAL,
-      tilt: s.tilt,
-    });
+    const camera = (s: Settings) => ({ distance: (2 * FOCAL) / fit(s), focal: FOCAL, tilt: s.tilt });
 
     const toPlane = (s: Settings, x: number, y: number): [number, number] | null => {
       const { distance, focal, tilt } = camera(s);
@@ -694,11 +669,11 @@ export default function Radar({
       return [dx * t, ey + dy * t];
     };
 
-    const period = (s: Settings) => (s.mode === "pulse" ? 3.2 : 6);
+    const period = (s: Settings) => (s.mode === 'pulse' ? 3.2 : 6);
 
     const advance = (s: Settings, dt: number) => {
       const step = dt * Math.abs(s.speed);
-      const pulse = s.mode === "pulse";
+      const pulse = s.mode === 'pulse';
       const span = pulse ? 1.15 : TAU;
       const delta = (step / period(s)) * span;
       const direction = s.speed < 0 && !pulse ? -1 : 1;
@@ -750,7 +725,7 @@ export default function Radar({
         kind: number,
         intensity: number,
         core: number,
-        angle: number,
+        angle: number
       ) => {
         if (count * 8 + 8 > instances.length) return;
         instances.set([x, y, radius, kind, intensity, core, 0, angle], count * 8);
@@ -769,20 +744,12 @@ export default function Radar({
             0,
             fade * strength * 2.2,
             index === 0 ? 1 : 0.3,
-            angle,
+            angle
           );
           if (index === 0 && age < 1.4) {
             const progress = age / 1.4;
             const eased = 1 - Math.pow(1 - progress, 3);
-            push(
-              echo.x,
-              echo.y,
-              unit * (4 + 26 * eased),
-              1,
-              (1 - progress) * (1 - progress) * strength * 1.4,
-              0,
-              0,
-            );
+            push(echo.x, echo.y, unit * (4 + 26 * eased), 1, (1 - progress) * (1 - progress) * strength * 1.4, 0, 0);
           }
         });
       };
@@ -798,12 +765,7 @@ export default function Radar({
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
 
-    const bindTexture = (
-      entry: Program,
-      name: string,
-      unit: number,
-      texture: WebGLTexture | null,
-    ) => {
+    const bindTexture = (entry: Program, name: string, unit: number, texture: WebGLTexture | null) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(entry.uniforms[name], unit);
@@ -830,12 +792,12 @@ export default function Radar({
       const u = sceneProgram.uniforms;
       gl.useProgram(sceneProgram.program);
       setCamera(sceneProgram, s);
-      gl.uniform1f(u.uMode, s.mode === "pulse" ? 1 : 0);
+      gl.uniform1f(u.uMode, s.mode === 'pulse' ? 1 : 0);
       gl.uniform1f(u.uSweep, state.sweep);
       gl.uniform1f(u.uSwept, Math.min(state.swept, TAU + 1));
-      gl.uniform1f(u.uDirection, s.speed < 0 && s.mode !== "pulse" ? -1 : 1);
+      gl.uniform1f(u.uDirection, s.speed < 0 && s.mode !== 'pulse' ? -1 : 1);
       gl.uniform1f(u.uCycle, state.cycle);
-      gl.uniform1f(u.uTrail, s.mode === "pulse" ? s.trail * 0.22 : s.trail * TAU * 0.5);
+      gl.uniform1f(u.uTrail, s.mode === 'pulse' ? s.trail * 0.22 : s.trail * TAU * 0.5);
       gl.uniform1f(u.uRings, s.ringCount);
       gl.uniform1f(u.uSpokes, s.spokeCount);
       gl.uniform1f(u.uTicks, s.ticks ? 1 : 0);
@@ -877,7 +839,7 @@ export default function Radar({
         gl.useProgram(programs.down.program);
         gl.uniform2f(programs.down.uniforms.uTexel, 1 / source.width, 1 / source.height);
         gl.uniform2f(programs.down.uniforms.uTarget, target.width, target.height);
-        bindTexture(programs.down, "uSource", 0, source.texture);
+        bindTexture(programs.down, 'uSource', 0, source.texture);
         run(programs.down, target, target.width, target.height);
         source = target;
       }
@@ -888,8 +850,8 @@ export default function Radar({
         gl.useProgram(programs.up.program);
         gl.uniform2f(programs.up.uniforms.uTexel, 1 / from.width, 1 / from.height);
         gl.uniform2f(programs.up.uniforms.uTarget, target.width, target.height);
-        bindTexture(programs.up, "uSource", 0, from.texture);
-        bindTexture(programs.up, "uBase", 1, down[level].texture);
+        bindTexture(programs.up, 'uSource', 0, from.texture);
+        bindTexture(programs.up, 'uBase', 1, down[level].texture);
         run(programs.up, target, target.width, target.height);
       }
 
@@ -906,8 +868,8 @@ export default function Radar({
       gl.uniform1f(c.uLightMode, s.lightMode ? 1 : 0);
       const back = parseColor(s.backgroundColor);
       gl.uniform4f(c.uBackground, back[0], back[1], back[2], back[3]);
-      bindTexture(composite, "uScene", 0, scene.texture);
-      bindTexture(composite, "uBloom", 1, up[0].texture);
+      bindTexture(composite, 'uScene', 0, scene.texture);
+      bindTexture(composite, 'uBloom', 1, up[0].texture);
       run(composite, null, canvas.width, canvas.height);
     };
 
@@ -920,8 +882,7 @@ export default function Radar({
       const moving = !s.paused && !reduce;
       if (!s.intro || reduce) state.intro = 1;
       else if (state.intro < 1) state.intro = Math.min(1, state.intro + dt / INTRO_SECONDS);
-      const plane =
-        s.mouseInteraction && pointer.inside && !reduce ? toPlane(s, pointer.x, pointer.y) : null;
+      const plane = s.mouseInteraction && pointer.inside && !reduce ? toPlane(s, pointer.x, pointer.y) : null;
       cursor.inside = !!plane && Math.hypot(plane[0], plane[1]) < 0.98;
       if (plane) {
         cursor.x = plane[0];
@@ -938,8 +899,7 @@ export default function Radar({
         advance(s, dt * ramp);
       }
       render();
-      const settling =
-        state.intro < 1 || state.heat > 0.001 || Math.abs(state.heatVelocity) > 0.001;
+      const settling = state.intro < 1 || state.heat > 0.001 || Math.abs(state.heatVelocity) > 0.001;
       if (moving || settling) raf = requestAnimationFrame(frame);
       else last = 0;
     };
@@ -968,8 +928,7 @@ export default function Radar({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.inside =
-        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       wake();
     };
 
@@ -985,17 +944,17 @@ export default function Radar({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -1014,9 +973,9 @@ export default function Radar({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       for (const target of [scene, ...down, ...up]) {
         gl.deleteTexture(target.texture);
         gl.deleteFramebuffer(target.framebuffer);
@@ -1027,7 +986,7 @@ export default function Radar({
       gl.deleteBuffer(instanceBuffer);
       gl.deleteVertexArray(quadVao);
       gl.deleteVertexArray(spriteVao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -1036,11 +995,7 @@ export default function Radar({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`radar-container${className ? ` ${className}` : ""}`}
-      {...rest}
-    >
+    <div ref={containerRef} className={`radar-container${className ? ` ${className}` : ''}`} {...rest}>
       <canvas ref={canvasRef} className="radar-canvas" aria-hidden="true" />
     </div>
   );

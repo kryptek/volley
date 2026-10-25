@@ -1,12 +1,12 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
-import "./Particles.css";
+import { useEffect, useRef, type CSSProperties } from 'react';
+import './Particles.css';
 
-export type ParticlesShape = "circle" | "square" | "ring" | "sparkle";
-export type ParticlesHoverEffect = "parallax" | "repel" | "attract";
-export type ParticlesDrift = "none" | "up" | "down" | "forward";
+export type ParticlesShape = 'circle' | 'square' | 'ring' | 'sparkle';
+export type ParticlesHoverEffect = 'parallax' | 'repel' | 'attract';
+export type ParticlesDrift = 'none' | 'up' | 'down' | 'forward';
 
 export interface ParticlesProps {
   particleCount?: number;
@@ -314,11 +314,7 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
   return null;
 };
 
-const link = (
-  gl: WebGL2RenderingContext,
-  vertexSource: string,
-  fragmentSource: string,
-): Program | null => {
+const link = (gl: WebGL2RenderingContext, vertexSource: string, fragmentSource: string): Program | null => {
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
   const program = gl.createProgram();
@@ -336,7 +332,7 @@ const link = (
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -360,7 +356,7 @@ const Particles = ({
   particleCount = 200,
   particleSpread = 10,
   speed = 0.1,
-  particleColors = ["#ffffff"],
+  particleColors = ['#ffffff'],
   moveParticlesOnHover = true,
   particleHoverFactor = 1,
   alphaParticles = false,
@@ -369,38 +365,36 @@ const Particles = ({
   cameraDistance = 20,
   disableRotation = false,
   pixelRatio,
-  shape = "circle",
+  shape = 'circle',
   glow = 0.5,
   twinkle = 0.3,
   depthOfField = 0,
   connections = false,
   connectionDistance = 110,
-  hoverEffect = "parallax",
+  hoverEffect = 'parallax',
   hoverRadius = 140,
   clickBurst = true,
-  drift = "none",
+  drift = 'none',
   driftSpeed = 1,
   variation = 0,
   intro = true,
   opacity = 1,
   lightMode = false,
   paused = false,
-  className = "",
-  style,
+  className = '',
+  style
 }: ParticlesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
-  const palette = (
-    Array.isArray(particleColors) ? particleColors : [particleColors as unknown as string]
-  )
+  const palette = (Array.isArray(particleColors) ? particleColors : [particleColors as unknown as string])
     .filter(Boolean)
     .map(String);
   const settings: Settings = {
     count: clamp(Math.round(particleCount), 1, MAX_COUNT),
     spread: Math.max(0.1, particleSpread),
     speed,
-    colors: palette.length ? palette : ["#ffffff"],
+    colors: palette.length ? palette : ['#ffffff'],
     mouse: moveParticlesOnHover,
     hoverFactor: Math.max(0, particleHoverFactor),
     soft: alphaParticles,
@@ -424,7 +418,7 @@ const Particles = ({
     intro,
     opacity: clamp(opacity, 0, 1),
     lightMode,
-    paused,
+    paused
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -432,12 +426,12 @@ const Particles = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -484,8 +478,8 @@ const Particles = ({
     gl.vertexAttribDivisor(2, 1);
     gl.bindVertexArray(null);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const cache = new Map<string, number[]>();
     const parse = (value: string): number[] => {
       const cached = cache.get(value);
@@ -493,7 +487,7 @@ const Particles = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#ffffff";
+        probe.fillStyle = '#ffffff';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -503,10 +497,10 @@ const Particles = ({
       return rgb;
     };
     const ink = (rgb: number[]): number[] => {
-      const linear = rgb.map((v) => Math.pow(v, 2.2));
+      const linear = rgb.map(v => Math.pow(v, 2.2));
       const tone = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
       const depth = Math.min(1, 0.06 / Math.max(tone, 0.0001));
-      return linear.map((v) => Math.pow(v * depth, 1 / 2.2));
+      return linear.map(v => Math.pow(v * depth, 1 / 2.2));
     };
 
     const view = { width: 1, height: 1, ratio: 1 };
@@ -517,29 +511,29 @@ const Particles = ({
       travel: 0,
       offsetX: 0,
       offsetY: 0,
-      reveal: settingsRef.current.intro && !reduce ? 0 : 1,
+      reveal: settingsRef.current.intro && !reduce ? 0 : 1
     };
     const bursts: Burst[] = [];
     const packedBursts = new Float32Array(MAX_BURSTS * 4);
     const cloud = {
-      key: "",
+      key: '',
       count: 0,
       positions: new Float32Array(0),
       randoms: new Float32Array(0),
-      colors: new Float32Array(0),
+      colors: new Float32Array(0)
     };
     const screen = {
       x: new Float32Array(0),
       y: new Float32Array(0),
       ahead: new Float32Array(0),
-      alpha: new Float32Array(0),
+      alpha: new Float32Array(0)
     };
     let raf = 0;
     let last = 0;
     let visible = true;
 
     const rebuild = (s: Settings) => {
-      const key = `${s.count}|${s.variation}|${s.colors.join(",")}|${s.lightMode ? 1 : 0}`;
+      const key = `${s.count}|${s.variation}|${s.colors.join(',')}|${s.lightMode ? 1 : 0}`;
       if (key === cloud.key) return;
       cloud.key = key;
       const next = seeded(s.variation * 7919 + 1);
@@ -547,7 +541,7 @@ const Particles = ({
       const positions = new Float32Array(total * 3);
       const randoms = new Float32Array(total * 4);
       const tints = new Float32Array(total * 3);
-      const swatches = s.colors.map((value) => (s.lightMode ? ink(parse(value)) : parse(value)));
+      const swatches = s.colors.map(value => (s.lightMode ? ink(parse(value)) : parse(value)));
       for (let i = 0; i < total; i++) {
         let x: number;
         let y: number;
@@ -586,14 +580,7 @@ const Particles = ({
       const x = s.rotate ? Math.sin(elapsed * 0.0002) * 0.1 : 0;
       const y = s.rotate ? Math.cos(elapsed * 0.0005) * 0.15 : 0;
       const z = s.rotate ? state.spin : 0;
-      const [sx, cx, sy, cy, sz, cz] = [
-        Math.sin(x),
-        Math.cos(x),
-        Math.sin(y),
-        Math.cos(y),
-        Math.sin(z),
-        Math.cos(z),
-      ];
+      const [sx, cx, sy, cy, sz, cz] = [Math.sin(x), Math.cos(x), Math.sin(y), Math.cos(y), Math.sin(z), Math.cos(z)];
       return [
         cy * cz + sy * sx * sz,
         cx * sz,
@@ -603,15 +590,11 @@ const Particles = ({
         sy * sz + cy * sx * cz,
         sy * cx,
         -sx,
-        cy * cx,
+        cy * cx
       ];
     };
 
-    const offsetOf = (): [number, number, number] => [
-      state.offsetX,
-      state.offsetY,
-      -(1 - easeOut(state.reveal)) * 70,
-    ];
+    const offsetOf = (): [number, number, number] => [state.offsetX, state.offsetY, -(1 - easeOut(state.reveal)) * 70];
 
     const project = (s: Settings, matrix: number[]) => {
       const total = Math.min(cloud.count, MAX_LINKED);
@@ -638,10 +621,7 @@ const Particles = ({
         let wz = matrix[2] * px + matrix[5] * py + matrix[8] * pz + oz + bobZ;
         let edge = 1;
         if (s.drift === 1 || s.drift === 2) {
-          const k = wrap(
-            r3 * spanY + oy + bobY + (s.drift === 1 ? state.travel : -state.travel),
-            spanY,
-          );
+          const k = wrap(r3 * spanY + oy + bobY + (s.drift === 1 ? state.travel : -state.travel), spanY);
           wy = k - spanY / 2;
           const low = clamp(k / (spanY * 0.12), 0, 1);
           const high = clamp((spanY - k) / (spanY * 0.12), 0, 1);
@@ -667,8 +647,7 @@ const Particles = ({
           const ex = sx - pointer.sx;
           const ey = sy - pointer.sy;
           const reach = Math.hypot(ex, ey);
-          const falloff =
-            Math.exp(-(ex * ex + ey * ey) / (radius * radius)) * s.hoverFactor * active;
+          const falloff = Math.exp(-(ex * ex + ey * ey) / (radius * radius)) * s.hoverFactor * active;
           if (s.hoverEffect === 1 && reach > 0.001) {
             dx += (ex / reach) * radius * 0.5 * falloff;
             dy += (ey / reach) * radius * 0.5 * falloff;
@@ -708,8 +687,7 @@ const Particles = ({
       const buckets = new Map<number, number[]>();
       for (let i = 0; i < total; i++) {
         if (screen.alpha[i] < 0.02) continue;
-        const key =
-          (Math.floor(screen.y[i] / reach) + 1) * columns + Math.floor(screen.x[i] / reach) + 1;
+        const key = (Math.floor(screen.y[i] / reach) + 1) * columns + Math.floor(screen.x[i] / reach) + 1;
         const bucket = buckets.get(key);
         if (bucket) bucket.push(i);
         else buckets.set(key, [i]);
@@ -740,8 +718,7 @@ const Particles = ({
               lineData[base + 4] = (cloud.colors[i * 3] + cloud.colors[j * 3]) / 2;
               lineData[base + 5] = (cloud.colors[i * 3 + 1] + cloud.colors[j * 3 + 1]) / 2;
               lineData[base + 6] = (cloud.colors[i * 3 + 2] + cloud.colors[j * 3 + 2]) / 2;
-              lineData[base + 7] =
-                fade * fade * layer * 0.7 * Math.min(screen.alpha[i], screen.alpha[j]);
+              lineData[base + 7] = fade * fade * layer * 0.7 * Math.min(screen.alpha[i], screen.alpha[j]);
               lineCount++;
             }
           }
@@ -779,10 +756,7 @@ const Particles = ({
       const u = dots.uniforms;
       let burstCount = 0;
       for (let i = bursts.length - 1; i >= 0 && burstCount < MAX_BURSTS; i--) {
-        packedBursts.set(
-          [bursts[i].x, bursts[i].y, bursts[i].age / BURST_SECONDS, 1],
-          burstCount * 4,
-        );
+        packedBursts.set([bursts[i].x, bursts[i].y, bursts[i].age / BURST_SECONDS, 1], burstCount * 4);
         burstCount++;
       }
       gl.useProgram(dots.program);
@@ -905,7 +879,7 @@ const Particles = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") pointer.inside = false;
+      if (event.pointerType !== 'mouse') pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -919,20 +893,20 @@ const Particles = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -952,20 +926,18 @@ const Particles = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteProgram(dots.program);
       gl.deleteProgram(lines.program);
-      [corners, positionBuffer, randomBuffer, colorBuffer, lineBuffer].forEach((buffer) =>
-        gl.deleteBuffer(buffer),
-      );
+      [corners, positionBuffer, randomBuffer, colorBuffer, lineBuffer].forEach(buffer => gl.deleteBuffer(buffer));
       gl.deleteVertexArray(dotVao);
       gl.deleteVertexArray(lineVao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -974,11 +946,7 @@ const Particles = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`particles-container${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`particles-container${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="particles-canvas" aria-hidden="true" />
     </div>
   );

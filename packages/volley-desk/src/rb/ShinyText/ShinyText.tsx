@@ -1,13 +1,13 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { useEffect, useRef } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useRef } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
-import "./ShinyText.css";
+import './ShinyText.css';
 
-type Easing = "smooth" | "linear" | "snappy";
-type Trigger = "loop" | "hover" | "view";
+type Easing = 'smooth' | 'linear' | 'snappy';
+type Trigger = 'loop' | 'hover' | 'view';
 
 export interface ShinyTextProps {
   text?: string;
@@ -21,7 +21,7 @@ export interface ShinyTextProps {
   softness?: number;
   bands?: number;
   glow?: number;
-  direction?: "left" | "right";
+  direction?: 'left' | 'right';
   easing?: Easing;
   trigger?: Trigger;
   yoyo?: boolean;
@@ -52,11 +52,11 @@ interface Settings {
 }
 
 const EASINGS: Record<Easing, (t: number) => number> = {
-  linear: (t) => t,
-  smooth: (t) => 0.5 - Math.cos(Math.PI * t) / 2,
-  snappy: (t) => (t < 0.5 ? 16 * Math.pow(t, 5) : 1 - Math.pow(-2 * t + 2, 5) / 2),
+  linear: t => t,
+  smooth: t => 0.5 - Math.cos(Math.PI * t) / 2,
+  snappy: t => (t < 0.5 ? 16 * Math.pow(t, 5) : 1 - Math.pow(-2 * t + 2, 5) / 2)
 };
-const TRIGGERS: Trigger[] = ["loop", "hover", "view"];
+const TRIGGERS: Trigger[] = ['loop', 'hover', 'view'];
 const FALLOFF = [0, 0.2, 0.4, 0.6, 0.8, 1];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -64,33 +64,25 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 let paint: CanvasRenderingContext2D | null = null;
 
 const parseColor = (value: string): number[] | null => {
-  if (typeof document === "undefined") return null;
-  if (!paint) paint = document.createElement("canvas").getContext("2d");
+  if (typeof document === 'undefined') return null;
+  if (!paint) paint = document.createElement('canvas').getContext('2d');
   if (!paint) return null;
-  paint.fillStyle = "#000000";
+  paint.fillStyle = '#000000';
   paint.fillStyle = value;
   const resolved = String(paint.fillStyle);
-  if (resolved.startsWith("#")) {
-    return [1, 3, 5].map((i) => Number.parseInt(resolved.slice(i, i + 2), 16)).concat(1);
+  if (resolved.startsWith('#')) {
+    return [1, 3, 5].map(i => parseInt(resolved.slice(i, i + 2), 16)).concat(1);
   }
   const parts = resolved.match(/[\d.]+/g);
   if (!parts || parts.length < 3) return null;
-  return [
-    Number(parts[0]),
-    Number(parts[1]),
-    Number(parts[2]),
-    parts.length > 3 ? Number(parts[3]) : 1,
-  ];
+  return [Number(parts[0]), Number(parts[1]), Number(parts[2]), parts.length > 3 ? Number(parts[3]) : 1];
 };
 
 const blend = (from: number[], to: number[], amount: number) => {
   const channel = (a: number, b: number) =>
-    Math.round(
-      Math.pow(Math.pow(a / 255, 2.2) * (1 - amount) + Math.pow(b / 255, 2.2) * amount, 1 / 2.2) *
-        255,
-    );
+    Math.round(Math.pow(Math.pow(a / 255, 2.2) * (1 - amount) + Math.pow(b / 255, 2.2) * amount, 1 / 2.2) * 255);
   const alpha = from[3] * (1 - amount) + to[3] * amount;
-  if (alpha <= 0) return "rgba(0, 0, 0, 0)";
+  if (alpha <= 0) return 'rgba(0, 0, 0, 0)';
   const weigh = (a: number, b: number) => (a * from[3] * (1 - amount) + b * to[3] * amount) / alpha;
   const r = from[3] === to[3] ? channel(from[0], to[0]) : Math.round(weigh(from[0], to[0]));
   const g = from[3] === to[3] ? channel(from[1], to[1]) : Math.round(weigh(from[1], to[1]));
@@ -101,8 +93,8 @@ const blend = (from: number[], to: number[], amount: number) => {
 const ShinyText = ({
   text,
   children,
-  color = "#b5b5b5",
-  shineColor = "#ffffff",
+  color = '#b5b5b5',
+  shineColor = '#ffffff',
   speed = 2,
   delay = 0,
   angle = 120,
@@ -110,15 +102,15 @@ const ShinyText = ({
   softness = 0.8,
   bands = 1,
   glow = 0,
-  direction = "left",
-  easing = "smooth",
-  trigger = "loop",
+  direction = 'left',
+  easing = 'smooth',
+  trigger = 'loop',
   yoyo = false,
   followPointer = false,
   pauseOnHover = false,
   disabled = false,
-  className = "",
-  style,
+  className = '',
+  style
 }: ShinyTextProps) => {
   const rootRef = useRef<HTMLSpanElement>(null);
   const glowRef = useRef<HTMLSpanElement>(null);
@@ -136,13 +128,13 @@ const ShinyText = ({
     softness: clamp(softness, 0, 1),
     bands: clamp(Math.round(bands), 1, 3),
     glow: clamp(glow, 0, 1),
-    sign: direction === "right" ? 1 : -1,
+    sign: direction === 'right' ? 1 : -1,
     ease: EASINGS[easing as Easing] ?? EASINGS.smooth,
-    trigger: TRIGGERS.includes(trigger as Trigger) ? (trigger as Trigger) : "loop",
+    trigger: TRIGGERS.includes(trigger as Trigger) ? (trigger as Trigger) : 'loop',
     yoyo,
     followPointer,
     pauseOnHover,
-    disabled,
+    disabled
   };
 
   useEffect(() => {
@@ -153,11 +145,11 @@ const ShinyText = ({
     const root = rootRef.current;
     if (!root) return undefined;
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const state = {
       pos: null as number | null,
       vel: 0,
-      phase: "idle",
+      phase: 'idle',
       from: 0,
       to: 0,
       start: 0,
@@ -168,7 +160,7 @@ const ShinyText = ({
       target: 0,
       visible: true,
       seen: false,
-      colors: "",
+      colors: ''
     };
     let base: number[] | null = null;
     let shine: number[] | null = null;
@@ -205,7 +197,7 @@ const ShinyText = ({
       }
       stops.sort((a, b) => a[0] - b[0]);
       const list = stops.map(([at, amount]) => `${blend(fill, shine!, amount)} ${at.toFixed(2)}%`);
-      return `linear-gradient(${s.angle}deg, ${blend(fill, shine!, 0)} 0%, ${list.join(", ")}, ${blend(fill, shine!, 0)} 100%)`;
+      return `linear-gradient(${s.angle}deg, ${blend(fill, shine!, 0)} 0%, ${list.join(', ')}, ${blend(fill, shine!, 0)} 100%)`;
     };
 
     const draw = () => {
@@ -223,7 +215,7 @@ const ShinyText = ({
       }
       if (state.pos === null || s.disabled) {
         root.style.backgroundImage = `linear-gradient(${s.color}, ${s.color})`;
-        if (glowRef.current) glowRef.current.style.backgroundImage = "none";
+        if (glowRef.current) glowRef.current.style.backgroundImage = 'none';
         return;
       }
       root.style.backgroundImage = gradient(state.pos, base!);
@@ -236,7 +228,7 @@ const ShinyText = ({
     const sweep = (from: number, to: number, now: number) => {
       const s = settingsRef.current!;
       const span = Math.abs(exit() - entry()) || 1;
-      state.phase = "sweep";
+      state.phase = 'sweep';
       state.from = from;
       state.to = to;
       state.start = now;
@@ -259,7 +251,7 @@ const ShinyText = ({
       last = now;
       if (s.disabled) {
         state.pos = null;
-        state.phase = "idle";
+        state.phase = 'idle';
         draw();
         return;
       }
@@ -267,19 +259,18 @@ const ShinyText = ({
       if (following) {
         if (state.pos === null) state.pos = nearest();
         const stiffness = 220;
-        state.vel +=
-          ((state.target - state.pos) * stiffness - state.vel * 2 * Math.sqrt(stiffness)) * dt;
+        state.vel += ((state.target - state.pos) * stiffness - state.vel * 2 * Math.sqrt(stiffness)) * dt;
         state.pos += state.vel * dt;
-        state.phase = "follow";
+        state.phase = 'follow';
         draw();
         raf = requestAnimationFrame(tick);
         return;
       }
-      if (state.phase === "follow") {
+      if (state.phase === 'follow') {
         state.vel = 0;
         sweep(state.pos ?? nearest(), nearest(), now);
       }
-      if (state.phase === "sweep") {
+      if (state.phase === 'sweep') {
         if (s.pauseOnHover && state.inside) {
           state.start += dt * 1000;
           raf = requestAnimationFrame(tick);
@@ -292,16 +283,16 @@ const ShinyText = ({
           raf = requestAnimationFrame(tick);
           return;
         }
-        if (s.trigger !== "loop" || reduce) {
-          state.phase = "idle";
+        if (s.trigger !== 'loop' || reduce) {
+          state.phase = 'idle';
           state.pos = null;
           draw();
           return;
         }
-        state.phase = "wait";
+        state.phase = 'wait';
         state.resume = now + s.delay * 1000;
       }
-      if (state.phase === "wait") {
+      if (state.phase === 'wait') {
         if (!state.visible) return;
         if (now < state.resume) {
           window.clearTimeout(timer);
@@ -317,7 +308,7 @@ const ShinyText = ({
         raf = requestAnimationFrame(tick);
         return;
       }
-      if (state.phase === "idle" && s.trigger === "loop" && !reduce && state.visible) {
+      if (state.phase === 'idle' && s.trigger === 'loop' && !reduce && state.visible) {
         state.flip = false;
         sweep(entry(), exit(), now);
         raf = requestAnimationFrame(tick);
@@ -332,8 +323,7 @@ const ShinyText = ({
       const dy = -Math.cos(radians);
       const length = Math.abs(rect.width * dx) + Math.abs(rect.height * dy) || 1;
       const along =
-        (event.clientX - rect.left - rect.width / 2) * dx +
-        (event.clientY - rect.top - rect.height / 2) * dy;
+        (event.clientX - rect.left - rect.width / 2) * dx + (event.clientY - rect.top - rect.height / 2) * dy;
       return 50 + (along / length) * 100;
     };
 
@@ -344,7 +334,7 @@ const ShinyText = ({
       if (s.disabled) return;
       if (s.followPointer) {
         if (state.pos === null) state.pos = nearest();
-      } else if (s.trigger === "hover" && state.phase === "idle" && !reduce) {
+      } else if (s.trigger === 'hover' && state.phase === 'idle' && !reduce) {
         sweep(entry(), exit(), performance.now());
       }
       wake();
@@ -358,12 +348,12 @@ const ShinyText = ({
       wake();
     };
 
-    const observer = new IntersectionObserver((entries) => {
-      const visible = entries.some((item) => item.isIntersecting);
+    const observer = new IntersectionObserver(entries => {
+      const visible = entries.some(item => item.isIntersecting);
       state.visible = visible;
       const s = settingsRef.current!;
       if (!visible) return;
-      if (s.trigger === "view" && !state.seen && !reduce && !s.disabled) {
+      if (s.trigger === 'view' && !state.seen && !reduce && !s.disabled) {
         state.seen = true;
         sweep(entry(), exit(), performance.now());
       }
@@ -371,17 +361,17 @@ const ShinyText = ({
     });
     observer.observe(root);
 
-    root.addEventListener("pointerenter", onEnter);
-    root.addEventListener("pointermove", onMove);
-    root.addEventListener("pointerleave", onLeave);
+    root.addEventListener('pointerenter', onEnter);
+    root.addEventListener('pointermove', onMove);
+    root.addEventListener('pointerleave', onLeave);
 
     syncRef.current = () => {
       const s = settingsRef.current!;
       if (s.disabled) {
         state.pos = null;
-        state.phase = "idle";
-      } else if (s.trigger !== "loop" && state.phase === "wait") {
-        state.phase = "idle";
+        state.phase = 'idle';
+      } else if (s.trigger !== 'loop' && state.phase === 'wait') {
+        state.phase = 'idle';
         state.pos = null;
       }
       draw();
@@ -395,9 +385,9 @@ const ShinyText = ({
       cancelAnimationFrame(raf);
       window.clearTimeout(timer);
       observer.disconnect();
-      root.removeEventListener("pointerenter", onEnter);
-      root.removeEventListener("pointermove", onMove);
-      root.removeEventListener("pointerleave", onLeave);
+      root.removeEventListener('pointerenter', onEnter);
+      root.removeEventListener('pointermove', onMove);
+      root.removeEventListener('pointerleave', onLeave);
       syncRef.current = null;
     };
   }, []);
@@ -405,7 +395,7 @@ const ShinyText = ({
   return (
     <span
       ref={rootRef}
-      className={`shiny-text${className ? ` ${className}` : ""}`}
+      className={`shiny-text${className ? ` ${className}` : ''}`}
       style={{ backgroundImage: `linear-gradient(${color}, ${color})`, ...style }}
     >
       {content}

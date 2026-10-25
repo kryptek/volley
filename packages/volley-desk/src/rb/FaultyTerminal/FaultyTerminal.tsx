@@ -1,15 +1,15 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, type HTMLAttributes, useEffect, useRef } from "react";
-import "./FaultyTerminal.css";
+import { useEffect, useRef, type CSSProperties, type HTMLAttributes } from 'react';
+import './FaultyTerminal.css';
 
 type Vec2 = [number, number];
 
-export type FaultyTerminalGlyphs = "blocks" | "dots" | "characters";
-export type FaultyTerminalClickEffect = "glitch" | "degauss" | "none";
+export type FaultyTerminalGlyphs = 'blocks' | 'dots' | 'characters';
+export type FaultyTerminalClickEffect = 'glitch' | 'degauss' | 'none';
 
-export interface FaultyTerminalProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
+export interface FaultyTerminalProps extends Omit<HTMLAttributes<HTMLDivElement>, 'style'> {
   scale?: number;
   gridMul?: Vec2;
   digitSize?: number;
@@ -82,37 +82,37 @@ const GLYPHS: Record<string, number> = { blocks: 0, dots: 1, characters: 2 };
 const CLICKS: Record<string, number> = { none: 0, glitch: 1, degauss: 2 };
 
 const FONT = [
-  [".###.", "#..##", "#.#.#", "##..#", ".###."],
-  ["..#..", ".##..", "..#..", "..#..", ".###."],
-  ["####.", "....#", ".###.", "#....", "#####"],
-  ["####.", "....#", ".###.", "....#", "####."],
-  ["#..#.", "#..#.", "#####", "...#.", "...#."],
-  ["#####", "#....", "####.", "....#", "####."],
-  [".###.", "#....", "####.", "#...#", ".###."],
-  ["#####", "....#", "...#.", "..#..", "..#.."],
-  [".###.", "#...#", ".###.", "#...#", ".###."],
-  [".###.", "#...#", ".####", "....#", ".###."],
-  [".###.", "#...#", "#####", "#...#", "#...#"],
-  ["####.", "#...#", "####.", "#...#", "####."],
-  [".####", "#....", "#....", "#....", ".####"],
-  ["####.", "#...#", "#...#", "#...#", "####."],
-  ["#####", "#....", "####.", "#....", "#####"],
-  ["#####", "#....", "####.", "#....", "#...."],
-  [".....", "..#..", ".###.", "..#..", "....."],
-  [".....", ".....", ".###.", ".....", "....."],
-  [".#...", "..#..", "...#.", "..#..", ".#..."],
-  ["....#", "...#.", "..#..", ".#...", "#...."],
-  [".....", "#.#.#", ".###.", "#.#.#", "....."],
-  [".....", "#####", ".....", "#####", "....."],
-  [".....", ".....", ".....", ".....", "#####"],
+  ['.###.', '#..##', '#.#.#', '##..#', '.###.'],
+  ['..#..', '.##..', '..#..', '..#..', '.###.'],
+  ['####.', '....#', '.###.', '#....', '#####'],
+  ['####.', '....#', '.###.', '....#', '####.'],
+  ['#..#.', '#..#.', '#####', '...#.', '...#.'],
+  ['#####', '#....', '####.', '....#', '####.'],
+  ['.###.', '#....', '####.', '#...#', '.###.'],
+  ['#####', '....#', '...#.', '..#..', '..#..'],
+  ['.###.', '#...#', '.###.', '#...#', '.###.'],
+  ['.###.', '#...#', '.####', '....#', '.###.'],
+  ['.###.', '#...#', '#####', '#...#', '#...#'],
+  ['####.', '#...#', '####.', '#...#', '####.'],
+  ['.####', '#....', '#....', '#....', '.####'],
+  ['####.', '#...#', '#...#', '#...#', '####.'],
+  ['#####', '#....', '####.', '#....', '#####'],
+  ['#####', '#....', '####.', '#....', '#....'],
+  ['.....', '..#..', '.###.', '..#..', '.....'],
+  ['.....', '.....', '.###.', '.....', '.....'],
+  ['.#...', '..#..', '...#.', '..#..', '.#...'],
+  ['....#', '...#.', '..#..', '.#...', '#....'],
+  ['.....', '#.#.#', '.###.', '#.#.#', '.....'],
+  ['.....', '#####', '.....', '#####', '.....'],
+  ['.....', '.....', '.....', '.....', '#####']
 ];
 
-const FONT_BITS = FONT.map((rows) =>
+const FONT_BITS = FONT.map(rows =>
   rows.reduce((bits, row, r) => {
     let value = bits;
-    for (let c = 0; c < 5; c++) if (row[c] === "#") value += 2 ** (r * 5 + c);
+    for (let c = 0; c < 5; c++) if (row[c] === '#') value += 2 ** (r * 5 + c);
     return value;
-  }, 0),
+  }, 0)
 );
 
 const VERTEX = `#version 300 es
@@ -227,8 +227,8 @@ void main() {
 }`;
 
 const fontArray = `const uint FONT[${FONT_BITS.length}] = uint[${FONT_BITS.length}](${FONT_BITS.map(
-  (bits) => `${bits}u`,
-).join(", ")});`;
+  bits => `${bits}u`
+).join(', ')});`;
 
 const MAIN_FRAGMENT = `#version 300 es
 precision highp float;
@@ -548,23 +548,23 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
     if (!info) continue;
-    const name = info.name.replace(/\[0\]$/, "");
+    const name = info.name.replace(/\[0\]$/, '');
     uniforms[name] = gl.getUniformLocation(program, name);
   }
   return { program, uniforms };
 };
 
 const hexToRgb = (hex: string): number[] => {
-  let h = String(hex || "#ffffff")
-    .replace("#", "")
+  let h = String(hex || '#ffffff')
+    .replace('#', '')
     .trim();
   if (h.length === 3 || h.length === 4)
     h = h
       .slice(0, 3)
-      .split("")
-      .map((c) => c + c)
-      .join("");
-  const num = Number.parseInt(h.slice(0, 6), 16);
+      .split('')
+      .map(c => c + c)
+      .join('');
+  const num = parseInt(h.slice(0, 6), 16);
   if (Number.isNaN(num)) return [1, 1, 1];
   return [((num >> 16) & 255) / 255, ((num >> 8) & 255) / 255, (num & 255) / 255];
 };
@@ -582,22 +582,22 @@ export default function FaultyTerminal({
   chromaticAberration = 0,
   dither = 0,
   curvature = 0.2,
-  tint = "#ffffff",
+  tint = '#ffffff',
   mouseReact = true,
   mouseStrength = 0.2,
   pageLoadAnimation = true,
   brightness = 1,
-  glyphs = "blocks",
+  glyphs = 'blocks',
   glow = 0.5,
   persistence = 0.5,
   scramble = 0.5,
   mouseGlow = 0.6,
   vignette = 0.25,
-  clickEffect = "glitch",
+  clickEffect = 'glitch',
   variation,
   lightMode = false,
   dpr,
-  className = "",
+  className = '',
   style,
   ...rest
 }: FaultyTerminalProps) {
@@ -616,7 +616,7 @@ export default function FaultyTerminal({
     flickerAmount,
     noiseAmp,
     chromaticAberration,
-    dither: typeof dither === "boolean" ? (dither ? 1 : 0) : dither,
+    dither: typeof dither === 'boolean' ? (dither ? 1 : 0) : dither,
     curvature,
     tint,
     mouseReact,
@@ -633,7 +633,7 @@ export default function FaultyTerminal({
     clickSeconds: CLICK_SECONDS[clickEffect] ?? 1,
     variation,
     lightMode,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -641,12 +641,12 @@ export default function FaultyTerminal({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
     const cellShader = link(gl, CELL_FRAGMENT);
@@ -677,9 +677,9 @@ export default function FaultyTerminal({
     });
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const view = { width: 1, height: 1, ratio: 1, columns: 1 };
-    const cells = { x: 0, y: 0, w: 1, h: 1, key: "" };
+    const cells = { x: 0, y: 0, w: 1, h: 1, key: '' };
     const pointer = { x: 0.5, y: 0.5, inside: false };
     const mouse = { x: 0.5, y: 0.5 };
     const clicks = new Float32Array(MAX_CLICKS * 4);
@@ -689,7 +689,7 @@ export default function FaultyTerminal({
     let current = 0;
     let fresh = true;
     const seedOffset = settingsRef.current.variation;
-    const initialOffset = typeof seedOffset === "number" ? seedOffset * 10 : Math.random() * 100;
+    const initialOffset = typeof seedOffset === 'number' ? seedOffset * 10 : Math.random() * 100;
     let iTime = initialOffset * settingsRef.current.timeScale;
     let introClock = settingsRef.current.pageLoadAnimation && !reduce ? 0 : 1;
     let raf = 0;
@@ -701,8 +701,7 @@ export default function FaultyTerminal({
       const reach = 1 + Math.max(0, s.curvature) * 2;
       const uvMin = 0.5 - 0.5 * reach;
       const uvMax = 0.5 + 0.5 * reach;
-      const margin =
-        0.06 * Math.max(1, Math.abs(s.glitchAmount)) * Math.max(1, Math.abs(s.flickerAmount)) + 0.2;
+      const margin = 0.06 * Math.max(1, Math.abs(s.glitchAmount)) * Math.max(1, Math.abs(s.flickerAmount)) + 0.2;
       const gridX = s.gridX * view.columns;
       const x0 = Math.floor((uvMin * s.scale - margin) * gridX) - 2;
       const x1 = Math.floor((uvMax * s.scale + margin) * gridX) + 2;
@@ -718,17 +717,7 @@ export default function FaultyTerminal({
       for (const target of targets) {
         for (const texture of [target.rings, target.extra]) {
           gl.bindTexture(gl.TEXTURE_2D, texture);
-          gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            gl.RGBA8,
-            cells.w,
-            cells.h,
-            0,
-            gl.RGBA,
-            gl.UNSIGNED_BYTE,
-            null,
-          );
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, cells.w, cells.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
         }
       }
       fresh = true;
@@ -840,8 +829,7 @@ export default function FaultyTerminal({
       mouse.y += (targetY - mouse.y) * follow;
       hover += ((pointer.inside ? 1 : 0) - hover) * (1 - Math.exp(-dt / 0.35));
       for (let k = 0; k < MAX_CLICKS; k++) {
-        if (clicks[k * 4 + 3] > 0 && clock - clicks[k * 4 + 2] > s.clickSeconds)
-          clicks[k * 4 + 3] = 0;
+        if (clicks[k * 4 + 3] > 0 && clock - clicks[k * 4 + 2] > s.clickSeconds) clicks[k * 4 + 3] = 0;
       }
       layoutCells(s);
       const decay = s.persistence > 0 ? Math.exp(-dt / (0.08 + s.persistence * 1.4)) : 0;
@@ -904,15 +892,15 @@ export default function FaultyTerminal({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) wake();
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
     wakeRef.current = wake;
 
@@ -921,10 +909,10 @@ export default function FaultyTerminal({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       for (const target of targets) {
         gl.deleteTexture(target.rings);
         gl.deleteTexture(target.extra);
@@ -933,7 +921,7 @@ export default function FaultyTerminal({
       gl.deleteVertexArray(vao);
       gl.deleteProgram(cellShader.program);
       gl.deleteProgram(mainShader.program);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -944,7 +932,7 @@ export default function FaultyTerminal({
   return (
     <div
       ref={containerRef}
-      className={`faulty-terminal-container${className ? ` ${className}` : ""}`}
+      className={`faulty-terminal-container${className ? ` ${className}` : ''}`}
       style={style}
       {...rest}
     >

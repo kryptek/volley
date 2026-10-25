@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 
-import "./Lightfall.css";
+import './Lightfall.css';
 
 const MAX_COLORS = 8;
 const BLOOM_LEVELS = 4;
@@ -33,7 +33,7 @@ export interface LightfallProps {
   intro?: boolean;
   fade?: number;
   lightMode?: boolean;
-  mixBlendMode?: CSSProperties["mixBlendMode"];
+  mixBlendMode?: CSSProperties['mixBlendMode'];
   paused?: boolean;
   dpr?: number;
   className?: string;
@@ -361,7 +361,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -373,14 +373,14 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 const Lightfall = ({
-  colors = ["#ffffff"],
-  backgroundColor = "#94a3b8",
+  colors = ['#ffffff'],
+  backgroundColor = '#94a3b8',
   speed = 0.3,
   streakCount = 2,
   streakWidth = 0.8,
@@ -406,8 +406,8 @@ const Lightfall = ({
   mixBlendMode,
   paused = false,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: LightfallProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -415,9 +415,7 @@ const Lightfall = ({
   const settingsRef = useRef<Settings>(null as unknown as Settings);
   const [generation, setGeneration] = useState(0);
   settingsRef.current = {
-    colors: (Array.isArray(colors) && colors.length ? colors : ["#ffffff"])
-      .slice(0, MAX_COLORS)
-      .map(String),
+    colors: (Array.isArray(colors) && colors.length ? colors : ['#ffffff']).slice(0, MAX_COLORS).map(String),
     backgroundColor: String(backgroundColor),
     speed,
     streakCount: Math.round(clamp(streakCount, 1, 16)),
@@ -442,23 +440,23 @@ const Lightfall = ({
     fade: clamp(fade, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
 
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
     const streakProgram = link(gl, STREAKS);
     const downProgram = link(gl, DOWNSAMPLE);
     const blurProgram = link(gl, BLUR);
@@ -468,9 +466,9 @@ const Lightfall = ({
     const onContextLost = (event: Event) => {
       event.preventDefault();
     };
-    const onContextRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onContextLost);
-    canvas.addEventListener("webglcontextrestored", onContextRestored);
+    const onContextRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onContextLost);
+    canvas.addEventListener('webglcontextrestored', onContextRestored);
 
     const buffer = gl.createBuffer();
     const vao = gl.createVertexArray();
@@ -482,12 +480,7 @@ const Lightfall = ({
 
     const format = floatTargets ? gl.RGBA16F : gl.RGBA8;
     const encode = floatTargets ? 1 : 0.25;
-    const createTarget = (): Target => ({
-      texture: null,
-      framebuffer: gl.createFramebuffer(),
-      width: 0,
-      height: 0,
-    });
+    const createTarget = (): Target => ({ texture: null, framebuffer: gl.createFramebuffer(), width: 0, height: 0 });
     const scene = createTarget();
     const levels = Array.from({ length: BLOOM_LEVELS }, () => [createTarget(), createTarget()]);
 
@@ -504,23 +497,12 @@ const Lightfall = ({
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.framebufferTexture2D(
-        gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
-        gl.TEXTURE_2D,
-        target.texture,
-        0,
-      );
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.texture, 0);
     };
 
     const pass = (target: Target | null, program: Program) => {
       gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.framebuffer : null);
-      gl.viewport(
-        0,
-        0,
-        target ? target.width : canvas.width,
-        target ? target.height : canvas.height,
-      );
+      gl.viewport(0, 0, target ? target.width : canvas.width, target ? target.height : canvas.height);
       gl.useProgram(program.program);
       return program.uniforms;
     };
@@ -530,14 +512,14 @@ const Lightfall = ({
       gl.bindTexture(gl.TEXTURE_2D, texture);
     };
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
     const colorCache = new Map<string, number[]>();
     const toRgb = (value: string): number[] => {
       if (colorCache.has(value)) return colorCache.get(value) as number[];
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#ffffff";
+        probe.fillStyle = '#ffffff';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -546,9 +528,9 @@ const Lightfall = ({
       colorCache.set(value, rgb);
       return rgb;
     };
-    const toLinear = (value: string) => toRgb(value).map((channel) => channel * channel);
+    const toLinear = (value: string) => toRgb(value).map(channel => channel * channel);
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const palette = new Float32Array(MAX_COLORS * 3);
     const pointer = { x: 0, y: 0, inside: false, held: false };
     const state = {
@@ -559,7 +541,7 @@ const Lightfall = ({
       lensX: 0,
       lensY: 0,
       touch: 0,
-      warp: 0,
+      warp: 0
     };
     let raf = 0;
     let last = 0;
@@ -614,13 +596,13 @@ const Lightfall = ({
         toScreenX(state.mouseX),
         toScreenY(state.mouseY),
         s.mouseInteraction ? s.mouseStrength * state.touch : 0,
-        s.mouseRadius,
+        s.mouseRadius
       );
       gl.uniform3f(
         r.uLens,
         toScreenX(state.lensX),
         toScreenY(state.lensY),
-        s.mouseInteraction ? 0.5 * s.lens * state.touch : 0,
+        s.mouseInteraction ? 0.5 * s.lens * state.touch : 0
       );
       gl.uniform1f(r.uLightMode, s.lightMode ? 1 : 0);
       gl.uniform1f(r.uEncode, encode);
@@ -710,8 +692,7 @@ const Lightfall = ({
 
       render();
 
-      const settling =
-        state.intro < 1 || state.warp > 0.001 || Math.abs((engaged ? 1 : 0) - state.touch) > 0.002;
+      const settling = state.intro < 1 || state.warp > 0.001 || Math.abs((engaged ? 1 : 0) - state.touch) > 0.002;
       if ((running && s.speed !== 0) || settling) raf = requestAnimationFrame(frame);
       else last = 0;
     };
@@ -774,20 +755,20 @@ const Lightfall = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -805,26 +786,24 @@ const Lightfall = ({
     return () => {
       cancelAnimationFrame(raf);
       wakeRef.current = null;
-      canvas.removeEventListener("webglcontextlost", onContextLost);
-      canvas.removeEventListener("webglcontextrestored", onContextRestored);
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      [scene, ...levels.flat()].forEach((target) => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      [scene, ...levels.flat()].forEach(target => {
         if (target.texture) gl.deleteTexture(target.texture);
         gl.deleteFramebuffer(target.framebuffer);
       });
-      [streakProgram, downProgram, blurProgram, compositeProgram].forEach((item) =>
-        gl.deleteProgram(item.program),
-      );
+      [streakProgram, downProgram, blurProgram, compositeProgram].forEach(item => gl.deleteProgram(item.program));
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      if (!gl.isContextLost()) gl.getExtension("WEBGL_lose_context")?.loseContext();
+      if (!gl.isContextLost()) gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, [generation]);
 
@@ -835,7 +814,7 @@ const Lightfall = ({
   return (
     <div
       ref={containerRef}
-      className={`lightfall-container${className ? ` ${className}` : ""}`}
+      className={`lightfall-container${className ? ` ${className}` : ''}`}
       style={{ ...(mixBlendMode ? { mixBlendMode } : null), ...style }}
     >
       <canvas ref={canvasRef} className="lightfall-canvas" aria-hidden="true" />

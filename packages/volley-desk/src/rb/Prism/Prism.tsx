@@ -1,12 +1,12 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, type HTMLAttributes, useEffect, useRef } from "react";
-import "./Prism.css";
+import { useEffect, useRef, type CSSProperties, type HTMLAttributes } from 'react';
+import './Prism.css';
 
-export type PrismAnimation = "rotate" | "3drotate" | "rotate3d" | "hover" | "static";
+export type PrismAnimation = 'rotate' | '3drotate' | 'rotate3d' | 'hover' | 'static';
 
-export interface PrismProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
+export interface PrismProps extends Omit<HTMLAttributes<HTMLDivElement>, 'style'> {
   height?: number;
   baseWidth?: number;
   animationType?: PrismAnimation;
@@ -192,7 +192,7 @@ const rotation = (yaw: number, pitch: number, roll: number): number[] => {
     sy * sz + cy * sx * cz,
     sy * cx,
     -sx,
-    cy * cx,
+    cy * cx
   ];
 };
 
@@ -209,7 +209,7 @@ const multiply = (a: number[], b: number[]) => {
 const Prism = ({
   height = 3.5,
   baseWidth = 5.5,
-  animationType = "rotate",
+  animationType = 'rotate',
   glow = 1,
   offset,
   noise = 0,
@@ -226,7 +226,7 @@ const Prism = ({
   resolution = 0.5,
   lightMode = false,
   dpr,
-  className = "",
+  className = '',
   style,
   ...rest
 }: PrismProps) => {
@@ -237,7 +237,7 @@ const Prism = ({
   const settings: Settings = {
     height: Math.max(0.1, height),
     baseWidth: Math.max(0.1, baseWidth),
-    animationType: animationType === "rotate3d" ? "3drotate" : animationType,
+    animationType: animationType === 'rotate3d' ? '3drotate' : animationType,
     glow: Math.max(0, glow),
     offsetX: offset?.x ?? 0,
     offsetY: offset?.y ?? 0,
@@ -254,7 +254,7 @@ const Prism = ({
     intro,
     resolution: clamp(resolution, 0.25, 1),
     lightMode,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -262,12 +262,12 @@ const Prism = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
     const shader = link(gl);
@@ -282,20 +282,20 @@ const Prism = ({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, PALETTE_SIZE, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
     const parse = (value: string): number[] => {
       if (!probe) return [255, 255, 255];
       probe.clearRect(0, 0, 1, 1);
-      probe.fillStyle = "#000000";
+      probe.fillStyle = '#000000';
       probe.fillStyle = String(value);
       probe.fillRect(0, 0, 1, 1);
       const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
       return [r, g, b];
     };
-    let paletteKey = "";
+    let paletteKey = '';
     let neutral = 0;
     const syncPalette = (colorsList: string[]) => {
-      const key = colorsList.join(",");
+      const key = colorsList.join(',');
       if (key === paletteKey) return;
       paletteKey = key;
       neutral = 0;
@@ -323,7 +323,7 @@ const Prism = ({
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, PALETTE_SIZE, 1, gl.RGBA, gl.UNSIGNED_BYTE, data);
     };
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const view = { width: 1, height: 1, scale: 1 };
     const pose = { yaw: 0, pitch: 0, roll: 0 };
     const pointer = { x: 0, y: 0, inside: false };
@@ -335,19 +335,16 @@ const Prism = ({
 
     const orientation = (s: Settings) => {
       const tilt = rotation(pose.yaw, pose.pitch, pose.roll);
-      if (s.animationType === "rotate") {
+      if (s.animationType === 'rotate') {
         const t = time * s.timeScale;
         const c0 = Math.cos(t);
         const c1 = Math.cos(t + 33);
         const c2 = Math.cos(t + 11);
         return multiply(tilt, [c0, 0, c2, 0, 1, 0, c1, 0, c0]);
       }
-      if (s.animationType === "3drotate") {
+      if (s.animationType === '3drotate') {
         const t = time * s.timeScale;
-        return multiply(
-          tilt,
-          rotation(t * 0.55, Math.sin(t * 0.6 + 0.6) * 0.6, Math.sin(t * 0.35 + 1.9) * 0.5),
-        );
+        return multiply(tilt, rotation(t * 0.55, Math.sin(t * 0.6 + 0.6) * 0.6, Math.sin(t * 0.35 + 1.9) * 0.5));
       }
       return tilt;
     };
@@ -382,7 +379,7 @@ const Prism = ({
       gl.uniformMatrix3fv(
         u.uHue,
         false,
-        HUE_W.map((w, i) => w + HUE_U[i] * c + HUE_V[i] * sn),
+        HUE_W.map((w, i) => w + HUE_U[i] * c + HUE_V[i] * sn)
       );
       gl.uniform1i(u.uUseHue, Math.abs(s.hueShift) > 0.0001 ? 1 : 0);
       gl.uniform1f(u.uLight, s.lightMode ? 1 : 0);
@@ -405,11 +402,7 @@ const Prism = ({
       raf = 0;
       if (!visible || document.hidden) return;
       const s = settingsRef.current;
-      if (
-        Math.round(
-          view.width * Math.min(s.dpr || window.devicePixelRatio || 1, 2) * s.resolution,
-        ) !== canvas.width
-      ) {
+      if (Math.round(view.width * Math.min(s.dpr || window.devicePixelRatio || 1, 2) * s.resolution) !== canvas.width) {
         resize();
         return;
       }
@@ -417,7 +410,7 @@ const Prism = ({
       last = now;
       if (!reduce) time += dt;
       if (introClock < 1) introClock = Math.min(1, introClock + dt / INTRO_SECONDS);
-      const hover = s.animationType === "hover";
+      const hover = s.animationType === 'hover';
       const aim = pointer.inside && !reduce && (hover || s.interactive);
       const reach = (hover ? 0.6 : 0.09) * s.hoverStrength;
       const yaw = aim ? -pointer.x * reach : 0;
@@ -427,9 +420,8 @@ const Prism = ({
       pose.pitch += (pitch - pose.pitch) * follow;
       pose.roll += (0 - pose.roll) * (1 - Math.pow(0.9, dt * 60));
       draw();
-      const settling =
-        Math.abs(yaw - pose.yaw) + Math.abs(pitch - pose.pitch) + Math.abs(pose.roll) > 1e-4;
-      const spinning = !reduce && !hover && s.animationType !== "static" && s.timeScale > 0;
+      const settling = Math.abs(yaw - pose.yaw) + Math.abs(pitch - pose.pitch) + Math.abs(pose.roll) > 1e-4;
+      const spinning = !reduce && !hover && s.animationType !== 'static' && s.timeScale > 0;
       const busy = spinning || settling || introClock < 1 || (!reduce && s.noise > 0);
       if (busy) raf = requestAnimationFrame(frame);
       else last = 0;
@@ -447,7 +439,7 @@ const Prism = ({
       pointer.x = clamp(x, -1, 1);
       pointer.y = clamp(y, -1, 1);
       const s = settingsRef.current;
-      if (s.interactive || s.animationType === "hover") wake();
+      if (s.interactive || s.animationType === 'hover') wake();
     };
 
     const onPointerLeave = () => {
@@ -462,18 +454,18 @@ const Prism = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("blur", onPointerLeave);
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('blur', onPointerLeave);
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
     wakeRef.current = wake;
 
@@ -482,14 +474,14 @@ const Prism = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("blur", onPointerLeave);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('blur', onPointerLeave);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteTexture(paletteTexture);
       gl.deleteVertexArray(vao);
       gl.deleteProgram(shader.program);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -498,12 +490,7 @@ const Prism = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`prism${className ? ` ${className}` : ""}`}
-      style={style}
-      {...rest}
-    >
+    <div ref={containerRef} className={`prism${className ? ` ${className}` : ''}`} style={style} {...rest}>
       <canvas ref={canvasRef} className="prism-canvas" aria-hidden="true" />
     </div>
   );

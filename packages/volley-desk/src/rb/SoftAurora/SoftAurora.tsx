@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
-import "./SoftAurora.css";
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import './SoftAurora.css';
 
 export interface SoftAuroraProps {
   speed?: number;
@@ -243,15 +243,14 @@ void main() {
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const parseColor = (value: string): number[] | null => {
-  const text = String(value || "").trim();
+  const text = String(value || '').trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
-    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb)
-    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
   return null;
 };
 
@@ -287,11 +286,11 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program["uniforms"] = {};
+  const uniforms: Program['uniforms'] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
-    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -305,8 +304,8 @@ const SoftAurora = ({
   speed = 0.6,
   scale = 1.5,
   brightness = 1.0,
-  color1 = "#f7f7f7",
-  color2 = "#e100ff",
+  color1 = '#f7f7f7',
+  color2 = '#e100ff',
   noiseFrequency = 2.5,
   noiseAmplitude = 1.0,
   bandHeight = 0.5,
@@ -322,8 +321,8 @@ const SoftAurora = ({
   intro = true,
   lightMode = false,
   opacity = 1,
-  className = "",
-  style,
+  className = '',
+  style
 }: SoftAuroraProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -350,7 +349,7 @@ const SoftAurora = ({
     clickPulse,
     intro,
     light: lightMode,
-    opacity: clamp(opacity, 0, 1),
+    opacity: clamp(opacity, 0, 1)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -364,18 +363,18 @@ const SoftAurora = ({
     const canvas = canvasRef.current;
     if (!container || !canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     const shader = gl ? link(gl) : null;
     if (!gl || !shader) return;
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const vao = gl.createVertexArray();
     const size = { width: 1, height: 1 };
     const pointer = { x: 0.5, y: 0.5, inside: false };
@@ -388,7 +387,7 @@ const SoftAurora = ({
     let raf = 0;
     let last = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== "hidden";
+    let pageVisible = document.visibilityState !== 'hidden';
     let lost = false;
 
     const resize = () => {
@@ -422,8 +421,7 @@ const SoftAurora = ({
       const follow = 1 - Math.exp(-dt / 0.325);
       mouse.x += ((tracking ? pointer.x : 0.5) - mouse.x) * follow;
       mouse.y += ((tracking ? pointer.y : 0.5) - mouse.y) * follow;
-      mouse.presence +=
-        ((tracking ? 1 : 0) - mouse.presence) * (1 - Math.exp(-dt / (tracking ? 0.45 : 0.8)));
+      mouse.presence += ((tracking ? 1 : 0) - mouse.presence) * (1 - Math.exp(-dt / (tracking ? 0.45 : 0.8)));
 
       for (let index = pulses.length - 1; index >= 0; index--) {
         pulses[index].age += dt;
@@ -433,8 +431,7 @@ const SoftAurora = ({
       pulses.forEach((pulse, index) => {
         pulseData[index * 4] = pulse.x;
         pulseData[index * 4 + 1] = pulse.y;
-        pulseData[index * 4 + 2] =
-          smoother(pulse.age / 0.18) * (1 - smoother((pulse.age - 0.18) / 2.42));
+        pulseData[index * 4 + 2] = smoother(pulse.age / 0.18) * (1 - smoother((pulse.age - 0.18) / 2.42));
         pulseData[index * 4 + 3] = pulse.age;
       });
 
@@ -463,18 +460,13 @@ const SoftAurora = ({
       gl.uniform2f(
         u.uShift,
         (mouse.x - 0.5) * s.influence * (s.mouse ? 1 : 0),
-        (mouse.y - 0.5) * s.influence * (s.mouse ? 1 : 0),
+        (mouse.y - 0.5) * s.influence * (s.mouse ? 1 : 0)
       );
       gl.uniform4f(u.uCursor, mouse.x * aspect, mouse.y, strength, 0);
       gl.uniform4fv(u.uPulses, pulseData);
       gl.uniform1f(u.uSpectrum, s.spectrum);
       gl.uniform1f(u.uTilt, s.tilt);
-      gl.uniform3f(
-        u.uIntro,
-        smoother(opening / 0.7),
-        1 + 3 * (1 - eased) * (1 - eased),
-        0.25 + 0.75 * eased,
-      );
+      gl.uniform3f(u.uIntro, smoother(opening / 0.7), 1 + 3 * (1 - eased) * (1 - eased), 0.25 + 0.75 * eased);
       gl.uniform1f(u.uLightMode, s.light ? 1 : 0);
       gl.uniform1f(u.uOpacity, s.opacity);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -507,7 +499,7 @@ const SoftAurora = ({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -531,13 +523,13 @@ const SoftAurora = ({
       wake();
     };
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== "mouse") onLeave();
+      if (event.pointerType !== 'mouse') onLeave();
     };
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerUp, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerUp, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -545,9 +537,9 @@ const SoftAurora = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration((value) => value + 1);
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    const onRestored = () => setGeneration(value => value + 1);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -555,17 +547,17 @@ const SoftAurora = ({
     });
     resizeObserver.observe(container);
 
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== "hidden";
+      pageVisible = document.visibilityState !== 'hidden';
       wake();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
 
     resize();
     wake();
@@ -575,14 +567,14 @@ const SoftAurora = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       if (!gl.isContextLost()) {
         gl.deleteVertexArray(vao);
         gl.deleteProgram(shader.program);
@@ -591,11 +583,7 @@ const SoftAurora = ({
   }, [generation]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`soft-aurora${className ? ` ${className}` : ""}`}
-      style={style}
-    >
+    <div ref={containerRef} className={`soft-aurora${className ? ` ${className}` : ''}`} style={style}>
       <canvas ref={canvasRef} className="soft-aurora__canvas" aria-hidden="true" />
     </div>
   );

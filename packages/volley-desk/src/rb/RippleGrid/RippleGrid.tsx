@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
-import "./RippleGrid.css";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
+import './RippleGrid.css';
 
-export type RippleGridVariant = "lines" | "dots" | "cross";
-export type RippleGridAutoRipple = "center" | "random" | "none";
+export type RippleGridVariant = 'lines' | 'dots' | 'cross';
+export type RippleGridAutoRipple = 'center' | 'random' | 'none';
 
 export interface RippleGridProps extends HTMLAttributes<HTMLDivElement> {
   color?: string;
@@ -200,7 +200,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -212,21 +212,21 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 export const RippleGrid = ({
-  color = "#ffffff",
-  variant = "lines",
+  color = '#ffffff',
+  variant = 'lines',
   cellSize = 48,
   lineWidth = 1,
   glow = 0.6,
   rippleStrength = 1,
   rippleSpeed = 1,
   rippleSize = 1,
-  autoRipple = "center",
+  autoRipple = 'center',
   rippleInterval = 2.6,
   tilt = 0,
   rotation = 0,
@@ -238,7 +238,7 @@ export const RippleGrid = ({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
+  className = '',
   ...rest
 }: RippleGridProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -264,7 +264,7 @@ export const RippleGrid = ({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -272,12 +272,12 @@ export const RippleGrid = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -293,8 +293,8 @@ export const RippleGrid = ({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colorCache = new Map<string, number[]>();
     const toLinear = (value: string): number[] => {
       const cached = colorCache.get(value);
@@ -302,33 +302,19 @@ export const RippleGrid = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#ffffff";
+        probe.fillStyle = '#ffffff';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
-        rgb = [r, g, b].map((v) => Math.pow(v / 255, 2.2));
+        rgb = [r, g, b].map(v => Math.pow(v / 255, 2.2));
       }
       colorCache.set(value, rgb);
       return rgb;
     };
 
     const view = { width: 1, height: 1, ratio: 1 };
-    const pointer = {
-      x: 0,
-      y: 0,
-      inside: false,
-      planeX: 0,
-      planeY: 0,
-      lastX: 0,
-      lastY: 0,
-      travel: 0,
-    };
-    const state = {
-      clock: 0,
-      intro: settingsRef.current.intro && !reduce ? 0 : 1,
-      glow: 0,
-      nextAuto: 0.4,
-    };
+    const pointer = { x: 0, y: 0, inside: false, planeX: 0, planeY: 0, lastX: 0, lastY: 0, travel: 0 };
+    const state = { clock: 0, intro: settingsRef.current.intro && !reduce ? 0 : 1, glow: 0, nextAuto: 0.4 };
     const ripples: Ripple[] = [];
     const packed = new Float32Array(MAX_RIPPLES * 4);
     let raf = 0;
@@ -374,7 +360,7 @@ export const RippleGrid = ({
       const tint = toLinear(s.color);
       const tone = 0.2126 * tint[0] + 0.7152 * tint[1] + 0.0722 * tint[2];
       const depth = Math.min(1, 0.12 / Math.max(tone, 0.001));
-      const ink = tint.map((v) => Math.pow(Math.min(1, v * depth), 1 / 2.2));
+      const ink = tint.map(v => Math.pow(Math.min(1, v * depth), 1 / 2.2));
       const diagonal = Math.hypot(view.width, view.height);
 
       gl.bindVertexArray(vao);
@@ -396,14 +382,11 @@ export const RippleGrid = ({
       gl.uniform3f(u.uPointer, pointer.planeX, pointer.planeY, state.glow);
       gl.uniform3fv(
         u.uColor,
-        tint.map((v) => Math.pow(v, 1 / 2.2)),
+        tint.map(v => Math.pow(v, 1 / 2.2))
       );
       gl.uniform3fv(u.uInk, ink);
       gl.uniform1f(u.uPresence, Math.min(1, presence * 1.6));
-      gl.uniform1f(
-        u.uReveal,
-        s.intro && !reduce ? presence * diagonal * 1.4 + s.cellSize * 4 : 1e6,
-      );
+      gl.uniform1f(u.uReveal, s.intro && !reduce ? presence * diagonal * 1.4 + s.cellSize * 4 : 1e6);
       gl.uniform1f(u.uFade, s.fade);
       gl.uniform1f(u.uOpacity, s.opacity);
       gl.uniform1f(u.uLightMode, s.lightMode ? 1 : 0);
@@ -422,12 +405,9 @@ export const RippleGrid = ({
       if (!s.intro || reduce) state.intro = 1;
       else if (state.intro < 1) state.intro = Math.min(1, state.intro + dt / INTRO_SECONDS);
 
-      if (moving && s.autoRipple !== "none" && state.clock >= state.nextAuto) {
-        if (s.autoRipple === "random") {
-          const spot = toPlane(
-            Math.random() * view.width,
-            view.height * (0.2 + Math.random() * 0.7),
-          );
+      if (moving && s.autoRipple !== 'none' && state.clock >= state.nextAuto) {
+        if (s.autoRipple === 'random') {
+          const spot = toPlane(Math.random() * view.width, view.height * (0.2 + Math.random() * 0.7));
           if (spot) spawn(spot[0], spot[1], 0.75);
         } else {
           spawn(0, 0, 1);
@@ -514,18 +494,18 @@ export const RippleGrid = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     if (settingsRef.current.intro && !reduce) spawn(0, 0, 1.1);
     resize();
 
@@ -546,14 +526,14 @@ export const RippleGrid = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteProgram(program.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -562,11 +542,7 @@ export const RippleGrid = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`ripple-grid-container${className ? ` ${className}` : ""}`}
-      {...rest}
-    >
+    <div ref={containerRef} className={`ripple-grid-container${className ? ` ${className}` : ''}`} {...rest}>
       <canvas ref={canvasRef} className="ripple-grid-canvas" aria-hidden="true" />
     </div>
   );

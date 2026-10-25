@@ -1,30 +1,29 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line except the
 // marked Volley Desk edits: the context budget and lost-context fallback (#417), and the context release
 // in the effect cleanup.
-"use client";
+'use client';
 
 import {
-  type ButtonHTMLAttributes,
-  type CSSProperties,
-  type ReactNode,
   useEffect,
   useId,
   useRef,
   useState,
   useSyncExternalStore,
-} from "react";
+  type ButtonHTMLAttributes,
+  type CSSProperties,
+  type ReactNode
+} from 'react';
 
-import { useLiteSurface } from "../../a11y/surface";
-import { acquireGl, glBudgetReleases, releaseGl, subscribeGl } from "../../look/glBudget";
-import "./SpecularButton.css";
+import { useLiteSurface } from '../../a11y/surface';
+import { acquireGl, glBudgetReleases, releaseGl, subscribeGl } from '../../look/glBudget';
+import './SpecularButton.css';
 
 const PAD = 24;
 const TAU = Math.PI * 2;
 
-export type SpecularButtonSize = "sm" | "md" | "lg";
+export type SpecularButtonSize = 'sm' | 'md' | 'lg';
 
-export interface SpecularButtonProps
-  extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children" | "type"> {
+export interface SpecularButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children' | 'type'> {
   children?: ReactNode;
   size?: SpecularButtonSize;
   radius?: number;
@@ -44,7 +43,7 @@ export interface SpecularButtonProps
   followMouse?: boolean;
   proximity?: number;
   autoAnimate?: boolean;
-  type?: "button" | "submit" | "reset";
+  type?: 'button' | 'submit' | 'reset';
 }
 
 type Settings = {
@@ -129,18 +128,18 @@ void main() {
 }`;
 
 const UNIFORMS = [
-  "uCenter",
-  "uHalf",
-  "uRadius",
-  "uPx",
-  "uSpot",
-  "uEntry",
-  "uLineColor",
-  "uBaseColor",
-  "uIntensity",
-  "uWindow",
-  "uThickness",
-  "uGlow",
+  'uCenter',
+  'uHalf',
+  'uRadius',
+  'uPx',
+  'uSpot',
+  'uEntry',
+  'uLineColor',
+  'uBaseColor',
+  'uIntensity',
+  'uWindow',
+  'uThickness',
+  'uGlow'
 ];
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -214,7 +213,7 @@ const link = (gl: WebGL2RenderingContext) => {
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -224,15 +223,15 @@ const link = (gl: WebGL2RenderingContext) => {
 };
 
 const SpecularButton = ({
-  children = "Get Started",
-  size = "lg",
+  children = 'Get Started',
+  size = 'lg',
   radius = 18,
-  tint = "#ffffff",
+  tint = '#ffffff',
   tintOpacity = 0.04,
   blur = 0,
-  textColor = "#f5f5f5",
-  lineColor = "#ffffff",
-  baseColor = "#525252",
+  textColor = '#f5f5f5',
+  lineColor = '#ffffff',
+  baseColor = '#525252',
   intensity = 1,
   idleIntensity = 0.35,
   shineSize = 10,
@@ -245,8 +244,8 @@ const SpecularButton = ({
   autoAnimate = false,
   disabled = false,
   onClick,
-  className = "",
-  type = "button",
+  className = '',
+  type = 'button',
   style,
   ...rest
 }: SpecularButtonProps) => {
@@ -267,7 +266,7 @@ const SpecularButton = ({
     followMouse,
     proximity: Math.max(1, proximity),
     autoAnimate,
-    disabled,
+    disabled
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -297,12 +296,12 @@ const SpecularButton = ({
     if (!granted) return undefined;
     const button = buttonRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     // Volley Desk (#417): no context (or no program) is flat; a lost one is flat until restored.
     if (!button || !canvas || !gl) {
@@ -315,16 +314,16 @@ const SpecularButton = ({
     };
     const onRestored = () => {
       setLost(false);
-      setGeneration((g) => g + 1);
+      setGeneration(g => g + 1);
     };
-    canvas.addEventListener("webglcontextlost", onLost);
-    canvas.addEventListener("webglcontextrestored", onRestored);
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
     const program = link(gl);
     if (!program) {
       setLost(true);
       return () => {
-        canvas.removeEventListener("webglcontextlost", onLost);
-        canvas.removeEventListener("webglcontextrestored", onRestored);
+        canvas.removeEventListener('webglcontextlost', onLost);
+        canvas.removeEventListener('webglcontextrestored', onRestored);
       };
     }
     // Volley Desk (#417): a working context clears an earlier failure (one lost or never given).
@@ -340,8 +339,8 @@ const SpecularButton = ({
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colors = new Map<string, number[]>();
     const view = { width: 1, height: 1, ratio: 1 };
     const pointer = { x: 0, y: 0, known: false };
@@ -356,7 +355,7 @@ const SpecularButton = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#000000";
+        probe.fillStyle = '#000000';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -371,13 +370,7 @@ const SpecularButton = ({
     const restSpot = (s: Settings) => {
       const r = cornerRadius(s);
       const inset = r * (1 - Math.SQRT1_2);
-      return loopPosition(
-        inset - view.width / 2,
-        view.height / 2 - inset,
-        view.width / 2,
-        view.height / 2,
-        r,
-      );
+      return loopPosition(inset - view.width / 2, view.height / 2 - inset, view.width / 2, view.height / 2, r);
     };
 
     const aim = (s: Settings) => {
@@ -388,10 +381,7 @@ const SpecularButton = ({
       const halfY = view.height / 2;
       const x = (pointer.x - rect.left - rect.width / 2) / scale;
       const y = (rect.top + rect.height / 2 - pointer.y) / scale;
-      const distance = Math.hypot(
-        Math.max(Math.abs(x) - halfX, 0),
-        Math.max(Math.abs(y) - halfY, 0),
-      );
+      const distance = Math.hypot(Math.max(Math.abs(x) - halfX, 0), Math.max(Math.abs(y) - halfY, 0));
       const t = clamp(1 - distance / s.proximity, 0, 1);
       const near = t * t * (3 - 2 * t);
       const nearest = loopPosition(x, y, halfX, halfY, cornerRadius(s));
@@ -416,20 +406,13 @@ const SpecularButton = ({
       gl.uniform1f(uniforms.uPx, view.ratio);
       const r = Math.min(s.radius, width / 2, height / 2);
       const [rimX, rimY] = rimPoint(state.spot, width / 2, height / 2, r);
-      const pull =
-        1 -
-        Math.min(0.35 * (height / 2), Math.hypot(rimX, rimY)) /
-          Math.max(Math.hypot(rimX, rimY), 0.0001);
+      const pull = 1 - Math.min(0.35 * (height / 2), Math.hypot(rimX, rimY)) / Math.max(Math.hypot(rimX, rimY), 0.0001);
       gl.uniform1f(uniforms.uSpot, state.spot);
       gl.uniform2f(uniforms.uEntry, rimX * pull * scaleX, rimY * pull * scaleY);
       gl.uniform3fv(uniforms.uLineColor, toRgb(s.lineColor));
       gl.uniform3fv(uniforms.uBaseColor, toRgb(s.baseColor));
       gl.uniform1f(uniforms.uIntensity, s.intensity * (state.level + state.press * 0.8));
-      gl.uniform2f(
-        uniforms.uWindow,
-        s.shineSize / 360 + state.press * 0.06,
-        s.shineFade / 360 + 0.0001,
-      );
+      gl.uniform2f(uniforms.uWindow, s.shineSize / 360 + state.press * 0.06, s.shineFade / 360 + 0.0001);
       gl.uniform1f(uniforms.uThickness, s.thickness);
       gl.uniform1f(uniforms.uGlow, s.glow);
       gl.bindVertexArray(vao);
@@ -458,14 +441,11 @@ const SpecularButton = ({
         diff -= Math.round(diff);
         state.spot = wrap(state.spot + diff * (1 - Math.exp(-dt * 8)));
       }
-      const level = s.autoAnimate
-        ? 1
-        : s.idleIntensity + (1 - s.idleIntensity) * (target ? target.near : 0);
+      const level = s.autoAnimate ? 1 : s.idleIntensity + (1 - s.idleIntensity) * (target ? target.near : 0);
       state.level += (level - state.level) * (1 - Math.exp(-dt * 7));
       state.press *= Math.exp(-dt * 5);
       draw(s);
-      const settling =
-        Math.abs(diff) > 0.0002 || Math.abs(level - state.level) > 0.001 || state.press > 0.002;
+      const settling = Math.abs(diff) > 0.0002 || Math.abs(level - state.level) > 0.001 || state.press > 0.002;
       if (settling || (spinning && !steering)) raf = requestAnimationFrame(frame);
       else last = 0;
     };
@@ -501,7 +481,7 @@ const SpecularButton = ({
     };
 
     const onPointerEnd = (event: PointerEvent) => {
-      if (event.pointerType === "mouse") return;
+      if (event.pointerType === 'mouse') return;
       pointer.known = false;
       wake();
     };
@@ -511,21 +491,21 @@ const SpecularButton = ({
       wake();
     };
 
-    const resizeObserver = new ResizeObserver((entries) => measure(entries[entries.length - 1]));
+    const resizeObserver = new ResizeObserver(entries => measure(entries[entries.length - 1]));
     resizeObserver.observe(button);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(button);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerup", onPointerEnd, { passive: true });
-    window.addEventListener("pointercancel", onPointerEnd, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    button.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerup', onPointerEnd, { passive: true });
+    window.addEventListener('pointercancel', onPointerEnd, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    button.addEventListener('pointerdown', onPointerDown);
     measure();
     wakeRef.current = wake;
 
@@ -534,13 +514,13 @@ const SpecularButton = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerEnd);
-      window.removeEventListener("pointercancel", onPointerEnd);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      button.removeEventListener("pointerdown", onPointerDown);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      canvas.removeEventListener("webglcontextrestored", onRestored);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      button.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
       gl.deleteProgram(program);
@@ -548,7 +528,7 @@ const SpecularButton = ({
       // (dev) runs this cleanup and then the effect again on the same canvas, whose lost context would
       // never draw again.
       setTimeout(() => {
-        if (!canvas.isConnected) gl.getExtension("WEBGL_lose_context")?.loseContext();
+        if (!canvas.isConnected) gl.getExtension('WEBGL_lose_context')?.loseContext();
       });
     };
   }, [granted, generation]);
@@ -563,15 +543,15 @@ const SpecularButton = ({
       type={type}
       disabled={disabled}
       onClick={onClick}
-      className={`specular-button specular-button--${size}${!granted || lost ? " specular-button--flat" : ""}${className ? ` ${className}` : ""}`}
+      className={`specular-button specular-button--${size}${!granted || lost ? ' specular-button--flat' : ''}${className ? ` ${className}` : ''}`}
       style={
         {
-          "--sb-radius": `${radius}px`,
-          "--sb-tint": tint,
-          "--sb-tint-opacity": tintOpacity,
-          "--sb-blur": `${blur}px`,
-          "--sb-text-color": textColor,
-          ...style,
+          '--sb-radius': `${radius}px`,
+          '--sb-tint': tint,
+          '--sb-tint-opacity': tintOpacity,
+          '--sb-blur': `${blur}px`,
+          '--sb-text-color': textColor,
+          ...style
         } as CSSProperties
       }
       {...rest}

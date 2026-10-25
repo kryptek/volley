@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 
-import "./PixelSnow.css";
+import './PixelSnow.css';
 
-export type PixelSnowVariant = "snowflake" | "square" | "round";
+export type PixelSnowVariant = 'snowflake' | 'square' | 'round';
 
 export interface PixelSnowProps extends HTMLAttributes<HTMLDivElement> {
   color?: string;
@@ -55,12 +55,7 @@ type Settings = {
 
 type Program = { program: WebGLProgram; uniforms: Record<string, WebGLUniformLocation | null> };
 
-type Target = {
-  texture: WebGLTexture | null;
-  framebuffer: WebGLFramebuffer | null;
-  width: number;
-  height: number;
-};
+type Target = { texture: WebGLTexture | null; framebuffer: WebGLFramebuffer | null; width: number; height: number };
 
 type Flake = {
   level: number;
@@ -79,58 +74,58 @@ type Flake = {
 
 const SPRITES: Record<string, string[][]> = {
   square: [
-    ["@"],
-    ["oo", "oo"],
-    ["xox", "o@o", "xox"],
-    ["xoox", "o@@o", "o@@o", "xoox"],
-    ["xooox", "oo@oo", "o@@@o", "oo@oo", "xooox"],
-    ["xox", "o@o", "xox"],
-    ["xoox", "o@@o", "o@@o", "xoox"],
-    ["xooox", "oo@oo", "o@@@o", "oo@oo", "xooox"],
+    ['@'],
+    ['oo', 'oo'],
+    ['xox', 'o@o', 'xox'],
+    ['xoox', 'o@@o', 'o@@o', 'xoox'],
+    ['xooox', 'oo@oo', 'o@@@o', 'oo@oo', 'xooox'],
+    ['xox', 'o@o', 'xox'],
+    ['xoox', 'o@@o', 'o@@o', 'xoox'],
+    ['xooox', 'oo@oo', 'o@@@o', 'oo@oo', 'xooox']
   ],
   round: [
-    ["@"],
-    [".x.", "x@x", ".x."],
-    [".xx.", "x@@x", "x@@x", ".xx."],
-    [".xxx.", "xo@ox", "x@@@x", "xo@ox", ".xxx."],
-    ["..xxx..", ".xooox.", "xoo@oox", "xo@@@ox", "xoo@oox", ".xooox.", "..xxx.."],
-    [".xx.", "x@@x", "x@@x", ".xx."],
-    [".xxx.", "xo@ox", "x@@@x", "xo@ox", ".xxx."],
-    ["..xxx..", ".xooox.", "xoo@oox", "xo@@@ox", "xoo@oox", ".xooox.", "..xxx.."],
+    ['@'],
+    ['.x.', 'x@x', '.x.'],
+    ['.xx.', 'x@@x', 'x@@x', '.xx.'],
+    ['.xxx.', 'xo@ox', 'x@@@x', 'xo@ox', '.xxx.'],
+    ['..xxx..', '.xooox.', 'xoo@oox', 'xo@@@ox', 'xoo@oox', '.xooox.', '..xxx..'],
+    ['.xx.', 'x@@x', 'x@@x', '.xx.'],
+    ['.xxx.', 'xo@ox', 'x@@@x', 'xo@ox', '.xxx.'],
+    ['..xxx..', '.xooox.', 'xoo@oox', 'xo@@@ox', 'xoo@oox', '.xooox.', '..xxx..']
   ],
   snowflake: [
-    ["@"],
-    [".x.", "x@x", ".x."],
-    ["..x..", "x.o.x", ".o@o.", "x.o.x", "..x.."],
-    ["...x...", ".x.o.x.", "..ooo..", "xoo@oox", "..ooo..", ".x.o.x.", "...x..."],
+    ['@'],
+    ['.x.', 'x@x', '.x.'],
+    ['..x..', 'x.o.x', '.o@o.', 'x.o.x', '..x..'],
+    ['...x...', '.x.o.x.', '..ooo..', 'xoo@oox', '..ooo..', '.x.o.x.', '...x...'],
     [
-      "....x....",
-      ".x..o..x.",
-      "..o.o.o..",
-      "...ooo...",
-      "xooo@ooox",
-      "...ooo...",
-      "..o.o.o..",
-      ".x..o..x.",
-      "....x....",
+      '....x....',
+      '.x..o..x.',
+      '..o.o.o..',
+      '...ooo...',
+      'xooo@ooox',
+      '...ooo...',
+      '..o.o.o..',
+      '.x..o..x.',
+      '....x....'
     ],
-    ["x...x", ".o.o.", "..@..", ".o.o.", "x...x"],
-    ["x..x..x", ".o.o.o.", "..ooo..", "xoo@oox", "..ooo..", ".o.o.o.", "x..x..x"],
+    ['x...x', '.o.o.', '..@..', '.o.o.', 'x...x'],
+    ['x..x..x', '.o.o.o.', '..ooo..', 'xoo@oox', '..ooo..', '.o.o.o.', 'x..x..x'],
     [
-      "x...x...x",
-      ".o..o..o.",
-      "..o.o.o..",
-      "...ooo...",
-      "xooo@ooox",
-      "...ooo...",
-      "..o.o.o..",
-      ".o..o..o.",
-      "x...x...x",
-    ],
-  ],
+      'x...x...x',
+      '.o..o..o.',
+      '..o.o.o..',
+      '...ooo...',
+      'xooo@ooox',
+      '...ooo...',
+      '..o.o.o..',
+      '.o..o..o.',
+      'x...x...x'
+    ]
+  ]
 };
 
-const VARIANTS = ["square", "round", "snowflake"];
+const VARIANTS = ['square', 'round', 'snowflake'];
 const CELL = 9;
 const LEVELS = 5;
 const SLOTS = 8;
@@ -332,7 +327,7 @@ const link = (
   gl: WebGL2RenderingContext,
   vertexSource: string,
   fragmentSource: string,
-  attributes: string[],
+  attributes: string[]
 ): Program | null => {
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -366,10 +361,10 @@ const buildAtlas = () => {
       rows.forEach((line, y) => {
         for (let x = 0; x < line.length; x++) {
           const mark = line[x];
-          if (mark === ".") continue;
+          if (mark === '.') continue;
           const offset = ((row * CELL + y) * width + level * CELL + x) * 4;
           data[offset] = 255;
-          data[offset + 1] = mark === "@" ? 255 : mark === "o" ? 128 : 0;
+          data[offset + 1] = mark === '@' ? 255 : mark === 'o' ? 128 : 0;
           data[offset + 3] = 255;
         }
       });
@@ -379,8 +374,8 @@ const buildAtlas = () => {
 };
 
 export default function PixelSnow({
-  color = "#ffffff",
-  variant = "snowflake",
+  color = '#ffffff',
+  variant = 'snowflake',
   density = 0.5,
   speed = 1,
   wind = 0.25,
@@ -399,7 +394,7 @@ export default function PixelSnow({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
+  className = '',
   ...rest
 }: PixelSnowProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -425,7 +420,7 @@ export default function PixelSnow({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -433,38 +428,28 @@ export default function PixelSnow({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
     const programs = {
-      flake: link(gl, FLAKE_VERTEX, FLAKE_FRAGMENT, ["aCorner", "aFlake"]),
-      pile: link(gl, QUAD_VERTEX, PILE, ["aPosition"]),
-      down: link(gl, QUAD_VERTEX, DOWN, ["aPosition"]),
-      up: link(gl, QUAD_VERTEX, UP, ["aPosition"]),
-      composite: link(gl, QUAD_VERTEX, COMPOSITE, ["aPosition"]),
+      flake: link(gl, FLAKE_VERTEX, FLAKE_FRAGMENT, ['aCorner', 'aFlake']),
+      pile: link(gl, QUAD_VERTEX, PILE, ['aPosition']),
+      down: link(gl, QUAD_VERTEX, DOWN, ['aPosition']),
+      up: link(gl, QUAD_VERTEX, UP, ['aPosition']),
+      composite: link(gl, QUAD_VERTEX, COMPOSITE, ['aPosition'])
     } as Record<string, Program>;
-    if (Object.values(programs).some((entry) => !entry)) return undefined;
+    if (Object.values(programs).some(entry => !entry)) return undefined;
 
     const atlas = buildAtlas();
     const atlasTexture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, atlasTexture);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA,
-      atlas.width,
-      atlas.height,
-      0,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      atlas.data,
-    );
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, atlas.width, atlas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, atlas.data);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
@@ -491,12 +476,7 @@ export default function PixelSnow({
     gl.bindVertexArray(null);
 
     const createTarget = (filter: number): Target => {
-      const target = {
-        texture: gl.createTexture(),
-        framebuffer: gl.createFramebuffer(),
-        width: 0,
-        height: 0,
-      };
+      const target = { texture: gl.createTexture(), framebuffer: gl.createFramebuffer(), width: 0, height: 0 };
       gl.bindTexture(gl.TEXTURE_2D, target.texture);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
@@ -511,13 +491,7 @@ export default function PixelSnow({
       gl.bindTexture(gl.TEXTURE_2D, target.texture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.framebufferTexture2D(
-        gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
-        gl.TEXTURE_2D,
-        target.texture,
-        0,
-      );
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.texture, 0);
     };
     const snow = createTarget(gl.NEAREST);
     const pileTexture = gl.createTexture();
@@ -531,8 +505,8 @@ export default function PixelSnow({
     const down = [createTarget(gl.LINEAR), createTarget(gl.LINEAR), createTarget(gl.LINEAR)];
     const up = [createTarget(gl.LINEAR), createTarget(gl.LINEAR)];
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colorCache = new Map<string, number[]>();
     const toRgb = (value: string): number[] => {
       const cached = colorCache.get(value);
@@ -540,7 +514,7 @@ export default function PixelSnow({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#ffffff";
+        probe.fillStyle = '#ffffff';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -563,9 +537,7 @@ export default function PixelSnow({
     const pickLevel = (r: number, s: Settings) => {
       const shift = s.flakeSize - 1;
       let total = 0;
-      const weights = LEVEL_WEIGHTS.map(
-        (weight, level) => weight * Math.pow(2.2, shift * (level - 1.5)),
-      );
+      const weights = LEVEL_WEIGHTS.map((weight, level) => weight * Math.pow(2.2, shift * (level - 1.5)));
       const sum = weights.reduce((a, b) => a + b, 0);
       for (let level = 0; level < LEVELS; level++) {
         total += weights[level] / sum;
@@ -590,9 +562,7 @@ export default function PixelSnow({
     };
 
     const populate = (s: Settings) => {
-      const target = Math.round(
-        clamp((view.width * view.height * s.density) / 1100, 0, MAX_FLAKES),
-      );
+      const target = Math.round(clamp((view.width * view.height * s.density) / 1100, 0, MAX_FLAKES));
       while (flakes.length < target) {
         const flake = {} as Flake;
         spawn(flake, s, false);
@@ -668,9 +638,7 @@ export default function PixelSnow({
       if (s.accumulate && s.speed > 0) {
         const grow = (0.25 + s.density * 0.9) * dt * Math.min(1, s.speed);
         for (let i = 0; i < pile.length; i++) {
-          const dune =
-            0.55 +
-            0.45 * Math.sin(i * 0.045 + Math.sin(i * 0.013) * 2.1) * Math.sin(i * 0.021 + 1.3);
+          const dune = 0.55 + 0.45 * Math.sin(i * 0.045 + Math.sin(i * 0.013) * 2.1) * Math.sin(i * 0.021 + 1.3);
           if (pile[i] < cap * dune) pile[i] += grow * (0.6 + 0.8 * dune);
         }
       }
@@ -700,12 +668,7 @@ export default function PixelSnow({
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
 
-    const bindTexture = (
-      entry: Program,
-      name: string,
-      unit: number,
-      texture: WebGLTexture | null,
-    ) => {
+    const bindTexture = (entry: Program, name: string, unit: number, texture: WebGLTexture | null) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(entry.uniforms[name], unit);
@@ -715,13 +678,12 @@ export default function PixelSnow({
       const s = settingsRef.current;
       sizeTarget(snow, view.gridWidth, view.gridHeight);
       let count = 0;
-      const sizes = SPRITES[VARIANTS[s.variant]].map((rows) => rows.length);
+      const sizes = SPRITES[VARIANTS[s.variant]].map(rows => rows.length);
       const sweep = state.intro * 1.75;
       for (const flake of flakes) {
         const level = flake.level;
         const depthLight = 1 - s.depth * (1 - LEVEL_LIGHT[level]);
-        const spark =
-          Math.pow(Math.max(0, Math.sin(state.time * 0.9 + flake.sparkle)), 60) * s.twinkle;
+        const spark = Math.pow(Math.max(0, Math.sin(state.time * 0.9 + flake.sparkle)), 60) * s.twinkle;
         const reveal =
           flake.reveal < 0 || state.intro >= 1
             ? 1
@@ -739,7 +701,7 @@ export default function PixelSnow({
       gl.viewport(0, 0, snow.width, snow.height);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      if (pile.length && pile.some((height) => height > 0.4)) {
+      if (pile.length && pile.some(height => height > 0.4)) {
         gl.bindTexture(gl.TEXTURE_2D, pileTexture);
         if (pileWidth !== pile.length) {
           pileWidth = pile.length;
@@ -780,15 +742,11 @@ export default function PixelSnow({
       let source = snow;
       for (let level = 0; level < down.length; level++) {
         const target = down[level];
-        sizeTarget(
-          target,
-          Math.max(1, Math.ceil(source.width / 2)),
-          Math.max(1, Math.ceil(source.height / 2)),
-        );
+        sizeTarget(target, Math.max(1, Math.ceil(source.width / 2)), Math.max(1, Math.ceil(source.height / 2)));
         gl.useProgram(programs.down.program);
         gl.uniform2f(programs.down.uniforms.uTexel, 1 / source.width, 1 / source.height);
         gl.uniform2f(programs.down.uniforms.uTarget, target.width, target.height);
-        bindTexture(programs.down, "uSource", 0, source.texture);
+        bindTexture(programs.down, 'uSource', 0, source.texture);
         run(programs.down, target, target.width, target.height);
         source = target;
       }
@@ -799,8 +757,8 @@ export default function PixelSnow({
         gl.useProgram(programs.up.program);
         gl.uniform2f(programs.up.uniforms.uTexel, 1 / from.width, 1 / from.height);
         gl.uniform2f(programs.up.uniforms.uTarget, target.width, target.height);
-        bindTexture(programs.up, "uSource", 0, from.texture);
-        bindTexture(programs.up, "uBase", 1, down[level].texture);
+        bindTexture(programs.up, 'uSource', 0, from.texture);
+        bindTexture(programs.up, 'uBase', 1, down[level].texture);
         run(programs.up, target, target.width, target.height);
       }
 
@@ -816,8 +774,8 @@ export default function PixelSnow({
       gl.uniform1f(c.uFade, s.fade);
       gl.uniform1f(c.uOpacity, s.opacity);
       gl.uniform1f(c.uLightMode, s.lightMode ? 1 : 0);
-      bindTexture(composite, "uSnow", 0, snow.texture);
-      bindTexture(composite, "uGlowMap", 1, up[0].texture);
+      bindTexture(composite, 'uSnow', 0, snow.texture);
+      bindTexture(composite, 'uGlowMap', 1, up[0].texture);
       run(composite, null, canvas.width, canvas.height);
     };
 
@@ -897,17 +855,17 @@ export default function PixelSnow({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastPixel = settingsRef.current.pixelSize;
@@ -930,9 +888,9 @@ export default function PixelSnow({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       for (const target of [snow, ...down, ...up]) {
         gl.deleteTexture(target.texture);
         gl.deleteFramebuffer(target.framebuffer);
@@ -945,7 +903,7 @@ export default function PixelSnow({
       gl.deleteBuffer(instanceBuffer);
       gl.deleteVertexArray(quadVao);
       gl.deleteVertexArray(flakeVao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -954,11 +912,7 @@ export default function PixelSnow({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`pixel-snow-container${className ? ` ${className}` : ""}`}
-      {...rest}
-    >
+    <div ref={containerRef} className={`pixel-snow-container${className ? ` ${className}` : ''}`} {...rest}>
       <canvas ref={canvasRef} className="pixel-snow-canvas" aria-hidden="true" />
     </div>
   );
