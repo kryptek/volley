@@ -1,5 +1,9 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  RECORD_LOCK_ARGV,
   type Ref,
   compareVersions,
   deployPlan,
@@ -10,7 +14,9 @@ import {
   servicesCheckout,
   stashName,
 } from "../../src/deploy/plan";
+import { LOCK_MARKER, lockHash } from "../../src/peer/doctor";
 import { renderSystemd } from "../../src/setup/services";
+import { tempDir } from "../helpers/tmp";
 
 const PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -162,6 +168,9 @@ describe("deployPlan", () => {
     expect(steps[2]?.commands).toEqual([
       { argv: ["/b/bun", "install", "--frozen-lockfile"], cwd: "/r" },
     ]);
+    expect(steps[2]?.detail).toBe(
+      "then record the bun.lock it installed from in node_modules/.volley-lock-sha256",
+    );
     expect(steps[3]?.commands).toEqual([
       { argv: ["/b/bun", "run", "build"], cwd: "/r/packages/volley-desk" },
     ]);
@@ -203,6 +212,20 @@ describe("deployPlan", () => {
   it("names the stash after the time, without characters a ref would refuse", () => {
     expect(stashName(new Date("2026-10-20T14:05:09.123Z"))).toBe(
       "volley-deploy-2026-10-20T14-05-09Z",
+    );
+  });
+});
+
+describe("RECORD_LOCK_ARGV", () => {
+  it("writes what the doctor's lockHash computes", () => {
+    const dir = tempDir("volley-record-lock-");
+    writeFileSync(join(dir, "bun.lock"), '{ "lockfileVersion": 1 }\n');
+    mkdirSync(join(dir, "node_modules"));
+    const [cmd, ...args] = RECORD_LOCK_ARGV;
+    const r = spawnSync(cmd as string, args, { cwd: dir, encoding: "utf-8" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(join(dir, "node_modules", LOCK_MARKER), "utf-8")).toBe(
+      `${lockHash(dir)}\n`,
     );
   });
 });

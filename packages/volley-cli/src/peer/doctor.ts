@@ -315,12 +315,13 @@ export const doctorInputs = (dir: string): string[] => [
   join(dir, "node_modules", LOCK_MARKER),
 ];
 
-/** After the doctor's own install: remember the bun.lock it installed from. */
-function markInstalled(dir: string): void {
+/**
+ * After an install from `dir`'s bun.lock (the doctor's `--fix`, `volley deploy`'s on the
+ * supervisor): remember the bun.lock it installed from. Throws when the marker cannot be written.
+ */
+export function recordInstall(dir: string): void {
   const h = lockHash(dir);
-  try {
-    if (h !== null) writeFileSync(join(dir, "node_modules", LOCK_MARKER), `${h}\n`);
-  } catch {}
+  if (h !== null) writeFileSync(join(dir, "node_modules", LOCK_MARKER), `${h}\n`);
 }
 
 /** What the doctor touches on this machine: the `PeerDeps` subset, injectable for tests. */
@@ -1211,7 +1212,9 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
             step[1] === "install" &&
             step[2] === "--cwd"
           ) {
-            markInstalled(step[3] as string);
+            try {
+              recordInstall(step[3] as string);
+            } catch {}
           }
         }
         for (const c of plan.run) {

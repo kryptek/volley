@@ -205,7 +205,7 @@ One command for the update the supervisor's machine needs after a release is tag
 
 1. **Local changes refuse the deploy** (exit 3), listing `git status --porcelain`. `--force-clean` stashes them first (`git stash push -u -m volley-deploy-<time>`) and prints the stash name; the deploy never runs `checkout -- .`, `reset` or `clean`.
 2. `git fetch --tags origin`, then the tag is resolved (`--latest`: the newest `v*` tag, a prerelease below its release). Tag names are checked against `^v?\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$` before any git call.
-3. `git checkout --detach <tag>`, `bun install --frozen-lockfile`, and the Desk build (`bun run build` in `packages/volley-desk`, without any `VITE_VOLLEY_BROKER_*` in its environment), after which it writes `dist/.volley-build` exactly as `volley setup` does.
+3. `git checkout --detach <tag>`, `bun install --frozen-lockfile` (then it records the `bun.lock` it installed from in `node_modules/.volley-lock-sha256`, as on a paired machine, so the supervisor's own doctor reads its dependencies as installed; a marker it cannot write fails the step), and the Desk build (`bun run build` in `packages/volley-desk`, without any `VITE_VOLLEY_BROKER_*` in its environment), after which it writes `dist/.volley-build` exactly as `volley setup` does.
 4. **Self-check**: `volley --version` from the checkout is the tag's version, `volleyd validate` passes on its example wave file, and `dist/index.html` and `dist/version.json` (with the tag's version) exist.
 5. **Restart** both services (`launchctl kickstart -k gui/<uid>/systems.volley.volleyd` and `…/systems.volley.desk`, or `systemctl --user restart volleyd.service volley-desk.service` one at a time). volleyd gets no control op: running waves continue, since volleyd reconciles its journal on start.
 6. **Health check** (up to 30 s, every second): volleyd's retained status on the broker is `working` and was published after the restart (the new process got through its start, past `spawning` and `registered`), and the Desk answers `GET /` with 200 and `GET /version.json` with the tag's version, on the port setup recorded (`--desk-port` overrides; default 5199).
@@ -228,6 +228,7 @@ dry run: would run, in order:
        $ git -C <repo> checkout --detach v0.5.0
   3. bun install --frozen-lockfile
        $ cd <repo> && <bun> install --frozen-lockfile
+       (then record the bun.lock it installed from in node_modules/.volley-lock-sha256)
   4. build the Desk
        $ cd <repo>/packages/volley-desk && <bun> run build
        (then record the checkout's Desk stamp in dist/.volley-build)
@@ -251,7 +252,7 @@ A dry run runs only `git status --porcelain`, the current-ref lookup (`git descr
 
 1. `git status --porcelain` (local changes: `failed at status`, nothing changed) and the ref it is at;
 2. `git fetch --tags origin`, then `git checkout --detach <tag>`;
-3. `bun install --frozen-lockfile`, then record the `bun.lock` it installed from in `node_modules/.volley-lock-sha256` (what the doctor's own install records), so the machine's doctor says the dependencies are installed;
+3. `bun install --frozen-lockfile`, then record the `bun.lock` it installed from in `node_modules/.volley-lock-sha256` (what the doctor's own install and the supervisor's deploy record), so the machine's doctor says the dependencies are installed;
 4. restart `volley peer run` (`systemctl --user restart volley-peer.service`, or `launchctl kickstart -k gui/<uid>/systems.volley.peer` on macOS), which runs its doctor at start;
 5. `bun <volley_dir>/packages/volley-cli/src/cli.ts peer doctor --json`: it must report the tag's version.
 
@@ -489,7 +490,7 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 |---|---|---|
 | `tool.<name>` | block (`gh`: warn) | `bun git gh tmux nc base64 cmp claude` installed (`command -v`), and their versions |
 | `bun_on_path`, `claude_on_path` | warn | **an estimate**: whether the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets, guessed as sshd's default `PATH` through your login shell's `-c` (sshd's `SetEnv`, `~/.ssh/environment` and `pam_env` are invisible to it). The detail says "estimated"; the supervisor's own probe of the real ssh `PATH` (readiness `path_ok`) decides |
-| `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin`, installed from its current `bun.lock` (the doctor's own install records the lockfile's hash in `node_modules/.volley-lock-sha256`, so a `git pull` without a reinstall shows up), and `package.json` agrees with `bun.lock` (`bun install --frozen-lockfile --dry-run`) |
+| `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin`, installed from its current `bun.lock` (the doctor's own install, `volley deploy` and `install.sh` record the lockfile's hash in `node_modules/.volley-lock-sha256`, so a `git pull` without a reinstall shows up), and `package.json` agrees with `bun.lock` (`bun install --frozen-lockfile --dry-run`) |
 | `volley.version` | block | the checkout's version is the one the supervisor requires (its readiness verdict's `requirements.volley`, read through the tunnel when this machine is paired) |
 | `repo.clone`, `repo.origin` | block | per repository in `peer.json`'s `repos` (each check names it: `repo.clone (b/b)`), else `--repo` (default `peer.json`'s legacy `repo`): a git clone whose `origin`, normalised to `<host>/<path>`, is the repository's (`github.com/<owner>/<name>`, or `--origin`'s) |
 | `repo.canonical` | warn | a repository's remote names its old owner or name: GitHub (`gh repo view <slug> --json nameWithOwner`) reports the same repository for both; `--fix` repoints `origin` |

@@ -268,7 +268,7 @@ function volleyChecks(f: Facts): Check[] {
       severity: "block",
       detail: !v.installed
         ? `volley ${v.version} in ${v.dir} has no dependencies installed (no node_modules/.bin)`
-        : `volley ${v.version} in ${v.dir}: dependencies not installed from its current bun.lock (changed since the doctor's last install)`,
+        : `volley ${v.version} in ${v.dir}: bun.lock changed since the last recorded install (reinstall with --frozen-lockfile)`,
       fix: reinstall,
     });
   } else {
