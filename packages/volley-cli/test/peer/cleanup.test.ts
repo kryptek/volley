@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { realDeps, runPeer } from "../../src/commands/peer";
@@ -315,6 +315,19 @@ describe("peer cleanup: clones", () => {
     ]);
     for (const c of [one, two, dirty, stashed, local])
       expect(existsSync(join(c, ".git"))).toBe(true);
+  });
+
+  it("keeps a clone a worktree is still checked out from, even with every branch pushed", async () => {
+    const dir = tempDir("volley-peer-cleanup-linked-");
+    const { clone } = originAndClone(dir);
+    const wt = join(dir, "wt");
+    git(clone, "worktree", "add", "-q", "-b", "side", wt);
+    git(wt, "push", "-q", "-u", "origin", "side");
+    const r = await run(["--json", "--clone", clone, "--yes"]);
+    expect(r.report?.clones).toEqual([
+      { clone, removed: false, why: `linked worktree ${realpathSync(wt)}` },
+    ]);
+    expect(existsSync(join(clone, ".git"))).toBe(true);
   });
 
   it("keeps a directory that is not a clone's top level", async () => {

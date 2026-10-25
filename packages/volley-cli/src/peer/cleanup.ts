@@ -69,7 +69,7 @@ export interface PeerCleanupClone {
   clone: string;
   removed: boolean;
   /**
-   * Why not: `dry run`, `gone`, `not a git clone`, `dirty work tree`, `stash`,
+   * Why not: `dry run`, `gone`, `not a git clone`, `dirty work tree`, `linked worktree <path>`, `stash`,
    * `<b> has no upstream`, `<n> unpushed commit(s) on <b>`, or an error.
    */
   why?: string;
@@ -311,6 +311,15 @@ async function cloneKeeps(deps: PeerCleanupDeps, clone: string): Promise<string 
   const status = await git(deps, clone, "status", "--porcelain");
   if (status.code !== 0) return lastLine(status.stderr) || "git status failed";
   if (status.stdout.trim() !== "") return "dirty work tree";
+  // A worktree still checked out from it needs its gitdir; the first entry is the clone itself.
+  const wts = await git(deps, clone, "worktree", "list", "--porcelain");
+  if (wts.code !== 0) return lastLine(wts.stderr) || "git worktree list failed";
+  const linked = wts.stdout
+    .split("\n")
+    .filter((l) => l.startsWith("worktree "))
+    .slice(1)
+    .map((l) => l.slice("worktree ".length));
+  if (linked.length > 0) return `linked worktree ${linked.join(", ")}`;
   const stash = await git(deps, clone, "stash", "list");
   if (stash.code !== 0) return lastLine(stash.stderr) || "git stash list failed";
   if (stash.stdout.trim() !== "") return "stash";

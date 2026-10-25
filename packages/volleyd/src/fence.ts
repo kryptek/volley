@@ -87,7 +87,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
  *     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
  *     remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied) |
- *     stash list (exactly) | for-each-ref [--format=…] refs/heads | rev-list --count <range>
+ *     stash list (exactly) | worktree list --porcelain (exactly) |
+ *     for-each-ref [--format=…] refs/heads | rev-list --count <range>
  *     (the clone checks of `volleyd cleanup`, read-only)
  *     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
  *     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
@@ -2177,6 +2178,8 @@ function git(args: string[], branchDelete?: BranchDeleteToken): Verdict {
     return { kind: "consent", verb: "git worktree remove" };
   }
 
+  // The clone checks' linked-worktree reading: exactly `worktree list --porcelain`.
+  if (sub === "worktree" && sameArgv(rest, ["list", "--porcelain"])) return ALLOW;
   // Allow-list: exact subcommand (no aliases, which resolve through config), exact options.
   if (sub === "worktree") {
     const spec = rest[0] === "add" ? GIT_SPECS["worktree add"] : undefined;

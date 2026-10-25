@@ -2345,6 +2345,7 @@ describe("wave cleanup (#612): the branch and clone tokens, the reads, the remot
     const C = "/path/to/clone";
     for (const argv of [
       ["git", "-C", C, "stash", "list"],
+      ["git", "-C", C, "worktree", "list", "--porcelain"],
       ["git", "-C", C, "for-each-ref", "--format=%(refname:short)", "refs/heads"],
       ["git", "-C", C, "rev-list", "--count", "main@{u}..main"],
       ["git", "-C", C, "status", "--porcelain"],
@@ -2355,6 +2356,9 @@ describe("wave cleanup (#612): the branch and clone tokens, the reads, the remot
       ["git", "-C", C, "stash", "pop"],
       ["git", "-C", C, "stash"],
       ["git", "-C", C, "stash", "list", "-p"],
+      ["git", "-C", C, "worktree", "list"],
+      ["git", "-C", C, "worktree", "prune"],
+      ["git", "-C", C, "worktree", "list", "--porcelain", "-z"],
       ["git", "-C", C, "for-each-ref", "refs/remotes"],
       ["git", "-C", C, "rev-list", "--exec=x", "main"],
     ])

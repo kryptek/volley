@@ -4725,7 +4725,8 @@ ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
     remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied) |
-    stash list (exactly) | for-each-ref [--format=…] refs/heads | rev-list --count <range>
+    stash list (exactly) | worktree list --porcelain (exactly) |
+    for-each-ref [--format=…] refs/heads | rev-list --count <range>
     (the clone checks of `volleyd cleanup`, read-only)
     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts

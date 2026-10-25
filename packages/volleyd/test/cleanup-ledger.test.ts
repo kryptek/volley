@@ -131,7 +131,7 @@ describe("ledgerOf", () => {
     const borrowed = ledgerOf({
       state,
       events,
-      system: [sys("repo_added", { by: "alfred", slug: "acme/demo", machines: ["local"] })],
+      system: [sys("repo_added", { by: "owner", slug: "acme/demo", machines: ["local"] })],
     });
     expect(borrowed.owned.filter((r) => r.kind === "repo")).toEqual([]);
     expect(borrowed.borrowed.filter((r) => r.kind === "repo")).toEqual([
@@ -139,7 +139,7 @@ describe("ledgerOf", () => {
         kind: "repo",
         host: "local",
         what: "acme/demo",
-        why: "added by alfred (not for a wave) — volley repo remove acme/demo",
+        why: "added by owner (not for a wave) — volley repo remove acme/demo",
       },
     ]);
   });
@@ -149,7 +149,7 @@ describe("ledgerOf", () => {
     const l = ledgerOf({
       state,
       events,
-      system: [sys("repo_added", { by: "alfred", slug: "acme/demo", machines: ["local"] })],
+      system: [sys("repo_added", { by: "owner", slug: "acme/demo", machines: ["local"] })],
       otherWaves: [{ wave: "w2", repo: "acme/demo" }],
     });
     expect(l.borrowed.filter((r) => r.kind === "repo")).toEqual([]);
@@ -191,7 +191,7 @@ describe("ledgerOf", () => {
       ledgerOf({
         state,
         events,
-        system: [sys("account_created", { by: "c", name: "alfred", role: "admin" })],
+        system: [sys("account_created", { by: "c", name: "ops", role: "admin" })],
       }).owned.filter((r) => r.kind === "account"),
     ).toEqual([]);
   });

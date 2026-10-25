@@ -112,6 +112,25 @@ describe("cleanup_on_end: true (the default)", () => {
     expect(cleaned()).toHaveLength(n);
   });
 
+  it("a wave resumed after its whole-wave run is cleaned again when it ends again", async () => {
+    await ranAndRetired("A");
+    await stage("A", "done");
+    await stage("B", "done");
+    await stage("C", "done");
+    await daemon.tick();
+    await daemon.tick();
+    const whole = () => cleaned().filter((e) => e.task === undefined);
+    await eventually(() => whole().length === 1);
+    await daemon.recordEvent(WAVE, { type: "wave_resumed", data: { by: OWNER } });
+    await stage("A", "implement");
+    await ranAndRetired("A");
+    await stage("A", "done");
+    await eventually(async () => {
+      await daemon.tick();
+      return whole().length === 2;
+    });
+  });
+
   it("volleyd archive runs one last pass and its answer lists the kept items", async () => {
     await stage("A", "cancelled");
     await stage("B", "done");

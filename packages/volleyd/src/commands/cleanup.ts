@@ -517,8 +517,16 @@ async function branchVerdict(
   };
 }
 
+/** The linked worktrees in `git worktree list --porcelain` output: every entry after the main one. */
+export const linkedWorktrees = (porcelain: string): string[] =>
+  porcelain
+    .split("\n")
+    .filter((l) => l.startsWith("worktree "))
+    .slice(1)
+    .map((l) => l.slice("worktree ".length));
+
 /**
- * The clone checks (D10), read-only: a clean tree, no stash, every local branch pushed to its
+ * The clone checks (D10), read-only: a clean tree, no linked worktree, no stash, every local branch pushed to its
  * upstream or one of `proven` (agent branches this run proved merged). Null: delete it; `gone`:
  * nothing there; otherwise why it is kept.
  */
@@ -534,6 +542,11 @@ async function cloneVerdict(
       ? "gone"
       : `unreadable: ${status.stderr.trim() || `exit ${status.code}`}`;
   if (status.stdout.trim() !== "") return "dirty work tree";
+  // A worktree still checked out from it (one cleanup kept, or anyone's) needs its gitdir.
+  const wts = await run(["git", "-C", path, "worktree", "list", "--porcelain"]);
+  if (wts.code !== 0) return `unreadable: ${wts.stderr.trim() || `exit ${wts.code}`}`;
+  const linked = linkedWorktrees(wts.stdout);
+  if (linked.length > 0) return `linked worktree ${linked.join(", ")}`;
   const stash = await run(["git", "-C", path, "stash", "list"]);
   if (stash.code !== 0 || stash.stdout.trim() !== "") return "stash";
   const refs = await run([
@@ -656,8 +669,8 @@ export async function runCleanup(
       keep({ kind: "branch", host: "local", what: b.branch, task: b.task, why: v.why });
       continue;
     }
-    proven.add(b.branch);
     if (dry) {
+      proven.add(b.branch);
       io.stdout(`would delete branch ${b.branch}\n`);
       continue;
     }
@@ -665,6 +678,8 @@ export async function runCleanup(
       branchDelete: mintBranchDeleteToken(b.repo, b.branch),
     });
     if (r.code === 0) {
+      // Proven only once it is gone: a branch still checked out somewhere was not deleted.
+      proven.add(b.branch);
       io.stdout(`deleted branch ${b.branch}\n`);
       removed.branches++;
     } else {

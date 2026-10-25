@@ -341,9 +341,8 @@ a.dag-issue-link {
   margin: 8px 0 0;
   font: 11.5px var(--f-mono);
 }
-.wave-train,
 /* What cleanup kept, one line each with why (SPEC §4.6.26). */
-  .wave-kept {
+.wave-kept {
   list-style: none;
   margin: 8px 0 0;
   padding: 0;
@@ -353,6 +352,7 @@ a.dag-issue-link {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.wave-train,
 .wave-fixers {
   list-style: none;
   margin: 8px 0 0;

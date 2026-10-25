@@ -4446,7 +4446,8 @@ export class Daemon {
     if (!verdict.ok) return;
     // The last cleanup pass comes first (SPEC §4.6.26): archived on a tick after it ran.
     if (this.config.effective(wave).cleanup_on_end && !this.cleanedWhole(wave)) {
-      this.startCleanup(wave);
+      // A run that kept an unreachable machine's items waits out its retry, as cleanupPass does.
+      if (this.cleanupState(wave).retryAt <= this.time.now()) this.startCleanup(wave);
       return;
     }
     await this.archiveWave(wave, DAEMON_AGENT_ID, verdict.reason);
@@ -4527,8 +4528,9 @@ export class Daemon {
     st = { tasks: new Set(), whole: false, retryAt: 0 };
     const log = this.waves.get(wave);
     for (const e of log?.journal.readAll() ?? []) {
-      if (e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed")
-        st.whole = false;
+      if (resetsWholeCleanup(e)) st.whole = false;
+      const task = reopenedTask(e);
+      if (task !== undefined) st.tasks.delete(task);
       if (e.type !== "wave_cleaned" || e.data.dry_run === true) continue;
       const unreachable = keptUnreachable(e.data.kept);
       if (typeof e.data.task === "string") {
@@ -4537,6 +4539,18 @@ export class Daemon {
     }
     this.cleanupDone.set(wave, st);
     return st;
+  }
+
+  /**
+   * Keep the cached cleanup state true to the journal: a wave that resumes or ends again needs
+   * its whole-wave pass again, and a task that leaves done or cancelled its own pass when it ends.
+   */
+  private noteCleanupReset(wave: WaveId, e: JournalEvent): void {
+    const st = this.cleanupDone.get(wave);
+    if (st === undefined) return;
+    if (resetsWholeCleanup(e)) st.whole = false;
+    const task = reopenedTask(e);
+    if (task !== undefined) st.tasks.delete(task);
   }
 
   /** Has the whole-wave pass run since `wave` ended (and reached every machine)? */
@@ -10786,6 +10800,7 @@ export class Daemon {
     if (decided !== undefined) this.lastDecided.set(decided, event.seq);
     const published = this.track(this.publishAppended(wave, event));
     this.noteRemediation(wave, event);
+    this.noteCleanupReset(wave, event);
     // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.
     const ended =
       event.type === "wave_stopped"
@@ -15460,4 +15475,14 @@ function windowShort(window: string | undefined): string {
   if (window === "weekly") return "7d";
   const f = window?.startsWith("model_weekly:") ? window.slice("model_weekly:".length) : "";
   return f !== "" ? `${f.charAt(0).toUpperCase()}${f.slice(1)}` : "window";
+}
+
+/** Does `e` send a wave back to needing its whole-wave cleanup pass (it resumed or ended again)? */
+const resetsWholeCleanup = (e: JournalEvent): boolean =>
+  e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed";
+
+/** The task `e` takes back out of done or cancelled, whose cleanup then runs again when it ends. */
+function reopenedTask(e: JournalEvent): string | undefined {
+  if (e.type !== "stage_entered" || e.task === undefined) return undefined;
+  return e.data.stage === "done" || e.data.stage === "cancelled" ? undefined : e.task;
 }

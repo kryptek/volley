@@ -371,15 +371,15 @@ export function formatCiMode(s: WaveState): string {
   return `ci: workflows (${typeof s.ci_workflows === "number" ? s.ci_workflows : "not read"})`;
 }
 
-/**
- * `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)` (the visibility could not be read),
- * `P1 (forced)` (`public_hygiene: on`) or `off`: what the wave's reviewers flag.
- */
 /** `cleanup: cleaned w1: 3 worktrees, 2 sessions; kept 1`: the wave's last cleanup run. Pure. */
 export function formatCleanup(c: NonNullable<WaveState["cleanup"]>): string {
   return `cleanup: ${c.summary}`;
 }
 
+/**
+ * `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)` (the visibility could not be read),
+ * `P1 (forced)` (`public_hygiene: on`) or `off`: what the wave's reviewers flag.
+ */
 function formatHygiene(s: WaveState): string {
   if (s.hygiene_level === "off") return "hygiene: off";
   return `hygiene: ${s.hygiene_level === "p3" ? "P3" : "P1"} (${s.repo_visibility ?? "forced"})`;

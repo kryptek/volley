@@ -187,6 +187,60 @@ describe("cleanup removes a managed clone only when nothing in it is unpushed", 
     expect(existsSync(clone)).toBe(false);
   });
 
+  it("a kept dirty worktree keeps its clone, even with its branch at the merged head", async () => {
+    const { home, clone } = setup();
+    const head = git(clone, "rev-parse", "HEAD").trim();
+    const wt = join(home, "wt", "w1", "T1-implementer");
+    mkdirSync(join(home, "wt", "w1"), { recursive: true });
+    git(clone, "worktree", "add", "-q", "-b", "w1/T1-implementer-1", wt);
+    writeFileSync(join(wt, "README.md"), "uncommitted\n");
+    const j = Journal.open(join(home, "waves", "w1"));
+    j.append({ type: "task_queued", task: "T1", data: { issue: 1 } });
+    j.append({
+      type: "agent_spawned",
+      task: "T1",
+      data: {
+        agent_id: "w1-t1-implementer-1",
+        role: "implementer",
+        host: "local",
+        worktree: wt,
+        branch: "w1/T1-implementer-1",
+      },
+    });
+    j.append({ type: "agent_retired", task: "T1", data: { agent_id: "w1-t1-implementer-1" } });
+    j.append({ type: "merged_by_supervisor", task: "T1", data: { task: "T1", head } });
+    j.append({ type: "stage_entered", task: "T1", data: { stage: "done" } });
+    const ev = readJournalFile(join(home, "waves", "w1", "journal.jsonl"));
+    const ledger = ledgerOf({
+      state: replay(ev).state as WaveState,
+      events: ev,
+      system: system(home),
+      clones: { repo_root: join(home, "repos"), localName: "testbox" },
+      localRepo: clone,
+    });
+    const io = makeBufferIO();
+    await runCleanup(
+      "w1",
+      ledger,
+      { exec, consent: mintConsentToken("volleyd cleanup w1 --yes"), localName: "testbox" },
+      io,
+    );
+    expect(existsSync(wt)).toBe(true);
+    expect(existsSync(clone)).toBe(true);
+    expect(io.readStdout()).toContain(`kept clone ${clone}: linked worktree ${wt} (on testbox)\n`);
+  });
+
+  it("an agent's pushed branch checked out in a linked worktree keeps the clone", async () => {
+    const { home, clone } = setup();
+    const wt = join(home, "elsewhere");
+    git(clone, "worktree", "add", "-q", "-b", "side", wt);
+    git(wt, "push", "-q", "-u", "origin", "side");
+    const io = makeBufferIO();
+    await cleanupWave(home, "w1", { yes: true, force: false }, io);
+    expect(existsSync(clone)).toBe(true);
+    expect(io.readStdout()).toContain(`kept clone ${clone}: linked worktree ${wt} (on testbox)\n`);
+  });
+
   it("the dry run removes nothing", async () => {
     const { home, clone } = setup();
     const io = makeBufferIO();
@@ -240,14 +294,14 @@ describe("a managed clone on a paired machine (#612 D2, D10)", () => {
       state: replay(ev).state as WaveState,
       events: ev,
       system: system(home),
-      clones: { repo_root: "~/.volley/repos", localName: "athena" },
+      clones: { repo_root: "~/.volley/repos", localName: "supervisor" },
     });
   };
 
   const deps = (run: ExecFn) => ({
     exec: run,
     consent: mintConsentToken("volleyd cleanup w1 --yes"),
-    localName: "athena",
+    localName: "supervisor",
     hosts: { box: { target: "dev@box", volley_dir: VD } },
   });
 
@@ -259,6 +313,7 @@ describe("a managed clone on a paired machine (#612 D2, D10)", () => {
     expect(b.steps.slice(0, peer).map((s) => s[3])).toEqual([
       "rev-parse",
       "status",
+      "worktree",
       "stash",
       "for-each-ref",
       "rev-list",
