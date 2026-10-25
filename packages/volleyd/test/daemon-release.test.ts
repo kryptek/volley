@@ -533,11 +533,11 @@ describe("release stages (SPEC §4.6.19)", () => {
         });
       await settleTasks();
       const started = await s.event("release_started");
-      expect(started.data).toMatchObject({
-        version: "0.13.3",
-        default_branch: "main",
-        date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-      });
+      // Read before the match: bun's toMatchObject writes an asymmetric matcher back into the
+      // object it matched, and the bump agent reports this date as its `--date`.
+      const date = String(started.data.date);
+      expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(started.data).toMatchObject({ version: "0.13.3", default_branch: "main" });
 
       // bump: its run lines substituted, verified as before.
       await s.event(registered("w1-release-bump-1"));
@@ -552,15 +552,7 @@ describe("release stages (SPEC §4.6.19)", () => {
         commands: [
           { argv: ["bun", "scripts/release-version.ts", "--set", "0.13.3"], code: 0, seconds: 1 },
           {
-            argv: [
-              "bun",
-              "run",
-              "changelog",
-              "--version",
-              "0.13.3",
-              "--date",
-              String(started.data.date),
-            ],
+            argv: ["bun", "run", "changelog", "--version", "0.13.3", "--date", date],
             code: 0,
             seconds: 1,
           },
