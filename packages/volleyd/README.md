@@ -1957,7 +1957,14 @@ role volleyd can keep alive (SPEC §4.6.25; `src/coordinator/`): `claude remote-
 fixed directory, in a tmux session named `volley-coordinator-<name>`, on the machine
 `coordinator.machine` names, restarted when it dies, its state retained on
 `volley/_system/federation/coordinator`. `<name>` is the coordinator name `volley setup`
-recorded (`setup.json` `coordinator`), the one waves bind to.
+recorded (`setup.json` `coordinator`), the one waves bind to. The CLI's side is
+[`volley coordinator`](../volley-cli/README.md#volley-coordinator) (status, open, restart, stop);
+the Desk picks the machine in Getting started's Access step or Settings › Machines' Coordinator
+card and opens the session from its top bar
+([The coordinator](../volley-desk/README.md#the-coordinator)). The role needs the broker
+reachable from the machine it runs on, nothing public: the phone reaches the session through the
+Claude app, and the Desk through the private network
+([`volley desk install --tailscale`](../volley-cli/README.md#volley-desk-serve)).
 
 ```sh
 volleyd config set coordinator.machine box-a     # a paired machine (or `local`: this one)
@@ -4978,7 +4985,7 @@ Same table as `volley` (a test keeps the two equal):
 | `1` | error: a validation failure, a request the daemon rejected, refused credentials |
 | `2` | usage error |
 | `3` | `resolve` / `inbox answer`: an answer the decision cannot apply (`BAD_ANSWER`) |
-| `69` | `SUPERVISOR_UNREACHABLE`: the broker does not answer, or volleyd is silent. The command diagnosed why (internet → private network → tunnel → broker → volleyd), printed `volleyd <command>: supervisor unreachable (<reason>): <cause>` and a `fix:` line, and submitted nothing; with `--json`, the `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }` object on stdout. `volleyd run` validates the file first, as always. The reasons and their texts: `packages/volley-cli/README.md`, "When the supervisor does not answer" |
+| `69` | `SUPERVISOR_UNREACHABLE`: the broker does not answer, or volleyd is silent. The command diagnosed why (internet → private network → tunnel → broker → volleyd), printed `volleyd <command>: supervisor unreachable (<reason>): <cause>` and a `fix:` line, and submitted nothing; with `--json`, the `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }` object on stdout. `volleyd run` validates the file first, as always. The reasons and their texts: the CLI's [When the supervisor does not answer](../volley-cli/README.md#when-the-supervisor-does-not-answer); the `/volley-issues` skill relays the cause and fix and asks, never switching brokers (`packages/volley-issues/SKILL.md`) |
 | `124` | the daemon did not answer in time |
 
 ---
