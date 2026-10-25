@@ -124,6 +124,8 @@ interface Rig {
   up: Set<string>;
   stopped: { v: boolean };
   name: { v: string | null };
+  login: { v: string | null };
+  logs: string[];
 }
 
 function rig(
@@ -136,6 +138,8 @@ function rig(
   const up = new Set(Object.keys(targets));
   const stopped = { v: false };
   const name = { v: "coord-test" as string | null };
+  const login = { v: LOGIN as string | null };
+  const logs: string[] = [];
   const deps: CoordinatorRunnerDeps = {
     now: () => now,
     config: () => cfg,
@@ -143,7 +147,7 @@ function rig(
     namespace: "default",
     target: (m) => targets[m] ?? `no machine '${m}'`,
     up: (m) => up.has(m),
-    login: () => LOGIN,
+    login: () => login.v,
     repos: (m, home) =>
       m === "box-a" ? [{ slug: "acme/app", target: `${home}/.volley/repos/acme/app` }] : [],
     publish: async (p) => {
@@ -155,7 +159,9 @@ function rig(
         stopped.v = v;
       },
     },
-    log: () => {},
+    log: (m) => {
+      logs.push(m);
+    },
   };
   const runner = new CoordinatorRunner(deps);
   return {
@@ -171,6 +177,8 @@ function rig(
     up,
     stopped,
     name,
+    login,
+    logs,
   };
 }
 
@@ -366,6 +374,84 @@ describe("the coordinator on a paired machine (box-a)", () => {
     expect(a.box.session).toBe(false);
     expect(b.box.launches).toHaveLength(1);
     expect(r.last()).toMatchObject({ machine: "box-b", state: "starting" });
+  });
+
+  it("its machine going down while it runs is stopped, not left running with a dead link", async () => {
+    const { box, host } = fakeBox();
+    const r = rig({ "box-a": remoteTarget(host) });
+    await r.tick();
+    await r.tick();
+    expect(r.last()).toMatchObject({ state: "running", session_url: LINK });
+    r.up.delete("box-a");
+    await r.tick();
+    expect(r.last()).toMatchObject({ state: "stopped", last_error: "box-a is not up" });
+    expect(r.last()?.session_url).toBeUndefined();
+    const n = r.published.length;
+    await r.tick();
+    expect(r.published).toHaveLength(n);
+    // Back up with its session still there: adopted, not counted as a death.
+    r.up.add("box-a");
+    await r.tick();
+    await r.tick();
+    expect(box.launches).toHaveLength(1);
+    expect(r.last()).toMatchObject({ state: "running", session_url: LINK, restarts: 0 });
+    expect(r.last()?.last_error).toBeUndefined();
+  });
+
+  it("a start that fails backs off on the ladder and is failed after three in a row", async () => {
+    const { box, host } = fakeBox();
+    let prepares = 0;
+    const real = remoteTarget(host);
+    const target: CoordinatorTarget = {
+      ...real,
+      home: () => real.home(),
+      kill: (s, t) => real.kill(s, t),
+      prepare: async () => {
+        prepares++;
+        throw new Error("ssh: connect to host box-a: Connection refused");
+      },
+    };
+    const r = rig({ "box-a": target });
+    await r.tick();
+    expect(prepares).toBe(1);
+    expect(r.last()).toMatchObject({ state: "stopped" });
+    expect(r.last()?.last_error).toContain("Connection refused");
+    await r.advance(4);
+    await r.tick();
+    expect(prepares, "not before 5 s").toBe(1);
+    await r.advance(1);
+    await r.tick();
+    expect(prepares).toBe(2);
+    await r.advance(29);
+    await r.tick();
+    expect(prepares, "not before 30 s").toBe(2);
+    await r.advance(1);
+    await r.tick();
+    expect(prepares).toBe(3);
+    expect(r.last()?.state).toBe("failed");
+    await r.advance(600);
+    await r.tick();
+    expect(prepares).toBe(3);
+    expect(box.launches).toHaveLength(0);
+  });
+
+  it("no coordinator login is reported once per backoff, not every tick", async () => {
+    const { box, host } = fakeBox();
+    const r = rig({ "box-a": remoteTarget(host) });
+    r.login.v = null;
+    await r.tick();
+    expect(r.last()).toMatchObject({ state: "stopped" });
+    expect(r.last()?.last_error).toContain("coordinator.json");
+    const said = () => r.logs.filter((l) => l.includes("cannot start")).length;
+    expect(said()).toBe(1);
+    await r.tick();
+    await r.tick();
+    expect(said()).toBe(1);
+    r.login.v = LOGIN;
+    await r.advance(5);
+    await r.tick();
+    expect(box.launches).toHaveLength(1);
+    expect(r.last()?.state).toBe("starting");
   });
 
   it("no coordinator name from setup: nothing runs", async () => {

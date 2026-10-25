@@ -90,6 +90,8 @@ export class CoordinatorRunner {
   async restart(): Promise<CoordinatorRolePayload | null> {
     await this.running;
     this.deps.stopped.set(false);
+    // Not ours to count: a pass during the kill must not take the session's end for a death.
+    this.launched = false;
     if (this.placed !== null) await this.killPlaced(this.placed);
     this.reset();
     // Back to a fresh start: the next pass launches it (`starting`) with no restarts counted.
@@ -102,6 +104,7 @@ export class CoordinatorRunner {
   async stop(): Promise<CoordinatorRolePayload | null> {
     await this.running;
     this.deps.stopped.set(true);
+    this.launched = false;
     if (this.placed !== null) await this.killPlaced(this.placed);
     this.reset();
     await this.tick();
@@ -145,8 +148,16 @@ export class CoordinatorRunner {
       this.payload = null;
     }
     if (want === "waiting") {
-      if (this.payload === null)
-        await this.set(this.fresh(machine, coord, cfg.dir, "stopped", `${machine} is not up`));
+      const why = `${machine} is not up`;
+      const cur = this.payload;
+      if (cur === null) await this.set(this.fresh(machine, coord, cfg.dir, "stopped", why));
+      else if (cur.state !== "failed" && (cur.state !== "stopped" || cur.last_error !== why)) {
+        // Nothing reaches a server there: its link is not handed out while the machine is down.
+        const { session_url: _u, needs_terminal: _n, ...rest } = cur;
+        await this.set({ ...rest, state: "stopped", since: this.iso(), last_error: why });
+      }
+      // Back up, a session still there is adopted; one gone is started afresh, not a death.
+      this.launched = false;
       return;
     }
     const target = this.deps.target(machine);
@@ -288,17 +299,23 @@ export class CoordinatorRunner {
     cfg: CoordinatorConfig,
   ): Promise<void> {
     const restarting = this.payload?.state === "restarting";
+    // A start that fails is on the deaths' ladder: it waits its rung, three in a row are failed.
     const fail = async (e: unknown) => {
       const why = e instanceof Error ? e.message : String(e);
-      this.deps.log(`coordinator: cannot start on ${placed.machine}: ${why}`);
-      const restarts = this.payload?.restarts ?? 0;
-      await this.set({
-        ...this.base(placed),
-        state: "stopped",
-        since: this.iso(),
-        restarts,
-        last_error: why,
-      });
+      this.deaths++;
+      this.quick++;
+      const base = { ...this.base(placed), since: this.iso(), last_error: why };
+      if (this.quick >= 3) {
+        this.deps.log(`coordinator: failed on ${placed.machine}: cannot start: ${why}`);
+        await this.set({ ...base, state: "failed" });
+        return;
+      }
+      const waitS = nextBackoff(cfg.restart_backoff_s, this.deaths, 0);
+      this.nextStartAt = this.now() + waitS * 1000;
+      this.deps.log(
+        `coordinator: cannot start on ${placed.machine}: ${why}; trying again in ${waitS} s`,
+      );
+      await this.set({ ...base, state: restarting ? "restarting" : "stopped" });
     };
     const login = this.deps.login();
     if (login === null)

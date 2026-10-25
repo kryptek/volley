@@ -29,7 +29,7 @@
             },
             "state": {
               "enum": ["starting", "running", "restarting", "stopped", "failed"],
-              "description": "starting: launched, its link not read yet. running: its session is up. restarting: it died and starts again after its backoff. stopped: not running (the owner stopped it, its machine is down, or it could not be started: last_error says which). failed: it died three times in a row soon after starting; it stays down until coordinator_restart."
+              "description": "starting: launched, its link not read yet. running: its session is up. restarting: it died and starts again after its backoff. stopped: not running (the owner stopped it, its machine is down, or it could not be started: last_error says which). failed: it died (or could not be started) three times in a row soon after starting; it stays down until coordinator_restart."
             },
             "since": {
               "type": "string",

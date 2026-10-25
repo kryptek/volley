@@ -3251,7 +3251,10 @@ export class Daemon {
     await this.removalSweep();
     await this.fleetTick();
     // The coordinator role: its ssh steps run beside the queue (a pass in flight is not repeated).
-    if (this.running) void this.track(this.coordinator.tick());
+    if (this.running)
+      void this.track(
+        this.coordinator.tick().catch((e: unknown) => this.log(`coordinator: ${String(e)}`)),
+      );
     await this.warnPeerIdle();
     await this.runLeases({ kind: "tick" });
     await this.monitor();

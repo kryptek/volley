@@ -33,7 +33,7 @@ Options:
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
   --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME); restart and stop need an admin
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
-  --timeout <seconds>  How long to wait for each answer (default 30)
+  --timeout <seconds>  restart and stop: how long to wait for volleyd's answer (default 30)
 
 Choose its machine with \`volleyd config set coordinator.machine <name>\` (\`local\`: this one;
 null: off). A laptop is refused unless coordinator.allow_laptop is true.

@@ -181,5 +181,5 @@
 #   dir: ~/.volley/coordinator   # its directory there (~: that machine's home)
 #   capacity: 4                  # the server's --capacity (concurrent sessions)
 #   permission_mode: acceptEdits # --permission-mode for the sessions it spawns
-#   restart_backoff_s: [5, 30, 120]  # waits before each restart; three quick deaths: failed
+#   restart_backoff_s: [5, 30, 120]  # waits before each restart; three quick deaths (or failed starts): failed
 #   allow_laptop: false          # a machine whose record says laptop: true may host it

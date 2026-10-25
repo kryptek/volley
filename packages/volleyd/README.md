@@ -1985,7 +1985,10 @@ volleyd config set coordinator.machine null      # off: the session is ended, th
   death, restarted after the ladder's next wait (it starts over after 10 minutes up); a third
   death in a row, each within the ladder's total of its start, is `failed` (the server's last
   screen lines in `last_error`) until `volley coordinator restart`. A volleyd restart adopts the
-  running session; volleyd's shutdown leaves it running. A machine that is down starts nothing.
+  running session; volleyd's shutdown leaves it running. A start that fails (prepare, the launch,
+  no coordinator login) is a death on the same ladder, `last_error` saying why. A machine that
+  is down starts nothing, and a role running there is `stopped` (`<machine> is not up`, its link
+  dropped) until the machine is back, when the session still running there is adopted.
 - **The link.** After a start volleyd reads the server's screen for its first
   `https://claude.ai/code/…` URL (`session_url`); without one the name is the handle. A question
   on the screen — the folder trust, or the first run's `Enable Remote Control? (y/n)` on a Claude
