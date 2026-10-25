@@ -23,8 +23,11 @@ Its `volley setup` ends with a 1-issue test wave that volleyd merges on its own 
   writes `merge: auto` and `branch_update: merge` into the wave file by default and leaves once
   the wave is submitted ([volley-issues README](../packages/volley-issues/README.md)).
 - **Optional: a release playbook**, `.volley/release.yaml` in the repository, for what turns a
-  merged release branch into a release (version bump, changelog, staging, smoke, notes). Without
-  one the wave simply completes. ([The release train](../packages/volleyd/README.md#the-release-train))
+  merged release branch into a release: its prepare stages bump the version (`{{version}}`,
+  resolved from the tags and the change fragments), assemble the changelog and open the release
+  PR; its ship stages tag and deploy after your one `release_go`. Without one the wave simply
+  completes and `/volley-issues` says so before it is submitted. This repository's own is the
+  example. ([The release train](../packages/volleyd/README.md#the-release-train))
 - **A phone that gets the Desk's notifications** (open the Desk on it once and allow
   notifications), or `volley notify` with a webhook to a push service.
 
@@ -72,7 +75,7 @@ and the CLI's [`volley coordinator`](../packages/volley-cli/README.md#volley-coo
 | Red CI | Classified first: own change (a fixup agent with the CI result as its directive), flake (a dedicated `fix-<test>` task whose merge unblocks every PR that waited on it), or infra incident (held and re-checked; never re-run). | [Self-healing CI](../packages/volleyd/README.md#self-healing-ci) |
 | Merging | Under `merge: auto`, each gated PR is squash-merged at exactly the reviewed head, through the authority fence, journaled `merged_by_supervisor`. A transient GitHub refusal (`Merge already in progress`, a 5xx, a rate limit) is retried with backoff, not escalated. | [Autopilot merging](../packages/volleyd/README.md#autopilot-merging) |
 | Merge order and conflicts | The merge queue: dependency order, one merge in flight per release branch, each branch brought up to date (a merge, never a force-push) before its turn. | [The merge queue](../packages/volleyd/README.md#the-merge-queue) |
-| Releasing | Once every task is merged, the playbook's stages run one at a time, each in a supervised agent's shell and verified afterwards. | [The release train](../packages/volleyd/README.md#the-release-train) |
+| Releasing | Once every task is merged, volleyd picks the version (minor on an `added` or `removed` fragment, else patch; `release_version:` overrides) and the playbook's prepare stages run one at a time, each in a supervised agent's shell and verified afterwards. It waits for the release PR's CI, then asks `release_go` once. On `go` it squash-merges the release PR (deleting the release branch), closes the issues, runs the ship stages (tag, deploy) at the merge commit and completes the wave. | [The release train](../packages/volleyd/README.md#the-release-train) |
 | Crashed or stalled agents | Relaunched or respawned once, on their own branch and PR. | [Autopilot](../packages/volleyd/README.md#autopilot) |
 | A dropped coordinator | Its waves keep running; a reconnecting session reclaims them by name. | [Ownership and claim](../packages/volleyd/README.md#ownership-and-claim) |
 
@@ -83,8 +86,9 @@ briefs forbid it and the fence enforces it for volleyd itself.
 
 - **Owner-only decisions** (`autopilot.owner_only`; by default `plan_change`, `repo_untrusted`,
   `model_switch`, `release_go` and `stage_go`). Autopilot never answers these. Production is
-  always yours: a deploy-shaped release stage says `gate: owner`, and the train ends on
-  `release_go`. An agent that hits its usage limit asks you for a `model_switch` only when no
+  always yours: nothing after `release_go` runs without your `go`, which covers exactly the
+  ship stages the playbook declares; a stage that deploys a customer's production also says
+  `gate: owner` and asks its own `stage_go`. An agent that hits its usage limit asks you for a `model_switch` only when no
   other signed-in account on its machine has room: otherwise autopilot moves it to that account
   (`agent_account_limit/move-exhausted`, under `account_move_max`).
 - **Escalations**: a decision no rule answers, one whose budget is spent, or one whose answer

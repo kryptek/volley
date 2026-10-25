@@ -726,7 +726,9 @@ async function launchAttempt(
         : briefExtra(ctx.root),
     hygiene_rule: hygiene.rule,
     hygiene_contract: hygiene.contract,
-    ...(req.stage !== undefined ? stageBriefVars(req.stage, req.wave.release_branch) : NO_STAGE),
+    ...(req.stage !== undefined
+      ? stageBriefVars(req.stage, req.wave.release_branch, ctx.worktree)
+      : NO_STAGE),
   });
   const brief = withPreface(preface, rendered);
   const notes = [

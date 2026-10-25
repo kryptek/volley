@@ -147,14 +147,16 @@ import {
   runIssueActions,
   taskIssues,
 } from "./autopilot/issues";
+import { mergeRelease } from "./autopilot/merge";
 import {
   DEFAULT_PLAYBOOK,
   PlaybookError,
   type PlaybookStage,
   type WavePlaybook,
-  allVerified,
+  nextVersion,
   playbookPath,
-  releaseGoInput,
+  releaseDate,
+  substituteStage,
   wavePlaybook,
 } from "./autopilot/playbook";
 import {
@@ -171,6 +173,7 @@ import {
   releaseView,
   releaseWaveTask,
   renderStageMd,
+  shipTarget,
   stageOf,
 } from "./autopilot/release-train";
 import {
@@ -318,12 +321,14 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import {
+  type ReleaseToken,
   SERVICE_LABEL,
   TMUX_SIZE,
   isRepoAdd,
   isRepoAddPath,
   mintConsentToken,
   mintModelSwitchToken,
+  mintReleaseToken,
   mintWakeToken,
 } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
@@ -1383,6 +1388,8 @@ export class Daemon {
   private readonly heldBack = new Map<WaveId, string[]>();
   /** The last "release playbook not run" reason logged per wave, so a tick does not repeat it. */
   private readonly playbookNotRun = new Map<WaveId, string>();
+  /** Ship stages whose default branch is being fetched before their spawn (`<wave>/_release/release`). */
+  private readonly shipFetching = new Set<string>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
   private readonly issueFiles = new Map<WaveId, Record<TaskId, string[]>>();
   private readonly config: ConfigStore;
@@ -3289,7 +3296,7 @@ export class Daemon {
       await this.holdPass(wave);
       await this.churnPass(wave);
       await this.completeIfSettled(wave);
-      await this.releaseGoIfVerified(wave);
+      await this.releaseAdvance(wave);
     }
     await this.archivePass();
     let live = this.ceilingCount().live;
@@ -3353,7 +3360,6 @@ export class Daemon {
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
-      for (const wave of this.waves.keys()) await this.releaseAdvance(wave);
       for (const wave of this.waves.keys()) {
         if (this.waves.get(wave)?.record.state?.status !== "running") {
           // A wave that does not tick never ends its merge turn: it gives the branch up.
@@ -4204,6 +4210,10 @@ export class Daemon {
     const train = this.releasePlaybook(wave);
     if (typeof train === "object" && train !== null) {
       const { path, sha256, playbook } = train;
+      // The release's version, day and default branch (read-only); held when a playbook that
+      // needs them cannot have them yet (the next tick reads again).
+      const release = await this.releaseVersion(wave, playbook.stages);
+      if (release === null) return;
       // The release PR's Closes lines (#416): the done tasks' issues, as the digest lists them.
       const { closes } = digestOf(
         this.journalEvents(wave),
@@ -4213,9 +4223,17 @@ export class Daemon {
       );
       await this.append(wave, {
         type: "release_started",
-        data: { done, cancelled, closes, playbook: { path, sha256, stages: playbook.stages } },
+        data: {
+          done,
+          cancelled,
+          closes,
+          ...release,
+          playbook: { path, sha256, stages: playbook.stages },
+        },
       });
-      this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
+      this.log(
+        `wave ${wave} releasing${release.version !== undefined ? ` v${release.version}` : ""}: ${playbook.stages.map((s) => s.name).join(", ")}`,
+      );
       await this.releaseAdvance(wave);
       return;
     }
@@ -4261,41 +4279,95 @@ export class Daemon {
   }
 
   /**
-   * Once every stage of a releasing wave is verified, ask the owner `release_go` (owner-only,
-   * wave-level), unless one is open already. After a `hold` it is asked again (`class: held`), so
-   * the Desk keeps showing it.
+   * The release's version, day and default branch at `release_started` (SPEC §4.6.19), read-only:
+   * the newest `v*` tag bumped by the release branch's change fragments (`nextVersion`; the wave
+   * file's `release_version:` overrides), the supervisor's UTC day, and the repository's default
+   * branch. What cannot be read is left out, unless the playbook needs it (a variable, the
+   * release PR or a ship stage): then null, logged once, and the next tick reads again.
    */
-  private async releaseGoIfVerified(wave: WaveId): Promise<void> {
-    const log = this.waves.get(wave);
-    const state = log?.record.state;
-    if (log === undefined || state?.status !== "releasing" || state.release === undefined) return;
-    if (!allVerified(state.release)) return;
-    if (openDecisions(log.record).some((d) => d.kind === "release_go")) return;
-    const asked = Object.values(log.record.decisions).filter((d) => d.kind === "release_go");
-    // Answered go, but release_done was not journaled (it failed): journal it now.
-    const go = asked.find((d) => d.resolved?.answer.trim().toLowerCase() === "go");
-    if (go?.resolved !== undefined) {
-      await this.append(wave, {
-        type: "release_done",
-        data: { by: go.resolved.by, decision_id: go.decision_id },
-      });
-      return;
-    }
-    const evidence = new Map<string, string>();
-    for (const e of log.journal.readAll()) {
-      if (e.type === "release_stage_verified" && typeof e.data.evidence === "string")
-        evidence.set(String(e.data.stage), e.data.evidence);
-    }
-    const { input, stages } = releaseGoInput(wave, state.release, evidence);
-    const id =
-      asked.length === 0
-        ? waveDecisionId("release_go", wave)
-        : waveDecisionId("release_go", wave, String(asked.length));
-    await this.openDecisionNow(
-      wave,
-      { ...input, id },
-      { stages, ...(asked.length > 0 ? { class: "held" } : {}) },
+  private async releaseVersion(
+    wave: WaveId,
+    stages: readonly PlaybookStage[],
+  ): Promise<{ version?: string; date: string; default_branch?: string } | null> {
+    const rec = this.waves.get(wave)?.record;
+    const plan = rec?.wave;
+    if (plan == null || rec?.state == null) return null;
+    const needs =
+      /\{\{/.test(JSON.stringify(stages)) ||
+      stages.some((s) => s.phase === "ship" || s.verify?.release_pr === true);
+    const gh = this.ghFor(plan.repo);
+    const io: ExecFn = (argv, opts = {}) =>
+      gh.exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, cwd: gh.cwd, ...opts });
+    const problems: string[] = [];
+    const repoView = await io(["gh", "repo", "view", "--json", "defaultBranchRef"]).catch(
+      () => null,
     );
+    let defaultBranch: string | undefined;
+    try {
+      const name = (JSON.parse(repoView?.stdout ?? "") as { defaultBranchRef?: { name?: unknown } })
+        .defaultBranchRef?.name;
+      if (repoView?.code === 0 && typeof name === "string" && name !== "") defaultBranch = name;
+    } catch {}
+    if (defaultBranch === undefined) problems.push("the default branch (gh repo view)");
+    const tagsR = await io([
+      "gh",
+      "api",
+      "repos/{owner}/{repo}/git/matching-refs/tags/v",
+      "--paginate",
+      "--slurp",
+    ]).catch(() => null);
+    let tags: string[] | undefined;
+    try {
+      const pages: unknown = tagsR?.code === 0 ? JSON.parse(tagsR.stdout) : undefined;
+      if (Array.isArray(pages))
+        tags = (pages.flat() as { ref?: unknown }[])
+          .map((r) => r?.ref)
+          .filter((r): r is string => typeof r === "string");
+    } catch {}
+    if (tags === undefined) problems.push("the tags (gh api matching-refs)");
+    let fragments: string[] | undefined;
+    if (gh.clone) {
+      const git = lockFetches(this.host.exec, LOCAL_HOST, gh.cwd);
+      await git(["git", "-C", gh.cwd, "fetch", "--quiet", "origin", rec.state.release_branch], {
+        timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms,
+      }).catch(() => null);
+      const ls = await this.host
+        .exec(
+          [
+            "git",
+            "-C",
+            gh.cwd,
+            "ls-tree",
+            "--name-only",
+            `refs/remotes/origin/${rec.state.release_branch}`,
+            "changes/",
+          ],
+          { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms },
+        )
+        .catch(() => null);
+      if (ls?.code === 0) fragments = ls.stdout.split("\n").filter((l) => l.trim() !== "");
+    }
+    if (fragments === undefined) problems.push("the change fragments (git ls-tree)");
+    const date = releaseDate(this.now());
+    const next =
+      tags === undefined || (fragments === undefined && plan.release_version === undefined)
+        ? null
+        : nextVersion(tags, fragments ?? [], plan.release_version);
+    if (next !== null && "error" in next) problems.push(next.error);
+    const version = next !== null && "version" in next ? next.version : undefined;
+    if (needs && (version === undefined || defaultBranch === undefined)) {
+      const msg = `release not started: cannot resolve ${problems.join(", ")}`;
+      if (this.playbookNotRun.get(wave) !== msg) {
+        this.playbookNotRun.set(wave, msg);
+        this.log(`wave ${wave}: ${msg}`);
+      }
+      return null;
+    }
+    return {
+      ...(version !== undefined ? { version } : {}),
+      date,
+      ...(defaultBranch !== undefined ? { default_branch: defaultBranch } : {}),
+    };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -8806,6 +8878,7 @@ export class Daemon {
           train: st.release,
           events: log.journal.readAll(),
           decisions: log.record.decisions,
+          spawns: this.opts.spawner !== undefined,
         });
       },
       journal: (ev) => this.append(wave, ev),
@@ -8834,14 +8907,83 @@ export class Daemon {
       },
       now: this.now,
       log: (line) => this.log(line),
+      cwd: () => {
+        const repo = log.record.wave?.repo;
+        return repo == null || isSlug(repo) ? undefined : expandHome(repo);
+      },
+      ciMode: () => log.record.state?.ci_mode,
+      merge: (pr, head) => this.mergeReleasePr(wave, pr, head),
+      merged: (pr) => this.releaseMergedIssues(wave, pr),
     });
     this.releases.set(wave, d);
     return d;
   }
 
+  /**
+   * The owner's `release_go` go (SPEC §4.6.19): squash-merge the release PR at its CI-green head,
+   * deleting the release branch, under a ReleaseToken minted here only, from the journaled
+   * release PR and the go that answered it. The merge commit, or why it did not merge.
+   */
+  private async mergeReleasePr(
+    wave: WaveId,
+    pr: number,
+    head: string,
+  ): Promise<{ sha: string } | { reason: string }> {
+    const log = this.waves.get(wave);
+    const st = log?.record.state;
+    const release = st?.release;
+    const go = Object.values(log?.record.decisions ?? {})
+      .filter((d) => d.kind === "release_go" && d.resolved?.answer.trim().toLowerCase() === "go")
+      .at(-1);
+    if (st == null || release?.pr === undefined || release.default_branch === undefined)
+      return { reason: "no release PR journaled" };
+    if (release.pr.number !== pr || release.pr.head !== head || go === undefined)
+      return { reason: `#${pr} at ${head.slice(0, 7)} is not the release PR the go answered` };
+    let token: ReleaseToken;
+    try {
+      token = mintReleaseToken({
+        wave,
+        pr,
+        head,
+        release_branch: st.release_branch,
+        decision_id: go.decision_id,
+      });
+    } catch (e) {
+      return { reason: e instanceof Error ? e.message : String(e) };
+    }
+    const gh = this.ghFor(log?.record.wave?.repo);
+    const io: ExecFn = (argv, opts = {}) =>
+      gh.exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
+    const out = await mergeRelease(io, token, release.default_branch, gh.cwd);
+    if (!out.ok) return { reason: out.stderr || out.reason };
+    if (out.merge_sha !== null) return { sha: out.merge_sha };
+    // Merged, its commit not read back: read once more (a ship stage runs at it).
+    const view = await io(["gh", "pr", "view", String(pr), "--json", "mergeCommit"], {
+      cwd: gh.cwd,
+    }).catch(() => null);
+    try {
+      const oid = (JSON.parse(view?.stdout ?? "") as { mergeCommit?: { oid?: unknown } })
+        .mergeCommit?.oid;
+      if (typeof oid === "string" && oid !== "") return { sha: oid };
+    } catch {}
+    return { reason: `#${pr} merged, but its merge commit could not be read` };
+  }
+
+  /** The release PR merged: the issue lifecycle's release check now, not on its poll. */
+  private releaseMergedIssues(wave: WaveId, pr: number): void {
+    const gh = this.ghFor(this.waves.get(wave)?.record.wave?.repo);
+    this.releasePolledAt.set(wave, this.now());
+    void this.track(
+      this.verifyIssues(wave, gh, pr)
+        .then(() => undefined)
+        .catch((e: unknown) =>
+          this.log(`${wave}: issues: ${e instanceof Error ? e.message : String(e)}`),
+        ),
+    );
+  }
+
   /** Level-triggered: a releasing wave's train enters its next stage, or retries a held spawn. */
   private async releaseAdvance(wave: WaveId): Promise<void> {
-    if (this.opts.spawner === undefined) return;
     if (this.waves.get(wave)?.record.state?.status !== "releasing") return;
     try {
       await this.releaseFor(wave).handle({ kind: "advance" });
@@ -8975,17 +9117,60 @@ export class Daemon {
     const closes = Array.isArray(started?.data.closes)
       ? (started.data.closes as unknown[]).filter((n): n is number => typeof n === "number")
       : [];
+    // The stage as its agent sees it: `{{version}}` and friends substituted (SPEC §4.6.19).
+    const train = rec.state.release;
+    const vars = {
+      wave,
+      release_branch: rec.state.release_branch,
+      ...(train?.version !== undefined ? { version: train.version } : {}),
+      ...(train?.date !== undefined ? { date: train.date } : {}),
+      ...(train?.default_branch !== undefined ? { default_branch: train.default_branch } : {}),
+      ...(train?.merged_sha !== undefined ? { merged_sha: train.merged_sha } : {}),
+    };
+    const resolved = substituteStage(stage, vars);
+    const ship = train !== undefined ? shipTarget({ train }, stage) : undefined;
+    if (stage.phase === "ship" && ship === undefined) {
+      this.log(`spawn ${key} (${stage.name}): held, the release PR is not merged`);
+      return;
+    }
     const files = {
-      "stage.md": renderStageMd(stage, {
+      "stage.md": renderStageMd(resolved, {
         wave,
         release_branch: rec.state.release_branch,
         attempt,
         closes,
+        ...(ship !== undefined ? { ship } : {}),
       }),
     };
-    void this.startSpawn(wave, RELEASE_TASK, "release", { stage, files }).catch((e: unknown) => {
+    const failed = (e: unknown) =>
       this.log(`spawn ${key} (${stage.name}): ${e instanceof Error ? e.message : String(e)}`);
-    });
+    if (ship === undefined) {
+      void this.startSpawn(wave, RELEASE_TASK, "release", { stage: resolved, files }).catch(failed);
+      return;
+    }
+    // A ship stage runs detached at the merge commit on the default branch (the release branch is
+    // gone): the default branch is fetched first, so the commit is in the clone.
+    if (this.shipFetching.has(key)) return;
+    this.shipFetching.add(key);
+    const repo = expandHome(rec.wave.repo);
+    void (async () => {
+      try {
+        await lockFetches(
+          this.host.exec,
+          LOCAL_HOST,
+          repo,
+        )(["git", "-C", repo, "fetch", "--quiet", "origin", ship.default_branch], {
+          timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms,
+        });
+      } finally {
+        this.shipFetching.delete(key);
+      }
+      await this.startSpawn(wave, RELEASE_TASK, "release", {
+        stage: resolved,
+        files,
+        start: { ref: ship.merged_sha, detach: true },
+      });
+    })().catch(failed);
   }
 
   /**
@@ -9946,7 +10131,11 @@ export class Daemon {
     // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
     const watch = await watchAgent(this.broker, ns, id, this.time, this.progressFeed);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
-    const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
+    // A release stage's agent has no PR of its own to probe (a ship stage's is detached, too).
+    const branchName =
+      typeof t.spawned.branch === "string" && t.task !== RELEASE_TASK
+        ? t.spawned.branch
+        : undefined;
     const role =
       typeof t.spawned.role === "string" && isRole(t.spawned.role) ? t.spawned.role : "implementer";
     let r: Reconciliation;
@@ -10282,9 +10471,13 @@ export class Daemon {
               (event.type === "stage_entered" && event.data.stage === "done"))
           ? [event.task]
           : [];
-    // The last stage of the release train verified: the owner's release_go (SPEC §4.6.19).
-    if (event.type === "release_stage_verified" || event.type === "release_stage_skipped")
-      await this.releaseGoIfVerified(wave);
+    // Past a verified or skipped stage the train advances (release_go included); its own handle,
+    // when it journaled the event, advances to the end itself.
+    if (
+      (event.type === "release_stage_verified" || event.type === "release_stage_skipped") &&
+      !this.releaseFor(wave).busy
+    )
+      await this.releaseAdvance(wave);
     if (event.type === "release_cancelled")
       this.log(
         `wave ${wave}: release train cancelled at ${String(event.data.stage)} by ${String(event.data.by)}`,
@@ -10765,12 +10958,6 @@ export class Daemon {
     if (d.kind === "repo_untrusted" && r.answer.trim().toLowerCase() === "cancel")
       await this.onTrustCancelled(wave, d, r.by);
     if (d.kind === "terminal_status_lost") await this.onTerminalLostResolved(wave, d);
-    if (d.kind === "release_go") {
-      // go: the release is the owner's, and done. Anything else holds it: asked again.
-      if (r.answer.trim().toLowerCase() === "go")
-        await this.append(wave, { type: "release_done", data: { by: r.by, decision_id: id } });
-      else await this.releaseGoIfVerified(wave);
-    }
     if (d.kind === "remote_repo_missing" && d.task !== null) {
       // `add`: the repository is added to that one machine (repo_add's run), then retried.
       const slug = (d as { slug?: unknown }).slug;
@@ -10843,8 +11030,14 @@ export class Daemon {
       }
       // "retry now" on a task: the next tick spawns it.
     }
-    // A release stage's question (stage_go, a failed stage's agent_blocked): the train's answer.
-    if (stageOf(d) !== undefined && this.opts.spawner !== undefined)
+    // A release stage's question (stage_go, a failed stage's agent_blocked), release_go (go:
+    // merge the release PR, then the ship stages; hold: asked again) and a red release PR's
+    // retry / hold: the train's answer (SPEC §4.6.19).
+    if (
+      d.kind === "release_go" ||
+      d.kind === "release_pr_ci_failed" ||
+      (stageOf(d) !== undefined && this.opts.spawner !== undefined)
+    )
       void this.enqueue(() =>
         this.releaseFor(wave).handle({ kind: "decision_resolved", decision: d }),
       );

@@ -260,10 +260,23 @@ export interface MergeQueueEntry {
   since: string;
 }
 
-/** wave-state `release` (SPEC §4.6.19): the train's stage in play and every stage's state. */
+/**
+ * wave-state `release` (SPEC §4.6.19): the train's stage in play and every stage's state (a ship
+ * stage marked `phase: ship`); the version, the release PR and its merge commit once known.
+ */
 export interface WaveRelease {
   stage: string | null;
-  stages: { name: string; state: "pending" | "awaiting_go" | "running" | "verified" | "failed" }[];
+  stages: {
+    name: string;
+    state: "pending" | "awaiting_go" | "running" | "verified" | "failed" | "skipped";
+    phase?: "ship";
+  }[];
+  phase?: "prepare" | "ship";
+  version?: string;
+  date?: string;
+  default_branch?: string;
+  pr?: { number: number; head: string; title?: string };
+  merged_sha?: string;
 }
 
 export interface WaveStatePayload {
@@ -348,6 +361,7 @@ export const DECISION_KINDS = [
   "merge_refused",
   "release_go",
   "stage_go",
+  "release_pr_ci_failed",
   "terminal_status_lost",
   "churn_exhausted",
 ] as const;

@@ -6,10 +6,15 @@ import { stringify } from "yaml";
 import {
   DEFAULT_PLAYBOOK,
   PlaybookError,
+  type PlaybookStage,
   formatPlaybook,
+  nextVersion,
   parsePlaybook,
   playbookPath,
   readPlaybook,
+  releaseDate,
+  substitute,
+  substituteStage,
   trainState,
   wavePlaybook,
 } from "../src/autopilot/playbook";
@@ -39,12 +44,103 @@ describe("parsePlaybook", () => {
     expect(p.version).toBe(1);
     expect(p.stages.map((s) => s.name)).toEqual(EXAMPLE.stages.map((s) => s.name));
     for (const s of p.stages) expect(["auto", "owner"]).toContain(s.gate);
-    expect(p.stages.some((s) => s.gate === "owner")).toBe(true);
-    // A stage without gate: is auto; without run: has none.
+    // A stage without gate: is auto; without run: has none; without phase: prepare.
     const bare = parsePlaybook("version: 1\nstages:\n  - { name: smoke, brief: Run the smoke. }\n");
     expect(bare.stages).toEqual([
-      { name: "smoke", brief: "Run the smoke.", run: [], gate: "auto" },
+      { name: "smoke", brief: "Run the smoke.", run: [], gate: "auto", phase: "prepare" },
     ]);
+  });
+
+  it("the Volley repository's own playbook is the spec example: bump, release-pr, tag, deploy", () => {
+    const own = readFileSync(new URL("../../../.volley/release.yaml", import.meta.url), "utf-8");
+    const p = parsePlaybook(own, ".volley/release.yaml");
+    expect(p).toEqual(parsePlaybook(stringify(EXAMPLE)));
+    expect(p.stages.map((s) => [s.name, s.phase, s.gate])).toEqual([
+      ["bump", "prepare", "auto"],
+      ["release-pr", "prepare", "auto"],
+      ["tag", "ship", "auto"],
+      ["deploy", "ship", "auto"],
+    ]);
+    expect(p.stages[0]?.run).toEqual([
+      ["bun", "scripts/release-version.ts", "--set", "{{version}}"],
+      ["bun", "run", "changelog", "--version", "{{version}}", "--date", "{{date}}"],
+    ]);
+    expect(p.stages[1]?.verify).toEqual({ release_pr: true });
+    expect(p.stages[2]?.verify).toEqual({ tag: "v{{version}}" });
+    expect(p.stages[3]?.run).toEqual([["volley", "deploy", "v{{version}}"]]);
+    expect(p.stages[3]?.verify).toEqual({ result: { deployed: "v{{version}}" } });
+  });
+
+  it("phase defaults to prepare; phase: later is a path-qualified error", () => {
+    expect(errorsOf("version: 1\nstages:\n  - { name: a, brief: b, phase: later }\n")).toEqual([
+      expect.objectContaining({ path: "stages[0].phase" }),
+    ]);
+  });
+
+  it("an unknown {{variable}} is refused where it is written", () => {
+    const yaml = [
+      "version: 1",
+      "stages:",
+      "  - name: bump",
+      "    brief: Bump to {{version}}.",
+      "    run:",
+      "      - [git, status]",
+      "      - [bun, run, changelog, --version, '{{ver}}']",
+      "",
+    ].join("\n");
+    expect(errorsOf(yaml)).toEqual([
+      { path: "stages[0].run[1][4]", reason: "unknown variable {{ver}}" },
+    ]);
+    expect(errorsOf("version: 1\nstages:\n  - { name: a, brief: 'at {{merged_sha}}' }\n")).toEqual([
+      { path: "stages[0].brief", reason: "{{merged_sha}} is known in a ship stage only" },
+    ]);
+    expect(
+      errorsOf(
+        "version: 1\nstages:\n  - { name: a, brief: b, verify: { tag: 'v{{tag}}', result: { x: '{{y}}' } } }\n",
+      ),
+    ).toEqual([
+      { path: "stages[0].verify.tag", reason: "unknown variable {{tag}}" },
+      { path: "stages[0].verify.result.x", reason: "unknown variable {{y}}" },
+    ]);
+  });
+
+  it("a ship stage never verifies commits_on_release, and needs a prepare stage verifying release_pr", () => {
+    const pr = "  - { name: pr, brief: Open it., verify: { release_pr: true } }\n";
+    expect(
+      errorsOf(
+        `version: 1\nstages:\n${pr}  - { name: tag, brief: t, phase: ship, verify: { commits_on_release: true } }\n`,
+      ),
+    ).toEqual([
+      {
+        path: "stages[1].verify.commits_on_release",
+        reason: "a ship stage pushes nothing but a tag (the release branch is merged and gone)",
+      },
+    ]);
+    expect(errorsOf("version: 1\nstages:\n  - { name: tag, brief: t, phase: ship }\n")).toEqual([
+      {
+        path: "stages[0].phase",
+        reason:
+          "a ship stage needs a prepare stage that verifies release_pr (the PR volleyd merges on the go)",
+      },
+    ]);
+    expect(
+      errorsOf(`version: 1\nstages:\n  - { name: tag, brief: t, phase: ship }\n${pr}`).map(
+        (e) => e.path,
+      ),
+    ).toEqual(["stages[1].phase"]);
+  });
+
+  it("substituteStage fills brief, run elements, verify.tag and verify.result values", () => {
+    const [s] = parsePlaybook(stringify(EXAMPLE)).stages.slice(3);
+    const vars = { version: "0.13.3", date: "2026-10-25", wave: "w1" };
+    const deploy = substituteStage(s as PlaybookStage, vars);
+    expect(deploy.run).toEqual([["volley", "deploy", "v0.13.3"]]);
+    expect(deploy.verify).toEqual({ result: { deployed: "v0.13.3" } });
+    expect(deploy.brief).toContain("Deploy v0.13.3");
+    const tag = substituteStage(parsePlaybook(stringify(EXAMPLE)).stages[2] as PlaybookStage, vars);
+    expect(tag.verify?.tag).toBe("v0.13.3");
+    // A variable not known yet is left as written.
+    expect(substitute("{{merged_sha}} {{version}}", vars)).toBe("{{merged_sha}} 0.13.3");
   });
 
   it("a duplicate stage name is reported at the second one", () => {
@@ -79,6 +175,45 @@ describe("parsePlaybook", () => {
     expect(() => parsePlaybook("version: 2\nstages: []\n", "x/release.yaml")).toThrow(
       /^RELEASE_PLAYBOOK_INVALID: x\/release\.yaml: invalid release playbook:\n {2}version: /,
     );
+  });
+});
+
+describe("nextVersion (SPEC §4.6.19)", () => {
+  const tags = ["refs/tags/v0.13.2", "refs/tags/v0.13.1", "refs/tags/v0.14.0-rc.1", "v0.9.0"];
+  it("the newest release tag, patch-bumped by fixed/changed/docs fragments", () => {
+    expect(nextVersion(tags, ["changes/600.fixed.md", "changes/README.md"])).toEqual({
+      version: "0.13.3",
+      newest: "v0.13.2",
+    });
+    expect(nextVersion(tags, ["changes/601.docs.md", "changes/602.changed.md"])).toMatchObject({
+      version: "0.13.3",
+    });
+    expect(nextVersion(tags, [])).toMatchObject({ version: "0.13.3" });
+  });
+  it("minor on any added or removed fragment", () => {
+    expect(nextVersion(tags, ["changes/1.fixed.md", "changes/2.added.md"])).toMatchObject({
+      version: "0.14.0",
+    });
+    expect(nextVersion(tags, ["3.removed.md"])).toMatchObject({ version: "0.14.0" });
+    expect(nextVersion(["v1.2.3"], ["4.added.md"])).toMatchObject({ version: "1.3.0" });
+  });
+  it("no tag: 0.1.0", () => {
+    expect(nextVersion([], ["1.added.md"])).toEqual({ version: "0.1.0" });
+    expect(nextVersion(["v0.14.0-rc.1"], [])).toEqual({ version: "0.1.0" });
+  });
+  it("release_version overrides, refused unless greater than the newest tag", () => {
+    expect(nextVersion(tags, ["1.fixed.md"], "1.0.0")).toEqual({
+      version: "1.0.0",
+      newest: "v0.13.2",
+    });
+    expect(nextVersion(tags, [], "0.13.2")).toEqual({
+      error: "release_version 0.13.2 is not greater than the newest tag v0.13.2",
+    });
+    expect(nextVersion(tags, [], "1.0")).toEqual({ error: "release_version 1.0 is not X.Y.Z" });
+    expect(nextVersion([], [], "0.0.1")).toEqual({ version: "0.0.1" });
+  });
+  it("releaseDate is the UTC day", () => {
+    expect(releaseDate(Date.parse("2026-10-25T23:59:59Z"))).toBe("2026-10-25");
   });
 });
 
@@ -164,6 +299,7 @@ describe("trainState", () => {
   it("started → every stage pending; entered → running (the current stage); verified", () => {
     expect(trainState([started])).toEqual({
       stage: null,
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "pending" },
         { name: "deploy", state: "pending" },
@@ -175,6 +311,7 @@ describe("trainState", () => {
       trainState([started, entered, ev("release_stage_verified", { stage: "smoke" })]),
     ).toEqual({
       stage: null,
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "verified" },
         { name: "deploy", state: "pending" },
@@ -189,6 +326,7 @@ describe("trainState", () => {
     ]);
     expect(s).toEqual({
       stage: "deploy",
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "pending" },
         { name: "deploy", state: "awaiting_go" },

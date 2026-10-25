@@ -1,0 +1,42 @@
+# Volley's own release playbook (SPEC §4.6.19; packages/volleyd/README.md, "The release train").
+# A wave on this repository runs it once every task is merged into its release branch: the
+# prepare stages bump the version and open the release PR; the owner's one `release_go` go has
+# volleyd squash-merge that PR (deleting the release branch), then run the ship stages at the
+# merge commit. volleyd resolves {{version}} from the newest v* tag and the change fragments.
+version: 1
+stages:
+  - name: bump
+    brief: >-
+      Bump every package to {{version}} and assemble CHANGELOG.md's {{version}} section
+      ({{date}}) from changes/. Then commit everything both commands changed as
+      `release: v{{version}} — <theme>` (<theme>: a few words naming what the section ships) and
+      push it to the release branch: `git push origin HEAD:{{release_branch}}`.
+    run:
+      - [bun, scripts/release-version.ts, --set, "{{version}}"]
+      - [bun, run, changelog, --version, "{{version}}", --date, "{{date}}"]
+    verify: { commits_on_release: true, files: [CHANGELOG.md] }
+  - name: release-pr
+    brief: >-
+      Open the release PR: `gh pr create --base {{default_branch}} --head {{release_branch}}
+      --label no-changelog --title 'release: v{{version}} — <theme>'` (the theme of the bump
+      commit), its body the changelog section's bullets and then the Closes lines under "Release
+      PR body", each exactly as written. Never merge it: volleyd squash-merges it on the owner's
+      release_go.
+    verify: { release_pr: true }
+  - name: tag
+    phase: ship
+    brief: >-
+      Tag the release's merge commit (your HEAD) with the annotated tag v{{version}} and push the
+      tag, nothing else.
+    run:
+      - [git, tag, -a, "v{{version}}", -m, "v{{version}}"]
+      - [git, push, origin, "v{{version}}"]
+    verify: { tag: "v{{version}}" }
+  - name: deploy
+    phase: ship
+    brief: >-
+      Deploy v{{version}} to the supervisor and its paired machines. Publish your stage result
+      with `deployed: "v{{version}}"` once `volley deploy` exits 0.
+    run:
+      - [volley, deploy, "v{{version}}"]
+    verify: { result: { deployed: "v{{version}}" } }

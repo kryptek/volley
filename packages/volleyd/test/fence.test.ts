@@ -33,6 +33,7 @@ import {
   mintModelSwitchToken,
   mintPickerToken,
   mintProfileRemoveToken,
+  mintReleaseToken,
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
@@ -1570,6 +1571,87 @@ describe("merge token (autopilot merging)", () => {
   it("refuses to mint over a short head or a non-positive PR", () => {
     expect(() => token(7, "abc1234")).toThrow(FenceError);
     expect(() => token(0)).toThrow(FenceError);
+  });
+});
+
+describe("release token (the release PR, SPEC §4.6.19)", () => {
+  const H = "a".repeat(40);
+  const H2 = "b".repeat(40);
+  const release = (pr = 12, head = H) =>
+    mintReleaseToken({
+      wave: "w",
+      pr,
+      head,
+      release_branch: "release/w",
+      decision_id: "release_go-w",
+    });
+  const MERGE = [
+    "gh",
+    "pr",
+    "merge",
+    "12",
+    "--squash",
+    "--match-head-commit",
+    H,
+    "--delete-branch",
+  ];
+
+  it("allows exactly the release PR's squash at its head, deleting the release branch", () => {
+    expect(() => assertAllowed(MERGE, { release: release() })).not.toThrow();
+    expect(() => assertAllowed([...MERGE, "--repo", "o/n"], { release: release() })).not.toThrow();
+  });
+
+  it("is denied with a MergeToken, a TrainToken, no token, another PR or another head", () => {
+    expect(() => assertAllowed(MERGE)).toThrow(/FENCE_DENIED: gh pr merge/);
+    const merge = mintMergeToken({ wave: "w", task: "T1", pr: 13, head: H2, release_branch: "x" });
+    expect(() => assertAllowed(MERGE, { merge })).toThrow(FenceError);
+    const train = mintTrainToken({
+      train: "train-1",
+      pr: 12,
+      head: H,
+      release_branch: "release/w",
+      members: [
+        { task: "T1", head: H },
+        { task: "T2", head: H2 },
+      ],
+    });
+    expect(() => assertAllowed(MERGE, { train })).toThrow(FenceError);
+    expect(() => assertAllowed(MERGE, { release: release(13) })).toThrow(FenceError);
+    expect(() => assertAllowed(MERGE, { release: release(12, H2) })).toThrow(FenceError);
+  });
+
+  it("denies --admin, other strategies and a merge that keeps the release branch", () => {
+    const t = release();
+    for (const argv of [
+      ["gh", "pr", "merge", "12", "--squash", "--match-head-commit", H],
+      [...MERGE, "--admin"],
+      [...MERGE, "--auto"],
+      ["gh", "pr", "merge", "12", "--merge", "--match-head-commit", H, "--delete-branch"],
+      ["gh", "pr", "merge", "12", "--rebase", "--match-head-commit", H, "--delete-branch"],
+      ["gh", "pr", "merge", "12", "--squash", "--delete-branch", "--match-head-commit", H],
+    ])
+      expect(() => assertAllowed(argv, { release: t }), argv.join(" ")).toThrow(FenceError);
+    for (const argv of [
+      ["git", "push"],
+      ["git", "merge", "x"],
+      ["gh", "workflow", "run", "ci"],
+    ])
+      expect(() => assertAllowed(argv, { release: t }), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("is checked by identity, frozen, and minted only over a PR number and a full sha", async () => {
+    const forged = {
+      wave: "w",
+      pr: 12,
+      head: H,
+      release_branch: "release/w",
+      decision_id: "d",
+    } as unknown as ReturnType<typeof mintReleaseToken>;
+    expect(() => assertAllowed(MERGE, { release: forged })).toThrow(FenceError);
+    await expect(exec(MERGE, { release: forged })).rejects.toThrow(FenceError);
+    expect(Object.isFrozen(release())).toBe(true);
+    expect(() => release(0)).toThrow(FenceError);
+    expect(() => release(12, "abc1234")).toThrow(FenceError);
   });
 });
 

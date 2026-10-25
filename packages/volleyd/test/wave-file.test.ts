@@ -136,6 +136,17 @@ describe("parseWaveFile", () => {
     ]);
   });
 
+  it("release_version: 0.14.0 is carried; release_version: 14 is an error at release_version", () => {
+    const w = parseWaveFile(`${HEADER}release_version: 0.14.0\ntasks:\n  T1: { issue: 1 }\n`);
+    expect(w.release_version).toBe("0.14.0");
+    expect(parseWaveFile(`${HEADER}tasks:\n  T1: { issue: 1 }\n`).release_version).toBeUndefined();
+    const errs = errorsOf(`${HEADER}release_version: 14\ntasks:\n  T1: { issue: 1 }\n`);
+    expect(errs.map((e) => e.split(":")[0])).toEqual(["release_version"]);
+    expect(errorsOf(`${HEADER}release_version: v1.0.0\ntasks:\n  T1: { issue: 1 }\n`)[0]).toMatch(
+      /^release_version: /,
+    );
+  });
+
   it("rejects an unknown after target with a path-qualified error", () => {
     const errs = errorsOf(
       `${HEADER}tasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n  T3: { issue: 3, after: [T1, T9] }\n`,

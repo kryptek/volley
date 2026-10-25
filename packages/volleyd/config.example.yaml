@@ -148,7 +148,9 @@
 # autopilot:
 #   enabled: true                # false: every decision waits for the owner (next decision on)
 #   owner_only: [plan_change, repo_untrusted, model_switch, release_go, stage_go]
-#                                # kinds only the owner answers: always escalated
+#                                # kinds only the owner answers: always escalated (release_go's
+#                                # go also merges the release PR and runs the playbook's ship
+#                                # stages; README "The release train")
 #   relaunch_max: 1              # relaunches of one <task>/<role> after a bad launch
 #   nudge_max: 1                 # extra nudges of one stalled run (<task>/<role>/<attempt>)
 #   respawn_max: 1               # respawns of one <task>/<role>

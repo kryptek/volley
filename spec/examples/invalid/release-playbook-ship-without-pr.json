@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "stages": [
+    { "name": "bump", "brief": "Bump the version.", "verify": { "commits_on_release": true } },
+    {
+      "name": "tag",
+      "phase": "ship",
+      "brief": "Tag the merge commit.",
+      "verify": { "tag": "v{{version}}" }
+    }
+  ]
+}

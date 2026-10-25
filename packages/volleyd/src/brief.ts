@@ -68,6 +68,8 @@ export interface BriefVars {
   stage_brief: string;
   stage_commands: string;
   stage_verify: string;
+  /** Where the stage's worktree is cut from and where its pushes go (prepare or ship). */
+  stage_rules: string;
 }
 
 /** The fields of an issue a brief names. */
@@ -143,6 +145,7 @@ export const NO_STAGE = {
   stage_brief: "",
   stage_commands: "",
   stage_verify: "",
+  stage_rules: "",
 } as const;
 
 /**

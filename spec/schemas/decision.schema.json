@@ -49,6 +49,7 @@
                 "merge_refused",
                 "release_go",
                 "stage_go",
+                "release_pr_ci_failed",
                 "terminal_status_lost",
                 "churn_exhausted"
               ]
@@ -121,6 +122,21 @@
               "type": "string",
               "minLength": 1,
               "description": "stage_go: the release playbook stage (spec section 4.6.19) that runs only on go."
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1,
+              "description": "release_go: the release's version (spec section 4.6.19)."
+            },
+            "pr": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "release_go, release_pr_ci_failed: the release PR (spec section 4.6.19)."
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$",
+              "description": "release_pr_ci_failed: the release PR's head whose CI is red."
             },
             "stages": {
               "type": "array",

@@ -231,10 +231,10 @@ describe("validateReleaseMerge (#313: release PRs pass the changelog guards)", (
     );
     expect(validateReleaseMerge(bare).errors.join(" ")).toContain("gh pr merge must name its PR");
   });
-  it("names the PR on every merge in the shipped SKILL.md (the coordinator sits on release-prep/<v>)", () => {
+  it("names the PR on every merge in the shipped SKILL.md, and cuts no rc or release-prep branch (#609)", () => {
     const section = releaseMergeSection(splitFrontmatter(SHIPPED).body) ?? "";
-    expect(section).toContain("gh pr merge release-prep/<v> --squash");
     expect(section).toContain("gh pr merge release/<date>-<theme> --squash");
+    expect(section).not.toMatch(/release-prep|rc\/v|gh workflow run/);
     expect(section).not.toMatch(/gh pr merge --/);
   });
   it("guards the shipped SKILL.md's release section", () => {

@@ -85,14 +85,14 @@ describe("briefs/release.md.tmpl", () => {
   it("renders with no placeholder left, the stage's commands and the protocol block", () => {
     const brief = renderBrief(loadTemplate("release"), {
       ...VARS,
-      ...stageBriefVars(BUMP, "release/w1"),
+      ...stageBriefVars(BUMP, "release/w1", "/path/to/wt"),
     });
     expect(brief).not.toContain("{{");
     expect(brief).toMatch(/^# Release stage `bump` of wave w1/);
     expect(brief).toContain(".volley/stage.md");
     expect(brief).toContain("bun run changelog --version 0.5.0 --commit");
     expect(brief).toContain('type="stage", payload={ "stage": "bump"');
-    expect(brief).toContain("never deploy to production");
+    expect(brief).toContain("never deploy: deploying is a ship stage's");
     expect(brief).toContain("## Volley protocol (mandatory)");
     expect(brief).not.toMatch(/vol_register/);
   });

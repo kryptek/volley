@@ -1,3 +1,4 @@
+import { RELEASE_TASK } from "./autopilot/release-train";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
 import type { WaveRecord } from "./reducer";
@@ -25,7 +26,8 @@ export type ReconcileAction = "mark_done_verified" | "re_wait" | "respawn_needed
 
 export interface TaskFacts {
   task: TaskId;
-  stage: TaskStage;
+  /** The task's stage, or `release <stage>` for a release stage's agent (the `_release` task). */
+  stage: TaskStage | `release ${string}`;
   agent_id: string;
   role: string;
   /** A retained registry entry exists. */
@@ -85,7 +87,7 @@ export function reconcileTask(f: TaskFacts, now: number, staleMs: number): Recon
 /** A task's current agent: the latest `agent_spawned` of its current role not yet retired. */
 export interface ReconcileTarget {
   task: TaskId;
-  stage: TaskStage;
+  stage: TaskStage | `release ${string}`;
   agent_id: string;
   /** The `agent_spawned` data (role, workspace, branch, lock, credentials, …). */
   spawned: Record<string, unknown>;
@@ -94,6 +96,8 @@ export interface ReconcileTarget {
 /**
  * Every unsettled task's current agents: per (task, role) the latest `agent_spawned` (an earlier
  * one was superseded), unless it was retired. In the journal order of each role's first spawn.
+ * A release stage's agent (the `_release` pseudo task) is one while its stage runs: a ship stage
+ * that restarts volleyd (`volley deploy`) is adopted again like any task's agent.
  */
 export function reconcileTargets(
   rec: WaveRecord,
@@ -111,6 +115,15 @@ export function reconcileTargets(
   for (const e of latest.values()) {
     const id = e.data.agent_id as string;
     if (retired.has(id)) continue;
+    if (e.task === RELEASE_TASK) {
+      const stage = e.data.stage;
+      const running = rec.state?.release?.stages.some(
+        (s) => s.name === stage && s.state === "running",
+      );
+      if (typeof stage === "string" && running === true)
+        out.push({ task: e.task, stage: `release ${stage}`, agent_id: id, spawned: e.data });
+      continue;
+    }
     const t = rec.state?.tasks.find((x) => x.id === e.task);
     if (t === undefined || SETTLED.has(t.stage)) continue;
     out.push({ task: e.task, stage: t.stage, agent_id: id, spawned: e.data });

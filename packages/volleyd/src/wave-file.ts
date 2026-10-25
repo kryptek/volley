@@ -83,6 +83,7 @@ interface RawWave {
   merge?: MergeMode;
   ci?: CiOverride;
   playbook?: string;
+  release_version?: string;
 }
 
 /**
@@ -353,6 +354,7 @@ function normalise(w: RawWave, placement: "auto" | "local"): Wave {
     ...(w.merge !== undefined ? { merge: w.merge } : {}),
     ...(w.ci !== undefined ? { ci: w.ci } : {}),
     ...(w.playbook !== undefined ? { playbook: w.playbook } : {}),
+    ...(w.release_version !== undefined ? { release_version: w.release_version } : {}),
   };
   // The file's own overlap plan, as written: the Desk and `validate` read it before any run.
   if (planned) wave.overlap_plan = { clusters: filePlan(wave).clusters };

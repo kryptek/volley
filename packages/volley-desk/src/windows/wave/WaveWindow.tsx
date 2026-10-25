@@ -47,10 +47,10 @@
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactNode, useEffect, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useState } from "react";
 import { ciStuck } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
-import { issueHref, prHref, prLabel } from "../../lib/github";
+import { issueHref, prHref, prLabel, releasePrHref } from "../../lib/github";
 import { plural } from "../../lib/plural";
 import { RepoChip } from "../../look/RepoChip";
 import {
@@ -313,19 +313,44 @@ function QueueLine({ s }: { s: WaveStatePayload }) {
 }
 
 /** The release train's stages as plain rows (the inbox's release item draws the Stepper). */
-function TrainRows({ release }: { release: WaveRelease }) {
+function TrainRows({ release, github }: { release: WaveRelease; github?: unknown }) {
+  const pr = release.pr;
+  const href = pr !== undefined ? releasePrHref(github, pr.number) : null;
+  const firstShip = release.stages.findIndex((st) => st.phase === "ship");
   return (
-    <ul className="wave-train" aria-label="Release train">
-      {release.stages.map((st) => (
-        <li
-          key={st.name}
-          className={`train-${st.state}`}
-          {...(st.name === release.stage ? { "aria-current": "step" as const } : {})}
-        >
-          <span className="mono">{st.name}</span> · {st.state.replaceAll("_", " ")}
-        </li>
-      ))}
-    </ul>
+    <>
+      {(release.version !== undefined || pr !== undefined) && (
+        <div className="wave-train-head">
+          {release.version !== undefined && <span className="mono">v{release.version}</span>}
+          {release.version !== undefined && pr !== undefined && " · "}
+          {pr !== undefined &&
+            (href !== null ? (
+              <a href={href} target="_blank" rel="noreferrer" aria-label={prLabel(pr.number)}>
+                PR #{pr.number}
+              </a>
+            ) : (
+              <span>PR #{pr.number}</span>
+            ))}
+        </div>
+      )}
+      <ul className="wave-train" aria-label="Release train">
+        {release.stages.map((st, i) => (
+          <Fragment key={st.name}>
+            {i === firstShip && (
+              <li className="train-divider" aria-label="ship: after the release go">
+                ship
+              </li>
+            )}
+            <li
+              className={`train-${st.state}`}
+              {...(st.name === release.stage ? { "aria-current": "step" as const } : {})}
+            >
+              <span className="mono">{st.name}</span> · {st.state.replaceAll("_", " ")}
+            </li>
+          </Fragment>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -611,7 +636,9 @@ export function WaveWindow(p: WaveWindowProps) {
             />
             <HostChips tasks={s.tasks} />
             {!ended && (queue.length > 0 || trains.length > 0) && <QueueLine s={s} />}
-            {s.status === "releasing" && s.release && <TrainRows release={s.release} />}
+            {s.status === "releasing" && s.release && (
+              <TrainRows release={s.release} github={s.github} />
+            )}
             {fixers.length > 0 && (
               <ul className="wave-fixers" aria-label="Fixer tasks">
                 {fixers.map((t) => (

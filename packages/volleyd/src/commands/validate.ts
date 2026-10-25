@@ -404,7 +404,9 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
         ? `${formatBriefPreface(null)} (no ${prefacePath})`
         : formatBriefPreface(preface);
     const playbook = wavePlaybook(wave);
-    const playbookLine = formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null);
+    const playbookLine = formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null, {
+      phases: true,
+    });
     const cp = criticalPaths(wave);
     const longest = Math.max(...Object.values(cp));
     let placement = "";

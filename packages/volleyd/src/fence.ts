@@ -71,7 +71,12 @@ import { AGENT_BRANCH } from "./worktree";
  *       gh pr merge <n> --merge --match-head-commit <sha40>
  *     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
  *     heads it contains, read as merged. Never --squash.
- *   Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+ *   - a ReleaseToken (`mintReleaseToken`, minted only by the `release_go` go, from the release PR
+ *     a prepare stage verified, at its CI-green head; SPEC §4.6.19): exactly
+ *       gh pr merge <n> --squash --match-head-commit <sha40> --delete-branch
+ *     with <n> the release PR and <sha40> that head: the release branch is squash-merged into the
+ *     default branch and deleted. Never --merge, never without --delete-branch.
+ *   Any may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
  *   supervisor holds no clone of (#448).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
@@ -490,6 +495,40 @@ export function mintTrainToken(t: TrainToken): TrainToken {
   return token;
 }
 
+const releases = new WeakSet<object>();
+
+/**
+ * Permission to squash-merge one wave's release PR at exactly its CI-green head, deleting the
+ * release branch (the owner's `release_go` go, SPEC §4.6.19). Only `mintReleaseToken` creates
+ * one (checked by identity).
+ */
+export interface ReleaseToken {
+  readonly wave: string;
+  readonly pr: number;
+  readonly head: string;
+  readonly release_branch: string;
+  readonly decision_id: string;
+}
+
+/** Callers: the daemon's `release_go` go only, from the journaled release PR at its green head. */
+export function mintReleaseToken(t: ReleaseToken): ReleaseToken {
+  if (!Number.isSafeInteger(t.pr) || t.pr <= 0)
+    throw new FenceError(`gh pr merge ${t.pr}`, "not a PR number");
+  if (!SHA40.test(t.head))
+    throw new FenceError(`gh pr merge --match-head-commit ${t.head}`, "not a full commit sha");
+  if (t.release_branch === "" || t.decision_id === "")
+    throw new FenceError("gh pr merge (release)", "a release without its branch or go");
+  const token = Object.freeze({
+    wave: t.wave,
+    pr: t.pr,
+    head: t.head,
+    release_branch: t.release_branch,
+    decision_id: t.decision_id,
+  });
+  releases.add(token);
+  return token;
+}
+
 /**
  * A `--repo` value naming the repository a supervisor holds no clone of (#448): `owner/name`, or
  * `host/owner/name` off github.com.
@@ -499,19 +538,23 @@ const isRepoName = (v: string): boolean =>
 
 /**
  * `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` for a MergeToken's n and
- * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly; each
- * may end in exactly `--repo <owner/name>` (a wave the supervisor holds no clone of, #448).
+ * head, `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, or
+ * `gh pr merge <n> --squash --match-head-commit <head> --delete-branch` for a ReleaseToken's,
+ * exactly; each may end in exactly `--repo <owner/name>` (a wave the supervisor holds no clone
+ * of, #448).
  */
 function mergeVerdict(
   all: readonly string[],
   token: MergeToken | undefined,
   train: TrainToken | undefined,
+  release: ReleaseToken | undefined,
 ): Verdict {
   const repo = all.length >= 2 && all.at(-2) === "--repo" && isRepoName(all.at(-1) ?? "");
   const args = repo ? all.slice(0, -2) : all;
   const squash = token !== undefined && merges.has(token);
   const commit = train !== undefined && trains.has(train);
-  if (!squash && !commit) return deny("gh pr merge");
+  const rel = release !== undefined && releases.has(release);
+  if (!squash && !commit && !rel) return deny("gh pr merge");
   const is = (exact: readonly string[], extra?: string) =>
     (args.length === exact.length ||
       (extra !== undefined && args.length === exact.length + 1 && args[exact.length] === extra)) &&
@@ -522,7 +565,18 @@ function mergeVerdict(
         ["pr", "merge", String(token.pr), "--squash", "--match-head-commit", token.head],
         "--delete-branch",
       )) ||
-    (commit && is(["pr", "merge", String(train.pr), "--merge", "--match-head-commit", train.head]));
+    (commit &&
+      is(["pr", "merge", String(train.pr), "--merge", "--match-head-commit", train.head])) ||
+    (rel &&
+      is([
+        "pr",
+        "merge",
+        String(release.pr),
+        "--squash",
+        "--match-head-commit",
+        release.head,
+        "--delete-branch",
+      ]));
   return ok ? ALLOW : deny("gh pr merge (not the gated PR at its gated head)");
 }
 
@@ -1433,6 +1487,8 @@ export interface FenceOptions {
   merge?: MergeToken;
   /** For a merge train's `gh pr merge --merge`: the train's token for exactly its PR and head. */
   train?: TrainToken;
+  /** For the release PR's squash merge: the `release_go` go's token for its PR and green head. */
+  release?: ReleaseToken;
   /** For typing `/model <id>`: the approved switch. */
   modelSwitch?: ModelSwitchToken;
   /** For Up/Down/Space and a picker's Other text: the inbox item's picker answer. */
@@ -2155,7 +2211,7 @@ function issueLifecycle(all: string[]): Verdict | null {
 
 function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
-  if (two === "pr merge") return mergeVerdict(args, opts.merge, opts.train);
+  if (two === "pr merge") return mergeVerdict(args, opts.merge, opts.train, opts.release);
   if (two === "pr ready") return readyVerdict(args.slice(2));
   const lifecycle = issueLifecycle(args);
   if (lifecycle !== null) return lifecycle;

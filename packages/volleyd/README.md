@@ -1224,39 +1224,79 @@ wave state carries `tasks[].synthetic: true` and `tasks[].remediation` (with `te
 
 ### The release train
 
-What turns a merged release branch into a release (the version bump, the changelog, a staging
-deploy, a smoke run, the release notes) differs in every project, so volleyd does not know it: a
-repository tells it, in a **release playbook** at `<repo>/.volley/release.yaml`
+What turns a merged release branch into a release (the version bump, the changelog, the release
+PR, the tag, a deploy) differs in every project, so volleyd does not know it: a repository tells
+it, in a **release playbook** at `<repo>/.volley/release.yaml`
 (`spec/schemas/release-playbook.schema.json`, SPEC §4.6.19). Each stage is generic: a `brief`
-for the agent that runs it, the argv lines it runs (`run`, shown in its brief verbatim), the
-facts volleyd checks afterwards (`verify`) and who lets it start (`gate`):
+for the agent that runs it, the argv lines it runs (`run`, shown in its brief), the facts volleyd
+checks afterwards (`verify`), who lets it start (`gate`) and when it runs (`phase`: `prepare`,
+the default, before the owner's `release_go`; `ship`, after its `go`). This repository's own
+playbook (`.volley/release.yaml`, tracked) is the example:
 
 ```yaml
 version: 1
 stages:
   - name: bump
-    brief: Bump every package to the release version and assemble the changelog from changes/.
+    brief: >-
+      Bump every package to {{version}} and assemble CHANGELOG.md's {{version}} section
+      ({{date}}) from changes/. Then commit everything both commands changed as
+      `release: v{{version}} — <theme>` (<theme>: a few words naming what the section ships) and
+      push it to the release branch: `git push origin HEAD:{{release_branch}}`.
     run:
-      - [bun, run, changelog, --version, 0.5.0, --date, 2026-10-20, --commit]
+      - [bun, scripts/release-version.ts, --set, "{{version}}"]
+      - [bun, run, changelog, --version, "{{version}}", --date, "{{date}}"]
     verify: { commits_on_release: true, files: [CHANGELOG.md] }
-  - name: staging
-    brief: Deploy the release branch to staging and run the smoke checks against it.
+  - name: release-pr
+    brief: >-
+      Open the release PR: `gh pr create --base {{default_branch}} --head {{release_branch}}
+      --label no-changelog --title 'release: v{{version}} — <theme>'` (the theme of the bump
+      commit), its body the changelog section's bullets and then the Closes lines under "Release
+      PR body", each exactly as written. Never merge it: volleyd squash-merges it on the owner's
+      release_go.
+    verify: { release_pr: true }
+  - name: tag
+    phase: ship
+    brief: >-
+      Tag the release's merge commit (your HEAD) with the annotated tag v{{version}} and push the
+      tag, nothing else.
     run:
-      - [make, deploy-staging]
-      - [make, smoke]
-    verify: { result: { smoke: passed } }
-    timeout_s: 1800
-    heavy: staging          # a lease pool the stage holds while it runs
-  - name: notes
-    brief: Draft the release notes from the changelog section and tag the release.
-    gate: owner             # a stage_go decision asks before it runs
-    verify: { tag: "v*" }
+      - [git, tag, -a, "v{{version}}", -m, "v{{version}}"]
+      - [git, push, origin, "v{{version}}"]
+    verify: { tag: "v{{version}}" }
+  - name: deploy
+    phase: ship
+    brief: >-
+      Deploy v{{version}} to the supervisor and its paired machines. Publish your stage result
+      with `deployed: "v{{version}}"` once `volley deploy` exits 0.
+    run:
+      - [volley, deploy, "v{{version}}"]
+    verify: { result: { deployed: "v{{version}}" } }
 ```
 
+- **Variables**: `{{version}}`, `{{date}}`, `{{wave}}`, `{{release_branch}}`,
+  `{{default_branch}}` and, in a ship stage only, `{{merged_sha}}` are substituted in a stage's
+  `brief`, each `run` argv element, `verify.tag` and `verify.result` values, when its brief is
+  rendered and when it is verified. Nothing else is: argv stays shell-free, and an unknown
+  `{{name}}` is a path-qualified `RELEASE_PLAYBOOK_INVALID` (`stages[0].run[1][4]: unknown
+  variable {{ver}}`).
+- **The version**: at `release_started` volleyd reads the newest `v*` tag (`gh api
+  repos/{owner}/{repo}/git/matching-refs/tags/v`; a prerelease is never the base) and the
+  release branch's change fragments (`git ls-tree origin/<release> changes/`): **minor** when
+  any is `*.added.md` or `*.removed.md`, else **patch** (`0.1.0` with no tag), and the default
+  branch (`gh repo view --json defaultBranchRef`). A wave file's `release_version: X.Y.Z`
+  overrides the version (the only way to cut `1.0.0`; refused unless greater than the newest
+  tag). `release_started` journals `{ version, date, default_branch }`, the wave state carries
+  them in `release`, and `volleyd status` prints `release: v0.13.3 · bump running (0/4
+  verified)`. A playbook that needs them and cannot read them yet waits (logged once) and the
+  next tick reads again.
+- **Phases**: prepare stages come first. A ship stage pushes nothing but a tag (no
+  `commits_on_release`), and a playbook with one needs a prepare stage that verifies
+  `release_pr`: the PR volleyd merges on the go.
 - **Where**: `.volley/release.yaml` in the wave's repo; a wave file's `playbook: <path>`
   (relative to `repo`, or absolute) points elsewhere, and `playbook: none` opts the wave out.
-  `volleyd validate` and `volleyd run` print `release playbook: <path> (N stages, M
-  owner-gated)` or `release playbook: none`. A playbook that does not validate (or a configured
+  `volleyd run` prints `release playbook: <path> (N stages, M owner-gated)` or `release
+  playbook: none`; `volleyd validate` counts the phases too (`(4 stages: 2 prepare, 2 ship, 0
+  owner-gated)`), and the `/volley-issues` helper prints the line where the wave is made. A playbook that does not validate (or a configured
   one that does not exist) fails `validate` and refuses the wave at `run` with
   `RELEASE_PLAYBOOK_INVALID` and its path-qualified errors (`stages[1].name: duplicate stage
   'smoke'`).
@@ -1273,13 +1313,26 @@ stages:
   wave is submitted and again when it settles; `release_started` records the path and sha256 of
   the file used. A wave whose repo is not on volleyd's machine has no playbook to read, so it
   completes without a train.
-- **The end is always yours**: once every stage is `verified` (or `skipped`), volleyd opens `release_go`
-  (wave-level, options `go` and `hold`, with each stage's evidence in `stages`). It is
-  owner-only (`autopilot.owner_only`), so it rings. `go` journals `release_done { by,
-  decision_id }` and the wave is `complete`; `hold` (or any other answer) keeps it `releasing`
-  and asks again at once (the new decision carries `class: held`), so a held
-  `release_go` is straight back in the inbox. volleyd never deploys to production
-  on its own: a deploy-shaped stage says `gate: owner`.
+- **One go, and it is always yours**: once every prepare stage is `verified` (or `skipped`) and
+  the release PR's head is CI-green (read as a task PR's head is: `gh api
+  …/actions/runs?head_sha=`, once per `ci_poll_ms` while running, honouring `ci_mode`; a moved
+  head is journaled `release_pr_detected` again), volleyd opens `release_go` (wave-level, options
+  `go` and `hold`, with each stage's evidence in `stages`); its question names the version, the
+  PR and the first bullets of the changelog section on the release branch. It is owner-only
+  (`autopilot.owner_only`), so it rings. A red head opens `release_pr_ci_failed` instead (`retry`
+  reads CI again, `hold` asks again; never answered automatically). **`go`** squash-merges the
+  release PR at exactly that head, deleting the release branch (`gh pr merge <n> --squash
+  --match-head-commit <sha> --delete-branch`, under a `ReleaseToken` only the go mints; never
+  `--admin`), journals `release_merged { pr, sha }`, closes the wave's issues at once (below),
+  runs the ship stages at the merge commit, and journals `release_done { by, decision_id,
+  version, merged_sha }` after the last one: the wave is `complete` (and later archived under
+  `archive_ended_after_h`). A merge that does not happen journals `release_merge_failed { pr,
+  head, reason }` and asks `release_go` again with the reason. A playbook with no release PR
+  (and so no ship stage) completes on `go` at once, as before. `hold` (or any other answer)
+  keeps it `releasing` and asks again at once (the new decision carries `class: held`), so a
+  held `release_go` is straight back in the inbox. The go is the owner's authority for exactly
+  the ship stages the journaled playbook declares; a ship stage whose deploy is production says
+  `gate: owner` and asks `stage_go` too.
 - **Without a playbook** (or with autopilot off) nothing changes: the wave completes, and its
   `wave_complete` decision is auto-acknowledged under autopilot. A playbook that stopped
   validating since the wave was submitted is not run; the `wave_complete` question says why.
@@ -1294,17 +1347,21 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   launch, registration check, screen tail, liveness) under the pseudo task `_release` (no wave
   file task can be named that). It is `<wave>-release-<stage>-<n>`, on the branch
   `<wave>/release-<stage>-<n>`, in a worktree cut from the **release branch's tip** (a fresh
-  fetch; `require_fresh_base` applies). A stage agent counts toward `hard_ceiling` like a task's,
+  fetch; `require_fresh_base` applies); a ship stage's is **detached at the release's merge
+  commit** (`origin/<default>` fetched first), the release branch being gone. A stage agent
+  still running when volleyd restarts is reconciled and watched again like a task's, so the
+  `deploy` stage can restart volleyd under its own agent and still be verified. A stage agent counts toward `hard_ceiling` like a task's,
   and its spawn waits on the kill switch and the pressure verdict; the spawn budget does not
   apply (a stage runs again only on the owner's `respawn`). `volleyd spawn` refuses the role.
   A spawn that fails backs off and asks `spawn_failed` as a task's does, but wave-level: `retry
   now` spawns at once, `stop task` fails the stage (the `agent_blocked` decision below).
 - **The brief** (`briefs/release.md.tmpl`, and `.volley/stage.md` beside it): the stage's
-  `brief`, its `run` lines verbatim as the commands to run in order (stopping at the first that
-  exits non-zero), the `verify` facts it must leave true, and the result contract. A `heavy`
-  stage's brief says `volley lease acquire --pool <pool>` first. Any push goes to the release
-  branch as a fast-forward, `git push origin HEAD:<release>`: that is the agent's push, never
-  volleyd's.
+  `brief`, its `run` lines (variables substituted) as the commands to run in order (stopping at
+  the first that exits non-zero), the `verify` facts it must leave true, and the result
+  contract. A `heavy` stage's brief says `volley lease acquire --pool <pool>` first. A prepare
+  stage's push goes to the release branch as a fast-forward, `git push origin HEAD:<release>`; a
+  ship stage pushes nothing but its tag. Either is the agent's push, never volleyd's; the
+  release PR is the agent's `gh pr create`, and only its merge is volleyd's.
 - **The result contract**: before its `done` the agent publishes
   `vol_publish(channel="result", type="stage", payload={ stage, commands: [{ argv, code, seconds
   }], notes, artifacts: { tag?, files?, urls? } })` (`review-result.schema.json`).
@@ -1313,9 +1370,12 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   `commits_on_release` (`git fetch` + `rev-parse` + `merge-base --is-ancestor`: the tip moved
   past the stage's start, the recorded `base_sha` (unknown: the fact does not hold), and the
   agent's HEAD is on it);
-  `tag` (`gh api repos/{owner}/{repo}/git/matching-refs/tags/<prefix>`, a GET: a matching tag at
-  the tip); `files` (`git show origin/<release>:<path>` exits 0); `result` (each field with its
-  value). Verified: `$VOLLEYD_HOME/waves/<wave>/release/<stage>.md` and `.json` (the commands
+  `release_pr` (`gh pr list --head <release> --base <default> --state open --json
+  number,headRefOid,title,labels`: exactly one, labelled `no-changelog`, its title starting
+  `release:`; journaled `release_pr_detected { pr, head, title }`); `tag` (`gh api
+  repos/{owner}/{repo}/git/matching-refs/tags/<prefix>`, a GET: a matching tag at the tip; a
+  ship stage's at the merge commit); `files` (`git show origin/<release>:<path>` exits 0; a ship
+  stage's at the merge commit); `result` (each field with its value). Verified: `$VOLLEYD_HOME/waves/<wave>/release/<stage>.md` and `.json` (the commands
   and exit codes, the artifacts, each fact with its evidence line), `release_stage_verified {
   stage, head, evidence }`, the agent retired, and the next stage starts (or `release_go` opens,
   its `stages` pointing at every evidence file).
@@ -1347,7 +1407,8 @@ stays open, saying nothing, until the release PR reaches main. volleyd owns that
   never), `release_started` carries it, and every release stage's `.volley/stage.md` has a
   `## Release PR body` section with one `Closes #N` line per issue, so the release PR body is
   generated, not hand-written.
-- **When the release reaches main**: while the wave is `complete` volleyd looks for the release
+- **When the release reaches main**: volleyd's own merge of the release PR (the release train's
+  go) checks at once, in the same tick. Otherwise, while the wave is `complete` volleyd looks for the release
   branch's merged PR (`gh pr list --head <release> --state merged`, once per
   `release_merge_poll_ms`, 5 minutes, until the wave is archived); `volleyd issues <wave>
   --verify [--pr <n>]` runs the same check now for a release merged by hand (refused unless the
@@ -4646,7 +4707,12 @@ MERGE (only with a token, checked by identity like consent tokens; either unlock
       gh pr merge <n> --merge --match-head-commit <sha40>
     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
     heads it contains, read as merged. Never --squash.
-  Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+  - a ReleaseToken (`mintReleaseToken`, minted only by the `release_go` go, from the release PR
+    a prepare stage verified, at its CI-green head; SPEC §4.6.19): exactly
+      gh pr merge <n> --squash --match-head-commit <sha40> --delete-branch
+    with <n> the release PR and <sha40> that head: the release branch is squash-merged into the
+    default branch and deleted. Never --merge, never without --delete-branch.
+  Any may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
   supervisor holds no clone of (#448).
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a

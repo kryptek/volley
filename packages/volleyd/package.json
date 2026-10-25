@@ -7,6 +7,7 @@
   "type": "module",
   "bin": { "volleyd": "./src/cli.ts" },
   "exports": {
+    "./autopilot/playbook": "./src/autopilot/playbook.ts",
     "./claude/sharing": "./src/claude/sharing.ts",
     "./claude/usage": "./src/claude/usage.ts",
     "./config-defaults": "./src/config-defaults.ts",

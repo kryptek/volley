@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -335,8 +335,28 @@ describe("volleyd validate: the release playbook (SPEC §4.6.19)", () => {
     const r = await runCli(["validate", waveFile()]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(
-      "release playbook: .volley/release.yaml (2 stages, 1 owner-gated)\n",
+      "release playbook: .volley/release.yaml (2 stages: 2 prepare, 0 ship, 1 owner-gated)\n",
     );
+  });
+
+  it("the Volley repository's own playbook: two prepare stages, two ship stages", async () => {
+    copyFileSync(
+      new URL("../../../.volley/release.yaml", import.meta.url),
+      join(repo, ".volley", "release.yaml"),
+    );
+    const r = await runCli(["validate", waveFile()]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "release playbook: .volley/release.yaml (4 stages: 2 prepare, 2 ship, 0 owner-gated)\n",
+    );
+  });
+
+  it("release_version: 0.14.0 is the wave's; release_version: 14 is refused at its path", async () => {
+    const ok = await runCli(["validate", waveFile("release_version: 0.14.0\n")]);
+    expect(ok.exitCode).toBe(0);
+    const bad = await runCli(["validate", waveFile("release_version: 14\n")]);
+    expect(bad.exitCode).not.toBe(0);
+    expect(bad.stderr + bad.stdout).toMatch(/release_version: /);
   });
 
   it("playbook: <path> overrides it; playbook: none and no file both print none", async () => {
@@ -344,7 +364,7 @@ describe("volleyd validate: the release playbook (SPEC §4.6.19)", () => {
     const r = await runCli(["validate", waveFile(`playbook: ${join(repo, "release.yaml")}\n`)]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(
-      `release playbook: ${join(repo, "release.yaml")} (2 stages, 1 owner-gated)\n`,
+      `release playbook: ${join(repo, "release.yaml")} (2 stages: 2 prepare, 0 ship, 1 owner-gated)\n`,
     );
     for (const extra of ["playbook: none\n", ""]) {
       const n = await runCli(["validate", waveFile(extra)]);
