@@ -1,0 +1,60 @@
+/* The Getting started art (src/getting-started/art): sizing and the Welcome scene's motion. */
+.gs-art {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  object-fit: contain;
+}
+
+.gs-bob {
+  animation: gs-bob 2.6s ease-in-out infinite;
+}
+.gs-blink {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: gs-blink 4.4s linear infinite;
+}
+/* The ball rides TOSS_PATH (scenes.tsx); the path is in viewBox units. */
+.gs-toss {
+  transform-box: view-box;
+  offset-anchor: 0 0;
+  offset-rotate: 0deg;
+  animation: gs-toss 3.6s linear infinite;
+}
+
+@keyframes gs-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+@keyframes gs-blink {
+  0%,
+  90%,
+  100% {
+    transform: scaleY(1);
+  }
+  94% {
+    transform: scaleY(0.1);
+  }
+}
+@keyframes gs-toss {
+  from {
+    offset-distance: 0%;
+  }
+  to {
+    offset-distance: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gs-bob,
+  .gs-blink,
+  .gs-toss {
+    animation: none;
+  }
+}
