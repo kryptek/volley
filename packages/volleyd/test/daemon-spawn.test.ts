@@ -1419,6 +1419,38 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       });
     });
 
+    it("a later role of a task that already spawned is never moved: remote_repo_missing opens", async () => {
+      localClaude = true;
+      let clone = true;
+      await setup({
+        repos: true,
+        localClone: true,
+        onBox: (b) => {
+          b.repoExists = async () => clone;
+        },
+      });
+      await submit("w1", "placement: auto\nplacement_prefer: [box]\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return spawnedOn("w1") !== undefined;
+      });
+      expect(spawnedOn("w1")?.host).toBe("box");
+      // The clone goes away between roles: the reviewer's spawn finds none on the box.
+      clone = false;
+      const r = await client.request("spawn", { wave: "w1", task: "T1", role: "spec_reviewer" });
+      expect(r).toMatchObject({ ok: false });
+      await eventually(async () =>
+        journal("w1").some(
+          (e) => e.type === "decision_opened" && e.data.kind === "remote_repo_missing",
+        ),
+      );
+      expect(journal("w1").some((e) => e.type === "task_placed" && e.data.by === "fallback")).toBe(
+        false,
+      );
+      expect((await state("w1")).tasks.find((t) => t.id === "T1")?.placement?.host).toBe("box");
+    });
+
     it("nowhere else to go, or pinned by the wave file: remote_repo_missing opens as before", async () => {
       localClaude = false;
       await setup({

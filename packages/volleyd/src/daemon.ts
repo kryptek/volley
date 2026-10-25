@@ -3724,7 +3724,7 @@ export class Daemon {
         candidates: p.candidates,
         by,
         from,
-        ...(why !== undefined ? { why: oneLine(why, 200) } : {}),
+        ...(why !== undefined ? { why: clipText(why, 200) } : {}),
         ...(p.local ? { local: true } : {}),
       },
     });
@@ -7686,7 +7686,7 @@ export class Daemon {
   /**
    * A spawn of `task` found no clone at the spawn path on machine `host` (#608): the pair is
    * `blocked` in that machine's readiness until a probe finds the clone, and a task the
-   * supervisor placed (not pinned by the wave file) is placed away from it. Returns the new
+   * supervisor placed (not pinned by the wave file) and not yet spawned is placed away from it. Returns the new
    * placement, why none is eligible (`Unplaced`), or null when the task stays (pinned, or not a
    * machine and repository the supervisor knows).
    */
@@ -7706,8 +7706,10 @@ export class Daemon {
       this.spawnBlocked.set(host, blocked);
       void this.enqueue(() => this.publishReadiness(host));
     }
-    const by = rec.state?.tasks.find((t) => t.id === task)?.placement?.by;
-    if (by === undefined || by === "wave_file") return null;
+    const t = rec.state?.tasks.find((x) => x.id === task);
+    const by = t?.placement?.by;
+    // A task that already spawned runs every later role on host_actual (§4.6.1): never moved.
+    if (by === undefined || by === "wave_file" || t?.host_actual !== undefined) return null;
     const p = this.placeAway(wave, task, [host]);
     if (p === null) return null;
     return p.host === null ? { why: p.why } : p;
@@ -15064,15 +15066,11 @@ function firstLines(text: string): string {
   return text.trim().split("\n").slice(0, 2).join("\n");
 }
 
-/** A message quoted in a decision question: one line, at most `decision_text_max` characters. */
-function clipText(text: string): string {
-  const one = text.replace(/\s+/g, " ").trim();
-  const max = DAEMON_DEFAULTS.decision_text_max;
-  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
-}
-
-/** `text` on one line, at most `max` characters (a schema's `maxLength`). */
-function oneLine(text: string, max: number): string {
+/**
+ * `text` on one line, at most `max` characters: a message quoted in a decision question
+ * (`decision_text_max`), or a schema's `maxLength`.
+ */
+function clipText(text: string, max: number = DAEMON_DEFAULTS.decision_text_max): string {
   const one = text.replace(/\s+/g, " ").trim();
   return one.length > max ? `${one.slice(0, max - 1)}…` : one;
 }
