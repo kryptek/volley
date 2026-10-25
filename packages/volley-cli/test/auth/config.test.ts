@@ -197,3 +197,9 @@ describe("writeConfig", () => {
     expect(existsSync(path)).toBe(true);
   });
 });
+
+describe("the snap layout", () => {
+  it("names mosquitto.ctrl by its full path: sudo's secure_path lacks /snap/bin on Debian", () => {
+    expect(LAYOUTS.snap.ctrl).toBe("/snap/bin/mosquitto.ctrl");
+  });
+});
