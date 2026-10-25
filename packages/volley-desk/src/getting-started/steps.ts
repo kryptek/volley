@@ -111,8 +111,8 @@ export const STEPS: readonly StepDef[] = [
     id: "access",
     title: "Access",
     subtitle: "Reach it from anywhere",
-    heading: "Reach it from anywhere.",
-    lede: "Open the Desk from your phone or away from home: Tailscale is the simplest way, and an address of your own works too.",
+    heading: "How do you plan on reaching your cluster?",
+    lede: "When you're away from home, your phone and laptop still need a way in. Pick the one that matches how you work. You can change it later.",
     Body: Access,
   },
   {

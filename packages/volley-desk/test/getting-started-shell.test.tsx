@@ -137,7 +137,7 @@ describe("Getting started: the shell", () => {
     expect(value("Computers")).toBe("studio, laptop");
     expect(value("Connected by")).toBe("—");
     expect(value("Repos")).toBe("—");
-    expect(value("People")).toBe("sam (steer)");
+    expect(value("People")).toBe("sam (Standard)");
     expect(value("Away from home")).toBe("Tailscale");
     fireEvent.click(stage.getByRole("button", { name: "Open the Desk" }));
     expect(on.onFinish).toHaveBeenCalledOnce();
