@@ -98,12 +98,12 @@ describe("Getting started: the shell", () => {
     );
   });
 
-  it("walks the stubs to Done, marking reached steps done, and Back steps back", () => {
+  it("walks the steps to Done, marking reached steps done, and Back steps back", () => {
     const { rail, stage, on, dialog } = mount();
     fireEvent.click(stage.getByRole("button", { name: "Let's go" }));
     expect(on.onStep).toHaveBeenLastCalledWith("this-computer");
     expect(stage.getByText("Step 1 of 6", { selector: ".gs-eyebrow" })).toBeInTheDocument();
-    expect(stage.getByText("This step is on its way.")).toBeInTheDocument();
+    expect(stage.getByRole("list", { name: "Install checks" })).toBeInTheDocument();
     expect(dialog.querySelector('[data-scene="this-computer"]')).not.toBeNull();
     expect(current(rail)).toHaveTextContent("This computer");
     expect(rail.getAllByRole("button")[0]?.querySelector(".gs-badge--done")).not.toBeNull();

@@ -71,9 +71,19 @@ export type DoctorAnswer =
   | { ok: true; checks: DoctorCheck[]; plan: DoctorCheck[]; doctorAt?: string }
   | { ok: false; error: string };
 
-/** `repo_add`'s answer: the canonical slug GitHub gave, its URL, the machines and their lines. */
+/**
+ * `repo_add`'s answer: the canonical slug GitHub gave, its URL and visibility (`private`, `public`,
+ * `internal`; absent from a volleyd that does not say), the machines and their lines.
+ */
 export type RepoAddResult =
-  | { ok: true; slug: string; url: string; machines: string[]; status: string[] }
+  | {
+      ok: true;
+      slug: string;
+      url: string;
+      visibility?: string;
+      machines: string[];
+      status: string[];
+    }
   | { ok: false; error: string };
 
 /** `repo_remove`'s answer: each clone left on disk (by machine), and what each machine said. */
@@ -336,6 +346,9 @@ export function createPeerOps(
         ok: true,
         slug: typeof r.slug === "string" ? r.slug : slug,
         url: typeof r.url === "string" ? r.url : `https://github.com/${slug}`,
+        ...(typeof r.visibility === "string" && r.visibility !== ""
+          ? { visibility: r.visibility.toLowerCase() }
+          : {}),
         machines: asStrings(r.machines),
         status: asStrings(r.status),
       };
