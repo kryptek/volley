@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -289,16 +289,37 @@ export function ensureOwnedDir(
  * account and token registries) go to the invoking user, as ~/.volley/volleyd/dynsec-admin.json
  * does: the user-level setup and the coordinator's CLIs read and rewrite them. mosquitto never
  * reads this dir (its state file, outside it, stays root's). Other layouts, and root with no sudo
- * user, keep them root's. `volley setup` and `volley auth` call it when they finish, since a
- * registry rewritten by rename comes back root's.
+ * user, keep them root's, and so does a dir that holds mosquitto's config or state file
+ * (`--dir` at /var/snap/mosquitto/common). `volley setup` and `volley auth` call it when they
+ * finish, since a registry rewritten by rename comes back root's.
  */
 export function handAuthDirToInvoker(ctx: Pick<AuthContext, "dir" | "layout" | "env" | "deps">) {
   if (ctx.layout.name !== "snap" || !existsSync(ctx.dir)) return;
+  const dir = resolve(ctx.dir);
+  if ([ctx.layout.config, ctx.layout.stateFile].some((f) => dirname(resolve(f)) === dir)) return;
   const user = ctx.deps.invokingUser(ctx.env);
   if (typeof user !== "object" || user === null) return;
   ctx.deps.chown(ctx.dir, user.uid, user.gid);
   for (const e of readdirSync(ctx.dir, { withFileTypes: true })) {
     if (e.isFile()) ctx.deps.chown(join(ctx.dir, e.name), user.uid, user.gid);
+  }
+}
+
+/**
+ * handAuthDirToInvoker when a command finishes: a failed handover (EPERM, a file renamed away
+ * mid-walk) is a warning, never the command's exit code or message.
+ */
+export function handAuthDirOnExit(
+  ctx: Pick<AuthContext, "dir" | "layout" | "env" | "deps">,
+  warn: (line: string) => void,
+) {
+  try {
+    handAuthDirToInvoker(ctx);
+  } catch (e) {
+    warn(
+      `could not give ${ctx.dir} to the sudo user (${e instanceof Error ? e.message : String(e)}); ` +
+        `fix it with: sudo chown -R "$SUDO_USER" ${ctx.dir}`,
+    );
   }
 }
 

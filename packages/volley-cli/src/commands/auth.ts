@@ -7,7 +7,7 @@ import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
 import {
   type AuthContext,
   type AuthDeps,
-  handAuthDirToInvoker,
+  handAuthDirOnExit,
   realAuthDeps,
   withAdmin,
 } from "../auth/context";
@@ -250,7 +250,7 @@ export async function auth(
   try {
     return await runVerb();
   } finally {
-    handAuthDirToInvoker(ctx);
+    handAuthDirOnExit(ctx, (line) => io.stderr(`volley auth: ${line}\n`));
   }
 }
 

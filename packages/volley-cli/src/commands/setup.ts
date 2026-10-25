@@ -9,7 +9,7 @@ import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
 import {
   type AuthContext,
-  handAuthDirToInvoker,
+  handAuthDirOnExit,
   readCredentials,
   realAuthDeps,
   volleydHome,
@@ -671,7 +671,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   try {
     return await runSteps();
   } finally {
-    handAuthDirToInvoker(auth);
+    handAuthDirOnExit(auth, (line) => io.stderr(`volley setup: ${line}\n`));
   }
 }
 
