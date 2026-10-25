@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type ApplyDeps, applyDeploy } from "../../src/deploy/apply";
-import { type Ref, platformServices } from "../../src/deploy/plan";
+import { type ApplyDeps, applyDeploy, q } from "../../src/deploy/apply";
+import { RECORD_LOCK_ARGV, type Ref, platformServices } from "../../src/deploy/plan";
 import { LOCK_MARKER, lockHash } from "../../src/peer/doctor";
 import { DESK_STAMP, deskStamp } from "../../src/setup/desk-build";
 import { fakeRepo } from "./fake-repo";
@@ -248,6 +248,7 @@ describe("applyDeploy", () => {
     expect(r.rollbackFailed?.byHand).toEqual([
       `git -C ${f.repo} checkout --detach v0.4.0`,
       `cd ${f.repo} && ${f.bun} install --frozen-lockfile`,
+      `cd ${f.repo} && ${RECORD_LOCK_ARGV.map(q).join(" ")}`,
       `cd ${f.repo}/packages/volley-desk && ${f.bun} run build`,
       "launchctl kickstart -k gui/501/systems.volley.volleyd",
       "launchctl kickstart -k gui/501/systems.volley.desk",
@@ -330,7 +331,9 @@ describe("applyDeploy", () => {
       };
       const r = await run();
       expect(r.failed?.why).toMatch(/^could not record node_modules\/\.volley-lock-sha256: /);
+      // The stub breaks the rollback's install too, so the rollback fails at the same step.
       expect(r.rolledBack).toBe(false);
+      expect(r.rollbackFailed?.step).toBe(r.failed?.step);
     });
   });
 });

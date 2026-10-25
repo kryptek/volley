@@ -9,6 +9,7 @@ import {
   type Command,
   type PlanContext,
   type PlanStep,
+  RECORD_LOCK_ARGV,
   type Ref,
   TAG_RE,
   deployPlan,
@@ -281,7 +282,13 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
       ...failure(backFailed),
       byHand: backSteps
         .filter((s) => s.id !== "self-check" && s.id !== "health")
-        .flatMap((s) => s.commands.map(shell)),
+        .flatMap((s) => {
+          const lines = s.commands.map(shell);
+          // The deploy records the marker in-process; by hand it is RECORD_LOCK_ARGV.
+          if (s.id === "install")
+            lines.push(shell({ argv: [...RECORD_LOCK_ARGV], cwd: back.repo }));
+          return lines;
+        }),
     },
   });
 }
