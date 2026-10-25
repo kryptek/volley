@@ -6,8 +6,10 @@ import {
   TIMING_TARGETS,
   WALL_TARGET_MS,
   evaluate,
+  noCiVerdict,
   readyVerdict,
   redact,
+  scanCli,
   scanText,
   secretsFrom,
   statusVerdict,
@@ -224,6 +226,105 @@ describe("the VM layers' verdicts", () => {
     expect(old.stderr).toContain("older than the boot");
     expect(run(["verdict", "status"], { stdin: "" }).code).toBe(2);
     expect(run(["verdict", "frob"]).code).toBe(2);
+  });
+});
+
+describe("a wave on a repository with no CI (verdict wave --ci none, #602)", () => {
+  const status = readFileSync(join(FIXTURES, "wave-status-noci.json"), "utf8");
+  const events = readFileSync(join(FIXTURES, "wave-events-noci.jsonl"), "utf8");
+  const ev = (o: object) => `${JSON.stringify(o)}\n`;
+
+  test("complete, mode none, nothing waited on CI and no decision but wave_complete's: null", () => {
+    expect(noCiVerdict({ status, events })).toBeNull();
+  });
+
+  test("a ci_pending, a task's decision, a missing or other mode, no wave_complete: why", () => {
+    expect(
+      noCiVerdict({ status, events: events + ev({ seq: 9, type: "ci_pending", data: {} }) }),
+    ).toBe("the journal has ci_pending: the wave waited for CI on a repository with none");
+    expect(
+      noCiVerdict({
+        status,
+        events: events + ev({ seq: 9, type: "decision_opened", data: { kind: "ci_timeout" } }),
+      }),
+    ).toBe("the wave asked the owner (ci_timeout) on a repository with no CI");
+    const noMode = events
+      .split("\n")
+      .filter((l) => !l.includes("ci_mode_detected"))
+      .join("\n");
+    expect(noCiVerdict({ status, events: noMode })).toBe(
+      'no ci_mode_detected { mode: "none" } in the journal',
+    );
+    expect(
+      noCiVerdict({ status, events: events.replace('"mode":"none"', '"mode":"workflows"') }),
+    ).toBe("ci_mode_detected says workflows, not none");
+    const running = events
+      .split("\n")
+      .filter((l) => !l.includes('"type":"wave_complete"'))
+      .join("\n");
+    expect(
+      noCiVerdict({ status: JSON.stringify({ status: "running", tasks: [] }), events: running }),
+    ).toBe("the wave is running, no wave_complete yet");
+  });
+
+  test("the command: exit 0 on the fixtures, 1 with the reason, 2 without --status/--events", () => {
+    const args = [
+      "verdict",
+      "wave",
+      "--ci",
+      "none",
+      "--status",
+      join(FIXTURES, "wave-status-noci.json"),
+    ];
+    expect(run([...args, "--events", join(FIXTURES, "wave-events-noci.jsonl")]).code).toBe(0);
+    const dir = tempDir("volley-metrics-noci-");
+    const pending = join(dir, "events.jsonl");
+    writeFileSync(pending, `${events}${ev({ seq: 9, type: "ci_pending", data: {} })}`);
+    const r = run([...args, "--events", pending]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("ci_pending");
+    expect(run(["verdict", "wave", "--ci", "none"]).code).toBe(2);
+    expect(run([...args, "--events", pending, "--ci", "some"]).code).toBe(2);
+  });
+});
+
+describe("text a person reads (the text command, #597)", () => {
+  test("scanCli names each line that says undefined, NaN, [object Object] or null on", () => {
+    expect(scanCli(readFileSync(join(FIXTURES, "text-undefined.txt"), "utf8"))).toEqual([
+      { line: 2, word: "undefined", text: "coordinator: undefined on undefined" },
+    ]);
+    expect(scanCli("a\nrate: NaN/s\nx: [object Object]\ncoordinator: null on box\n")).toEqual([
+      { line: 2, word: "NaN", text: "rate: NaN/s" },
+      { line: 3, word: "[object Object]", text: "x: [object Object]" },
+      { line: 4, word: "null on", text: "coordinator: null on box" },
+    ]);
+    // Words that merely contain one are fine.
+    expect(scanCli("undefinedness; NaNo; nullon\n")).toEqual([]);
+  });
+
+  test("JSON is a value, not text: a string value saying undefined passes", () => {
+    expect(
+      scanCli(JSON.stringify({ msg: "coordinator: undefined on undefined" }, null, 2)),
+    ).toEqual([]);
+    expect(scanCli(`plain\n${JSON.stringify({ msg: "NaN" })}\n`)).toEqual([]);
+  });
+
+  test("the command: 0 on a clean --check and status, 1 listing the line, 2 without a file", () => {
+    const dir = tempDir("volley-metrics-text-");
+    const clean = join(dir, "status.txt");
+    writeFileSync(clean, "wave hello-1 (complete)\ncoordinator: coordinator on athena\n");
+    expect(run(["text", join(FIXTURES, "check-pass.json"), clean]).code).toBe(0);
+    const json = join(dir, "status.json");
+    writeFileSync(json, JSON.stringify({ note: "undefined is a word here" }));
+    expect(run(["text", json]).code).toBe(0);
+    const bad = run(["text", clean, join(FIXTURES, "text-undefined.txt")]);
+    expect(bad.code).toBe(1);
+    expect(bad.stdout).toBe("undefined\n");
+    expect(bad.stderr).toBe(
+      `${join(FIXTURES, "text-undefined.txt")}:2: 'undefined': coordinator: undefined on undefined\n`,
+    );
+    expect(run(["text"]).code).toBe(2);
+    expect(run(["text", join(dir, "missing.txt")]).code).toBe(2);
   });
 });
 

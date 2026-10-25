@@ -33,6 +33,20 @@ describe("volley sim", () => {
     expect(r.stdout).toContain("VOLLEY_SIM_HOME='/path/to/home/.volley/sim'");
   });
 
+  it("`env` carries VOLLEY_SIM_ORIGINS and VOLLEY_SIM_WORKFLOWS on when set (the VM install tests)", async () => {
+    const r = await runCli({
+      argv: ["sim", "env"],
+      env: {
+        HOME: "/path/to/home",
+        VOLLEY_SIM_ORIGINS: "volley@10.20.0.11:/path/to/home/.volley/sim/origins",
+        VOLLEY_SIM_WORKFLOWS: "0",
+      },
+    });
+    expect(r.stdout).toMatch(
+      / VOLLEY_SIM_ORIGINS='volley@10\.20\.0\.11:\/path\/to\/home\/\.volley\/sim\/origins' VOLLEY_SIM_WORKFLOWS='0'\n$/,
+    );
+  });
+
   it("`reset` clears the world and nothing else in its home", async () => {
     const home = join(tempDir("volley-sim-cli-"), "sim");
     mkdirSync(join(home, "origins", "volley-sim", "x.git"), { recursive: true });

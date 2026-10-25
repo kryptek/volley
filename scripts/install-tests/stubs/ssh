@@ -1,6 +1,6 @@
 #!/bin/bash
 # ssh in vm.test.ts (scripts/install-tests/README.md): the fake VM. It finds the VM by the
-# destination's address (the multipass and tart stand-ins hand them out), appends
+# destination's address (the multipass stand-in hands them out), appends
 # `ssh <vm>: <command>` to $STUB_STATE/calls.log and answers from $STUB_STATE/ssh-rules: one rule a
 # line, `<extended regex>\t<exit>\t<file or ->`, the first that matches the command wins, its
 # file on stdout; no match is exit 0 with nothing printed. Built in, as a VM behaves: a VM that is

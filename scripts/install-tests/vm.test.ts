@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { tempDir } from "../helpers/tmp";
 
-// Layers 2–4 (README.md) against the stand-ins in stubs/: multipass and tart keep their VMs in a
-// state directory, ssh is the fake VM (it answers from rules), gh records the tracking issue's
-// calls. Every call lands in calls.log, which these tests read.
+// Layers 2 and 4 (README.md), verify.sh and install-vm.yml against the stand-ins in stubs/:
+// multipass keeps its VMs in a state directory, ssh is the fake VM (it answers from rules), gh
+// records the tracking issue's calls and answers verify.sh's. Every call lands in calls.log, which
+// these tests read.
 
 const HERE = import.meta.dir;
 const STUBS = join(HERE, "stubs");
@@ -21,9 +22,7 @@ interface World {
 function world(): World {
   const dir = tempDir("volley-vm-");
   const w = { dir, state: join(dir, "state"), out: join(dir, "out"), tmp: join(dir, "tmp") };
-  for (const d of [w.state, w.tmp, join(w.state, "images")]) mkdirSync(d, { recursive: true });
-  // A clean base image for Tart to clone.
-  writeFileSync(join(w.state, "images", "volley-macos-base"), "");
+  for (const d of [w.state, w.tmp]) mkdirSync(d, { recursive: true });
   return w;
 }
 
@@ -31,6 +30,22 @@ function world(): World {
 type Rule = [re: string, code: number, output?: string];
 
 const envelope = (e: object) => `${JSON.stringify({ topic: "t", envelope: e })}\n`;
+const fixture = (name: string) => readFileSync(join(FIXTURES, name), "utf8");
+const placed = (wave: string, host = "peer") =>
+  [
+    [
+      `volleyd status ${wave} --json`,
+      0,
+      JSON.stringify({ status: "complete", tasks: [{ id: "T1", stage: "done" }] }),
+    ],
+    [
+      `volleyd events ${wave}`,
+      0,
+      `${JSON.stringify({ seq: 5, type: "task_placed", task: "T1", data: { task: "T1", host } })}\n`,
+    ],
+  ] as Rule[];
+/** The peer's clone of the slug repository, as `volley repo add --wait` reports it. */
+const SLUG_CLONE = "/path/to/home/volley-repos/volley-sim/volley-slug-42";
 /** What a VM that installs and sets up cleanly answers. */
 const PASSING: Rule[] = [
   ["setup-metrics\\.json", 0, readFileSync(join(FIXTURES, "metrics-pass.json"), "utf8")],
@@ -47,15 +62,25 @@ const PASSING: Rule[] = [
     envelope({ type: "readiness", payload: { name: "peer", ready: true, reasons: [] } }),
   ],
   ["volley peer list --json", 0, '{ "machines": [{ "name": "peer" }], "hosts": ["peer"] }\n'],
+  ["volley peer list$", 0, "peer  ready  volley@10.20.0.12\n"],
+  ...placed("hello-peer"),
+  ...placed("hello-slug"),
+  // Layer 2's second wave, on a repository with no CI.
+  ["volleyd status hello-noci --json", 0, fixture("wave-status-noci.json")],
+  ["volleyd events hello-noci", 0, fixture("wave-events-noci.jsonl")],
+  // The first wave's name, read from its file.
+  ["s/\\^wave: //p", 0, "hello-ab12\n"],
   [
-    "volleyd status hello-peer --json",
+    "volleyd status hello-ab12$",
     0,
-    JSON.stringify({ status: "complete", tasks: [{ id: "T1", stage: "done" }] }),
+    "wave hello-ab12 (complete)\ncoordinator: coordinator on hub\n",
   ],
+  // The hub's world: its origins directory.
+  ["VOLLEY_SIM_HOME", 0, "/path/to/home/.volley/sim/origins"],
   [
-    "volleyd events hello-peer",
+    "volley repo add",
     0,
-    `${JSON.stringify({ seq: 5, type: "task_placed", task: "T1", data: { task: "T1", host: "peer" } })}\n`,
+    `Adding volley-sim/volley-slug-42 on peer\n  peer: cloning\n  peer: ready (${SLUG_CLONE})\n`,
   ],
   // After `volley peer remove` the peer's tunnel service is stopped.
   ["is-active --quiet volley-peer\\.service", 3],
@@ -231,6 +256,24 @@ describe("Layer 2: vm-linux.sh", () => {
       new RegExp(
         `^ssh ${vm}: .*~/\\.volley/volleyd/first-wave/volley-hello-\\*.*git -C "\\$c" log -1`,
       ),
+      // What a person reads: the first wave's status, plain and as JSON, and --check.
+      new RegExp(`^ssh ${vm}: .*volley sim env\\)"; volleyd status hello-ab12$`),
+      new RegExp(`^ssh ${vm}: .*volley sim env\\)"; volleyd status hello-ab12 --json$`),
+      new RegExp(`^ssh ${vm}: .*volley sim env\\)"; volley setup --check$`),
+      // A wave on a repository with no CI: volleyd restarted with the drop-in, the wave submitted
+      // with VOLLEY_SIM_WORKFLOWS=0, polled, the drop-in gone before the reboot.
+      new RegExp(
+        `^ssh ${vm}: .*volleyd\\.service\\.d/sim\\.conf.*systemctl --user daemon-reload && systemctl --user restart volleyd\\.service$`,
+      ),
+      new RegExp(`^ssh ${vm}: .*volley sub --pattern volley/default/volleyd/status`),
+      new RegExp(
+        `^ssh ${vm}: .*export VOLLEY_SIM_WORKFLOWS=0; bash -s 'first-wave' 'hello-noci' 'Add NOCI\\.md' '' \\(stdin \\d+ bytes\\)$`,
+      ),
+      new RegExp(`^ssh ${vm}: .*volleyd status hello-noci --json$`),
+      new RegExp(`^ssh ${vm}: .*volleyd events hello-noci --cursor vm-linux$`),
+      new RegExp(
+        `^ssh ${vm}: .*rm -f ~/\\.config/systemd/user/volleyd\\.service\\.d/sim\\.conf && systemctl --user daemon-reload$`,
+      ),
       new RegExp(`^ssh ${vm}: sudo reboot$`),
       new RegExp(`^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --check --json$`),
       new RegExp(`^ssh ${vm}: .*systemctl --user is-active --quiet volleyd\\.service$`),
@@ -258,7 +301,13 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(read(w, "summary.md")).toContain("`reboot_check_ms`");
     const m = JSON.parse(read(w, "metrics.json"));
     expect(m).toMatchObject({ label: "ubuntu-24.04", layer: 2, failures: [] });
-    expect(Object.keys(m.timings)).toEqual(["launch_ms", "reboot_ms", "reboot_check_ms"]);
+    expect(Object.keys(m.timings)).toEqual([
+      "launch_ms",
+      "noci_wave_ms",
+      "reboot_ms",
+      "reboot_check_ms",
+    ]);
+    expect(read(w, "status-first-wave.txt")).toContain("coordinator: coordinator on hub");
     expect(r.calls.some((c) => c.startsWith("gh "))).toBe(false);
   });
 
@@ -420,6 +469,47 @@ describe("Layer 2: vm-linux.sh", () => {
     }
   }, 15_000);
 
+  // The no-CI poll runs out here, busy for the whole cap: a 1 s cap keeps it short.
+  test("hello-noci: a ci_pending, or no ci_mode_detected none, fails with the verdict's reason", () => {
+    const events = fixture("wave-events-noci.jsonl");
+    const pending = `${events}${JSON.stringify({ seq: 9, type: "ci_pending", data: {} })}\n`;
+    const w = world();
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
+      env: { VM_MAX_WAIT_S: "1" },
+      rules: [["volleyd events hello-noci", 0, pending]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("the journal has ci_pending");
+    expect(r.out).toContain(
+      "FAIL: the wave hello-noci on a repository with no CI did not pass (the line above)",
+    );
+    // The drop-in is still removed, and the VM deleted.
+    expect(r.calls.some((c) => /rm -f .*volleyd\.service\.d\/sim\.conf/.test(c))).toBe(true);
+    expect(vmsLeft(w)).toEqual([]);
+
+    const w2 = world();
+    const noMode = events
+      .split("\n")
+      .filter((l) => !l.includes("ci_mode_detected"))
+      .join("\n");
+    const r2 = run(w2, "vm-linux.sh", ["ubuntu-24.04"], {
+      env: { VM_MAX_WAIT_S: "1" },
+      rules: [["volleyd events hello-noci", 0, noMode]],
+    });
+    expect(r2.code).toBe(1);
+    expect(r2.out).toContain('no ci_mode_detected { mode: "none" } in the journal');
+  }, 15_000);
+
+  test("volleyd status saying 'undefined on undefined' fails the run (#597)", () => {
+    const w = world();
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
+      rules: [["volleyd status hello-ab12$", 0, fixture("text-undefined.txt")]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL: volleyd status prints 'undefined'");
+    expect(read(w, "status-first-wave.txt")).toContain("undefined on undefined");
+  });
+
   test("a usage error exits 2 and touches nothing", () => {
     const w = world();
     const r = run(w, "vm-linux.sh", ["fedora-41"]);
@@ -442,7 +532,6 @@ describe("Layer 2: vm-linux.sh", () => {
 describe("the scripts' arguments", () => {
   for (const [script, pre] of [
     ["vm-linux.sh", ["ubuntu-24.04"]],
-    ["vm-macos.sh", []],
     ["vm-pair.sh", []],
   ] as const) {
     test(`${script}: --version without a value, or not vX.Y.Z, is a usage error`, () => {
@@ -512,119 +601,6 @@ describe("a failing run and the tracking issue", () => {
   });
 });
 
-describe("Layer 3: vm-macos.sh", () => {
-  test("the curl path: clone, boot headless, install, setup, the Mac's checks, restart, deleted", () => {
-    const w = world();
-    const r = run(w, "vm-macos.sh", []);
-    expect(r.out).toContain("Layer 3 (macos-curl) passed.");
-    expect(r.code).toBe(0);
-    const vm = "volley-it-42-macos-curl";
-    expectInOrder(r.calls, [
-      new RegExp(`^tart get ${vm}$`),
-      new RegExp(`^tart clone volley-macos-base ${vm}$`),
-      new RegExp(`^tart run --no-graphics ${vm}$`),
-      new RegExp(`^tart ip ${vm} --wait \\d+$`),
-      new RegExp(`^ssh ${vm}: true$`),
-      new RegExp(
-        `^ssh ${vm}: .*defaults read /Library/Preferences/com\\.apple\\.loginwindow autoLoginUser$`,
-      ),
-      new RegExp(`^ssh ${vm}: rm -rf ~/volley .*\\(stdin \\d+ bytes\\)$`),
-      new RegExp(`^ssh ${vm}: .*sh -s -- --source ~/volley --no-setup +<~/volley/install\\.sh$`),
-      new RegExp(`^ssh ${vm}: .*volley setup --yes --no-lan --simulated$`),
-      new RegExp(`^ssh ${vm}: .*launchctl print gui/\\$\\(id -u\\)/systems\\.volley\\.volleyd`),
-      new RegExp(`^ssh ${vm}: .*launchctl print gui/\\$\\(id -u\\)/systems\\.volley\\.desk`),
-      new RegExp(`^ssh ${vm}: .*security find-generic-password -s volley-broker -a coordinator`),
-      new RegExp(`^ssh ${vm}: .*curl -fsS http://127\\.0\\.0\\.1:5199/version\\.json$`),
-      new RegExp(`^ssh ${vm}: .*grep -q /volley-hooks/src/hooks/ ~/\\.claude/settings\\.json$`),
-      new RegExp(`^tart stop ${vm}$`),
-      new RegExp(`^tart run --no-graphics ${vm}$`),
-      new RegExp(`^ssh ${vm}: .*volley setup --check --json$`),
-      new RegExp(`^ssh ${vm}: .*launchctl print gui/\\$\\(id -u\\)/systems\\.volley\\.volleyd`),
-      new RegExp(`^tart delete ${vm}$`),
-    ]);
-    expect(vmsLeft(w)).toEqual([]);
-    // No cloud-init on a Mac: the base image's key, not the run's.
-    expect(readFileSync(join(w.state, "ssh-key"), "utf8").trim()).toBe(
-      join(w.dir, ".ssh", "id_ed25519"),
-    );
-    const m = JSON.parse(read(w, "metrics.json"));
-    expect(m).toMatchObject({ label: "macos-curl", layer: 3, failures: [] });
-    expect(m.timings.reboot_check_ms).toBeNumber();
-  });
-
-  test("--brew: brew tap and brew install, and the release it installed", () => {
-    const w = world();
-    const r = run(w, "vm-macos.sh", ["--brew", "--version", "v0.11.0"], {
-      rules: [["volley --version", 0, "volley 0.11.0\n"]],
-    });
-    expect(r.code).toBe(0);
-    const vm = "volley-it-42-macos-brew";
-    expectInOrder(r.calls, [
-      // The base image has no Homebrew (README.md: the base image): installed first, as on a new Mac.
-      new RegExp(
-        `^ssh ${vm}: .*NONINTERACTIVE=1 /bin/bash -c "\\$\\(curl -fsSL https://raw\\.githubusercontent\\.com/Homebrew/install/HEAD/install\\.sh\\)"$`,
-      ),
-      new RegExp(`^ssh ${vm}: .*brew tap kryptek/volley && brew install kryptek/volley/volley$`),
-      new RegExp(`^ssh ${vm}: .*volley --version$`),
-      new RegExp(`^ssh ${vm}: .*volley setup --yes --no-lan --simulated$`),
-      new RegExp(`^tart delete ${vm}$`),
-    ]);
-    // Volley's own install.sh (the curl path) never runs.
-    expect(
-      r.calls.some((c) => /kryptek\/volley\/.*install\.sh|~\/volley\/install\.sh/.test(c)),
-    ).toBe(false);
-
-    const w2 = world();
-    const old = run(w2, "vm-macos.sh", ["--brew", "--version", "v0.11.0"], {
-      rules: [["volley --version", 0, "volley 0.10.0\n"]],
-    });
-    expect(old.code).toBe(1);
-    expect(old.out).toContain("FAIL: the tap installed 'volley 0.10.0', not v0.11.0");
-  });
-
-  test("--brew: a Homebrew install that fails stops the run before brew tap", () => {
-    const w = world();
-    const r = run(w, "vm-macos.sh", ["--brew"], {
-      rules: [["Homebrew/install/HEAD/install\\.sh", 1]],
-    });
-    expect(r.code).toBe(1);
-    expect(r.out).toContain("FAIL: Homebrew did not install");
-    expect(r.calls.some((c) => c.includes("brew tap"))).toBe(false);
-    expect(vmsLeft(w)).toEqual([]);
-  });
-
-  test("a VM without auto-login fails early and clearly; nothing is installed; it is deleted", () => {
-    const w = world();
-    const r = run(w, "vm-macos.sh", [], { rules: [["autoLoginUser", 1]] });
-    expect(r.code).toBe(1);
-    expect(r.out).toContain(
-      "FAIL: volley-macos-base has no auto-login: the keychain needs a login session",
-    );
-    expect(r.calls.some((c) => c.includes("install.sh") || c.includes("volley setup"))).toBe(false);
-    expect(r.calls.at(-1)).toBe("tart delete volley-it-42-macos-curl");
-    expect(vmsLeft(w)).toEqual([]);
-  });
-
-  test("a missing keychain item fails the run", () => {
-    const w = world();
-    const r = run(w, "vm-macos.sh", [], { rules: [["find-generic-password", 44]] });
-    expect(r.code).toBe(1);
-    expect(r.out).toContain("FAIL: no volley-broker keychain item for the coordinator");
-    expect(r.out).toContain(
-      "FAIL: no volley-broker keychain item for the coordinator after the restart",
-    );
-  });
-
-  test("refuses to start when a VM of its name exists", () => {
-    const w = world();
-    mkdirSync(join(w.state, "vms", "volley-it-42-macos-curl"), { recursive: true });
-    const r = run(w, "vm-macos.sh", []);
-    expect(r.code).toBe(1);
-    expect(r.calls).toEqual(["tart get volley-it-42-macos-curl"]);
-    expect(vmsLeft(w)).toEqual(["volley-it-42-macos-curl"]);
-  });
-});
-
 describe("Layer 4: vm-pair.sh", () => {
   const HUB = "volley-it-42-hub";
   const PEER = "volley-it-42-peer";
@@ -653,10 +629,40 @@ describe("Layer 4: vm-pair.sh", () => {
       ),
       new RegExp(`^ssh ${HUB}: .*volley sub --pattern volley/_system/machines/peer/readiness`),
       new RegExp(`^ssh ${HUB}: .*volley peer list --json$`),
-      new RegExp(`^ssh ${HUB}: .*bash -s hello-peer peer \\(stdin \\d+ bytes\\)$`),
+      new RegExp(`^ssh ${HUB}: .*volley peer list$`),
+      new RegExp(
+        `^ssh ${HUB}: .*bash -s 'first-wave' 'hello-peer' 'Add PEER\\.md' 'peer' \\(stdin \\d+ bytes\\)$`,
+      ),
       new RegExp(`^ssh ${HUB}: .*volleyd status hello-peer --json$`),
       new RegExp(`^ssh ${HUB}: .*volleyd events hello-peer --cursor vm-pair$`),
+      new RegExp(`^ssh ${HUB}: .*volleyd status hello-peer$`),
       new RegExp(`^ssh ${PEER}: .*git -C .* log --all --format=%H -- src/T1\\.ts`),
+      // The slug repository: both machines share the hub's origins over ssh, the peer's git
+      // reaches it, the hub creates it and holds no clone, volleyd clones it on the peer.
+      new RegExp(`^ssh ${HUB}: .*printf "%s/origins" "\\$VOLLEY_SIM_HOME"$`),
+      new RegExp(
+        `^ssh ${PEER}: umask 077 && mkdir -p ~/\\.ssh && cat >~/\\.ssh/id_ed25519 \\(stdin \\d+ bytes\\)$`,
+      ),
+      new RegExp(
+        `^ssh ${HUB}: mkdir -p /path/to/home/\\.volley/sim/origins .*cat - ~/\\.bashrc .*\\(stdin \\d+ bytes\\)$`,
+      ),
+      new RegExp(
+        `^ssh ${PEER}: mkdir -p /path/to/home/\\.volley/sim/origins .*cat - ~/\\.bashrc .*\\(stdin \\d+ bytes\\)$`,
+      ),
+      new RegExp(
+        `^ssh ${PEER}: .*git config --global url\\.volley@10\\.20\\.0\\.11:/path/to/home/\\.volley/sim/origins/volley-sim/volley-slug-42\\.git\\.insteadOf https://github\\.com/volley-sim/volley-slug-42\\.git$`,
+      ),
+      new RegExp(
+        `^ssh ${HUB}: .*gh repo create volley-sim/volley-slug-42 --private && .*gh repo clone volley-sim/volley-slug-42 .*HEAD:release/hello-slug`,
+      ),
+      new RegExp(`^ssh ${HUB}: .*volley repo add volley-sim/volley-slug-42 --machine peer --wait$`),
+      new RegExp(`^ssh ${PEER}: .*git -C '${SLUG_CLONE}' rev-parse --git-dir$`),
+      new RegExp(
+        `^ssh ${HUB}: .*bash -s 'volley-sim/volley-slug-42' 'hello-slug' 'Add SLUG\\.md' 'peer' \\(stdin \\d+ bytes\\)$`,
+      ),
+      new RegExp(`^ssh ${HUB}: .*volleyd status hello-slug --json$`),
+      new RegExp(`^ssh ${HUB}: .*volleyd events hello-slug --cursor vm-pair$`),
+      new RegExp(`^ssh ${PEER}: .*git -C '${SLUG_CLONE}' log --all --format=%H -- src/T1\\.ts`),
       new RegExp(`^ssh ${HUB}: .*volley peer remove peer --now$`),
       new RegExp(`^ssh ${PEER}: .*systemctl --user is-active --quiet volley-peer\\.service$`),
       new RegExp(`^multipass delete --purge ${HUB}$`),
@@ -666,7 +672,64 @@ describe("Layer 4: vm-pair.sh", () => {
     const m = JSON.parse(read(w, "metrics.json"));
     expect(m).toMatchObject({ label: "pair", layer: 4, failures: [] });
     expect(m.timings.pair_ready_ms).toBeNumber();
+    expect(m.timings.slug_wave_ms).toBeNumber();
     expect(read(w, "summary.md")).toContain("| `pair_ready_ms` |");
+    // Both machines read the same VOLLEY_SIM_ORIGINS line first, the hub's origins over ssh.
+    const line = `export VOLLEY_SIM_ORIGINS=volley@10.20.0.11:/path/to/home/.volley/sim/origins; eval "$($HOME/.volley/bin/volley sim env)"`;
+    expect(r.calls.filter((c) => c.includes("cat - ~/.bashrc >~/.bashrc.it")).length).toBe(3);
+    expect(line.length + 1).toBe(
+      Number(
+        /\(stdin (\d+) bytes\)$/.exec(
+          r.calls.find((c) => c.startsWith(`ssh ${HUB}: mkdir -p`)) ?? "",
+        )?.[1],
+      ),
+    );
+  });
+
+  test("hello-slug: a REMOTE_REPO_MISSING fails naming it (#596)", () => {
+    const w = world();
+    const r = run(w, "vm-pair.sh", [], {
+      env: { VM_MAX_WAIT_S: "1" },
+      rules: [
+        [
+          "volleyd events hello-slug",
+          0,
+          `${JSON.stringify({ seq: 4, type: "spawn_failed", task: "T1", data: { task: "T1", code: "REMOTE_REPO_MISSING" } })}\n`,
+        ],
+      ],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("the wave hello-slug hit REMOTE_REPO_MISSING");
+    expect(r.out).toContain(
+      "FAIL: the wave hello-slug hit REMOTE_REPO_MISSING: volleyd found no clone of volley-sim/volley-slug-42 on peer",
+    );
+    expect(vmsLeft(w)).toEqual([]);
+  }, 15_000);
+
+  test("hello-slug: a peer clone reported at a path that is no clone on the peer fails", () => {
+    const w = world();
+    const r = run(w, "vm-pair.sh", [], {
+      rules: [[`git -C '${SLUG_CLONE}' rev-parse --git-dir`, 128]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      `FAIL: the peer's clone is reported at a hub path (${SLUG_CLONE} is no clone on the peer)`,
+    );
+    const none = world();
+    const r2 = run(none, "vm-pair.sh", [], {
+      rules: [["volley repo add", 0, "  peer: blocked (no clone)\n"]],
+    });
+    expect(r2.code).toBe(1);
+    expect(r2.out).toContain("FAIL: volley repo add did not report peer ready (repo-add.txt)");
+  }, 15_000);
+
+  test("volley repo add or volley peer list saying 'undefined' fails the run", () => {
+    const w = world();
+    const r = run(w, "vm-pair.sh", [], {
+      rules: [["volley peer list$", 0, "peer  undefined  volley@10.20.0.12\n"]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL: volley peer list prints 'undefined'");
   });
 
   // The readiness poll runs out here, busy for the whole cap: a 1 s cap and a longer timeout keep
@@ -747,45 +810,52 @@ describe("Layer 4: vm-pair.sh", () => {
   });
 });
 
-describe("the nightly workflow (install-nightly.yml)", () => {
+describe("the VM workflow (install-vm.yml)", () => {
+  type Step = { name?: string; uses?: string; if?: string; run?: string; with?: { path?: string } };
   const wf = Bun.YAML.parse(
-    readFileSync(join(HERE, "../../.github/workflows/install-nightly.yml"), "utf8"),
+    readFileSync(join(HERE, "../../.github/workflows/install-vm.yml"), "utf8"),
   ) as {
-    on: Record<string, unknown>;
+    on: Record<string, { inputs?: Record<string, unknown> } | null>;
     env: Record<string, string>;
+    concurrency: { group: string; "cancel-in-progress": boolean };
     jobs: Record<
       string,
       {
         "runs-on": string[] | string;
         needs?: string[];
         if?: string;
-        strategy?: { matrix: Record<string, string[]> };
-        steps?: { uses?: string; with?: { path?: string } }[];
+        "timeout-minutes"?: number;
+        strategy?: { "max-parallel"?: number; matrix: Record<string, string[]> };
+        steps?: Step[];
       }
     >;
   };
 
-  test("never on pull_request or push: a schedule and dispatch only", () => {
+  test("never on pull_request or push: the schedule and a dispatch (input version only)", () => {
     expect(Object.keys(wf.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
+    expect(Object.keys(wf.on.workflow_dispatch?.inputs ?? {})).toEqual(["version"]);
+    expect(wf.concurrency).toEqual({ group: "install-vm", "cancel-in-progress": false });
   });
 
-  test("three jobs on the two self-hosted runner labels, with their matrices, and a report", () => {
-    expect(Object.keys(wf.jobs)).toEqual(["linux-vm", "macos-tart", "pair", "report"]);
-    expect(wf.jobs["linux-vm"]?.["runs-on"]).toEqual(["self-hosted", "volley-linux-vm"]);
-    expect(wf.jobs["linux-vm"]?.strategy?.matrix.distro).toEqual(["ubuntu-24.04", "debian-13"]);
-    expect(wf.jobs["macos-tart"]?.["runs-on"]).toEqual(["self-hosted", "volley-macos-tart"]);
-    expect(wf.jobs["macos-tart"]?.strategy?.matrix.path).toEqual(["curl", "brew"]);
+  test("linux-vm and pair on the one runner label, and a report; no macOS job", () => {
+    expect(Object.keys(wf.jobs)).toEqual(["linux-vm", "pair", "report"]);
+    const linux = wf.jobs["linux-vm"];
+    expect(linux?.["runs-on"]).toEqual(["self-hosted", "volley-linux-vm"]);
+    expect(linux?.strategy?.matrix.distro).toEqual(["ubuntu-24.04", "debian-13"]);
+    expect(linux?.strategy?.["max-parallel"]).toBe(1);
+    expect(linux?.["timeout-minutes"]).toBe(40);
     expect(wf.jobs.pair?.["runs-on"]).toEqual(["self-hosted", "volley-linux-vm"]);
+    expect(wf.jobs.pair?.["timeout-minutes"]).toBe(60);
   });
 
-  test("a failing job reports to the tracking issue", () => {
-    expect(wf.env.VM_TRACK_ISSUE).toBe("1");
+  test("only the schedule reports to the tracking issue", () => {
+    expect(wf.env.VM_TRACK_ISSUE).toBe("${{ github.event_name == 'schedule' && '1' || '' }}");
   });
 
-  test("the report job tells the tracking issue about a job that failed or never ran", () => {
+  test("the report job fails a run that did not pass; only the schedule comments on the issue", () => {
     const report = wf.jobs.report;
     expect(report?.["runs-on"]).toBe("ubuntu-latest");
-    expect(report?.needs).toEqual(["linux-vm", "macos-tart", "pair"]);
+    expect(report?.needs).toEqual(["linux-vm", "pair"]);
     // Always, so a job that failed or never ran is reported (and only in the canonical repository).
     expect(report?.if).toBe("always() && github.repository == 'kryptek/volley'");
     const script = JSON.stringify(report?.steps ?? []);
@@ -793,15 +863,251 @@ describe("the nightly workflow (install-nightly.yml)", () => {
     expect(script).toContain("install-tests");
     expect(script).toContain("Nightly install tests are failing");
     expect(script).toContain("needs.linux-vm.result");
-    expect(script).toContain("needs.macos-tart.result");
     expect(script).toContain("needs.pair.result");
+    expect(script).not.toMatch(/macos/i);
+    expect(script).toContain("github.event_name == 'schedule'");
+    const run = report?.steps?.[0]?.run ?? "";
+    // The issue's calls sit inside the schedule's branch; the failure is for every event.
+    const guarded = run.slice(run.indexOf('if [ "$SCHEDULED" = 1 ]'), run.lastIndexOf("fi"));
+    expect(guarded).toContain("gh issue comment");
+    expect(run.replace(guarded, "")).not.toContain("gh issue");
+    expect(run.trimEnd().endsWith("exit 1")).toBe(true);
   });
 
-  test("no artifact uploads the run's private key", () => {
+  test("no artifact uploads the run's private key or raw transcript", () => {
     const uploads = Object.values(wf.jobs).flatMap((j) =>
       (j.steps ?? []).filter((s) => s.uses?.startsWith("actions/upload-artifact")),
     );
-    expect(uploads).toHaveLength(3);
-    for (const u of uploads) expect(u.with?.path).toMatch(/^!.+\/\*\*\/key$/m);
+    expect(uploads).toHaveLength(2);
+    for (const u of uploads) {
+      expect(u.with?.path).toMatch(/^!.+\/\*\*\/key$/m);
+      expect(u.with?.path).toMatch(/^!.+\/transcript\.raw$/m);
+    }
+  });
+
+  const cleanups = () =>
+    (["linux-vm", "pair"] as const).map((j) => {
+      const steps = wf.jobs[j]?.steps ?? [];
+      const i = steps.findIndex((s) => s.name === "Delete this run's VMs");
+      return { job: j, steps, i, step: steps[i] };
+    });
+
+  test("each VM job deletes this run's VMs in an always() step after the run", () => {
+    for (const { steps, i, step } of cleanups()) {
+      expect(step?.if).toBe("always()");
+      expect(steps.findIndex((s) => s.run?.includes("run-layer"))).toBeLessThan(i);
+    }
+  });
+
+  test("the cleanup step purges only volley-it-<run id>- VMs and prints the others", () => {
+    for (const { step } of cleanups()) {
+      const w = world();
+      for (const [name, addr] of [
+        ["volley-it-42-hub", "10.20.0.11"],
+        ["volley-it-other-7-hub", "10.20.0.12"],
+        ["unrelated", "10.20.0.13"],
+      ] as const) {
+        mkdirSync(join(w.state, "vms", name), { recursive: true });
+        writeFileSync(join(w.state, "vms", name, "addr"), addr);
+      }
+      const r = Bun.spawnSync(["bash", "-c", step?.run ?? "exit 9"], {
+        env: { PATH: `${STUBS}:/usr/bin:/bin`, STUB_STATE: w.state, GITHUB_RUN_ID: "42" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(r.exitCode).toBe(0);
+      expect(vmsLeft(w).sort()).toEqual(["unrelated", "volley-it-other-7-hub"]);
+      const out = r.stdout.toString();
+      expect(out).toContain("Purging volley-it-42-hub");
+      expect(out).toContain("Not this run's, left alone: volley-it-other-7-hub");
+      expect(out).not.toContain("unrelated");
+    }
+  });
+});
+
+describe("verify.sh", () => {
+  const job = (name: string, conclusion: string | null, status = "completed") => ({
+    name,
+    status,
+    conclusion,
+  });
+  const JOBS = ["Layer 2 (ubuntu-24.04)", "Layer 2 (debian-13)", "Layer 4 (pair)"];
+  const URL = "https://github.com/kryptek/volley/actions/runs/1001";
+  const view = (status: string, conclusion: string | null, jobs: object[]) =>
+    JSON.stringify({ status, conclusion, url: URL, jobs });
+  const passed = view(
+    "completed",
+    "success",
+    JOBS.map((n) => job(n, "success")),
+  );
+  const queued = view(
+    "queued",
+    null,
+    JOBS.map((n) => job(n, null, "queued")),
+  );
+
+  /** The stand-in gh's answers: run list before and after the dispatch, then run view in turn. */
+  function verify(
+    w: World,
+    args: string[],
+    opts: {
+      views?: string[];
+      env?: Record<string, string>;
+      artifacts?: Record<string, string>;
+    } = {},
+  ) {
+    writeFileSync(join(w.state, "gh-run-list.1"), '[{"databaseId": 1000}]\n');
+    writeFileSync(join(w.state, "gh-run-list.2"), '[{"databaseId": 1001}]\n');
+    (opts.views ?? [passed]).forEach((v, i) =>
+      writeFileSync(join(w.state, `gh-run-view.${i + 1}`), `${v}\n`),
+    );
+    for (const [path, content] of Object.entries(opts.artifacts ?? {})) {
+      mkdirSync(dirname(join(w.state, "artifacts", path)), { recursive: true });
+      writeFileSync(join(w.state, "artifacts", path), content);
+    }
+    const r = Bun.spawnSync(["bash", join(HERE, "verify.sh"), ...args], {
+      cwd: w.dir,
+      env: {
+        PATH: `${STUBS}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        HOME: w.dir,
+        TMPDIR: w.tmp,
+        STUB_STATE: w.state,
+        VM_OUT: w.out,
+        VERIFY_POLL_S: "0",
+        VERIFY_FIND_S: "5",
+        ...opts.env,
+      },
+      stdin: "ignore",
+      timeout: 20_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const log = join(w.state, "calls.log");
+    return {
+      code: r.exitCode,
+      stdout: r.stdout.toString(),
+      out: `${r.stdout.toString()}${r.stderr.toString()}`,
+      calls: existsSync(log) ? readFileSync(log, "utf8").trimEnd().split("\n") : [],
+    };
+  }
+  const branch = () =>
+    Bun.spawnSync(["git", "-C", HERE, "rev-parse", "--abbrev-ref", "HEAD"])
+      .stdout.toString()
+      .trim();
+
+  test("no argument dispatches the current branch; the run is the new one gh run list shows", () => {
+    const w = world();
+    const r = verify(w, []);
+    expect(r.code).toBe(0);
+    const b = branch();
+    expectInOrder(r.calls, [
+      /^gh auth status$/,
+      new RegExp(
+        `^gh run list --workflow install-vm\\.yml --branch ${b} --limit 1 --json databaseId$`,
+      ),
+      new RegExp(`^gh workflow run install-vm\\.yml --ref ${b}$`),
+      new RegExp(
+        `^gh run list --workflow install-vm\\.yml --branch ${b} --limit 1 --json databaseId$`,
+      ),
+      /^gh run view 1001 --json status,conclusion,url,jobs$/,
+      /^gh run watch 1001 --exit-status$/,
+      /^gh run download 1001 --dir \S+run-1001 --pattern layer\*$/,
+    ]);
+  });
+
+  test("<branch> dispatches that ref; --version adds the input, and must be vX.Y.Z", () => {
+    const w = world();
+    const r = verify(w, ["release/2026-10-25-gaps", "--version", "v0.13.2"]);
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain(
+      "gh workflow run install-vm.yml --ref release/2026-10-25-gaps -f version=v0.13.2",
+    );
+    for (const bad of [["--version", "0.13.2"], ["--version"], ["a", "b"], ["--frob"]]) {
+      const w2 = world();
+      const u = verify(w2, bad);
+      expect(u.code).toBe(2);
+      expect(u.out).toContain("usage: verify.sh [<branch>] [--version vX.Y.Z]");
+      expect(u.calls).toEqual([]);
+    }
+  });
+
+  test("a passing run prints three pass rows and the run URL, and exits 0", () => {
+    const w = world();
+    const metrics = (timings: Record<string, number>) =>
+      JSON.stringify({ total_ms: 400_000, timings, setup: { wall_ms: 185_000 } });
+    const r = verify(w, ["main"], {
+      artifacts: {
+        "layer2-ubuntu-24.04/metrics.json": metrics({ noci_wave_ms: 121_000 }),
+        "layer2-ubuntu-24.04/failures.md": "",
+        "layer4-pair/metrics.json": metrics({ slug_wave_ms: 300_000 }),
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("| layer | result | metrics | first failure |");
+    expect(r.stdout).toContain(
+      "| ubuntu-24.04 | pass | setup 3 m 5 s · install 6 m 40 s · noci_wave_ms 2 m 1 s |  |",
+    );
+    expect(r.stdout).toMatch(/\| debian-13 \| pass \| — \|/);
+    expect(r.stdout).toContain(
+      "| pair | pass | setup 3 m 5 s · install 6 m 40 s · slug_wave_ms 5 m 0 s |",
+    );
+    expect(r.stdout).toContain(`run: ${URL} (success)`);
+    expect(r.stdout).not.toContain("Leftover");
+    expect(existsSync(join(w.out, "run-1001", "layer2-ubuntu-24.04", "metrics.json"))).toBe(true);
+  });
+
+  test("a failing run prints the failing layer's first FAIL line, the URL and the leftover check; exit 1", () => {
+    const w = world();
+    const failed = view("completed", "failure", [
+      job(JOBS[0] as string, "failure"),
+      job(JOBS[1] as string, "success"),
+      job(JOBS[2] as string, "cancelled"),
+    ]);
+    const r = verify(w, ["main"], {
+      views: [failed],
+      artifacts: {
+        "layer2-ubuntu-24.04/metrics.json": JSON.stringify({ timings: {} }),
+        "layer2-ubuntu-24.04/failures.md":
+          "- the wave hello-noci on a repository with no CI did not pass (the line above)\n- volleyd.service is not active after the reboot\n",
+      },
+    });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain(
+      "| ubuntu-24.04 | failure | — | FAIL: the wave hello-noci on a repository with no CI did not pass (the line above) |",
+    );
+    expect(r.stdout).toContain(
+      "| pair | cancelled | — | no artifact: the job did not run its script |",
+    );
+    expect(r.stdout).toContain(`run: ${URL} (failure)`);
+    expect(r.stdout).toContain(
+      "Leftover VMs? On the paired Linux machine: multipass list | grep volley-it- (scripts/install-tests/README.md, Cleaning up)",
+    );
+  });
+
+  test("jobs still queued after VERIFY_QUEUED_S: the no-runner line once, and the wait goes on", () => {
+    const w = world();
+    const r = verify(w, ["main"], {
+      views: [queued, queued, queued, queued, passed],
+      env: { VERIFY_QUEUED_S: "0" },
+    });
+    expect(r.code).toBe(0);
+    const line =
+      "no runner is online for volley-linux-vm: start the runner service on the paired Linux machine (scripts/install-tests/README.md, The Linux box)";
+    expect(r.stdout.split("\n").filter((l) => l === line)).toHaveLength(1);
+    expect(r.calls.filter((c) => c.startsWith("gh run view 1001")).length).toBeGreaterThan(4);
+    expect(r.calls.filter((c) => c.startsWith("gh workflow run"))).toHaveLength(1);
+    // Under the threshold, nothing is said.
+    const w2 = world();
+    const r2 = verify(w2, ["main"], { views: [queued, passed] });
+    expect(r2.stdout).not.toContain("no runner is online");
+  });
+
+  test("gh not signed in: exit 2 with one line, nothing dispatched", () => {
+    const w = world();
+    writeFileSync(join(w.state, "gh-signed-out"), "");
+    const r = verify(w, ["main"]);
+    expect(r.code).toBe(2);
+    expect(r.out.trim()).toBe("verify.sh: gh is not signed in: run gh auth login, then try again");
+    expect(r.calls).toEqual(["gh auth status"]);
   });
 });

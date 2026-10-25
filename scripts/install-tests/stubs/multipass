@@ -2,8 +2,8 @@
 # multipass in vm.test.ts (scripts/install-tests/README.md): every call appended to
 # $STUB_STATE/calls.log, a VM a directory under $STUB_STATE/vms/<name> with its address (which the
 # ssh stand-in answers on) and its boot time; a launch's cloud-init is kept as
-# $STUB_STATE/cloud-init.<name>.yaml. STUB_FAIL=launch makes `launch` fail
-# after making the instance.
+# $STUB_STATE/cloud-init.<name>.yaml; `list --format csv` lists them. STUB_FAIL=launch makes
+# `launch` fail after making the instance.
 set -u
 S=${STUB_STATE:?STUB_STATE is not set}
 printf 'multipass %s\n' "$*" >>"$S/calls.log"
@@ -46,6 +46,14 @@ case "${1:-}" in
       exit 2
     fi
     info_json "$name"
+    ;;
+  list)
+    echo "Name,State,IPv4,IPv6,Release,AliasesForInstance"
+    for d in "$S"/vms/*/; do
+      [ -d "$d" ] || continue
+      n=$(basename "$d")
+      echo "$n,Running,$(cat "$d/addr" 2>/dev/null),,Ubuntu 24.04 LTS,"
+    done
     ;;
   delete)
     shift

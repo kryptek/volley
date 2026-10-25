@@ -8,8 +8,12 @@
 # The checks: `volley machine add` exits 0; the hub's readiness verdict on the peer is ready
 # within 10 minutes (`pair_ready_ms`) and `volley peer list` lists it; the wave hello-peer
 # (`host: peer`) completes with `task_placed` naming the peer and the simulated agent's commit in
-# the peer's clone; `volley peer remove` stops the peer's service. Results land in $VM_OUT
-# (default ./vm-results); exit 1 when a check failed. Both VMs are deleted whatever happens.
+# the peer's clone; a repository added by slug (#596: `gh repo create`, then
+# `volley repo add <slug> --machine peer --wait` reporting a clone on the peer) runs the wave
+# hello-slug there the same way, with no REMOTE_REPO_MISSING; `volley peer list`, `volley repo add`
+# and `volleyd status` never say `undefined`; `volley peer remove` stops the peer's service.
+# Results land in $VM_OUT (default ./vm-results); exit 1 when a check failed. Both VMs are deleted
+# whatever happens.
 # shellcheck disable=SC2317 # the functions poll and the trap call
 set -u
 
@@ -35,6 +39,7 @@ LAYER=4
 LABEL=pair
 PEER=peer
 WAVE=hello-peer
+SLUG_WAVE=hello-slug
 
 lib_init
 HUB_VM=$(vm_name hub) || exit 1
@@ -109,33 +114,90 @@ on "$HUB" 'volley peer list --json' >"$OUT/peer-list.json" 2>>"$TRANSCRIPT" ||
   fail "volley peer list --json exited non-zero"
 bun -e 'const j = JSON.parse(await Bun.file(process.argv[1]).text()); process.exit((j.machines ?? []).some((m) => m.name === process.argv[2]) ? 0 : 1)' \
   "$OUT/peer-list.json" "$PEER" 2>/dev/null || fail "volley peer list does not list $PEER (peer-list.json)"
+capture "$HUB" 'volley peer list' peer-list.txt
+
+# <wave> complete on the hub, its task T1 placed on the peer (`<wave>-status.json`,
+# `<wave>-events.jsonl`); a REMOTE_REPO_MISSING in its journal says so at once (#596).
+done_on_peer() {
+  local wave=$1
+  on "$HUB" "volleyd status $wave --json" >"$OUT/$wave-status.json" 2>/dev/null &&
+    on "$HUB" "volleyd events $wave --cursor vm-pair" >"$OUT/$wave-events.jsonl" 2>/dev/null || return 1
+  if grep -qi remote_repo_missing "$OUT/$wave-events.jsonl"; then
+    echo "the wave $wave hit REMOTE_REPO_MISSING: volleyd found no clone of its repository on $PEER" >&2
+    return 1
+  fi
+  metrics verdict wave --status "$OUT/$wave-status.json" --events "$OUT/$wave-events.jsonl" \
+    --task T1 --host "$PEER"
+}
 
 # A second wave on the first wave's scratch repository, its one task pinned to the peer.
 say "The wave $WAVE, host: $PEER"
 t2=$(now_ms)
-vm_ssh "$HUB" "$PRELUDE eval \"\$(volley sim env)\"; bash -s $WAVE $PEER" >>"$TRANSCRIPT" 2>&1 <<'EOF' ||
-set -eu
-wave=$1 host=$2
-f=$(ls -t "$HOME"/.volley/volleyd/first-wave/*/.volley/waves/hello-*.yaml | head -n 1)
-repo=${f%/.volley/waves/*}
-url=$(cd "$repo" && gh issue create --title "Add PEER.md" --body "The pair test's wave, on $host.")
-sed -e "s/^wave: .*/wave: $wave/" -e "s/^  T1: .*/  T1: { issue: ${url##*/}, host: $host }/" "$f" \
-  >"$repo/.volley/waves/$wave.yaml"
-volleyd run "$repo/.volley/waves/$wave.yaml"
-EOF
+submit_wave "$HUB" first-wave "$WAVE" "Add PEER.md" "$PEER" >>"$TRANSCRIPT" 2>&1 ||
   fail "could not submit the wave $WAVE"
-done_on_peer() {
-  on "$HUB" "volleyd status $WAVE --json" >"$OUT/wave-status.json" 2>/dev/null &&
-    on "$HUB" "volleyd events $WAVE --cursor vm-pair" >"$OUT/wave-events.jsonl" 2>/dev/null &&
-    metrics verdict wave --status "$OUT/wave-status.json" --events "$OUT/wave-events.jsonl" \
-      --task T1 --host "$PEER"
-}
-poll 900 done_on_peer || fail "the wave $WAVE did not complete on $PEER (the line above)"
+poll 900 done_on_peer "$WAVE" || fail "the wave $WAVE did not complete on $PEER (the line above)"
 timing peer_wave_ms $(($(now_ms) - t2))
+capture "$HUB" "volleyd status $WAVE" "$WAVE-status.txt" "volleyd status"
 # The simulated implementer commits src/<task>.ts in the clone it worked in, on the peer.
 # shellcheck disable=SC2016 # expanded on the peer
 on "$PEER_ADDR" 'for g in $(find ~ -maxdepth 6 -name .git -prune 2>/dev/null); do git -C "${g%/.git}" log --all --format=%H -- src/T1.ts; done | grep -q .' ||
   fail "no commit of src/T1.ts in a clone on the peer"
+
+# A repository added by slug (#596): no clone of it on the hub, one on the peer that volleyd makes.
+# Both machines' fake GitHubs share the hub's origins over ssh (VOLLEY_SIM_ORIGINS, with the run's
+# key), so the peer's `gh repo clone` and git reach the origin the hub's `gh repo create` made.
+say "A repository added by slug, placed on $PEER"
+t3=$(now_ms)
+SLUG="volley-sim/volley-slug-$(run_id)"
+# shellcheck disable=SC2016 # expanded on the hub
+ORIGINS=$(on_sim "$HUB" 'printf "%s/origins" "$VOLLEY_SIM_HOME"' 2>>"$TRANSCRIPT")
+if [ -z "$ORIGINS" ]; then
+  fail "could not read the hub's origins directory (volley sim env)"
+else
+  SIM_ORIGINS="$VM_USER@$HUB:$ORIGINS"
+  # The line both machines' shells (and the agents' launches) read first.
+  SIM_LINE="export VOLLEY_SIM_ORIGINS=$SIM_ORIGINS; eval \"\$(\$HOME/.volley/bin/volley sim env)\""
+  # git over ssh to the hub without a question: the run's key on the peer, a new host key accepted.
+  vm_ssh "$PEER_ADDR" 'umask 077 && mkdir -p ~/.ssh && cat >~/.ssh/id_ed25519' <"$KEYDIR/id_ed25519" ||
+    fail "could not copy the run's key to the peer"
+  for addr in "$HUB" "$PEER_ADDR"; do
+    # shellcheck disable=SC2016 # expanded on the VM
+    vm_ssh "$addr" "mkdir -p $ORIGINS && printf 'Host $HUB\\n  StrictHostKeyChecking accept-new\\n' >>~/.ssh/config &&" \
+      'chmod 600 ~/.ssh/config && cat - ~/.bashrc >~/.bashrc.it && mv ~/.bashrc.it ~/.bashrc' \
+      <<<"$SIM_LINE" || fail "could not set VOLLEY_SIM_ORIGINS on $addr"
+  done
+  # volleyd's peer clone fetches https://github.com/<slug>.git: on the peer, that is the hub's origin.
+  on "$PEER_ADDR" "git config --global url.$SIM_ORIGINS/$SLUG.git.insteadOf https://github.com/$SLUG.git" ||
+    fail "could not point the peer's git at the hub's origin of $SLUG"
+  # The repository, with main and the wave's release branch, and no clone left on the hub.
+  # shellcheck disable=SC2016 # expanded on the hub
+  on_sim "$HUB" "gh repo create $SLUG --private && d=\$(mktemp -d) && gh repo clone $SLUG \"\$d/c\" &&" \
+    "git -C \"\$d/c\" commit -q --allow-empty -m root &&" \
+    "git -C \"\$d/c\" push -q origin HEAD:main HEAD:release/$SLUG_WAVE && rm -rf \"\$d\"" \
+    >>"$TRANSCRIPT" 2>&1 || fail "could not create $SLUG on the hub"
+  capture "$HUB" "volley repo add $SLUG --machine $PEER --wait" repo-add.txt "volley repo add"
+  CLONE=$(sed -n "s/^ *$PEER: ready (\\(.*\\))\$/\\1/p" "$OUT/repo-add.txt" | tail -n 1)
+  if [ -z "$CLONE" ]; then
+    fail "volley repo add did not report $PEER ready (repo-add.txt)"
+  elif ! on "$PEER_ADDR" "git -C '$CLONE' rev-parse --git-dir" >/dev/null 2>>"$TRANSCRIPT"; then
+    fail "the peer's clone is reported at a hub path ($CLONE is no clone on the peer)"
+  fi
+
+  say "The wave $SLUG_WAVE on $SLUG, host: $PEER"
+  submit_wave "$HUB" "$SLUG" "$SLUG_WAVE" "Add SLUG.md" "$PEER" >>"$TRANSCRIPT" 2>&1 ||
+    fail "could not submit the wave $SLUG_WAVE"
+  poll 900 done_on_peer "$SLUG_WAVE" ||
+    fail "the wave $SLUG_WAVE did not complete on $PEER (the line above)"
+  grep -qi remote_repo_missing "$OUT/$SLUG_WAVE-events.jsonl" 2>/dev/null &&
+    fail "the wave $SLUG_WAVE hit REMOTE_REPO_MISSING: volleyd found no clone of $SLUG on $PEER"
+  timing slug_wave_ms $(($(now_ms) - t3))
+  capture "$HUB" "volleyd status $SLUG_WAVE" "$SLUG_WAVE-status.txt" "volleyd status"
+  check_text "$OUT/$SLUG_WAVE-status.json" "volleyd status --json"
+  if [ -n "$CLONE" ]; then
+    on "$PEER_ADDR" "git -C '$CLONE' fetch -q origin && git -C '$CLONE' log --all --format=%H -- src/T1.ts | grep -q ." ||
+      fail "no commit of src/T1.ts in the peer's clone of $SLUG ($CLONE)"
+  fi
+fi
 
 say "volley peer remove $PEER stops the peer's service"
 on "$HUB" "volley peer remove $PEER --now" >>"$TRANSCRIPT" 2>&1 || fail "volley peer remove exited non-zero"
@@ -146,6 +208,6 @@ stopped() {
 }
 poll 120 stopped || fail "volley-peer.service still runs on the peer after volley peer remove"
 
-# --no-lan on a VM with a LAN address skips the phone step, as on Layer 3's Mac.
+# --no-lan on a VM with a LAN address skips the phone step.
 summarize --total-ms $((t1 - t0)) --allow-skipped phone
 finish
