@@ -17,6 +17,7 @@
  */
 import { type FormEvent, useEffect, useState } from "react";
 import { useAccount } from "../auth/SignInGate";
+import type { Progress } from "../getting-started/state";
 import {
   type AuthOps,
   type SetupPlan,
@@ -48,7 +49,9 @@ export function useAdminRole(
   identity: string | null,
   ask: boolean,
 ): { admin: boolean; role: string | null } {
-  const [role, setRole] = useState<string | null>(() => readSessionRole(identity));
+  // The stored role is read each render: `identity` arrives after the first one on a live Desk.
+  const [probedRole, setRole] = useState<string | null>(null);
+  const role = probedRole ?? readSessionRole(identity);
   const [probed, setProbed] = useState(false);
   useEffect(() => {
     if (!ask || probed || role !== null || ops === null || identity === null) return;
@@ -78,6 +81,10 @@ export interface SetupProps {
   onUseToken?: (token: string) => void;
   /** Opens the setup wizard in its own modal (Settings closes meanwhile); `repair` for Run setup again. */
   onOpenSetup?: (repair: boolean) => void;
+  /** Getting started: finished or skipped and when; `null` while it is neither. */
+  gettingStarted?: Progress["done"] | null;
+  /** Opens Getting started at the step it reached (Settings closes meanwhile). */
+  onOpenGettingStarted?: () => void;
 }
 
 type PlanState =
@@ -112,6 +119,16 @@ function reopenWithToken(deskUrl: string) {
     // Only the fragment changed, so the page would not load again by itself.
     window.location.reload();
   };
+}
+
+/** Getting started's row: Not yet · Finished <date> · Skipped <date>. */
+function gettingStartedState(done: Progress["done"] | null | undefined): string {
+  if (!done) return "Not yet";
+  const d = new Date(done.at);
+  const date = Number.isNaN(d.getTime())
+    ? ""
+    : ` ${d.toLocaleDateString(undefined, { dateStyle: "medium" })}`;
+  return `${done.kind === "finished" ? "Finished" : "Skipped"}${date}`;
 }
 
 function when(iso: string): string {
@@ -237,6 +254,17 @@ export function Setup(p: SetupProps) {
       </Group>
       {admin && ops !== null ? (
         <Group title="Admin">
+          {p.onOpenGettingStarted && (
+            <Row
+              label="Getting started"
+              hint="The first-launch walk-through: this computer, machines, repos, people, access"
+            >
+              <span className="s-hint">{gettingStartedState(p.gettingStarted)}</span>
+              <button type="button" className="btn" onClick={p.onOpenGettingStarted}>
+                Open…
+              </button>
+            </Row>
+          )}
           <Row
             label="One-time admin token"
             hint="Used once to sign in as admin on a new browser; shown here once"

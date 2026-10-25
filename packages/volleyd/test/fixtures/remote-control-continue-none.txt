@@ -1,0 +1,1 @@
+Error: No recent session found in this directory or its worktrees. Run `claude remote-control` to start a new one.

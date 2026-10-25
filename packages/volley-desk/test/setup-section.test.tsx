@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { SignInGate } from "../src/auth/SignInGate";
-import { Setup } from "../src/settings/Setup";
+import { Setup, type SetupProps } from "../src/settings/Setup";
 import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider, useDesk } from "../src/store/context";
 import {
   type AuthOps,
@@ -18,7 +18,10 @@ const DESK = "http://desk.example:5199/";
 function section(
   ops: AuthOps | null,
   admin: boolean,
-  extra: { onPreviewSignIn?: () => void; onOpenSetup?: (repair: boolean) => void } = {},
+  extra: Pick<
+    SetupProps,
+    "onPreviewSignIn" | "onOpenSetup" | "gettingStarted" | "onOpenGettingStarted"
+  > = {},
 ) {
   return render(
     <Setup
@@ -170,6 +173,33 @@ describe("Settings › Setup & Security", () => {
     section(ops, true, { onOpenSetup });
     fireEvent.click(screen.getByRole("button", { name: "Open setup…" }));
     expect(onOpenSetup).toHaveBeenCalledWith(true);
+  });
+
+  it("shows Getting started's state to an admin, and Open… reopens it", async () => {
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
+    const onOpenGettingStarted = vi.fn();
+    const view = section(ops, true, { gettingStarted: null, onOpenGettingStarted });
+    expect(await screen.findByText("On")).toBeInTheDocument();
+    expect(row("Getting started").getByText("Not yet")).toBeInTheDocument();
+    fireEvent.click(row("Getting started").getByRole("button", { name: "Open…" }));
+    expect(onOpenGettingStarted).toHaveBeenCalledOnce();
+    const at = "2026-10-24T12:00:00.000Z";
+    const day = new Date(at).toLocaleDateString(undefined, { dateStyle: "medium" });
+    view.unmount();
+    const finished = section(ops, true, {
+      gettingStarted: { kind: "finished", at },
+      onOpenGettingStarted,
+    });
+    expect(row("Getting started").getByText(`Finished ${day}`)).toBeInTheDocument();
+    finished.unmount();
+    section(ops, true, { gettingStarted: { kind: "skipped", at }, onOpenGettingStarted });
+    expect(row("Getting started").getByText(`Skipped ${day}`)).toBeInTheDocument();
+    await screen.findByText("On");
+  });
+
+  it("a non-admin browser has no Getting started row", () => {
+    section(fakeOps({}).ops, false, { onOpenGettingStarted: vi.fn() });
+    expect(screen.queryByText("Getting started")).not.toBeInTheDocument();
   });
 
   it("previews the sign-in screen", () => {

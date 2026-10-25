@@ -868,6 +868,26 @@ record is removed.
 
 ---
 
+## `volley coordinator`
+
+The coordinator role (SPEC §4.6.25): the Claude Code Remote Control server volleyd keeps alive
+on the machine `coordinator.machine` names (`volleyd config set coordinator.machine <name>`;
+`local` is the supervisor's machine, `null` turns it off). `status` and `open` read volleyd's
+retained `volley/_system/federation/coordinator`, so they need the broker, not an answer from
+volleyd; `restart` and `stop` are admin ops.
+
+```sh
+volley coordinator status          # coord-test on box-a: running since 2026-10-24T12:00:05.000Z · https://claude.ai/code/…
+volley coordinator status --json   # the retained state: machine, name, state, since, session_url, restarts, last_error, dir
+volley coordinator open            # prints the link; exit 1 with `no link yet: open the Claude app and pick "coord-test"`
+volley coordinator open --browser  # and opens it (open on macOS, xdg-open elsewhere)
+volley coordinator restart         # start it again: clears its backoff, a stop or a failure
+volley coordinator stop            # end it until the next restart
+```
+
+With the role off, `status` says so and `open` exits 1. `--broker-url`, `--namespace`,
+`--username`, `--password` and `--timeout` as everywhere.
+
 ## `volley lease`
 
 Heavy operations (integration-test suites, builds, browsers) share machine-global **lease pools**
