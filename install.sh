@@ -19,7 +19,8 @@ and Claude Code, each only when missing; on Linux mosquitto is the snap, snapd i
 first when missing, and the install stops before Volley when no mosquitto 2.1 can be put on the
 machine), clones Volley at a release tag into ~/.volley/src,
 writes the `volley` and `volleyd` commands into ~/.volley/bin, adds that directory to PATH in
-your shell's startup file once, then runs `volley setup`. On macOS, when Homebrew resolves
+your shell's startup file once, then runs `volley setup` (on Linux it runs the broker's steps
+through sudo, saying why first, reusing the sudo this install asked for). On macOS, when Homebrew resolves
 Volley's tap (kryptek/volley/volley), neither --version nor --source is given and ~/.volley/bin
 has no volley yet, it runs `brew install kryptek/volley/volley` instead of the clone. Rerunning
 it is safe: what is already there is left alone.

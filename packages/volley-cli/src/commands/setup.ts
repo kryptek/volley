@@ -30,6 +30,7 @@ import {
   renderCheck,
 } from "../setup/check";
 import { planClaudeCode } from "../setup/claude-code";
+import { brokerStepsNeedRoot, runBrokerStepsAsRoot } from "../setup/escalate";
 import { type FirstWaveOptions, type WaveView, planFirstWave } from "../setup/first-wave";
 import { ghRepoDeleteLine } from "../setup/first-wave-repo";
 import {
@@ -544,6 +545,31 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       }
       return EXIT.ERROR;
     };
+    // A Linux install whose broker files are root's: detect, security and accounts as root first.
+    if (
+      brokerStepsNeedRoot({
+        platform: deps.platform,
+        uid: deps.uid,
+        layout: layout.name,
+        steps: steps.map(([n]) => n),
+        check,
+        peer,
+      })
+    ) {
+      const root = await runBrokerStepsAsRoot(ctx, io, {
+        flags: {
+          ...(layoutFlag !== undefined ? { layout: layoutFlag } : {}),
+          ...(str("config") !== undefined ? { config: str("config") as string } : {}),
+          ...(str("state-file") !== undefined ? { stateFile: str("state-file") as string } : {}),
+        },
+        argv,
+      });
+      if (typeof root === "object") {
+        journal("security", root.event, root.summary);
+        stopped();
+        return root.stop;
+      }
+    }
     const skipped: string[] = [];
     for (const [name, planner] of steps) {
       const i = ALL.findIndex(([n]) => n === name);
@@ -707,7 +733,9 @@ before changing anything.
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
   2. Security  write the Dynamic Security broker config (the diff is shown; the old file is
                backed up), create the plugin's state file and admin login, restart the broker,
-               then check both listeners refuse anonymous clients. Asks whether devices on
+               then check both listeners refuse anonymous clients. On a Linux install whose
+               broker files are root's (the snap, /etc/mosquitto) steps 1-3 run through sudo,
+               announced first; a cloud image's passwordless sudo asks nothing. Asks whether devices on
                your network may reach the WebSocket listener (port 9001: needed for the Desk on
                a phone; logins required, not encrypted until TLS is set up), unless --lan or
                --no-lan says; TCP (1883) stays on this machine either way

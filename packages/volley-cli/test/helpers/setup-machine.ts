@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
-import { LAYOUTS, type Layout } from "../../src/auth/config";
+import { LAYOUTS, type Layout, type LayoutName } from "../../src/auth/config";
 import type { AuthContext } from "../../src/auth/context";
 import { type BufferIO, makeBufferIO } from "../../src/io";
 import type { WaveView } from "../../src/setup/first-wave";
@@ -126,6 +126,13 @@ export interface FakeMachine {
   interfaces: Record<string, { address: string; family: "IPv4" | "IPv6"; internal: boolean }[]>;
   /** The fake clock (`deps.now`): `sleep` advances it. */
   clock: number;
+  /** sudo on the fake machine: whether it needs a password (`sudo -n` then fails). */
+  sudo: { passwordless: boolean };
+  /**
+   * What `sudo [-n] bun <volley cli> …` runs as root: given the argv after the CLI's path. Unset:
+   * the command is unknown (127).
+   */
+  rootChild?: (argv: string[]) => Promise<ExecResult>;
 }
 
 export interface FirstWaveWorld {
@@ -160,10 +167,17 @@ export const MERGING: WaveView[] = [
 export function fakeMachine(
   fake: FakeDynsec,
   dir: string,
-  opts: { platform?: NodeJS.Platform; repair?: boolean; lan?: boolean } = {},
+  opts: {
+    platform?: NodeJS.Platform;
+    repair?: boolean;
+    lan?: boolean;
+    /** The install (default brew-arm64); its files stay under `dir`. */
+    layout?: LayoutName;
+    uid?: number;
+  } = {},
 ): FakeMachine {
   const layout: Layout = {
-    ...LAYOUTS["brew-arm64"],
+    ...LAYOUTS[opts.layout ?? "brew-arm64"],
     config: join(dir, "mosquitto.conf"),
     authDir: join(dir, "auth"),
     stateFile: join(dir, "dynamic-security.json"),
@@ -217,6 +231,7 @@ export function fakeMachine(
       submitted: new Set(),
     },
     clock: NOW,
+    sudo: { passwordless: true },
     loaded: new Set(),
     active: new Set(),
     settingsFile,
@@ -275,6 +290,14 @@ export function fakeMachine(
       );
     }
     if (a[0] === "bun" && a[1] === volleydCli && a[2] === "validate") return ok();
+    // The broker steps as root (setup/escalate.ts): sudo's password, then the child run.
+    const at = a.indexOf(volleyCli);
+    if (a[0] === "sudo" && at > 0 && m.rootChild !== undefined) {
+      if (a[1] === "-n" && !m.sudo.passwordless) {
+        return { code: 1, stdout: "", stderr: "sudo: a password is required\n" };
+      }
+      return m.rootChild(a.slice(at + 1));
+    }
     // Tailscale (setup/network.ts): the CLI on PATH, or the macOS app's, or `sudo` on Linux.
     const ts = a[0] === "sudo" ? a.slice(1) : a;
     if (ts[0] === "tailscale" || ts[0] === TAILSCALE_APP_CLI) {
@@ -518,7 +541,7 @@ export function fakeMachine(
         : ((m.firstWave.states.length > 1 ? m.firstWave.states.shift() : m.firstWave.states[0]) ??
           null),
     platform: opts.platform ?? "darwin",
-    uid: 501,
+    uid: opts.uid ?? 501,
     lanHost: () => "desk.example",
     repoRoot: repo,
     bun: "bun",

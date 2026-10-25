@@ -248,12 +248,7 @@ install_volley() {
 SETUP_OK=''
 setup_volley() {
   local addr=$1
-  # Linux: the snap broker's files are root's, so its steps run under sudo first, as
-  # docs/INSTALL.md's Linux notes say; the rest as the user.
-  if [ "$LAYER" != 3 ] &&
-    ! on "$addr" "[ ! -d /snap/mosquitto/current ] || sudo ~/.volley/bin/volley setup --step detect --step security --step accounts --yes --no-lan" >>"$TRANSCRIPT" 2>&1; then
-    fail "sudo volley setup (the broker steps) exited non-zero on $addr"
-  fi
+  # As a person runs it: on Linux, setup takes the snap broker's steps through sudo itself.
   if on_sim "$addr" "volley setup --yes --no-lan --simulated" >>"$TRANSCRIPT" 2>&1; then
     # shellcheck disable=SC2034 # vm-pair.sh reads it
     SETUP_OK=1

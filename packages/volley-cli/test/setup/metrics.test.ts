@@ -134,6 +134,8 @@ describe("setup metrics", () => {
     await seen.askSecret?.("hidden: ");
     await seen.ask?.("Name: ");
     await seen.exec(["sudo", "systemctl", "restart", "mosquitto"]);
+    // `sudo -n` never prompts: the silent try of the broker steps is not a prompt.
+    await seen.exec(["sudo", "-n", "bun", "cli.ts", "setup", "--step", "security"]);
     const end = meter.begin("security");
     clock = 125_000;
     end(3);
