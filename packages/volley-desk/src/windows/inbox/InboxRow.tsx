@@ -285,7 +285,12 @@ export function InboxRow(p: InboxRowProps) {
               href={item.pointers.link}
               target="_blank"
               rel="noreferrer noopener"
-              onClick={() => void send("open")}
+              aria-disabled={busy}
+              onClick={(e) => {
+                // A second click while the first `open` is in flight would be refused as stale.
+                if (busy) e.preventDefault();
+                else void send("open");
+              }}
             >
               Open
             </a>

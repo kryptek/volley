@@ -23,7 +23,9 @@ export interface HandoffInput {
 const list = (items: string[]) => (items.length === 0 ? "none" : items.join("; "));
 
 export function renderHandoff(h: HandoffInput): string {
-  const waves = h.waves.map((w) => `\`${w.id}\` (${w.repo}, ${w.done}/${w.total} tasks done)`);
+  const waves = h.waves.map(
+    (w) => `\`${w.id}\` (${w.repo ? `${w.repo}, ` : ""}${w.done}/${w.total} tasks done)`,
+  );
   const inbox = h.inbox.map((i) => `\`${i.id}\` ${i.title}`);
   return [
     `You are the coordinator \`${h.name}\` of this Volley fleet, running on \`${h.machine}\` in \`${h.dir}\` (repos under \`repos/\`).`,

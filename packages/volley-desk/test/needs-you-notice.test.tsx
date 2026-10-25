@@ -69,6 +69,25 @@ describe("a notice in Needs you", () => {
     );
   });
 
+  it("a second Open while the first is in flight sends nothing more", async () => {
+    let finish: (v: { ok: boolean }) => void = () => {};
+    const control = row(
+      notice(),
+      vi.fn(
+        () =>
+          new Promise<{ ok: boolean }>((r) => {
+            finish = r;
+          }),
+      ),
+    );
+    const a = screen.getByRole("link", { name: "Open" });
+    fireEvent.click(a);
+    await waitFor(() => expect(a).toHaveAttribute("aria-disabled", "true"));
+    fireEvent.click(a);
+    expect(control).toHaveBeenCalledTimes(1);
+    finish({ ok: true });
+  });
+
   it("a failure notice has no link: Dismiss only", () => {
     row(
       notice({

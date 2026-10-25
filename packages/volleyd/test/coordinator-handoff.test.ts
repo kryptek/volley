@@ -37,4 +37,10 @@ describe("renderHandoff (SPEC §4.6.25)", () => {
       ].join("\n"),
     );
   });
+
+  it("leaves the repo out of a wave that has none yet", () => {
+    expect(
+      renderHandoff({ ...base, waves: [{ id: "w3", repo: "", done: 0, total: 0 }], inbox: [] }),
+    ).toContain("Running waves: `w3` (0/0 tasks done).");
+  });
 });

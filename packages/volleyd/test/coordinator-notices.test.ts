@@ -118,6 +118,30 @@ describe("noticesFor (SPEC §4.6.25)", () => {
     ).toEqual({ supersede: [NOTICE_LINK, NOTICE_FAILED], open: [] });
     expect(noticesFor(running(), null, [])).toEqual({ supersede: [], open: [] });
   });
+
+  it("a stop (no link any more) supersedes the open link notice", () => {
+    const { session_url: _, ...stopped } = running({ state: "stopped" });
+    expect(noticesFor(running(), stopped, [openItem(NOTICE_LINK, LINK)])).toEqual({
+      supersede: [NOTICE_LINK],
+      open: [],
+    });
+  });
+
+  it("running again closes the open failure notice, even on a link already shown", () => {
+    const failed = running({ state: "failed", last_error: "exited 1" });
+    const dismissedLink: InboxItem = {
+      ...openItem(NOTICE_LINK, LINK),
+      answered: { answer: "dismiss", by: "coord-test", where: { kind: "desk" }, at: AT },
+    };
+    expect(noticesFor(failed, running(), [dismissedLink, openItem(NOTICE_FAILED)])).toEqual({
+      supersede: [NOTICE_FAILED],
+      open: [],
+    });
+    const { session_url: _, ...noLink } = running();
+    expect(noticesFor(failed, noLink, [openItem(NOTICE_FAILED)]).supersede).toEqual([
+      NOTICE_FAILED,
+    ]);
+  });
 });
 
 describe("itemForNotice (SPEC §4.6.18)", () => {

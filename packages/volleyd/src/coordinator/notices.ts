@@ -69,6 +69,10 @@ export function noticesFor(
         });
       }
     }
+    // A stop or restart drops the link: Open would point at a dead session.
+    if (link === undefined && prev?.session_url !== undefined) supersede.add(NOTICE_LINK);
+    // Running again (on a link already shown, or none yet): the failure is over.
+    if (next.state === "running" && prev?.state !== "running") supersede.add(NOTICE_FAILED);
     if (next.state === "failed" && prev?.state !== "failed") {
       // Open, or shown for this failure (opened once it began).
       const already =

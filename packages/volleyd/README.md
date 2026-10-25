@@ -2015,7 +2015,9 @@ volleyd config set coordinator.machine null      # off: the session is ended, th
   phone; `state: failed` opens `n-coordinator-failed` (`Coordinator on <machine> stopped`, the last
   error and `volley coordinator restart`). The open notices a new one replaces are answered
   `superseded` (`where: autopilot`) first: a new link replaces both, a failure the link notice,
-  the role turned off both. A volleyd restart adopting the same link opens nothing new.
+  the role turned off both. A stop or restart that drops the link closes the link notice, and
+  the role running again closes the failure notice. A volleyd restart adopting the same link
+  opens nothing new.
 - **The handoff text** (`coordinator/handoff.ts`, `renderHandoff`). A fresh session under the
   server knows nothing of the fleet: when its hooks' registry entry arrives (the one carrying
   `model_source`, sent once its mailbox session exists, so the mail is kept) naming the role's
