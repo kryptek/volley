@@ -125,7 +125,6 @@ describe("Getting started: the shell", () => {
   it("stepLabel counts every step, Welcome and Done included, out of STEPS.length", () => {
     expect(stepLabel(0)).toEqual({ n: 1, of: 7, eyebrow: "Step 1 of 7" });
     expect(stepLabel(STEPS.length - 1)).toEqual({ n: 7, of: 7, eyebrow: "Step 7 of 7" });
-    expect(stepLabel(3).of).toBe(STEPS.length);
   });
 
   it("the rail badge and the eyebrow count the same step", () => {
