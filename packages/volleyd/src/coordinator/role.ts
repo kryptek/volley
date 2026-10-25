@@ -225,6 +225,23 @@ export interface CoordinatorRolePayload {
 }
 
 /**
+ * Whether `v` is a coordinator role payload (`name`, `machine`, `state`, `since` strings,
+ * `restarts` a number): what `formatCoordinator` may format. A wave's `coordinator` (the owner's
+ * presence) is not one.
+ */
+export function isCoordinatorRole(v: unknown): v is CoordinatorRolePayload {
+  if (typeof v !== "object" || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    typeof p.name === "string" &&
+    typeof p.machine === "string" &&
+    typeof p.state === "string" &&
+    typeof p.since === "string" &&
+    typeof p.restarts === "number"
+  );
+}
+
+/**
  * One line for the role's state: `coord-test on box-a: running since <t> · <link>`; a stop or
  * failure carries its reason, a question on the server's screen says so.
  */

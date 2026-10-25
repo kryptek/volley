@@ -4,7 +4,7 @@ import { churnCauses } from "../autopilot/digest";
 import { formatBriefPreface } from "../brief";
 import { systemClock } from "../clock";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
-import { type CoordinatorRolePayload, formatCoordinator } from "../coordinator/role";
+import { formatCoordinator, isCoordinatorRole } from "../coordinator/role";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller, span } from "../ownership";
@@ -64,11 +64,6 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     }
     const states =
       wave !== undefined ? [res.result as WaveState] : (res.result as { waves: WaveState[] }).waves;
-    const kill = (res.result as { kill_switch?: boolean }).kill_switch === true;
-    const logins = (res.result as { agent_logins?: { live: number; swept: number } }).agent_logins;
-    const localAgents = (res.result as { local_agents?: LocalAgentsView }).local_agents;
-    const ceiling = (res.result as { ceiling?: { live: number; max: number } }).ceiling;
-    const coordinator = (res.result as { coordinator?: CoordinatorRolePayload }).coordinator;
     let decisions: DecisionPayload[] = [];
     let caller: string | null = null;
     if (states.some((s) => s.open_decisions.length > 0)) {
@@ -77,17 +72,38 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       caller = (await resolveCaller(client, parsed.values.by, withSetupCoordinator(env).env)).id;
     }
     io.stdout(
-      (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
-        (logins !== undefined ? `${formatLogins(logins)}\n` : "") +
-        (ceiling !== undefined ? `hard ceiling: ${ceiling.live}/${ceiling.max}\n` : "") +
-        (localAgents !== undefined ? `${formatLocalAgents(localAgents)}\n` : "") +
-        (coordinator !== undefined ? `coordinator: ${formatCoordinator(coordinator)}\n` : "") +
+      // A wave's answer is its wave-state: its `coordinator` is the owner's presence, not the role.
+      (wave === undefined ? formatFleetLines(res.result) : "") +
         (states.length === 0
           ? "no waves\n"
           : states.map((s) => formatWave(s, { caller, decisions })).join("\n")),
     );
     return EXIT.OK;
   });
+}
+
+/**
+ * The fleet answer's prefix lines (no wave asked), each ending in `\n`, or `""`: the kill
+ * switch, agent logins, the hard ceiling, local agents and, while the role is on, the
+ * coordinator. A `coordinator` of any other shape prints nothing.
+ */
+export function formatFleetLines(result: unknown): string {
+  const r = result as {
+    kill_switch?: boolean;
+    agent_logins?: { live: number; swept: number };
+    ceiling?: { live: number; max: number };
+    local_agents?: LocalAgentsView;
+    coordinator?: unknown;
+  };
+  return (
+    (r.kill_switch === true
+      ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n"
+      : "") +
+    (r.agent_logins !== undefined ? `${formatLogins(r.agent_logins)}\n` : "") +
+    (r.ceiling !== undefined ? `hard ceiling: ${r.ceiling.live}/${r.ceiling.max}\n` : "") +
+    (r.local_agents !== undefined ? `${formatLocalAgents(r.local_agents)}\n` : "") +
+    (isCoordinatorRole(r.coordinator) ? `coordinator: ${formatCoordinator(r.coordinator)}\n` : "")
+  );
 }
 
 /**

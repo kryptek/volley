@@ -146,6 +146,51 @@ describe("the coordinator role in the daemon (SPEC §4.6.25)", () => {
     await eventually(async () => (await topic()) === null);
   });
 
+  it("status <wave> never formats the owner's presence as the role; status with the role off has no line", async () => {
+    const { f, topic, set } = await coordinatorFleet();
+    const off = await runCli(["status"], f.env.env);
+    expect(off.stdout).not.toContain("coordinator:");
+
+    expect((await set({ coordinator: { machine: PEER } })).ok).toBe(true);
+    await f.tick();
+    await f.tick();
+    await eventually(async () => (await topic())?.state === "running");
+    await f.submit("w1", "", "  T1: { issue: 42, host: local }\n");
+    // An online owner: its retained status is what makes the wave's `coordinator` presence.
+    const owner = new VolleyBroker();
+    await owner.connect({ url: f.env.broker.url, agentId: "owner-1" });
+    clients.push(owner);
+    await owner.publish(
+      `volley/${NS}/owner-1/status`,
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "owner-1",
+          parentId: null,
+          channel: "status",
+          type: "working",
+          payload: {},
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    expect((await runCli(["claim", "w1", "--by", "owner-1"], f.env.env)).exitCode).toBe(0);
+    await eventually(async () => {
+      const r = await runCli(["status", "w1", "--json"], f.env.env);
+      return JSON.parse(r.stdout).coordinator?.presence === "online";
+    });
+
+    const one = await runCli(["status", "w1"], f.env.env);
+    expect(one.exitCode).toBe(0);
+    expect(one.stdout).not.toContain("coordinator:");
+    expect(one.stdout).not.toContain("undefined");
+    expect(one.stdout.startsWith("w1")).toBe(true);
+    expect(one.stdout).toContain("owner-1 · online");
+    // The fleet view still carries the role line.
+    expect((await runCli(["status"], f.env.env)).stdout).toContain(
+      `coordinator: coord-test on ${PEER}: running since`,
+    );
+  });
+
   it("a laptop is refused unless allow_laptop", async () => {
     const { f, set } = await coordinatorFleet();
     await f.beat({ laptop: true });

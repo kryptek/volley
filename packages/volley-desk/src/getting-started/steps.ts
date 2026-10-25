@@ -124,3 +124,13 @@ export const STEPS: readonly StepDef[] = [
     Body: Done,
   },
 ];
+
+/**
+ * A step's number, counted the one way the rail's badge and the stage's eyebrow both read:
+ * every step, Welcome and Done included, `Step n of STEPS.length`.
+ */
+export function stepLabel(i: number): { n: number; of: number; eyebrow: string } {
+  const n = i + 1;
+  const of = STEPS.length;
+  return { n, of, eyebrow: `Step ${n} of ${of}` };
+}

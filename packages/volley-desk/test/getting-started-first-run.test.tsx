@@ -99,7 +99,7 @@ describe("Getting started on first launch", () => {
     expect(readProgress(localStorage).step).toBe("this-computer");
     first.unmount();
     mount();
-    expect(screen.getByText("Step 1 of 6")).toBeInTheDocument();
+    expect(screen.getByText("Step 2 of 7")).toBeInTheDocument();
   });
 
   it("Skip for now stops it reopening; Settings › Setup & Security › Open… reopens it", () => {

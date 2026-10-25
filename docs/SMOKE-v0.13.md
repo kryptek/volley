@@ -84,7 +84,8 @@ Getting started open on Welcome.
 
 ### A2. Every step to finished (macOS VM)
 
-- [ ] **Welcome** › **Let's go**: *Step 1 of 6*, **This computer**.
+- [ ] **Welcome** › **Let's go**: *Step 2 of 7*, **This computer**; on every step the rail's
+  badge matches the eyebrow's number, and **Done** reads 7 / *Step 7 of 7*.
 - [ ] **This computer**: the card is titled with the VM's machine name and lists the message
   broker (`mosquitto 2.1.…`), `bun`, `gh`, `tmux` (or `cmux`) and Claude Code with their
   versions, each ✓, and Volley services `done`. The security, accounts and services plans read
