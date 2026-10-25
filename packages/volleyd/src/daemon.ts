@@ -333,6 +333,7 @@ import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import { LocalTmuxHost } from "./hosts/local-tmux";
 import {
+  type CloneProbe,
   type RemoteHost,
   type RemoteHostSpec,
   type RepoRemoteHost,
@@ -433,6 +434,7 @@ import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure
 import { readRepoView, readSlugView, viewFromSlug } from "./repo-visibility";
 import {
   type AddStep,
+  type MachineFacts,
   type RepoMachines,
   addPlan,
   assignedSlugs,
@@ -1674,10 +1676,30 @@ export class Daemon {
   private readonly afterDoctor = new Map<string, Set<string>>();
   /** repo_add's runs and sign-in trust writes in flight (`stop` waits for them). */
   private readonly repoWork = new Set<Promise<void>>();
-  /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
+  /**
+   * Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name, with what
+   * the clone probe found at each wanted repository's spawn path (`spawnPaths`, by slug) in the
+   * same pass (#608).
+   */
   private readonly probes = new Map<
     string,
-    { path: PathProbe | null; error?: string; at: number; running: boolean }
+    {
+      path: PathProbe | null;
+      error?: string;
+      at: number;
+      running: boolean;
+      clones?: Record<string, CloneProbe | { error: string }>;
+      spawnPaths?: Record<string, string>;
+    }
+  >();
+  /**
+   * The (machine, repository) pairs a spawn found no clone at (`REMOTE_REPO_MISSING`, #608): the
+   * repository is `blocked` there with `why` until a probe finds the clone at `path` (the spawn
+   * path it failed at) or the spawn path changes.
+   */
+  private readonly spawnBlocked = new Map<
+    string,
+    Map<string, { why: string; at: number; path: string }>
   >();
   /** Each machine's verdict as last published (`key`: readinessKey) and when. */
   private readonly published = new Map<string, { key: string; at: number }>();
@@ -3680,8 +3702,18 @@ export class Daemon {
     });
   }
 
-  /** Journal an owner's re-placement (`by: decision`, `from` the machine it leaves). */
-  private async rePlace(wave: WaveId, task: TaskId, p: Placement, from: string): Promise<void> {
+  /**
+   * Journal a re-placement, `from` the machine it leaves: an owner's (`by: decision`), or the
+   * supervisor's off a machine that could not spawn it (`by: fallback`, with `why`).
+   */
+  private async rePlace(
+    wave: WaveId,
+    task: TaskId,
+    p: Placement,
+    from: string,
+    by: "decision" | "fallback" = "decision",
+    why?: string,
+  ): Promise<void> {
     await this.append(wave, {
       type: "task_placed",
       task,
@@ -3690,8 +3722,9 @@ export class Daemon {
         host: p.host,
         score: p.score,
         candidates: p.candidates,
-        by: "decision",
+        by,
         from,
+        ...(why !== undefined ? { why: oneLine(why, 200) } : {}),
         ...(p.local ? { local: true } : {}),
       },
     });
@@ -4724,6 +4757,18 @@ export class Daemon {
     for (const a of this.supervised.values()) {
       if (a.wave === wave && a.task === task && a.role === role) return;
     }
+    // No clone where the spawn ran (#608): a task the supervisor placed goes elsewhere if it can;
+    // else (or pinned there) the owner is asked.
+    let away: Placement | undefined;
+    if (e instanceof SpawnError && e.code === "REMOTE_REPO_MISSING") {
+      const d = e.detail as { host: string; target: string; repo: string; slug?: string };
+      const why = e.message.startsWith(`${e.code}: `)
+        ? e.message.slice(e.code.length + 2)
+        : e.message;
+      const r = this.repoMissingAway(wave, task, d.host, why);
+      if (r !== null && "host" in r) away = r;
+      else await this.openRepoMissing(wave, task, d, r?.why);
+    }
     const eff = this.config.effective(wave);
     // Failures count per spawn: this role's, for the agent attempt it is trying to launch.
     // A failure that burned its attempt's identity moved the next one on: still the same run.
@@ -4748,7 +4793,12 @@ export class Daemon {
     const full = e instanceof Error ? e.message : String(e);
     // A SpawnError's message starts with its code, which is journaled beside it.
     const message = full.startsWith(`${code}: `) ? full.slice(code.length + 2) : full;
-    const nextRetryAt = stopped ? null : new Date(until).toISOString();
+    const nextRetryAt =
+      away !== undefined
+        ? new Date(this.now()).toISOString()
+        : stopped
+          ? null
+          : new Date(until).toISOString();
     await this.append(wave, {
       type: "spawn_failed",
       task,
@@ -4761,6 +4811,14 @@ export class Daemon {
         next_retry_at: nextRetryAt,
       },
     });
+    if (away !== undefined) {
+      // Its next spawn goes where it now is (rePlace clears the back-off): no decision.
+      const from = (e as SpawnError).detail.host as string;
+      this.log(`spawn ${key} failed (${code}): placed on ${away.host} instead of ${from}`);
+      await this.rePlace(wave, task, away, from, "fallback", message);
+      void this.enqueue(() => this.publishState(wave));
+      return;
+    }
     this.log(
       `spawn ${key} failed (${code}), attempt ${n}: ${stopped ? "retries stopped" : `retry in ${wait / 1000}s`}`,
     );
@@ -5487,26 +5545,72 @@ export class Daemon {
     if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
     const eff = this.config.effective(wave);
     const slug = this.slugOf(wave);
-    const record = this.machines.record(t.host);
-    // The box's managed root: never the supervisor's absolute repo_root (#596).
-    const root = remoteRepoRoot(eff.fleet.repo_root);
     const target: SlugTarget | "legacy" =
       slug === undefined
         ? "legacy"
-        : {
-            slug,
-            repos: eff.repos,
-            repo_root: root,
-            // A managed clone's home-relative path, from the clones the machine reports (#436).
-            home: homeFromClones(root, record?.repos),
-            // Where the machine itself reports its clone (#596).
-            clone: reportedClone(record, slug),
-            origin: legacyOrigin(record?.repo, t.host_spec?.repo ?? eff.hosts[t.host]?.repo),
-          };
+        : (() => {
+            const c = this.cloneFacts(t.host, slug, eff, t.host_spec?.repo);
+            return { slug, repos: eff.repos, repo_root: c.root, ...c.facts };
+          })();
     // The spec carries its clone, so the host built from it is one repository's.
     return this.remoteBySpec(
       resolveRemoteHost(t.host, t.host_spec, eff.hosts, target),
     ) as RepoRemoteHost;
+  }
+
+  /**
+   * What resolving peer `name`'s clone of `slug` reads beside the config (#608): the managed
+   * root a paired machine keeps (never the supervisor's absolute repo_root, #596), the home its
+   * managed clones tell (#436), the clone its record reports (#596) and its legacy clone's
+   * origin (`legacy`: an inline host's `repo`, else its config's). `remoteHost` spawns in what
+   * they resolve to; readiness compares the record with it and probes it (`spawnPath`).
+   */
+  private cloneFacts(
+    name: string,
+    slug: string,
+    eff: Tunables,
+    legacy?: string,
+  ): { root: string; facts: MachineFacts } {
+    const record = this.machines.record(name);
+    const root = remoteRepoRoot(eff.fleet.repo_root);
+    return {
+      root,
+      facts: {
+        home: homeFromClones(root, record?.repos),
+        clone: reportedClone(record, slug),
+        origin: legacyOrigin(record?.repo, legacy ?? eff.hosts[name]?.repo),
+      },
+    };
+  }
+
+  /** The path a spawn of `slug` on peer `name` would use (`cloneFacts`); undefined: none. */
+  private spawnPath(name: string, slug: string, eff: Tunables): string | undefined {
+    const { root, facts } = this.cloneFacts(name, slug, eff);
+    return cloneFor(
+      { repos: eff.repos, fleet: { repo_root: root }, hosts: eff.hosts },
+      name,
+      slug,
+      facts,
+    );
+  }
+
+  /** Every running wave's repository, then every one config gives `name`: readiness judges these. */
+  private wantedSlugs(name: string, cfg: Tunables): string[] {
+    const waves = this.waveSlugs();
+    return [
+      ...waves,
+      ...assignedSlugs(cfg, name).filter((s) => !waves.some((w) => sameSlug(w, s))),
+    ];
+  }
+
+  /** Each wanted repository's spawn path on peer `name`, where it resolves to one. */
+  private spawnPaths(name: string, cfg: Tunables): Record<string, string> {
+    return Object.fromEntries(
+      this.wantedSlugs(name, cfg).flatMap((slug) => {
+        const path = this.spawnPath(name, slug, cfg);
+        return path === undefined ? [] : [[slug, path]];
+      }),
+    );
   }
 
   /**
@@ -6326,6 +6430,22 @@ export class Daemon {
     const records = accountRecords(this.usage);
     const record = isLocal ? this.ownRecord : this.machines.record(name);
     const waves = this.waveSlugs();
+    const spawn = isLocal ? {} : this.spawnPaths(name, cfg);
+    // A spawn that found no clone stands while its spawn path does (a repo_add's run wins).
+    const blocked = [...(this.spawnBlocked.get(name) ?? [])].filter(
+      ([slug, b]) => spawn[slug] === b.path,
+    );
+    const runs = {
+      ...Object.fromEntries(
+        blocked.map(([slug, b]) => [slug, { state: "blocked" as const, reasons: [b.why] }]),
+      ),
+      ...Object.fromEntries(this.repoRuns.get(name) ?? []),
+    };
+    const probed = Object.entries(probe?.clones ?? {}).flatMap(([slug, c]) =>
+      "error" in c || probe?.spawnPaths?.[slug] !== spawn[slug]
+        ? []
+        : [[slug, { ...c, at: probe?.at }]],
+    );
     // Its best candidate (the balancing rule's pick there), so one fresh login keeps it eligible;
     // a config default that pins an account here is that account.
     const pin = cfg.claude.default_account;
@@ -6354,15 +6474,13 @@ export class Daemon {
       hostVersion: this.version,
       // Every running wave's repository, beside every one the machine reports (#436).
       repos: {
-        wanted: [
-          ...waves,
-          ...assignedSlugs(cfg, name).filter((s) => !waves.some((w) => sameSlug(w, s))),
-        ],
+        wanted: this.wantedSlugs(name, cfg),
         records: record?.repos,
         ...(record?.repo !== undefined ? { legacy: record.repo } : {}),
-        ...(this.repoRuns.has(name)
-          ? { runs: Object.fromEntries(this.repoRuns.get(name) ?? []) }
-          : {}),
+        ...(Object.keys(runs).length > 0 ? { runs } : {}),
+        // A peer's spawn path, against its record and as probed there (#608).
+        ...(Object.keys(spawn).length > 0 ? { spawn } : {}),
+        ...(probed.length > 0 ? { probed: Object.fromEntries(probed) } : {}),
         // The own doctor reports every running wave's clone; a repository config gives only to
         // other machines is checked out here for the supervisor, not for agents (#439).
         ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, waves) } : {}),
@@ -6525,37 +6643,76 @@ export class Daemon {
   }
 
   /**
-   * The PATH probe of a peer whose record is up, at most every `path_probe_interval_ms`: run
-   * beside the queue (it is an ssh round-trip), then re-compute that machine's verdict.
+   * The PATH probe of a peer whose record is up, at most every `path_probe_interval_ms` (at once
+   * when a wanted repository's spawn path changed), and in the same pass a clone probe at each
+   * spawn path (#608): run beside the queue (ssh round-trips), then re-compute that machine's
+   * verdict. A clone found where a spawn found none lifts that block.
    */
   private maybeProbe(name: string): void {
     if (this.machines.record(name)?.tunnel !== "up") return;
     const prior = this.probes.get(name);
     const at = this.now();
+    const spawnPaths = this.spawnPaths(name, this.config.effective());
+    const moved = JSON.stringify(spawnPaths) !== JSON.stringify(prior?.spawnPaths ?? {});
     if (
       prior !== undefined &&
-      (prior.running || at - prior.at < DAEMON_DEFAULTS.path_probe_interval_ms)
+      (prior.running || (!moved && at - prior.at < DAEMON_DEFAULTS.path_probe_interval_ms))
     ) {
       return;
     }
     const host = this.remoteFor(name);
     if (typeof host === "string") {
-      this.probes.set(name, { path: null, error: host, at, running: false });
+      this.probes.set(name, { path: null, error: host, at, running: false, spawnPaths });
       return;
     }
-    this.probes.set(name, { path: prior?.path ?? null, at, running: true });
+    this.probes.set(name, {
+      path: prior?.path ?? null,
+      at,
+      running: true,
+      ...(prior?.clones !== undefined && !moved ? { clones: prior.clones } : {}),
+      spawnPaths,
+    });
+    const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+    const timeoutMs = DAEMON_DEFAULTS.path_probe_timeout_ms;
     void Promise.resolve()
-      .then(() => host.probePath())
-      .then(
-        (path) => ({ path }),
-        (e: unknown) => ({ path: null, error: e instanceof Error ? e.message : String(e) }),
+      .then(() =>
+        Promise.all([
+          host.probePath().then(
+            (path) => ({ path }),
+            (e: unknown) => ({ path: null, error: message(e) }),
+          ),
+          Promise.all(
+            Object.entries(spawnPaths).map(([slug, path]) =>
+              host.probeClone(path, { timeoutMs }).then(
+                (c): [string, CloneProbe | { error: string }] => [slug, c],
+                (e: unknown): [string, CloneProbe | { error: string }] => [
+                  slug,
+                  { error: message(e) },
+                ],
+              ),
+            ),
+          ),
+        ]),
       )
-      .then(async (r) => {
+      .then(async ([r, found]) => {
         if (!this.running) return;
         await this.enqueue(async () => {
           // A removed host (or a newer probe) is not overwritten by this one.
           if (this.probes.get(name)?.at !== at) return;
-          this.probes.set(name, { ...r, at, running: false });
+          const clones = Object.fromEntries(found);
+          this.probes.set(name, { ...r, at, running: false, clones, spawnPaths });
+          const blocked = this.spawnBlocked.get(name);
+          for (const [slug, c] of found) {
+            const b = blocked?.get(slug);
+            if (b === undefined || b.path !== spawnPaths[slug]) continue;
+            if (
+              "state" in c &&
+              c.state === "found" &&
+              (c.slug === undefined || sameSlug(c.slug, slug))
+            )
+              blocked?.delete(slug);
+          }
+          if (blocked?.size === 0) this.spawnBlocked.delete(name);
           await this.publishReadiness(name);
         });
       });
@@ -7484,8 +7641,81 @@ export class Daemon {
   }
 
   /**
-   * The remote half of a spawn's setup: the box's clone must exist (else a
-   * `remote_repo_missing` decision), its folder trust is mirrored (trust bits only) for the
+   * A spawn found no clone on machine `d.host` (`REMOTE_REPO_MISSING`): the `remote_repo_missing`
+   * decision, once (through the decision store: retained topic, the Desk, notify; the task
+   * parks). `nowhere`: why no other machine can take the task now, said in the question (#608).
+   */
+  private async openRepoMissing(
+    wave: WaveId,
+    task: TaskId,
+    d: { host: string; target: string; repo: string; slug?: string },
+    nowhere?: string,
+  ): Promise<void> {
+    const log = this.waves.get(wave);
+    if (log === undefined) return;
+    const decisionId = waveDecisionId("remote_repo_missing", wave, `${d.target}:${d.repo}`);
+    if (openDecisionFor(log.record.state?.open_decisions ?? [], decisionId) !== undefined) return;
+    // A repository on GitHub is added by its slug; a legacy clone is cloned by hand.
+    const ask =
+      d.slug !== undefined
+        ? remoteRepoMissing(d.host, d.slug)
+        : {
+            question: `Needs you: no clone of the repo at ${d.repo} on ${d.target}. Clone it there, then retry?`,
+            options: ["retry", "cancel"],
+          };
+    const question =
+      nowhere !== undefined
+        ? `${ask.question.replace(/\?$/, "")}; no other machine can take it now (${clipText(nowhere)})?`
+        : ask.question;
+    await this.openSpawnDecision(wave, {
+      kind: "remote_repo_missing",
+      id: decisionId,
+      task,
+      ...ask,
+      question,
+      pointers: {},
+      data: {
+        host: d.host,
+        target: d.target,
+        repo: d.repo,
+        ...(d.slug !== undefined ? { slug: d.slug } : {}),
+      },
+    });
+  }
+
+  /**
+   * A spawn of `task` found no clone at the spawn path on machine `host` (#608): the pair is
+   * `blocked` in that machine's readiness until a probe finds the clone, and a task the
+   * supervisor placed (not pinned by the wave file) is placed away from it. Returns the new
+   * placement, why none is eligible (`Unplaced`), or null when the task stays (pinned, or not a
+   * machine and repository the supervisor knows).
+   */
+  private repoMissingAway(
+    wave: WaveId,
+    task: TaskId,
+    host: string,
+    why: string,
+  ): Placement | { why: string } | null {
+    const slug = this.slugOf(wave);
+    const rec = this.waves.get(wave)?.record;
+    if (slug === undefined || rec === undefined || this.isLocalMachine(host)) return null;
+    const path = this.spawnPath(host, slug, this.config.effective(wave));
+    if (path !== undefined) {
+      const blocked = this.spawnBlocked.get(host) ?? new Map();
+      blocked.set(slug, { why, at: this.now(), path });
+      this.spawnBlocked.set(host, blocked);
+      void this.enqueue(() => this.publishReadiness(host));
+    }
+    const by = rec.state?.tasks.find((t) => t.id === task)?.placement?.by;
+    if (by === undefined || by === "wave_file") return null;
+    const p = this.placeAway(wave, task, [host]);
+    if (p === null) return null;
+    return p.host === null ? { why: p.why } : p;
+  }
+
+  /**
+   * The remote half of a spawn's setup: the box's clone must exist (else REMOTE_REPO_MISSING:
+   * `spawnFailed` places the task elsewhere or opens `remote_repo_missing`), its folder trust is mirrored (trust bits only) for the
    * trust check, and spawn runs with the box's repo, worktree root, hooks, broker URL and a lock
    * directory per target (`$VOLLEYD_HOME/hosts/<target>/locks`: the lock is keyed by target and
    * worktree path).
@@ -7516,34 +7746,12 @@ export class Daemon {
       throw err;
     });
     if (!exists) {
-      // Through the decision store: retained topic (the Desk, notify) and the task parks.
-      if (openId === undefined) {
-        // A repository on GitHub is added by its slug; a legacy clone is cloned by hand.
-        const ask =
-          spec.slug !== undefined
-            ? remoteRepoMissing(spec.name, spec.slug)
-            : {
-                question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
-                options: ["retry", "cancel"],
-              };
-        await this.openSpawnDecision(wave, {
-          kind: "remote_repo_missing",
-          id: decisionId,
-          task,
-          ...ask,
-          pointers: {},
-          data: {
-            host: spec.name,
-            target: spec.target,
-            repo: spec.repo,
-            ...(spec.slug !== undefined ? { slug: spec.slug } : {}),
-          },
-        });
-      }
+      // spawnFailed places an auto-placed task elsewhere, else opens remote_repo_missing (#608).
       throw new SpawnError("REMOTE_REPO_MISSING", `no clone at ${spec.repo} on ${spec.target}`, {
         host: spec.name,
         target: spec.target,
         repo: spec.repo,
+        ...(spec.slug !== undefined ? { slug: spec.slug } : {}),
       });
     }
     // The clone appeared while the decision was still open: only a spawn that does not wait for
@@ -12923,13 +13131,13 @@ export class Daemon {
   private placementDefaults(wave?: WaveId): PlacementDefaults {
     const rec = wave === undefined ? undefined : this.waves.get(wave)?.record;
     const current = rec?.plan ?? rec?.wave;
-    if (current != null) return { default: current.placement ?? "local", paired: 1, kept: true };
     const cfg = this.config.effective();
     const local = this.config.localName();
-    return {
-      default: cfg.placement.default,
-      paired: Object.keys(cfg.hosts).filter((n) => n !== local).length,
-    };
+    // The names a task's `host:` may give, checked on every version (#608).
+    const pairedNames = Object.keys(cfg.hosts).filter((n) => n !== local);
+    if (current != null)
+      return { default: current.placement ?? "local", paired: 1, kept: true, local, pairedNames };
+    return { default: cfg.placement.default, paired: pairedNames.length, local, pairedNames };
   }
 
   /** Parse a request's `wave_yaml`; a Reply when it is missing or invalid. */
@@ -14860,6 +15068,12 @@ function firstLines(text: string): string {
 function clipText(text: string): string {
   const one = text.replace(/\s+/g, " ").trim();
   const max = DAEMON_DEFAULTS.decision_text_max;
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
+
+/** `text` on one line, at most `max` characters (a schema's `maxLength`). */
+function oneLine(text: string, max: number): string {
+  const one = text.replace(/\s+/g, " ").trim();
   return one.length > max ? `${one.slice(0, max - 1)}…` : one;
 }
 

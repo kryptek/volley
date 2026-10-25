@@ -56,9 +56,10 @@ export interface WaveOptions {
   branchUpdate?: "merge" | "rebase";
   /**
    * `placement:` pinned for this wave; omitted, the supervisor's `placement.default` decides
-   * (`auto` once a machine is paired).
+   * (`auto` once a machine is paired). `{ host }` pins every task to that machine instead
+   * (`host: <name>`, no `placement:`); `volleyd validate` checks the name, this does not.
    */
-  placement?: "local" | "auto";
+  placement?: "local" | "auto" | { host: string };
   /**
    * The repository tree at the release branch (path → bytes) each issue's Files list resolves
    * against; omitted or null, no entry resolves (footprints `none`, their entries `unresolved`).
@@ -310,7 +311,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     `brief_preface: ${q(opts.briefPreface ?? DEFAULT_BRIEF_PREFACE)}`,
     `pipeline: ${opts.pipeline !== undefined ? q(opts.pipeline) : "[implement, [spec_review, quality_review], fixup, merge_ready]"}`,
     `merge: ${q(opts.merge ?? "auto")}`,
-    ...(opts.placement !== undefined ? [`placement: ${q(opts.placement)}`] : []),
+    ...(typeof opts.placement === "string" ? [`placement: ${q(opts.placement)}`] : []),
     ...waveConfigLine(opts),
     "tasks:",
   ];
@@ -368,6 +369,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
   ) => {
     lines.push(`  ${t.id}:`, `    issue: ${t.issue}`);
     if (extra.issues !== undefined) lines.push(`    issues: ${q(extra.issues)}`);
+    if (typeof opts.placement === "object") lines.push(`    host: ${q(opts.placement.host)}`);
     if (t.title !== undefined) lines.push(`    title: ${q(t.title)}`);
     if (t.after.length > 0) {
       const chained = extra.chained ?? [];
@@ -486,11 +488,15 @@ export function ensureBriefPreface(
   return { path, created: true };
 }
 
+/** A machine name `--placement` pins every task to (a `fleet.local_name` or `hosts.<name>`). */
+const MACHINE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
+
 const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <id> --repo <path>
          --release-branch <branch> --model <model> [--pipeline <json>] [--namespace <ns>]
          [--repo-slug <owner/repo>] [--satisfied <n,n,...>] [--brief-preface <path>]
          [--merge auto|manual] [--autopilot on|off] [--branch-update merge|rebase]
-         [--placement local|auto] [--no-plan | --plan-only] [--verbose] [--out <wave.yaml>]
+         [--placement local|auto|<machine>] [--no-plan | --plan-only] [--verbose]
+         [--out <wave.yaml>]
 
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
@@ -510,7 +516,9 @@ hygiene rules); an existing one is never changed.
 --autopilot writes config: { autopilot: { enabled } } (omitted: the supervisor's setting, on by
 default). --branch-update writes config: { branch_update } (merge is recommended for autopilot
 waves: no force-push). --placement writes placement: to pin where the wave's tasks run (omitted:
-the supervisor's placement.default, auto once a machine is paired). The last lines on stderr are
+the supervisor's placement.default, auto once a machine is paired); a machine name instead pins
+every task to it (host: <machine>; this machine's name is the one volleyd validate's placement
+line prints, and volleyd validate checks it). The last lines on stderr are
 the submit command, owned by the stable coordinator name in VOLLEY_COORDINATOR, and that name.
 Each issue's Files list is resolved against the --repo tree at origin/<release branch> (else
 the local branch; else "no tree: footprints unresolved") into the task's files: and footprint:.
@@ -562,19 +570,33 @@ function main(argv: string[]): number {
     return 2;
   }
   const satisfied = satisfiedRaw.map(Number);
-  const choice = <T extends string>(flag: string, value: string | undefined, allowed: T[]) => {
+  /** `value` when it is one of `allowed`, else what `other` makes of it (a machine name). */
+  const choice = <T extends string, O = never>(
+    flag: string,
+    value: string | undefined,
+    allowed: T[],
+    other?: (s: string) => O | undefined,
+  ): T | O | undefined => {
     if (value === undefined || (allowed as string[]).includes(value)) return value as T | undefined;
-    throw new Error(`--${flag} must be ${allowed.join(" or ")}, got ${value}`);
+    const o = other?.(value);
+    if (o !== undefined) return o;
+    const also = other !== undefined ? ", or a machine name" : "";
+    throw new Error(`--${flag} must be ${allowed.join(" or ")}${also}, got ${value}`);
   };
   let merge: "auto" | "manual" | undefined;
   let autopilot: "on" | "off" | undefined;
   let branchUpdate: "merge" | "rebase" | undefined;
-  let placement: "local" | "auto" | undefined;
+  let placement: "local" | "auto" | { host: string } | undefined;
   try {
     merge = choice("merge", v.merge, ["auto", "manual"]);
     autopilot = choice("autopilot", v.autopilot, ["on", "off"]);
     branchUpdate = choice("branch-update", v["branch-update"], ["merge", "rebase"]);
-    placement = choice("placement", v.placement, ["local", "auto"]);
+    placement = choice<"local" | "auto", { host: string }>(
+      "placement",
+      v.placement,
+      ["local", "auto"],
+      (s) => (MACHINE.test(s) ? { host: s } : undefined),
+    );
   } catch (e) {
     process.stderr.write(`wave-from-issues: ${e instanceof Error ? e.message : String(e)}\n`);
     return 2;
@@ -644,6 +666,11 @@ function main(argv: string[]): number {
         p.created
           ? `wrote ${p.path} from the template: add this repository's rules to it\n`
           : `brief preface: ${p.path} (kept)\n`,
+      );
+    }
+    if (typeof placement === "object") {
+      process.stderr.write(
+        `placement: every task pinned to ${placement.host}; volleyd validate checks the name\n`,
       );
     }
     for (const w of warnings) process.stderr.write(`warning: ${w}\n`);

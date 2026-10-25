@@ -118,6 +118,7 @@ export function formatPlacement(t: TaskState): string {
   const head = `    on ${p.host} (${p.by}${p.score !== null ? `, ${score(p.score)}` : ""})\n`;
   return (
     head +
+    (p.why !== undefined ? `      why: ${p.why}\n` : "") +
     p.candidates
       .map((c) => `      ${c.host.padEnd(hostW)}  ${score(c.score).padEnd(4)}  ${c.line}\n`)
       .join("")

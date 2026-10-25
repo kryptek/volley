@@ -157,7 +157,9 @@ export interface PlacementCandidate {
 export interface TaskPlacement {
   /** A machine name: the supervisor's own machine under its `fleet.local_name`. */
   host: string;
-  by: "auto" | "wave_file" | "decision";
+  by: "auto" | "wave_file" | "decision" | "fallback";
+  /** Why it was moved (`fallback`): what the machine it left said. */
+  why?: string;
   score: number | null;
   decided_at: string;
   candidates: PlacementCandidate[];
