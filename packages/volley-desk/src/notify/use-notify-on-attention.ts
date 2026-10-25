@@ -14,10 +14,14 @@
  * first replay, or a reconnect's resync and replay) tiers are tracked but
  * nothing fires, so whatever needed you when the page loaded or the Desk
  * reconnected stays quiet, and so do the transient tiers of a resync.
+ *
+ * An item with a `link` (an owner-only `notice`, `inboxNotification`) opens it in a new tab when
+ * its notification is clicked: the coordinator's new link, from the phone's lock screen.
  */
 import { useEffect, useRef } from "react";
 import type { Tier } from "../attention";
 import { emitSound } from "../sounds/emit";
+import type { InboxItem } from "../store/types";
 import type { NotifyOptions } from "./use-notify-settings";
 
 export interface AttentionItem {
@@ -26,6 +30,23 @@ export interface AttentionItem {
   tier: Tier;
   title: string;
   body: string;
+  /** What a click on the notification opens (a notice's `pointers.link`). */
+  link?: string;
+}
+
+/**
+ * An inbox item as an attention item: owner-only items push to the phone (only the owner answers
+ * them) until answered; a `notice` carries its link.
+ */
+export function inboxNotification(i: InboxItem): AttentionItem {
+  const link = i.kind === "notice" ? i.pointers.link : undefined;
+  return {
+    key: `inbox:${i.id}`,
+    tier: i.owner_only && i.answered === undefined ? "you" : "none",
+    title: `Needs you · ${i.title}`,
+    body: i.question,
+    ...(link ? { link } : {}),
+  };
 }
 
 export interface NotifyOnAttentionOptions {
@@ -69,7 +90,11 @@ export function useNotifyOnAttention(
     const N = typeof window !== "undefined" ? window.Notification : undefined;
     const canNotify = settings.enabled && N !== undefined && N.permission === "granted";
     if (canNotify && N !== undefined) {
-      for (const it of fresh) new N(`Volley: ${it.title}`, { body: it.body, tag: it.key });
+      for (const it of fresh) {
+        const n = new N(`Volley: ${it.title}`, { body: it.body, tag: it.key });
+        const { link } = it;
+        if (link) n.onclick = () => void window.open(link, "_blank", "noopener");
+      }
     }
     // One policy pass for the lot: however many arrived together, one chime.
     emitSound("attention_needed", fresh.length);

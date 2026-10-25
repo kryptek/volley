@@ -468,6 +468,16 @@ export interface Tunables {
    * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
    * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
    */
+  /**
+   * The coordinator role (SPEC §4.6.25): the machine it runs on (null: off) and whether a laptop
+   * may host it; absent from a supervisor that predates it.
+   */
+  coordinator?: {
+    machine?: string | null;
+    dir?: string;
+    allow_laptop?: boolean;
+    [key: string]: unknown;
+  };
   fleet?: {
     local_name?: string | null;
     /** Where managed clones live on every machine (`~` is that machine's home). */
@@ -631,6 +641,8 @@ export interface MachinePayload {
   arch?: string;
   cores: number;
   tunnel: "up" | "down" | "local";
+  /** The machine is a laptop (it sleeps and travels): it hosts the coordinator only when allowed. */
+  laptop?: boolean;
   /** Why the tunnel is down; absent while it is up. */
   reason?: "disconnect" | "heartbeat_timeout";
   /** The 1, 5 and 15 minute load averages. */
@@ -685,6 +697,22 @@ export interface RolesPayload {
   version: number;
   updated_at: string;
   updated_by: string;
+}
+
+/**
+ * coordinator-role.schema.json payload: the coordinator role's state on the retained
+ * `volley/_system/federation/coordinator` (SPEC §4.6.25), accepted only from `volleyd`.
+ */
+export interface CoordinatorRolePayload {
+  machine: string;
+  name: string;
+  state: "starting" | "running" | "restarting" | "stopped" | "failed";
+  since: string;
+  session_url?: string;
+  restarts: number;
+  last_error?: string;
+  needs_terminal?: "trust" | "consent";
+  dir?: string;
 }
 
 /** One step of a role move as the moves topic has it. */
@@ -769,7 +797,7 @@ export interface ReadinessPayload {
 }
 
 /** inbox-item.schema.json payload.kind. */
-export const INBOX_KINDS = ["decision", "picker", "handoff", "release"] as const;
+export const INBOX_KINDS = ["decision", "picker", "handoff", "release", "notice"] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 
 /** inbox-item.schema.json $defs.where.kind: where an answer was given. */
@@ -1040,6 +1068,11 @@ export interface DeskState {
   machineHistory?: Record<string, MachineSample[]>;
   /** volleyd's machine roles record (SPEC §4.6.24); absent until it is retained. */
   roles?: RolesPayload;
+  /**
+   * The coordinator role's state (`volley/_system/federation/coordinator`, SPEC §4.6.25); null
+   * while it is cleared (the role is off), absent until anything is retained.
+   */
+  coordinatorRole?: CoordinatorRolePayload | null;
   /** Each role move's retained progress, by move id. */
   roleMoves?: Record<string, RoleMovePayload>;
   /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */

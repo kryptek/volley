@@ -88,7 +88,11 @@ import { applyLookToDocument } from "./look/applyLook";
 import { progressBeat } from "./look/tetherPulses";
 import { themeById } from "./look/themes";
 import { useLook } from "./look/useLook";
-import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
+import {
+  type AttentionItem,
+  inboxNotification,
+  useNotifyOnAttention,
+} from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
 import {
   MOVE_ACCOUNT_TIMEOUT_MS,
@@ -1192,13 +1196,9 @@ export default function App() {
         title: `${purposeOf(a, state.waves[a.wave]).label} needs you`,
         body: agentAttn[a.id]?.reason ?? "",
       })),
-    // Owner-only inbox items push to the phone: only the owner answers them.
-    ...inboxItems.map((i) => ({
-      key: `inbox:${i.id}`,
-      tier: i.owner_only && i.answered === undefined ? ("you" as const) : ("none" as const),
-      title: `Needs you · ${i.title}`,
-      body: i.question,
-    })),
+    // Owner-only inbox items push to the phone: only the owner answers them. A notice's click
+    // opens its link (the coordinator's).
+    ...inboxItems.map(inboxNotification),
   ];
   useNotifyOnAttention(notify, items, { quiet: settling });
 
@@ -1285,6 +1285,7 @@ export default function App() {
           <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
+              role={demo ? undefined : state.coordinatorRole}
               waves={waveList}
               coordinators={coordinators}
               needsYou={notWorking}
@@ -1732,6 +1733,8 @@ export default function App() {
             roles: state.roles,
             roleMoves: state.roleMoves ?? {},
             roleOps,
+            coordinatorRole: state.coordinatorRole ?? null,
+            coordinatorOps: authOps,
             localName: state.config?.fleet?.local_name,
             focus: focusMachine?.name,
             focusSeq: focusMachine?.seq,

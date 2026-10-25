@@ -761,3 +761,50 @@ button.m-local:focus-visible {
   color: inherit;
   text-decoration: underline;
 }
+
+/* The Coordinator card (SPEC §4.6.25): the top of Settings › Machines, and the Getting started
+   Access step. Theme tokens only. */
+.coord-card {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-solid);
+}
+.coord-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.coord-card-title {
+  font-weight: 600;
+}
+.coord-card > p {
+  margin: 0;
+}
+.coord-card-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.coord-card-pick select {
+  max-width: 100%;
+  font: inherit;
+}
+.coord-card-state {
+  font-size: 12px;
+  color: var(--mute);
+  overflow-wrap: anywhere;
+}
+.coord-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.coord-card-actions:empty {
+  display: none;
+}

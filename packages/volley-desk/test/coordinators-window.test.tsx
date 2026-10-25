@@ -397,3 +397,29 @@ describe("messaging a reconnecting coordinator", () => {
     });
   });
 });
+
+describe("CoordinatorsWindow: the coordinator role's machine (SPEC §4.6.25)", () => {
+  it("names the machine the coordinator runs on, its state and its link", () => {
+    setup({
+      role: {
+        machine: "box-a",
+        name: "coord-test",
+        state: "running",
+        since: "2026-10-25T12:00:00.000Z",
+        restarts: 0,
+        session_url: "https://claude.ai/code/session_fake01",
+      },
+    });
+    const r = row("Coordinator coord-test on box-a");
+    expect(r).toHaveTextContent(/on box-a · running on box-a since/);
+    expect(within(r).getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
+      "https://claude.ai/code/session_fake01",
+    );
+  });
+
+  it("no role: no row", () => {
+    setup();
+    expect(screen.queryByRole("listitem", { name: /^Coordinator coord-test/ })).toBeNull();
+  });
+});

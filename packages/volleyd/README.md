@@ -1428,6 +1428,12 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | `picker` | `p-<agent_id>-<tool_use_id>` | a Claude Code picker in any session (the hooks' `picker_opened`) |
 | `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
+| `notice` | `n-coordinator-link`, `n-coordinator-failed` | the coordinator role's link changed, or it failed ([The coordinator role](#the-coordinator-role)) |
+
+A `notice` is volleyd's own (`owner_only: true`): it tells the owner something, never blocks a
+wave, carries its link in `pointers.link`, and takes only `open` (acknowledged: the owner opened
+the link) or `dismiss`. Its id is fixed: one opened again after the last was answered (by the
+owner, or `superseded` by volleyd) reuses the id at the next `version`.
 
 **volleyd is the referee.** An answer is `inbox_answer { id, version, answer, where }`. On the
 mailbox it is the owner's: a wave's item is answered by the wave's owner or the session bound to
@@ -2003,6 +2009,23 @@ volleyd config set coordinator.machine null      # off: the session is ended, th
   `volley coordinator restart|stop`); a stop holds until the next restart, across volleyd
   restarts (`$VOLLEYD_HOME/coordinator-stopped`). `coordinator_status` is also a mailbox read;
   `volleyd status` prints a `coordinator:` line.
+- **Notices** (`coordinator/notices.ts`, `noticesFor`). Each publish of the topic is compared with
+  the last: a new `session_url` opens the owner-only notice `n-coordinator-link` (`Coordinator on
+  <machine>: open it`, the link in `question` and `pointers.link`), which the Desk pushes to the
+  phone; `state: failed` opens `n-coordinator-failed` (`Coordinator on <machine> stopped`, the last
+  error and `volley coordinator restart`). The open notices a new one replaces are answered
+  `superseded` (`where: autopilot`) first: a new link replaces both, a failure the link notice,
+  the role turned off both. A volleyd restart adopting the same link opens nothing new.
+- **The handoff text** (`coordinator/handoff.ts`, `renderHandoff`). A fresh session under the
+  server knows nothing of the fleet: when its hooks' registry entry arrives (the one carrying
+  `model_source`, sent once its mailbox session exists, so the mail is kept) naming the role's
+  coordinator name with a `cwd` under the role's `dir`, while the role is `starting` or `running`,
+  volleyd sends it one mailbox `steering` message, shown at its next prompt: `You are the
+  coordinator <name> of this Volley fleet, running on <machine> in <dir> (repos under repos/)`,
+  the running waves (repository, tasks done), the open Needs-you items (id and title), the
+  previous coordinator session's agent id when known, and `Use /volley and /volley-issues as
+  usual.` Each session gets it once: `$VOLLEYD_HOME/coordinator-sessions.json` keeps the last 50
+  greeted, newest last (the next session's previous one).
 - **What is lost when it dies:** the turn in flight. The restart reattaches to the session, not
   the turn. Phase 2 adds continuity across machines (failover, a replica); Phase 1 runs one
   supervisor and one broker, and the role reaches the broker the way agents on its machine do.
