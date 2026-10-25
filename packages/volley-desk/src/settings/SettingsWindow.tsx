@@ -20,6 +20,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
 import { AccountButtons, initials } from "../auth/AccountActions";
+import type { Progress } from "../getting-started/state";
 import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import { SOUND0 } from "../sounds/settings";
@@ -106,6 +107,8 @@ export interface SettingsWindowProps {
     liveAgents?: number;
     /** Setup & Security › Open setup…: Settings closes and the wizard opens in its own modal. */
     onOpenSetup?: (repair: boolean) => void;
+    /** Setup & Security › Getting started: its state, and Open… (Settings closes meanwhile). */
+    gettingStarted?: { done: Progress["done"] | null; onOpen: () => void };
   };
 }
 
@@ -387,6 +390,12 @@ export function SettingsWindow(p: SettingsWindowProps) {
                   ? { onPreviewSignIn: p.onboarding.onPreviewSignIn }
                   : {})}
                 {...(p.onboarding?.onOpenSetup ? { onOpenSetup: p.onboarding.onOpenSetup } : {})}
+                {...(p.onboarding?.gettingStarted
+                  ? {
+                      gettingStarted: p.onboarding.gettingStarted.done,
+                      onOpenGettingStarted: p.onboarding.gettingStarted.onOpen,
+                    }
+                  : {})}
               />
             )}
             {sec === "about" && <About />}
