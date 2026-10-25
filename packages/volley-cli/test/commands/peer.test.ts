@@ -1185,7 +1185,7 @@ describe("volley peer on the supervisor's machine", () => {
         { mode: 0o600 },
       );
       // Signed in (it gets as far as finding no volleyd).
-      expect((await run(["list"], d, env)).stderr).toContain("volleyd is not running");
+      expect((await run(["list"], d, env)).stderr).toContain("(daemon_silent)");
     } finally {
       await locked.close();
     }
@@ -1225,8 +1225,8 @@ describe("volley peer on the supervisor's machine", () => {
         deps(fakeExec(() => ({})).exec, { readStdin: async () => "{}" }),
       );
       // Signed in (it gets as far as finding no volleyd), not refused for want of credentials.
-      expect(io.readStderr()).toContain("volleyd is not running");
-      expect(code).toBe(EXIT.ERROR);
+      expect(io.readStderr()).toContain("(daemon_silent)");
+      expect(code).toBe(EXIT.SUPERVISOR_UNREACHABLE);
     } finally {
       await locked.close();
     }
@@ -1301,8 +1301,20 @@ describe("volley peer on the supervisor's machine", () => {
 
   it("a host command with volleyd down says so", async () => {
     const r = await run(["list"], deps(fakeExec(() => ({})).exec));
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("volleyd is not running");
+    expect(r.exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(r.stderr).toContain(
+      `volley peer list: supervisor unreachable (daemon_silent): The broker answers but volleyd is silent in namespace '${NS}'`,
+    );
+  });
+
+  it("--json with volleyd down: the SUPERVISOR_UNREACHABLE object on stdout", async () => {
+    const r = await run(["list", "--json"], deps(fakeExec(() => ({})).exec));
+    expect(r.exitCode).toBe(EXIT.SUPERVISOR_UNREACHABLE);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      error: "SUPERVISOR_UNREACHABLE",
+      reason: "daemon_silent",
+      where: { namespace: NS },
+    });
   });
 });
 

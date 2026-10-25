@@ -40,6 +40,20 @@ export const REQUIRED_SECTIONS = [
 ] as const;
 
 /**
+ * Strings `## Choosing a dispatch path` must name (#571): an unreachable supervisor (`volleyd`
+ * exits 69 `SUPERVISOR_UNREACHABLE`) is relayed to the owner and asked about, never answered by
+ * switching brokers or modes, and never by the legacy path.
+ */
+export const REQUIRED_DISPATCH_PATH = [
+  "exit 69",
+  "SUPERVISOR_UNREACHABLE",
+  "volleyd status --json",
+  "verbatim",
+  "never switch",
+  "do not fall back to the legacy path",
+] as const;
+
+/**
  * Strings the volleyd path (the text from `## Volleyd path` to `## Legacy path`) must name
  * verbatim: the helper, where the wave file goes, and the exact commands of each step, so an
  * edit can't silently drop one.
@@ -300,6 +314,25 @@ export function validateVolleydPath(source: string): ValidationResult {
   return { ok: errors.length === 0, errors };
 }
 
+/** The body text from the `## Choosing a dispatch path` heading up to the next `## `, or null. */
+export function dispatchPathSection(body: string): string | null {
+  const start = /^## Choosing a dispatch path\b.*$/m.exec(body);
+  if (start === null) return null;
+  const rest = body.slice(start.index + start[0].length);
+  const end = /^## /m.exec(rest);
+  return body.slice(start.index, start.index + start[0].length + (end?.index ?? rest.length));
+}
+
+export function validateDispatchPath(source: string): ValidationResult {
+  const section = dispatchPathSection(splitFrontmatter(source).body);
+  if (section === null)
+    return { ok: false, errors: ["missing the ## Choosing a dispatch path section"] };
+  const errors = REQUIRED_DISPATCH_PATH.filter((needle) => !section.includes(needle)).map(
+    (needle) => `dispatch path must mention: ${needle}`,
+  );
+  return { ok: errors.length === 0, errors };
+}
+
 /** The body text from the `## Release branch merge` heading up to the next `## ` heading, or null. */
 export function releaseMergeSection(body: string): string | null {
   const start = /^## Release branch merge\b.*$/m.exec(body);
@@ -330,6 +363,7 @@ export function validateSkill(source: string): ValidationResult {
   const results = [
     validateFrontmatter(source),
     validateSections(source),
+    validateDispatchPath(source),
     validateVolleydPath(source),
     validateReleaseMerge(source),
     validateBriefTitle(source),

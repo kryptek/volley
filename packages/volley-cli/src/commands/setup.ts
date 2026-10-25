@@ -12,9 +12,17 @@ import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { askHidden } from "../hidden-input";
 import type { IO } from "../io";
+import { probeReach, reachChecks } from "../peer/checks/reach";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
-import { checkDeps, checkExit, checkReport, checkSteps, renderCheck } from "../setup/check";
+import {
+  type CheckRow,
+  checkDeps,
+  checkExit,
+  checkReport,
+  checkSteps,
+  renderCheck,
+} from "../setup/check";
 import { planClaudeCode } from "../setup/claude-code";
 import { type FirstWaveOptions, type WaveView, planFirstWave } from "../setup/first-wave";
 import { ghRepoDeleteLine } from "../setup/first-wave-repo";
@@ -43,9 +51,11 @@ import {
   setupFence,
 } from "../setup/step";
 import { planTerminal } from "../setup/terminal";
+import { realProbes } from "../supervisor/probes";
 import { defaultAuthDir } from "./auth";
 import { findRepoRoot } from "./dash";
 import { DESK_PORT } from "./desk-serve";
+import { type PeerConfig, peerFile, peerReach, readPeerConfig } from "./peer";
 
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
@@ -216,6 +226,8 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
   // VOLLEY_SIMULATED=1 (the soak, CI): the sign-ins are answered by fakes and nothing opens.
   exec: env.VOLLEY_SIMULATED === "1" ? simulatedExec(spawnExec) : spawnExec,
   probeAnonymous: (url) => probeAnonymous(url),
+  // The soak and CI (VOLLEY_SIMULATED=1) probe nothing outside the machine.
+  ...(env.VOLLEY_SIMULATED === "1" ? {} : { reach: realProbes(env) }),
   liveAgents: async (url, creds) => {
     const b = await openClient(url, creds);
     try {
@@ -480,6 +492,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
 
   if (check) {
     const rows = await checkSteps(ctx, steps);
+    // A paired machine: whether it reaches its supervisor, under the Network row (text only).
+    if (peer && values.json !== true) await addReachLines(ctx, rows);
     if (values.json === true) {
       io.stdout(`${JSON.stringify(checkReport(rows, ctx.volleydHome), null, 2)}\n`);
     } else {
@@ -646,6 +660,26 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     ].join("\n"),
   );
   return EXIT.OK;
+}
+
+/**
+ * `--peer --check` on a paired machine: the doctor's reach rows (`network.internet`, `tunnel.up`,
+ * `supervisor.live`) as lines under the Network row, each failing one with its fix line.
+ */
+async function addReachLines(ctx: SetupContext, rows: CheckRow[]): Promise<void> {
+  const row = rows.find((r) => r.name === "network");
+  if (row === undefined || ctx.deps.reach === undefined) return;
+  let cfg: PeerConfig;
+  try {
+    if (!existsSync(peerFile(ctx.home))) return;
+    cfg = readPeerConfig(ctx.home);
+  } catch {
+    return;
+  }
+  for (const c of reachChecks(await probeReach(ctx.deps.reach, peerReach(cfg)))) {
+    row.lines.push(`${c.ok ? "✓" : "!"} ${c.id}: ${c.detail}`);
+    if (!c.ok && c.fix !== undefined) row.lines.push(`  fix: ${c.fix.command}`);
+  }
 }
 
 const PEER_HEADER = "this machine joins a supervisor's fleet (paired with `volley peer join`)";

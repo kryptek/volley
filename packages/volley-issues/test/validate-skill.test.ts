@@ -8,6 +8,7 @@ import {
   ISSUE_PLAN_TEMPLATE,
   PLANNING_HEADING,
   PLANNING_REFERENCE,
+  REQUIRED_DISPATCH_PATH,
   REQUIRED_PLANNING,
   REQUIRED_RELEASE_MERGE,
   REQUIRED_SECTIONS,
@@ -15,11 +16,13 @@ import {
   REQUIRED_TEMPLATE_HEADINGS,
   REQUIRED_VOLLEYD_PATH,
   SKILL_VERSION,
+  dispatchPathSection,
   parseSimpleYaml,
   planningSection,
   releaseMergeSection,
   splitFrontmatter,
   validateBriefTitle,
+  validateDispatchPath,
   validateFrontmatter,
   validateIssuePlanTemplate,
   validatePlanning,
@@ -59,12 +62,15 @@ See ${PLANNING_REFERENCE}.
 ### Step 5: submit and leave
 `;
 const RELEASE_NEEDLES = REQUIRED_RELEASE_MERGE.map((needle) => `- ${needle}\n`).join("");
+const DISPATCH_NEEDLES = REQUIRED_DISPATCH_PATH.map((needle) => `- ${needle}\n`).join("");
 const ALL_SECTIONS = REQUIRED_SECTIONS.map((h) =>
   h === "## Volleyd path"
     ? `${h}\n\n${VOLLEYD_NEEDLES}`
     : h === "## Release branch merge"
       ? `${h}\n\n${RELEASE_NEEDLES}`
-      : `${h}\n\nbody\n`,
+      : h === "## Choosing a dispatch path"
+        ? `${h}\n\n${DISPATCH_NEEDLES}`
+        : `${h}\n\nbody\n`,
 ).join("\n");
 const BRIEF_TITLE_NEEDLES = BRIEF_TITLE_RULES.map((needle) => `- ${needle}\n`).join("");
 const FULL_OK = `${GOOD_FRONTMATTER}\n# /volley-issues\n\n${ALL_SECTIONS}\n${BRIEF_TITLE_NEEDLES}`;
@@ -165,6 +171,48 @@ describe("validateVolleydPath", () => {
       );
     },
   );
+});
+
+describe("validateDispatchPath (#571: an unreachable supervisor is relayed, never worked around)", () => {
+  it("accepts a section naming every needle", () => {
+    expect(validateDispatchPath(FULL_OK).ok).toBe(true);
+  });
+  it("the shipped skill names exit 69, SUPERVISOR_UNREACHABLE and the relay rule", () => {
+    const section = dispatchPathSection(splitFrontmatter(SHIPPED).body) ?? "";
+    expect(section).toContain("exit 69");
+    expect(section).toContain("SUPERVISOR_UNREACHABLE");
+    expect(section).toContain("never switch");
+    expect(section).not.toContain("## Volleyd path");
+  });
+  it.each([...REQUIRED_DISPATCH_PATH])(
+    "rejects the shipped SKILL.md when its dispatch path loses %s",
+    (needle) => {
+      const section = dispatchPathSection(splitFrontmatter(SHIPPED).body) ?? "";
+      const stripped = SHIPPED.replace(section, section.split(needle).join(""));
+      expect(validateDispatchPath(stripped).errors).toContain(
+        `dispatch path must mention: ${needle}`,
+      );
+    },
+  );
+  it("flags a missing section", () => {
+    const r = validateDispatchPath(
+      FULL_OK.replace("## Choosing a dispatch path", "## Something else"),
+    );
+    expect(r.errors).toEqual(["missing the ## Choosing a dispatch path section"]);
+  });
+});
+
+describe("the /volley skill's BROKER_DOWN rule points at the relay rule (#571)", () => {
+  it("names exit 69 and the volley-issues dispatch-path section", () => {
+    const volley = readFileSync(
+      fileURLToPath(new URL("../../volley-skill/SKILL.md", import.meta.url)),
+      "utf-8",
+    );
+    const rule = volley.slice(volley.indexOf("**BROKER_DOWN handling.**"));
+    const para = rule.slice(0, rule.indexOf("\n\n**", 10));
+    expect(para).toContain("exit 69");
+    expect(para).toContain("Choosing a dispatch path");
+  });
 });
 
 describe("validateReleaseMerge (#313: release PRs pass the changelog guards)", () => {

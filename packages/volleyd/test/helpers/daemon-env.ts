@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
@@ -105,7 +106,13 @@ export async function makeDaemonEnv(
   return {
     broker,
     home,
-    env: { VOLLEY_BROKER_URL: broker.url, VOLLEY_NAMESPACE: NS, VOLLEYD_HOME: home },
+    // HOME: never the real one (an unreachable broker's diagnosis reads ~/.volley/peer.json).
+    env: {
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_NAMESPACE: NS,
+      VOLLEYD_HOME: home,
+      HOME: join(home, "user-home"),
+    },
     options,
     start: async (extra) => {
       const d = await Daemon.start(options(extra));

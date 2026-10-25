@@ -8,6 +8,11 @@ export const EXIT = {
   USAGE: 2,
   /** `volley deploy`: the services checkout has local changes (and no --force-clean). */
   DIRTY: 3,
+  /**
+   * The supervisor does not answer (`EX_UNAVAILABLE`): the command diagnosed why (supervisor/
+   * diagnose.ts), printed the cause and fix, and submitted nothing. volleyd's table has it too.
+   */
+  SUPERVISOR_UNREACHABLE: 69,
   TIMEOUT: 124,
 } as const;
 

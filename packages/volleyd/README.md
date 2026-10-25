@@ -4945,8 +4945,16 @@ its full text stays in the journal).
 
 ## Exit codes
 
-Same table as `volley`: `0` success · `1` error (validation failure, daemon not running, broker
-down, request rejected) · `2` usage error · `124` the daemon did not answer in time.
+Same table as `volley` (a test keeps the two equal):
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | error: a validation failure, a request the daemon rejected, refused credentials |
+| `2` | usage error |
+| `3` | `resolve` / `inbox answer`: an answer the decision cannot apply (`BAD_ANSWER`) |
+| `69` | `SUPERVISOR_UNREACHABLE`: the broker does not answer, or volleyd is silent. The command diagnosed why (internet → private network → tunnel → broker → volleyd), printed `volleyd <command>: supervisor unreachable (<reason>): <cause>` and a `fix:` line, and submitted nothing; with `--json`, the `{ "error": "SUPERVISOR_UNREACHABLE", "reason", "cause", "fix", "where", "probes" }` object on stdout. `volleyd run` validates the file first, as always. The reasons and their texts: `packages/volley-cli/README.md`, "When the supervisor does not answer" |
+| `124` | the daemon did not answer in time |
 
 ---
 

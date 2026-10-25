@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { printUnreachable, silentInput } from "volley-cli/supervisor/diagnose";
+import {
+  type Probes,
+  climb,
+  connectFailed,
+  realProbes,
+  whereHere,
+} from "volley-cli/supervisor/probes";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { VolleyError } from "volley-mcp/errors";
 import { buildTopic, isValidNamespace } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { authFields, controlAuth } from "./broker-auth";
@@ -309,21 +318,38 @@ export interface ControlTarget {
   namespace: string;
   /** The caller's credentials (`controlAuth`); null connects anonymously. */
   auth: BrokerAuth | null;
+  /** `--json`: an unreachable supervisor's diagnosis goes to stdout as JSON too. */
+  json?: boolean;
+  /** The caller's environment (where the unreachable-supervisor ladder looks); unset: process.env. */
+  env?: Record<string, string | undefined>;
+  /** The ladder's probes (volley-cli's supervisor/probes.ts); unset: the real ones. */
+  probes?: Probes;
 }
 
 /** `resolveTarget` plus the caller's broker credentials (`controlAuth`), for control commands. */
 export function resolveControlTarget(
-  values: { "broker-url"?: string | boolean | undefined; namespace?: string | boolean | undefined },
+  values: {
+    "broker-url"?: string | boolean | undefined;
+    namespace?: string | boolean | undefined;
+    json?: string | boolean | undefined;
+  },
   env: Record<string, string | undefined>,
   cwd: string = process.cwd(),
 ): ControlTarget {
   const target = resolveTarget(values, env);
-  return { ...target, auth: controlAuth(env, cwd, target.brokerUrl) };
+  return {
+    ...target,
+    auth: controlAuth(env, cwd, target.brokerUrl),
+    ...(values.json === true ? { json: true } : {}),
+    env,
+  };
 }
 
 /**
  * Connect a control client, run `fn`, always disconnect. Maps the failure modes to the CLI exit
- * table: broker down / daemon not running → 1, no answer → 124. `prefix` is e.g. `volleyd status`.
+ * table: broker down / daemon not running → 69 with the diagnosis (volley-cli's
+ * supervisor/diagnose.ts; nothing is sent), no answer → 124, anything else → 1. `prefix` is e.g.
+ * `volleyd status`.
  */
 export async function withClient(
   target: ControlTarget,
@@ -335,12 +361,30 @@ export async function withClient(
   try {
     client = await ControlClient.connect(target.brokerUrl, target.namespace, target.auth);
   } catch (e) {
+    if (e instanceof VolleyError && e.code === "BROKER_DOWN") {
+      const env = target.env ?? process.env;
+      const where = { ...whereHere(env, target.brokerUrl), namespace: target.namespace };
+      const input = connectFailed(await climb(where, target.probes ?? realProbes(env)));
+      if (printUnreachable(io, prefix, target.json === true, input)) {
+        return EXIT.SUPERVISOR_UNREACHABLE;
+      }
+    }
     io.stderr(`${prefix}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
   try {
     return await fn(client);
   } catch (e) {
+    if (e instanceof NotRunningError) {
+      // The broker answered, so the earlier rungs passed: volleyd is silent.
+      const where = {
+        ...whereHere(target.env ?? process.env, target.brokerUrl),
+        namespace: target.namespace,
+      };
+      if (printUnreachable(io, prefix, target.json === true, silentInput(where))) {
+        return EXIT.SUPERVISOR_UNREACHABLE;
+      }
+    }
     io.stderr(`${prefix}: ${e instanceof Error ? e.message : String(e)}\n`);
     return e instanceof ControlTimeoutError ? EXIT.TIMEOUT : EXIT.ERROR;
   } finally {

@@ -36,7 +36,7 @@ import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } fro
 import { volleydHome } from "../auth/context";
 import { withSetupAuthDir } from "../auth/coordinator-login";
 import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
-import { openClient, reportConnectError } from "../connect";
+import { connectToSupervisor, reportDaemonSilent } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { PMSET_BATT_ARGV, POWER_SUPPLY_DIR, isLaptop } from "../machine/laptop";
@@ -59,6 +59,7 @@ import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
 import { PROBE_DEFAULTS, realUsageFetch } from "../peer/usage-probe";
 import { readNetworkRecord } from "../setup/journal";
 import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
+import { realProbes } from "../supervisor/probes";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
 
@@ -597,6 +598,8 @@ export interface AskFlags {
   username?: string | undefined;
   password?: string | undefined;
   "broker-url"?: string | undefined;
+  /** A failure to reach the supervisor prints the `SUPERVISOR_UNREACHABLE` object too. */
+  json?: boolean | undefined;
 }
 
 /**
@@ -637,18 +640,14 @@ export async function askVolleyd(
     const refused = adminRefusal(cmd, auth, env, io, adminOnly);
     if (refused !== null) return refused;
   }
-  let broker: VolleyBroker;
-  try {
-    broker = await openClient(resolveBrokerUrl(v["broker-url"], env), auth);
-  } catch (e) {
-    reportConnectError(io, e);
-    return EXIT.ERROR;
-  }
+  const brokerUrl = resolveBrokerUrl(v["broker-url"], env);
+  const reach = { command: cmd, json: v.json === true, env };
+  const broker = await connectToSupervisor(brokerUrl, io, auth, reach);
+  if (typeof broker === "number") return broker;
   try {
     const status = await broker.queryRetained(buildTopic(namespace, "volleyd", "status"), PROBE_MS);
     if (status === null || !LIVE.has(parseEnvelope(status)?.type ?? "")) {
-      io.stderr(`${cmd}: volleyd is not running in namespace '${namespace}'\n`);
-      return EXIT.ERROR;
+      return reportDaemonSilent(io, brokerUrl, namespace, reach);
     }
     const answer =
       admin && auth !== null
@@ -1634,6 +1633,14 @@ const peerAuth = (cfg: PeerConfig): BrokerAuth => ({
   password: cfg.password,
 });
 
+/** What the doctor's reach rows (checks/reach.ts) probe on this paired machine. */
+export const peerReach = (cfg: PeerConfig) => ({
+  brokerUrl: brokerThroughTunnel(cfg),
+  tunnelPort: peerTunnel(cfg) === "ssh" ? cfg.remote_port : null,
+  auth: peerAuth(cfg),
+  namespace: cfg.namespace,
+});
+
 /** Connect through the tunnel as the peer, its LWT the record with `tunnel: down`. */
 async function connectPeer(
   deps: PeerDeps,
@@ -2078,6 +2085,8 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     yes: v.yes === true,
     clone: v.clone === true,
     ...(supervisorDir !== undefined ? { volleyDir: supervisorDir } : {}),
+    // A paired machine: whether it reaches its supervisor (online, the tunnel, volleyd live).
+    ...(cfg !== null ? { reach: peerReach(cfg) } : {}),
   };
   const code = await doctor(
     io,
@@ -2275,6 +2284,7 @@ export function realDeps(): PeerDeps {
     },
     volleyArgv: [process.execPath, cli],
     which: (cmd) => Bun.which(cmd),
+    reach: realProbes(process.env),
     laptop: realLaptop,
     // packages/volley-cli/src/commands → the checkout root.
     volleyDir: resolve(dirname(cli), "..", "..", ".."),

@@ -35,6 +35,8 @@
     "./setup/services": "./src/setup/services.ts",
     "./setup/step": "./src/setup/step.ts",
     "./setup/tailscale-serve": "./src/setup/tailscale-serve.ts",
+    "./supervisor/diagnose": "./src/supervisor/diagnose.ts",
+    "./supervisor/probes": "./src/supervisor/probes.ts",
     "./test/fake-dynsec": "./test/helpers/fake-dynsec.ts",
     "./test/vm-stat": "./test/fixtures/vm-stat.ts"
   },

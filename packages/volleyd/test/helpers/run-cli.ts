@@ -11,11 +11,13 @@ export interface RunResult {
 
 /**
  * A default env that can never reach the live broker or the real `~/.volley/volleyd`: port 1 on
- * loopback refuses connections, and the home is a path under the temp dir that is never created.
+ * loopback refuses connections, and the homes are paths under the temp dir that are never created
+ * (`HOME` too: an unreachable broker's diagnosis reads `~/.volley/peer.json`).
  */
 export const SAFE_ENV = {
   VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1",
   VOLLEYD_HOME: join(tmpdir(), "volleyd-test-no-home"),
+  HOME: join(tmpdir(), "volleyd-test-no-user-home"),
 };
 
 /** Invoke the CLI in-process with a buffer IO. */

@@ -12,7 +12,7 @@ import {
   resolveNamespace,
   resolveWebhookUrl,
 } from "../args";
-import { connectAsClient } from "../connect";
+import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { createBellSurface } from "./notify/surfaces/bell";
@@ -20,7 +20,11 @@ import { createDesktopSurface } from "./notify/surfaces/desktop";
 import type { Surface, SurfaceName } from "./notify/surfaces/types";
 import { createWebhookSurface } from "./notify/surfaces/webhook";
 
-export type NotifyConnectFn = typeof connectAsClient;
+export type NotifyConnectFn = (
+  brokerUrl: string,
+  io: IO,
+  auth: BrokerAuth | null,
+) => Promise<NotifyBrokerLike | ExitCode>;
 
 /** Minimal broker shape `notify` consumes — lets tests pass a fake without re-implementing every VolleyBroker method. */
 export interface NotifyBrokerLike {
@@ -172,9 +176,11 @@ export async function notify({
 
   const onSet = new Set(onTypes);
 
-  const connect = connectFn ?? connectAsClient;
-  const broker = (await connect(brokerUrl, io, auth)) as NotifyBrokerLike | null;
-  if (broker === null) return EXIT.ERROR;
+  const connect: NotifyConnectFn =
+    connectFn ??
+    ((url, out, a) => connectToSupervisor(url, out, a, { command: "volley notify", env }));
+  const broker = await connect(brokerUrl, io, auth);
+  if (typeof broker === "number") return broker;
 
   let unsubscribe: (() => Promise<void>) | null = null;
   try {
