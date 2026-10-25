@@ -87,7 +87,14 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
   autopilot: {
     enabled: true,
-    owner_only: ["plan_change", "repo_untrusted", "model_switch", "release_go", "stage_go"],
+    owner_only: [
+      "plan_change",
+      "repo_untrusted",
+      "model_switch",
+      "release_go",
+      "stage_go",
+      "release_pr_ci_failed",
+    ],
     relaunch_max: 1,
     nudge_max: 1,
     respawn_max: 1,

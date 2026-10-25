@@ -767,6 +767,7 @@ describe("the release train (SPEC §4.6.19)", () => {
     expect(s.status).toBe("releasing");
     expect(s.release).toEqual({
       stage: null,
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "pending" },
         { name: "deploy", state: "pending" },
@@ -795,12 +796,61 @@ describe("the release train (SPEC §4.6.19)", () => {
     expect(done.status).toBe("complete");
     expect(done.release).toEqual({
       stage: null,
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "verified" },
         { name: "deploy", state: "verified" },
       ],
     });
     valid(done);
+  });
+
+  it("release_started's version, release_pr_detected's PR and release_merged's sha fold in", () => {
+    const s = reduce([
+      ...events,
+      ev("release_started", {
+        done: ["T0"],
+        cancelled: [],
+        version: "0.13.3",
+        date: "2026-10-25",
+        default_branch: "main",
+        playbook: {
+          stages: [
+            { name: "pr", brief: "b", run: [], gate: "auto", phase: "prepare" },
+            { name: "tag", brief: "t", run: [], gate: "auto", phase: "ship" },
+          ],
+        },
+      }),
+      ev("release_stage_entered", { stage: "pr" }),
+      ev("release_pr_detected", { pr: 12, head: "d".repeat(40), title: "release: v0.13.3" }),
+      ev("release_stage_verified", { stage: "pr" }),
+    ]);
+    expect(s.release).toEqual({
+      stage: null,
+      phase: "prepare",
+      version: "0.13.3",
+      date: "2026-10-25",
+      default_branch: "main",
+      pr: { number: 12, head: "d".repeat(40), title: "release: v0.13.3" },
+      stages: [
+        { name: "pr", state: "verified" },
+        { name: "tag", state: "pending", phase: "ship" },
+      ],
+    });
+    valid(s);
+    const merged = reduce([
+      ...events,
+      ev("release_started", {
+        done: ["T0"],
+        cancelled: [],
+        version: "0.13.3",
+        playbook: { stages: [{ name: "tag", phase: "ship" }] },
+      }),
+      ev("release_merged", { pr: 12, sha: "e".repeat(40) }),
+    ]);
+    expect(merged.release).toMatchObject({ phase: "ship", merged_sha: "e".repeat(40) });
+    expect(merged.status).toBe("releasing");
+    valid(merged);
   });
 
   it("a paused releasing wave resumes releasing, not running", () => {

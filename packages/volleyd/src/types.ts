@@ -519,6 +519,8 @@ export interface Wave {
   ci?: CiOverride;
   /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
   playbook?: string;
+  /** `release_version:` (SPEC §4.6.19): the release's version, instead of the one volleyd resolves. */
+  release_version?: string;
   /**
    * The overlap plan for this version (`wave_planned`); absent until planned. Not `plan`: a
    * `WaveRecord`'s `plan` is already the versioned wave file.
@@ -753,10 +755,21 @@ export type ReleaseStageState =
   | "failed"
   | "skipped";
 
-/** wave-state `release`: the stage running or awaiting its go (else null), and every stage. */
+/**
+ * wave-state `release`: the stage running or awaiting its go (else null), and every stage (a ship
+ * stage marked `phase: ship`). The version, day and default branch come with `release_started`;
+ * `pr` once a prepare stage verified the release PR; `merged_sha` once volleyd merged it, from
+ * when the train is in its `ship` phase (SPEC §4.6.19).
+ */
 export interface ReleaseState {
   stage: string | null;
-  stages: { name: string; state: ReleaseStageState }[];
+  stages: { name: string; state: ReleaseStageState; phase?: "ship" }[];
+  phase?: "prepare" | "ship";
+  version?: string;
+  date?: string;
+  default_branch?: string;
+  pr?: { number: number; head: string; title?: string };
+  merged_sha?: string;
 }
 
 /** wave-state `autopilot` (SPEC §4.6.1, §4.6.16). */
@@ -924,6 +937,9 @@ export const WAVE_EVENT_TYPES = [
   "release_stage_failed",
   "release_stage_skipped",
   "release_cancelled",
+  "release_pr_detected",
+  "release_merged",
+  "release_merge_failed",
   "release_done",
   // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
   "inbox_opened",

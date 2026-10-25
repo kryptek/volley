@@ -3,25 +3,34 @@
   "stages": [
     {
       "name": "bump",
-      "brief": "Bump every package to the release version and assemble the changelog from changes/.",
+      "brief": "Bump every package to {{version}} and assemble CHANGELOG.md's {{version}} section ({{date}}) from changes/. Then commit everything both commands changed as `release: v{{version}} — <theme>` (<theme>: a few words naming what the section ships) and push it to the release branch: `git push origin HEAD:{{release_branch}}`.",
       "run": [
-        ["bun", "run", "changelog", "--version", "0.5.0", "--date", "2026-10-20", "--commit"]
+        ["bun", "scripts/release-version.ts", "--set", "{{version}}"],
+        ["bun", "run", "changelog", "--version", "{{version}}", "--date", "{{date}}"]
       ],
       "verify": { "commits_on_release": true, "files": ["CHANGELOG.md"] }
     },
     {
-      "name": "staging",
-      "brief": "Deploy the release branch to staging and run the smoke checks against it.",
-      "run": [["make", "deploy-staging"], ["make", "smoke"]],
-      "verify": { "result": { "smoke": "passed" } },
-      "timeout_s": 1800,
-      "heavy": "staging"
+      "name": "release-pr",
+      "brief": "Open the release PR: `gh pr create --base {{default_branch}} --head {{release_branch}} --label no-changelog --title 'release: v{{version}} — <theme>'` (the theme of the bump commit), its body the changelog section's bullets and then the Closes lines under \"Release PR body\", each exactly as written. Never merge it: volleyd squash-merges it on the owner's release_go.",
+      "verify": { "release_pr": true }
     },
     {
-      "name": "notes",
-      "brief": "Draft the release notes from the changelog section and tag the release.",
-      "gate": "owner",
-      "verify": { "tag": "v*" }
+      "name": "tag",
+      "phase": "ship",
+      "brief": "Tag the release's merge commit (your HEAD) with the annotated tag v{{version}} and push the tag, nothing else.",
+      "run": [
+        ["git", "tag", "-a", "v{{version}}", "-m", "v{{version}}"],
+        ["git", "push", "origin", "v{{version}}"]
+      ],
+      "verify": { "tag": "v{{version}}" }
+    },
+    {
+      "name": "deploy",
+      "phase": "ship",
+      "brief": "Deploy v{{version}} to the supervisor and its paired machines. Publish your stage result with `deployed: \"v{{version}}\"` once `volley deploy` exits 0.",
+      "run": [["volley", "deploy", "v{{version}}"]],
+      "verify": { "result": { "deployed": "v{{version}}" } }
     }
   ]
 }

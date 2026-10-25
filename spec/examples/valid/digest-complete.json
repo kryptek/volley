@@ -46,6 +46,8 @@
     ],
     "release": {
       "stage": "tag",
+      "version": "0.13.3",
+      "pr": { "number": 12, "head": "dddddddddddddddddddddddddddddddddddddddd" },
       "stages": [
         { "name": "smoke", "state": "verified" },
         { "name": "tag", "state": "awaiting_go" }

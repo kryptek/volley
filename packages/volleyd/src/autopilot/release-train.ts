@@ -1,5 +1,6 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { type CiState, ciStateOf } from "../artifacts";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { type DecisionInput, type DecisionRecord, waveDecisionId } from "../decisions";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
@@ -12,7 +13,13 @@ import type {
   WaveId,
   WaveTask,
 } from "../types";
-import type { PlaybookStage } from "./playbook";
+import {
+  type PlaybookStage,
+  type PlaybookVars,
+  prepareVerified,
+  releaseGoInput,
+  substituteStage,
+} from "./playbook";
 
 /**
  * The release train's stages (SPEC §4.6.19): one `release` agent per stage, run serially in
@@ -45,6 +52,15 @@ export const STAGE_RESULT_TYPE = "stage";
 
 /** A `stage_go` decision's answers: `go` runs the stage; `skip` marks it skipped; `hold` asks again. */
 export const STAGE_GO_OPTIONS = ["go", "skip", "hold"];
+
+/** A `release_pr_ci_failed` decision's answers: `retry` reads CI again; `hold` asks again. */
+export const RELEASE_CI_OPTIONS = ["retry", "hold"];
+
+/** The label a release PR carries (CI's changelog guards skip it). */
+export const RELEASE_PR_LABEL = "no-changelog";
+
+/** The title prefix of a release PR (the squash commit's subject). */
+export const RELEASE_PR_TITLE = "release:";
 
 /** A failed stage's `agent_blocked` decision's answers. */
 export const STAGE_FAILED_OPTIONS = ["respawn", "skip", "cancel"];
@@ -114,18 +130,43 @@ export function shellLine(argv: string[]): string {
     .join(" ");
 }
 
+/**
+ * Where a ship stage runs: the release's merge commit on the default branch (the release branch
+ * is merged and deleted by then).
+ */
+export interface ShipTarget {
+  default_branch: string;
+  merged_sha: string;
+}
+
 /** The `verify` facts in prose, one bullet each (none: the result contract alone). */
-export function verifyProse(stage: PlaybookStage, releaseBranch: string): string[] {
+export function verifyProse(
+  stage: PlaybookStage,
+  releaseBranch: string,
+  ship?: ShipTarget,
+): string[] {
   const v = stage.verify ?? {};
   const out: string[] = [];
+  const short = ship?.merged_sha.slice(0, 7);
+  const at =
+    ship !== undefined
+      ? `the release's merge commit \`${short}\` on \`${ship.default_branch}\``
+      : `the head of \`${releaseBranch}\``;
   if (v.commits_on_release === true)
     out.push(
       `- At least one new commit is on \`${releaseBranch}\` (pushed with \`git push origin HEAD:${releaseBranch}\`), and your HEAD is on it.`,
     );
-  if (v.tag !== undefined)
-    out.push(`- A tag matching \`${v.tag}\` exists on origin at the head of \`${releaseBranch}\`.`);
+  if (v.release_pr === true)
+    out.push(
+      `- Exactly one open pull request from \`${releaseBranch}\` into the default branch, labelled \`${RELEASE_PR_LABEL}\`, its title starting \`${RELEASE_PR_TITLE}\` (volleyd merges it on the owner's go; never merge it yourself).`,
+    );
+  if (v.tag !== undefined) out.push(`- A tag matching \`${v.tag}\` exists on origin at ${at}.`);
   for (const f of v.files ?? [])
-    out.push(`- \`${f}\` exists on \`${releaseBranch}\` (origin's copy).`);
+    out.push(
+      ship !== undefined
+        ? `- \`${f}\` exists at ${at}.`
+        : `- \`${f}\` exists on \`${releaseBranch}\` (origin's copy).`,
+    );
   for (const [k, val] of Object.entries(v.result ?? {}))
     out.push(`- Your result payload carries \`${k}: ${JSON.stringify(val)}\`.`);
   return out;
@@ -155,26 +196,66 @@ export function stageCommandsText(stage: PlaybookStage): string {
   return out.join("\n");
 }
 
+/** Where a stage's pushes go: the release branch (prepare), or nothing but a tag (ship). */
+function pushRule(stage: PlaybookStage, releaseBranch: string): string {
+  return stage.phase === "ship"
+    ? "Push nothing but the tag the stage names (`git push origin <tag>`): your HEAD is the release's merge commit on the default branch, and the release branch is gone. Never push a branch."
+    : `Any push goes to the release branch: \`git push origin HEAD:${releaseBranch}\` (a fast-forward, never a force-push).`;
+}
+
 /** The facts volleyd checks after the stage's done, in prose. */
-export function stageVerifyText(stage: PlaybookStage, releaseBranch: string): string {
-  const facts = verifyProse(stage, releaseBranch);
+export function stageVerifyText(
+  stage: PlaybookStage,
+  releaseBranch: string,
+  ship?: ShipTarget,
+): string {
+  const facts = verifyProse(stage, releaseBranch, ship);
   return [
     ...(facts.length > 0 ? facts : ["- Your stage result (below) is all volleyd checks."]),
     "",
-    `Any push goes to the release branch: \`git push origin HEAD:${releaseBranch}\` (a fast-forward, never a force-push).`,
+    pushRule(stage, releaseBranch),
   ].join("\n");
 }
 
-/** The release brief's stage placeholders (brief.ts BriefVars). */
+/** The release brief's rules on where the worktree is and where pushes go. */
+export function stageRulesText(
+  stage: PlaybookStage,
+  releaseBranch: string,
+  worktree: string,
+): string {
+  if (stage.phase === "ship")
+    return [
+      `- Work only in this worktree (\`${worktree}\`, a detached HEAD at the release's merge commit on the default branch: \`${releaseBranch}\` was squash-merged and deleted on the owner's go).`,
+      "- Run only what the stage says. Push nothing but the tag the stage names: never push a branch, never force-push, never merge anything. The owner's go covers exactly this playbook's ship stages.",
+    ].join("\n");
+  return [
+    `- Work only in this worktree (\`${worktree}\`, cut from the tip of \`${releaseBranch}\`).`,
+    `- Run only what the stage says. Any push goes to the release branch as a fast-forward: \`git push origin HEAD:${releaseBranch}\`. Never force-push, never push to or merge into any other branch (the release PR is volleyd's to merge, on the owner's go), and never deploy: deploying is a ship stage's, after the owner's go.`,
+  ].join("\n");
+}
+
+/**
+ * The release brief's stage placeholders (brief.ts BriefVars); `stage` already substituted, and
+ * `ship` a ship stage's target (its facts are read at the merge commit, as stage.md says).
+ */
 export function stageBriefVars(
   stage: PlaybookStage,
   releaseBranch: string,
-): { stage: string; stage_brief: string; stage_commands: string; stage_verify: string } {
+  worktree: string,
+  ship?: ShipTarget,
+): {
+  stage: string;
+  stage_brief: string;
+  stage_commands: string;
+  stage_verify: string;
+  stage_rules: string;
+} {
   return {
     stage: stage.name,
     stage_brief: stage.brief.trim(),
     stage_commands: stageCommandsText(stage),
-    stage_verify: stageVerifyText(stage, releaseBranch),
+    stage_verify: stageVerifyText(stage, releaseBranch, ship),
+    stage_rules: stageRulesText(stage, releaseBranch, worktree),
   };
 }
 
@@ -200,14 +281,30 @@ function releasePrBodyText(releaseBranch: string, closes: readonly number[]): st
   ];
 }
 
-/** `.volley/stage.md`: the stage's brief, its commands in order, the facts to leave true, the contract. */
+/**
+ * `.volley/stage.md`: the stage's brief, its commands in order, the facts to leave true, the
+ * contract. `stage` is substituted already (its `{{version}}` and friends); a ship stage's says
+ * where it runs (`ship`).
+ */
 export function renderStageMd(
   stage: PlaybookStage,
-  ctx: { wave: WaveId; release_branch: string; attempt: number; closes?: readonly number[] },
+  ctx: {
+    wave: WaveId;
+    release_branch: string;
+    attempt: number;
+    closes?: readonly number[];
+    ship?: ShipTarget;
+  },
 ): string {
   return [
     `# Release stage \`${stage.name}\` (wave ${ctx.wave}, attempt ${ctx.attempt})`,
     "",
+    ...(ctx.ship !== undefined
+      ? [
+          `A ship stage: it runs after the owner's \`release_go\`, in a detached worktree at the release's merge commit \`${ctx.ship.merged_sha}\` on \`${ctx.ship.default_branch}\`. Push nothing but a tag.`,
+          "",
+        ]
+      : []),
     "## Brief",
     "",
     stage.brief.trim(),
@@ -218,9 +315,9 @@ export function renderStageMd(
     "",
     "## Verified after your done",
     "",
-    stageVerifyText(stage, ctx.release_branch),
+    stageVerifyText(stage, ctx.release_branch, ctx.ship),
     "",
-    ...releasePrBodyText(ctx.release_branch, ctx.closes ?? []),
+    ...(ctx.ship === undefined ? releasePrBodyText(ctx.release_branch, ctx.closes ?? []) : []),
     "## Result contract",
     "",
     "Before your `done`, publish what you ran and what it produced:",
@@ -265,6 +362,27 @@ export interface ReleaseView {
   asked: Record<string, number>;
   /** Each verified stage's evidence file (its latest `release_stage_verified`). */
   evidence: Record<string, string>;
+  /** The playbook variables known now (`{{version}}`, …; `merged_sha` once merged). */
+  vars: PlaybookVars;
+  /**
+   * The owner's `go` on `release_go` not yet merged or failed: who, which decision, and the
+   * release PR head that question named (the go merges that head only).
+   */
+  go?: { by: string; decision_id: string; head?: string };
+  /** Why the last go did not merge (`release_merge_failed`), until the next go. */
+  merge_failure?: string;
+  /** Whether `release_done` is journaled. */
+  done: boolean;
+  /** `release_go` decisions asked so far, and whether one is open. */
+  release_go: { asked: number; open: boolean };
+  /** `release_pr_ci_failed` decisions asked so far, and whether one is open. */
+  ci_failed: { asked: number; open: boolean };
+  /** The release PR head's CI as the driver last read it (not journaled). */
+  ci?: { head: string; state: CiState; excerpt?: string[] };
+  /** Whether the driver is merging the release PR right now. */
+  merging?: boolean;
+  /** false: this supervisor spawns no agent, so no stage is entered (release_go is still asked). */
+  spawns?: boolean;
 }
 
 /** A decision record's stage, when it is one of the train's. */
@@ -288,6 +406,7 @@ export function releaseView(o: {
   train: ReleaseState | undefined;
   events: Iterable<JournalEvent>;
   decisions: Record<string, DecisionRecord>;
+  spawns?: boolean;
 }): ReleaseView | null {
   if (o.train === undefined) return null;
   let stages: PlaybookStage[] = [];
@@ -295,10 +414,35 @@ export function releaseView(o: {
   const runs: Record<string, StageRun> = {};
   const steers: Record<string, number> = {};
   const evidence: Record<string, string> = {};
+  let go: ReleaseView["go"];
+  let mergeFailure: string | undefined;
+  let done = false;
   for (const e of o.events) {
     if (e.type === "release_started") {
-      stages = ((e.data.playbook as { stages?: PlaybookStage[] } | undefined)?.stages ??
-        []) as PlaybookStage[];
+      // A playbook journaled before phases existed: every stage is a prepare stage.
+      stages = (
+        ((e.data.playbook as { stages?: PlaybookStage[] } | undefined)?.stages ??
+          []) as PlaybookStage[]
+      ).map((s) => ({ ...s, phase: s.phase ?? "prepare" }));
+    } else if (
+      e.type === "decision_resolved" &&
+      o.decisions[String(e.data.decision_id)]?.kind === "release_go"
+    ) {
+      const head = (o.decisions[String(e.data.decision_id)] as { head?: unknown }).head;
+      go =
+        String(e.data.answer).trim().toLowerCase() === "go"
+          ? {
+              by: String(e.data.by),
+              decision_id: String(e.data.decision_id),
+              ...(typeof head === "string" ? { head } : {}),
+            }
+          : undefined;
+      if (go !== undefined) mergeFailure = undefined;
+    } else if (e.type === "release_merge_failed") {
+      go = undefined;
+      mergeFailure = typeof e.data.reason === "string" ? e.data.reason : "the merge failed";
+    } else if (e.type === "release_done") {
+      done = true;
     } else if (e.type === "release_stage_entered" && typeof e.data.stage === "string") {
       attempt[e.data.stage] = typeof e.data.attempt === "number" ? e.data.attempt : 1;
       delete runs[e.data.stage];
@@ -330,7 +474,15 @@ export function releaseView(o: {
   }
   const open: Record<string, DecisionRecord> = {};
   const asked: Record<string, number> = {};
+  const releaseGo = { asked: 0, open: false };
+  const ciFailed = { asked: 0, open: false };
   for (const d of Object.values(o.decisions)) {
+    const tally =
+      d.kind === "release_go" ? releaseGo : d.kind === "release_pr_ci_failed" ? ciFailed : null;
+    if (tally !== null) {
+      tally.asked++;
+      if (d.resolved === undefined) tally.open = true;
+    }
     const s = stageOf(d);
     if (s === undefined) continue;
     if (d.kind === "stage_go") asked[s] = (asked[s] ?? 0) + 1;
@@ -349,8 +501,43 @@ export function releaseView(o: {
     open,
     asked,
     evidence,
+    vars: {
+      wave: o.wave,
+      release_branch: o.release_branch,
+      ...(o.train.version !== undefined ? { version: o.train.version } : {}),
+      ...(o.train.date !== undefined ? { date: o.train.date } : {}),
+      ...(o.train.default_branch !== undefined ? { default_branch: o.train.default_branch } : {}),
+      ...(o.train.merged_sha !== undefined ? { merged_sha: o.train.merged_sha } : {}),
+    },
+    ...(go !== undefined ? { go } : {}),
+    ...(mergeFailure !== undefined ? { merge_failure: mergeFailure } : {}),
+    done,
+    release_go: releaseGo,
+    ci_failed: ciFailed,
+    ...(o.spawns !== undefined ? { spawns: o.spawns } : {}),
   };
 }
+
+/** A view's stage with its variables substituted (what its agent and its verification see). */
+export const resolvedStage = (v: ReleaseView, name: string): PlaybookStage | undefined => {
+  const s = v.stages.find((x) => x.name === name);
+  return s === undefined ? undefined : substituteStage(s, v.vars);
+};
+
+/** A ship stage's target (the merge commit on the default branch); none for a prepare stage. */
+export function shipTarget(
+  v: Pick<ReleaseView, "train">,
+  stage: Pick<PlaybookStage, "phase">,
+): ShipTarget | undefined {
+  const { default_branch, merged_sha } = v.train;
+  return stage.phase === "ship" && default_branch !== undefined && merged_sha !== undefined
+    ? { default_branch, merged_sha }
+    : undefined;
+}
+
+/** Whether a prepare stage of the playbook verifies the release PR (volleyd merges it on go). */
+export const mergesPr = (v: Pick<ReleaseView, "stages">): boolean =>
+  v.stages.some((s) => s.phase !== "ship" && s.verify?.release_pr === true);
 
 // ---------------------------------------------------------------------------------------------
 // The interpreter
@@ -365,6 +552,8 @@ export interface StageReport {
   facts: { fact: string; ok: boolean; evidence: string }[];
   /** The facts that do not hold, by name (`tag v0.5.0`, `file CHANGELOG.md`). */
   missing: string[];
+  /** The release PR, when the `release_pr` fact holds. */
+  pr?: ReleasePr;
 }
 
 export type ReleaseEvent =
@@ -395,6 +584,13 @@ export type ReleaseEvent =
   /** The owner stopped the retries of a stage's spawn that keeps failing: the stage fails. */
   | { kind: "spawn_stopped"; why: string };
 
+/** A release stage's report of the release PR it verified (`release_pr`). */
+export interface ReleasePr {
+  number: number;
+  head: string;
+  title: string;
+}
+
 export type ReleaseAction =
   | { kind: "journal"; event: NewEvent }
   | { kind: "spawn"; stage: string; attempt: number }
@@ -402,7 +598,11 @@ export type ReleaseAction =
   | { kind: "steer"; stage: string; agent_id: string; text: string }
   | { kind: "decide"; decision: DecisionInput; data: Record<string, unknown> }
   /** Retire an agent; `status`: a DAEMON_ENDED one for an agent that never ended itself. */
-  | { kind: "retire"; agent_id: string; status?: string };
+  | { kind: "retire"; agent_id: string; status?: string }
+  /** Read the release PR's head and its CI (beside the queue; `fresh`: forget the last read). */
+  | { kind: "check_pr"; fresh?: boolean }
+  /** Squash-merge the release PR at its CI-green head (the owner's go; beside the queue). */
+  | { kind: "merge"; pr: number; head: string };
 
 const journal = (type: WaveEventType, data: Record<string, unknown>): ReleaseAction => ({
   kind: "journal",
@@ -501,21 +701,131 @@ function stateOf(v: ReleaseView, stage: string) {
   return v.train.stages.find((s) => s.name === stage)?.state;
 }
 
-function advance(v: ReleaseView): ReleaseAction[] {
-  if (!v.releasing) return [];
-  // One stage at a time: running (its spawn retried until it happens), awaiting its go, or failed
-  // and waiting for the owner's answer.
-  for (const s of v.train.stages) {
+/** The `release_go` question (the `n`th: `class: held`), with every stage's evidence. */
+function askRelease(v: ReleaseView): ReleaseAction {
+  const evidence = new Map(Object.entries(v.evidence));
+  const { input, stages } = releaseGoInput(v.wave, v.train, evidence, {
+    ...(v.ci?.excerpt !== undefined ? { excerpt: v.ci.excerpt } : {}),
+    ...(v.merge_failure !== undefined ? { retry: v.merge_failure } : {}),
+  });
+  const n = v.release_go.asked;
+  return {
+    kind: "decide",
+    decision: {
+      ...input,
+      id:
+        n === 0
+          ? waveDecisionId("release_go", v.wave)
+          : waveDecisionId("release_go", v.wave, String(n)),
+    },
+    data: {
+      stages,
+      ...(n > 0 ? { class: "held" } : {}),
+      ...(v.train.version !== undefined ? { version: v.train.version } : {}),
+      ...(v.train.pr !== undefined ? { pr: v.train.pr.number, head: v.train.pr.head } : {}),
+    },
+  };
+}
+
+/** The release PR's CI is red at its head: the owner's `retry` or `hold`, never automatic. */
+function askCiFailed(v: ReleaseView, pr: { number: number; head: string }): ReleaseAction {
+  const n = v.ci_failed.asked;
+  return {
+    kind: "decide",
+    decision: {
+      kind: "release_pr_ci_failed",
+      task: null,
+      id:
+        n === 0
+          ? waveDecisionId("release_pr_ci_failed", v.wave)
+          : waveDecisionId("release_pr_ci_failed", v.wave, String(n)),
+      question: `Wave ${v.wave}'s release PR #${pr.number} is red at ${pr.head.slice(0, 7)}: release_go waits for it to be green. retry: volleyd reads its CI again (re-run it, or push a fix to ${v.release_branch}, first); hold: asked again.`,
+      options: [...RELEASE_CI_OPTIONS],
+    },
+    data: { pr: pr.number, head: pr.head, ...(n > 0 ? { class: "held" } : {}) },
+  };
+}
+
+/** `release_done` with the go that released it (and the version). */
+const releaseDone = (v: ReleaseView, go: { by: string; decision_id: string }): ReleaseAction =>
+  journal("release_done", {
+    by: go.by,
+    decision_id: go.decision_id,
+    ...(v.train.version !== undefined ? { version: v.train.version } : {}),
+    ...(v.train.merged_sha !== undefined ? { merged_sha: v.train.merged_sha } : {}),
+  });
+
+/**
+ * One phase's stages, one at a time: running (its spawn retried until it happens), awaiting its
+ * go, or failed and waiting for the owner's answer; else the next pending one. Null: every stage
+ * of the phase is settled.
+ */
+function stepPhase(v: ReleaseView, phase: "prepare" | "ship"): ReleaseAction[] | null {
+  const mine = v.train.stages.filter((s) => (s.phase === "ship" ? "ship" : "prepare") === phase);
+  for (const s of mine) {
     if (s.state === "running") {
       const attempt = v.attempt[s.name] ?? 1;
       return v.runs[s.name] === undefined ? [{ kind: "spawn", stage: s.name, attempt }] : [];
     }
     if (s.state === "awaiting_go" || s.state === "failed") return [];
   }
-  const next = v.train.stages.find((s) => s.state === "pending");
-  const stage = v.stages.find((s) => s.name === next?.name);
-  if (next === undefined || stage === undefined) return [];
+  const next = mine.find((s) => s.state === "pending");
+  if (next === undefined) return null;
+  if (v.spawns === false) return [];
+  const stage = v.stages.find((s) => s.name === next.name);
+  if (stage === undefined) return [];
   return stage.gate === "owner" ? [askGo(v, stage)] : enter(stage.name, 1);
+}
+
+/**
+ * Every prepare stage settled: `release_go` once the release PR (when one is verified) is
+ * CI-green at its head; on the go, merge it (or, with no release PR, `release_done` at once).
+ */
+function goStep(v: ReleaseView): ReleaseAction[] {
+  if (!prepareVerified(v.train)) return [];
+  const pr = mergesPr(v) ? v.train.pr : undefined;
+  if (v.go !== undefined) {
+    if (pr === undefined) return [releaseDone(v, v.go)];
+    if (v.merging === true) return [];
+    // The go is for the head its question named: a moved head, or a red one, drops it (asked again).
+    if (v.go.head !== undefined && v.go.head !== pr.head)
+      return [
+        journal("release_merge_failed", {
+          pr: pr.number,
+          head: pr.head,
+          reason: `the head moved from ${v.go.head.slice(0, 7)} to ${pr.head.slice(0, 7)} after release_go was asked`,
+        }),
+      ];
+    if (v.ci?.head === pr.head && v.ci.state === "red")
+      return [
+        journal("release_merge_failed", {
+          pr: pr.number,
+          head: pr.head,
+          reason: `CI is red at ${pr.head.slice(0, 7)}`,
+        }),
+      ];
+    // Only at the head whose CI was read green (a moved head is read again first).
+    if (v.ci?.head !== pr.head || v.ci.state !== "green") return [{ kind: "check_pr" }];
+    return [{ kind: "merge", pr: pr.number, head: pr.head }];
+  }
+  if (v.release_go.open) return [];
+  if (pr === undefined) return [askRelease(v)];
+  // Running, unread or no run yet (the driver reads `none` green under `ci_mode: none`): read it.
+  const ci = v.ci?.head === pr.head ? v.ci.state : undefined;
+  if (ci === "red") return v.ci_failed.open ? [] : [askCiFailed(v, pr)];
+  if (ci !== "green") return [{ kind: "check_pr" }];
+  return [askRelease(v)];
+}
+
+function advance(v: ReleaseView): ReleaseAction[] {
+  if (!v.releasing || v.done) return [];
+  if (v.train.phase === "ship") {
+    const step = stepPhase(v, "ship");
+    if (step !== null) return step;
+    const go = v.go ?? { by: "", decision_id: "" };
+    return [releaseDone(v, go)];
+  }
+  return stepPhase(v, "prepare") ?? goStep(v);
 }
 
 function onDone(
@@ -555,6 +865,16 @@ function onChecked(
   if (run?.agent_id !== ev.agent_id || stateOf(v, ev.stage) !== "running") return [];
   if (ev.report.ok)
     return [
+      ...(ev.report.pr !== undefined
+        ? [
+            journal("release_pr_detected", {
+              pr: ev.report.pr.number,
+              head: ev.report.pr.head,
+              title: ev.report.pr.title,
+              stage: ev.stage,
+            }),
+          ]
+        : []),
       journal("release_stage_verified", {
         stage: ev.stage,
         agent_id: ev.agent_id,
@@ -576,6 +896,11 @@ function onChecked(
 function onResolved(v: ReleaseView, d: DecisionRecord): ReleaseAction[] {
   const stage = stageOf(d);
   const answer = d.resolved?.answer.trim().toLowerCase();
+  // release_go: the view folded the answer in (go pending, or a hold asked again by advance).
+  if (d.kind === "release_go") return v.releasing ? advance(v) : [];
+  // retry: CI is read again at once; hold: advance asks again.
+  if (d.kind === "release_pr_ci_failed")
+    return v.releasing && answer === "retry" ? [{ kind: "check_pr", fresh: true }] : [];
   // Paused too: the decision is consumed now, and advance never re-asks a stage awaiting its go
   // or failed. The spawn this enters is held until the wave resumes.
   if (stage === undefined || answer === undefined || !(v.releasing || v.paused)) return [];
@@ -682,11 +1007,63 @@ export function globRegex(glob: string): RegExp {
 
 const out = (r: ExecResult) => r.stdout.trim();
 
+/** The argv that lists the release PR: open, from the release branch into the default one. */
+export const releasePrListArgv = (releaseBranch: string, defaultBranch: string): string[] => [
+  "gh",
+  "pr",
+  "list",
+  "--head",
+  releaseBranch,
+  "--base",
+  defaultBranch,
+  "--state",
+  "open",
+  "--json",
+  "number,headRefOid,title,labels",
+];
+
 /**
- * Check a stage's `verify` facts and result after its `done` (read-only git and `gh api` GETs in
+ * The release PR from `releasePrListArgv`'s output: exactly one, labelled `no-changelog`, its
+ * title starting `release:` (CI's changelog guards need both; the title is the squash subject).
+ */
+export function parseReleasePr(stdout: string): { pr: ReleasePr } | { why: string } {
+  let list: unknown;
+  try {
+    list = JSON.parse(stdout);
+  } catch {
+    return { why: "gh printed no PR list" };
+  }
+  if (!Array.isArray(list) || list.length === 0) return { why: "no open release PR" };
+  if (list.length > 1)
+    return {
+      why: `${list.length} open release PRs (${list.map((p: { number?: unknown }) => `#${String(p.number)}`).join(", ")}), want exactly one`,
+    };
+  const p = list[0] as {
+    number?: unknown;
+    headRefOid?: unknown;
+    title?: unknown;
+    labels?: unknown;
+  };
+  if (typeof p.number !== "number" || typeof p.headRefOid !== "string")
+    return { why: "gh printed a PR without a number or head" };
+  const title = typeof p.title === "string" ? p.title : "";
+  const labels = Array.isArray(p.labels)
+    ? (p.labels as { name?: unknown }[]).map((l) => l?.name).filter((n) => typeof n === "string")
+    : [];
+  if (!labels.includes(RELEASE_PR_LABEL))
+    return { why: `#${p.number} is not labelled ${RELEASE_PR_LABEL}` };
+  if (!title.startsWith(RELEASE_PR_TITLE))
+    return { why: `#${p.number}'s title does not start with "${RELEASE_PR_TITLE}"` };
+  return { pr: { number: p.number, head: p.headRefOid, title } };
+}
+
+/**
+ * Check a stage's `verify` facts and result after its `done` (read-only git and `gh` reads in
  * the agent's worktree `cwd`): `commits_on_release` (the release tip moved past `start` and the
- * agent's HEAD is on it), `tag` (a matching tag at the tip), `files` (each on the release branch),
- * `result` (each field with its value), and every `run` line reported with exit code 0.
+ * agent's HEAD is on it), `release_pr` (exactly one open release PR, labelled and titled),
+ * `tag` (a matching tag at the tip; a ship stage's at the release's merge commit), `files`
+ * (each on the release branch; a ship stage's at the merge commit), `result` (each field with
+ * its value), and every `run` line reported with exit code 0. `stage` is substituted already.
  */
 export async function verifyStage(
   exec: ExecFn,
@@ -696,6 +1073,10 @@ export async function verifyStage(
     start: string | undefined;
     release_branch: string;
     result: StageResult;
+    /** The release PR's base (`release_pr`). */
+    default_branch?: string;
+    /** A ship stage's target: the merge commit on the default branch. */
+    ship?: ShipTarget;
   },
 ): Promise<StageReport> {
   const facts: StageReport["facts"] = [];
@@ -705,12 +1086,18 @@ export async function verifyStage(
     if (!ok) missing.push(name);
   };
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  // A ship stage's target is the merge commit (the release branch is gone): the default branch
+  // is fetched so the commit is here, and every fact is read at it.
+  const branch = o.ship?.default_branch ?? o.release_branch;
   const remote = `refs/remotes/origin/${o.release_branch}`;
-  const fetched = await git("fetch", "--quiet", "origin", o.release_branch);
-  const tipR = await git("rev-parse", "--verify", "--quiet", remote);
+  const fetched = await git("fetch", "--quiet", "origin", branch);
+  const tipR = o.ship === undefined ? await git("rev-parse", "--verify", "--quiet", remote) : null;
   const headR = await git("rev-parse", "HEAD");
-  const tip = tipR.code === 0 ? out(tipR) : undefined;
+  const tip = o.ship !== undefined ? o.ship.merged_sha : tipR?.code === 0 ? out(tipR) : undefined;
   const head = headR.code === 0 ? out(headR) : undefined;
+  const target = o.ship !== undefined ? tip : remote;
+  const where =
+    o.ship !== undefined ? `the merge commit ${tip?.slice(0, 7)}` : `origin/${o.release_branch}`;
   const fetchNote =
     fetched.code === 0 ? "" : ` (fetch failed: ${fetched.stderr.trim() || fetched.code})`;
   // Every run line, in order, reported with exit code 0 (each reported command matches one line).
@@ -752,6 +1139,27 @@ export async function verifyStage(
       start === undefined
         ? `start unknown (no base_sha recorded), origin/${o.release_branch} at ${tip?.slice(0, 7) ?? "?"}${fetchNote}`
         : `origin/${o.release_branch} ${start.slice(0, 7)}..${tip?.slice(0, 7) ?? "?"}, HEAD ${head?.slice(0, 7) ?? "?"}${ok ? " on it" : ""}${fetchNote}`,
+    );
+  }
+  let pr: ReleasePr | undefined;
+  if (v.release_pr === true) {
+    const r =
+      o.default_branch === undefined
+        ? null
+        : await exec(releasePrListArgv(o.release_branch, o.default_branch), { cwd: o.cwd });
+    const found =
+      r === null
+        ? { why: "the default branch is unknown" }
+        : r.code !== 0
+          ? { why: `gh pr list exited ${r.code}: ${r.stderr.trim()}` }
+          : parseReleasePr(r.stdout);
+    if ("pr" in found) pr = found.pr;
+    fact(
+      "release_pr",
+      "pr" in found,
+      "pr" in found
+        ? `#${found.pr.number} "${found.pr.title}" at ${found.pr.head.slice(0, 7)}`
+        : found.why,
     );
   }
   if (v.tag !== undefined) {
@@ -803,12 +1211,8 @@ export async function verifyStage(
     );
   }
   for (const f of v.files ?? []) {
-    const r = await git("show", "--quiet", `${remote}:${f}`);
-    fact(
-      `file ${f}`,
-      r.code === 0,
-      r.code === 0 ? `on origin/${o.release_branch}` : `git show exited ${r.code}`,
-    );
+    const r = await git("show", "--quiet", `${target}:${f}`);
+    fact(`file ${f}`, r.code === 0, r.code === 0 ? `on ${where}` : `git show exited ${r.code}`);
   }
   for (const [k, want] of Object.entries(v.result ?? {})) {
     const got = o.result.fields?.[k];
@@ -824,7 +1228,55 @@ export async function verifyStage(
     ...(tip !== undefined ? { tip } : {}),
     facts,
     missing,
+    ...(pr !== undefined ? { pr } : {}),
   };
+}
+
+/** How many of the changelog section's bullets the `release_go` question quotes. */
+const EXCERPT_BULLETS = 3;
+/** How long a quoted bullet may be before it is cut. */
+const EXCERPT_CHARS = 160;
+
+/** The first bullets of `CHANGELOG.md`'s top section (each its first line, cut), pure. */
+export function changelogExcerpt(text: string, n = EXCERPT_BULLETS): string[] {
+  const lines = text.split("\n");
+  const start = lines.findIndex((l) => l.startsWith("## "));
+  if (start < 0) return [];
+  const out: string[] = [];
+  for (const l of lines.slice(start + 1)) {
+    if (l.startsWith("## ") || out.length >= n) break;
+    if (!l.startsWith("- ")) continue;
+    out.push(l.length > EXCERPT_CHARS ? `${l.slice(0, EXCERPT_CHARS - 1)}…` : l);
+  }
+  return out;
+}
+
+/**
+ * The release PR as it is now and CI on its head (read-only, in the wave's clone `cwd`): the
+ * open PR from the release branch, its head's aggregate CI (`none` read green under
+ * `ci_mode: none`, else as runs still to come: `running`), and the changelog section's first
+ * bullets on the release branch.
+ */
+export async function readReleasePr(
+  exec: ExecFn,
+  o: { cwd: string; release_branch: string; default_branch: string; ci_mode?: string },
+): Promise<{ pr: ReleasePr; ci: CiState; excerpt: string[] } | { why: string }> {
+  const r = await exec(releasePrListArgv(o.release_branch, o.default_branch), { cwd: o.cwd });
+  if (r.code !== 0) return { why: `gh pr list exited ${r.code}: ${r.stderr.trim()}` };
+  const found = parseReleasePr(r.stdout);
+  if (!("pr" in found)) return found;
+  // One `gh api …/actions/runs?head_sha=` GET on the supervisor, as a task PR's head is read.
+  const state = await ciStateOf(exec, o.cwd, found.pr.head, { exec, cwd: o.cwd });
+  const ci: CiState = state === "none" ? (o.ci_mode === "none" ? "green" : "running") : state;
+  await exec(["git", "-C", o.cwd, "fetch", "--quiet", "origin", o.release_branch]);
+  const log = await exec([
+    "git",
+    "-C",
+    o.cwd,
+    "show",
+    `refs/remotes/origin/${o.release_branch}:CHANGELOG.md`,
+  ]);
+  return { pr: found.pr, ci, excerpt: log.code === 0 ? changelogExcerpt(log.stdout) : [] };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -950,6 +1402,17 @@ export interface ReleaseDeps {
   enqueue: (fn: () => Promise<void>) => Promise<void>;
   now: () => number;
   log?: (line: string) => void;
+  /** The wave's clone (where the release PR and its CI are read); absent: none on this machine. */
+  cwd?: () => string | undefined;
+  /** The repository's CI mode (`none`: a head without runs is green). */
+  ciMode?: () => string | undefined;
+  /**
+   * Squash-merge the release PR at `head` under a ReleaseToken (the owner's go): the merge
+   * commit, or why it did not merge.
+   */
+  merge?: (pr: number, head: string) => Promise<{ sha: string } | { reason: string }>;
+  /** The release PR merged: the issue lifecycle's release check, now. */
+  merged?: (pr: number) => void;
 }
 
 /** Executes the train's actions for one wave. Call it from one serial queue. */
@@ -957,19 +1420,51 @@ export class ReleaseTrain {
   /** Verifications running beside the queue, by agent id. */
   private readonly inflight = new Set<string>();
   private readonly chains = new Set<Promise<void>>();
+  /** The release PR head's CI as last read (`at`: when), and whether a read is running. */
+  private ci: { head: string; state: CiState; excerpt: string[]; at: number } | undefined;
+  private reading = false;
+  private merging = false;
+  private depth = 0;
 
   constructor(
     private readonly wave: WaveId,
     private readonly deps: ReleaseDeps,
   ) {}
 
+  /** The journal's view with what the driver read itself (the PR's CI, a merge running). */
+  private view(): ReleaseView | null {
+    const v = this.deps.view();
+    if (v === null) return null;
+    return {
+      ...v,
+      ...(this.ci !== undefined
+        ? { ci: { head: this.ci.head, state: this.ci.state, excerpt: this.ci.excerpt } }
+        : {}),
+      merging: this.merging,
+    };
+  }
+
+  /** Whether a `handle` is running (it advances to the end itself: a nested advance is moot). */
+  get busy(): boolean {
+    return this.depth > 0;
+  }
+
   /** Handle one observation, then advance until the train settles. */
   async handle(ev: ReleaseEvent): Promise<void> {
-    const v = this.deps.view();
+    this.depth++;
+    try {
+      await this.step(ev);
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private async step(ev: ReleaseEvent): Promise<void> {
+    const v = this.view();
     if (v === null) return;
     await this.run(nextRelease(v, ev));
     for (let i = 0; i < DAEMON_DEFAULTS.pipeline_max_advances; i++) {
-      const w = this.deps.view();
+      const w = this.view();
       if (w === null) return;
       const acts = nextRelease(w, { kind: "advance" });
       if (acts.length === 0 || !(await this.run(acts))) return;
@@ -994,6 +1489,12 @@ export class ReleaseTrain {
           if (stage !== undefined) this.deps.spawn(stage, a.attempt);
           break;
         }
+        case "check_pr":
+          this.checkPr(a.fresh === true);
+          break;
+        case "merge":
+          this.merge(a.pr, a.head);
+          break;
         case "steer":
           await this.deps.steer(a.agent_id, a.text);
           progressed = true;
@@ -1014,6 +1515,92 @@ export class ReleaseTrain {
     return progressed;
   }
 
+  /**
+   * Beside the queue: read the release PR and its head's CI (once per `ci_poll_ms` while it is
+   * not settled; a green or red head is not read again unless `fresh`), journal a moved head as
+   * `release_pr_detected`, and advance.
+   */
+  private checkPr(fresh: boolean): void {
+    const v = this.deps.view();
+    const pr = v?.train.pr;
+    const cwd = this.deps.cwd?.();
+    const base = v?.train.default_branch;
+    if (v == null || pr === undefined || cwd === undefined || base === undefined || this.reading)
+      return;
+    const c = this.ci;
+    if (!fresh && c !== undefined && c.head === pr.head) {
+      if (c.state === "green" || c.state === "red") return;
+      if (this.deps.now() - c.at < DAEMON_DEFAULTS.ci_poll_ms) return;
+    }
+    if (fresh) this.ci = undefined;
+    this.reading = true;
+    const ciMode = this.deps.ciMode?.();
+    const p: Promise<void> = readReleasePr(this.io(), {
+      cwd,
+      release_branch: v.release_branch,
+      default_branch: base,
+      ...(ciMode !== undefined ? { ci_mode: ciMode } : {}),
+    })
+      .then(async (r) => {
+        this.reading = false;
+        if (!("pr" in r)) {
+          this.deps.log?.(`release ${this.wave}: the release PR: ${r.why}`);
+          return;
+        }
+        this.ci = { head: r.pr.head, state: r.ci, excerpt: r.excerpt, at: this.deps.now() };
+        await this.deps.enqueue(async () => {
+          const now = this.deps.view()?.train.pr;
+          if (now !== undefined && (now.head !== r.pr.head || now.number !== r.pr.number))
+            await this.deps.journal({
+              type: "release_pr_detected",
+              data: { pr: r.pr.number, head: r.pr.head, title: r.pr.title, moved_from: now.head },
+            });
+          await this.handle({ kind: "advance" });
+        });
+      })
+      .catch((e: unknown) => {
+        this.reading = false;
+        this.deps.log?.(`release ${this.wave}: reading the release PR: ${String(e)}`);
+      })
+      .finally(() => this.chains.delete(p));
+    this.chains.add(p);
+  }
+
+  /**
+   * Beside the queue: squash-merge the release PR at its CI-green head (the owner's go), then
+   * journal `release_merged` (and run the issues' release check) or `release_merge_failed`
+   * (the go is asked again, after CI is read again).
+   */
+  private merge(pr: number, head: string): void {
+    const merge = this.deps.merge;
+    if (merge === undefined || this.merging) return;
+    this.merging = true;
+    const p: Promise<void> = merge(pr, head)
+      .catch((e: unknown) => ({ reason: e instanceof Error ? e.message : String(e) }))
+      .then(async (r) => {
+        await this.deps.enqueue(async () => {
+          this.merging = false;
+          if ("sha" in r) {
+            await this.deps.journal({ type: "release_merged", data: { pr, sha: r.sha, head } });
+            this.deps.merged?.(pr);
+          } else {
+            this.ci = undefined;
+            await this.deps.journal({
+              type: "release_merge_failed",
+              data: { pr, head, reason: r.reason },
+            });
+          }
+          await this.handle({ kind: "advance" });
+        });
+      })
+      .catch((e: unknown) => {
+        this.merging = false;
+        this.deps.log?.(`release ${this.wave}: merging #${pr}: ${String(e)}`);
+      })
+      .finally(() => this.chains.delete(p));
+    this.chains.add(p);
+  }
+
   /** The fenced exec with the pipeline's hard timeout. */
   private io(): ExecFn {
     return (argv, opts: ExecOptions = {}) =>
@@ -1024,9 +1611,10 @@ export class ReleaseTrain {
   private verify(stageName: string, agentId: string, result: StageResult): void {
     const v = this.deps.view();
     const run = v?.runs[stageName];
-    const stage = v?.stages.find((s) => s.name === stageName);
+    const stage = v == null ? undefined : resolvedStage(v, stageName);
     if (v == null || run?.agent_id !== agentId || stage === undefined || this.inflight.has(agentId))
       return;
+    const ship = shipTarget(v, stage);
     this.inflight.add(agentId);
     const p: Promise<void> = (async (): Promise<ReleaseEvent> => {
       let report: StageReport;
@@ -1040,6 +1628,10 @@ export class ReleaseTrain {
                 start: run.base_sha,
                 release_branch: v.release_branch,
                 result,
+                ...(v.train.default_branch !== undefined
+                  ? { default_branch: v.train.default_branch }
+                  : {}),
+                ...(ship !== undefined ? { ship } : {}),
               });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);

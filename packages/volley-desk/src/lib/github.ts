@@ -39,6 +39,15 @@ export function prHref(task: Pick<WaveTask, "pr"> | undefined): string | null {
 /** The accessible name of an issue link (`Issue #104 on GitHub`). */
 export const issueLabel = (n: number | string): string => `Issue #${n} on GitHub`;
 
+/**
+ * The release PR `n` on the wave's repository (wave-state `release.pr`, which carries a number
+ * only); null without a `github` or a number.
+ */
+export function releasePrHref(github: unknown, n: unknown): string | null {
+  const gh = githubOf(github);
+  return gh && isIssueNumber(n) ? `${gh.url.replace(/\/+$/, "")}/pull/${n}` : null;
+}
+
 /** The accessible name of a PR link (`PR #7 on GitHub`). */
 export const prLabel = (n: number | string): string => `PR #${n} on GitHub`;
 

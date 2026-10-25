@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { isReservedChannel } from "volley-mcp/channels";
+import { DEFAULT_PLAYBOOK, formatPlaybook, wavePlaybook } from "volleyd/autopilot/playbook";
 import {
   type Footprint,
   type FootprintOf,
@@ -465,6 +466,25 @@ export function readRepoTree(repo: string, branch: string, home: string = homedi
 }
 
 /**
+ * The wave's release playbook, said where the wave is made (volleyd README, "The release
+ * train"): `release playbook: .volley/release.yaml (4 stages, 0 owner-gated)`, or that the wave
+ * will complete without a release. Null when `repo` is not a directory on this machine.
+ */
+export function playbookLine(repo: string, home: string = homedir()): string | null {
+  const dir = repo === "~" ? home : repo.startsWith("~/") ? join(home, repo.slice(2)) : repo;
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return null;
+  try {
+    const p = wavePlaybook({ repo: dir });
+    return p === null
+      ? `release playbook: none — the wave will complete without a release; add ${DEFAULT_PLAYBOOK} (volleyd README, "The release train")`
+      : formatPlaybook(DEFAULT_PLAYBOOK, p.playbook);
+  } catch (e) {
+    const why = (e instanceof Error ? e.message : String(e)).replace(/\n\s*/g, "; ");
+    return `release playbook: invalid — ${why}`;
+  }
+}
+
+/**
  * Create the preface at `file` (relative to `repo`, or absolute) from the template when there
  * is none. An existing file is never touched: it is the repo's own rules.
  */
@@ -527,6 +547,9 @@ ones that cannot bundle (an after: marked "# chained by the planner"), and write
 plan:; the plan in words heads the file and stderr, with the footprint counts (--verbose lists
 the entries that matched no path). --no-plan writes footprints only (no bundle, chain or plan);
 --plan-only prints the plan on stdout and writes nothing. Edit the file to plan differently.
+When --repo is on this machine, the line after the footprint counts names its release playbook
+(.volley/release.yaml: its stages and owner-gated ones), or says "release playbook: none": the
+wave will complete without a release.
 `;
 
 function main(argv: string[]): number {
@@ -651,9 +674,11 @@ function main(argv: string[]): number {
     ]
       .map((l) => `${l}\n`)
       .join("");
+    const playbook = playbookLine(repoArg);
+    const playbookText = playbook === null ? "" : `${playbook}\n`;
     if (v["plan-only"] === true) {
       // The explanation only: no wave file, no preface, nothing to submit.
-      process.stderr.write(noTree);
+      process.stderr.write(`${noTree}${playbookText}`);
       process.stdout.write(planBlock);
       return 0;
     }
@@ -679,7 +704,7 @@ function main(argv: string[]): number {
         `note: no Depends on:/deps: line in ${undeclared.map((n) => `#${n}`).join(", ")}; confirm their order before submitting\n`,
       );
     }
-    process.stderr.write(`${noTree}${planBlock}`);
+    process.stderr.write(`${noTree}${planBlock}${playbookText}`);
     for (const line of submitLines(v.out ?? "<wave.yaml>", process.env.VOLLEY_COORDINATOR)) {
       process.stderr.write(`${line}\n`);
     }

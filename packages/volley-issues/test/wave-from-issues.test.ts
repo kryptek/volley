@@ -985,6 +985,43 @@ describe("footprints and the overlap plan (#381)", () => {
     expect(r.stderr).toContain("footprints: 3 listed, 1 resolved, 1 guessed (#105); 1 entry");
   });
 
+  it("CLI: a repo without .volley/release.yaml is told the wave completes without a release", () => {
+    const r = cli(["--repo", repoWithTree()]);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(
+      `footprints: 3 listed, 1 resolved, 1 guessed (#105); 1 entry unresolved (run with --verbose to list)\nrelease playbook: none — the wave will complete without a release; add .volley/release.yaml (volleyd README, "The release train")\n`,
+    );
+    // --plan-only says so too, on stderr (stdout is the plan).
+    const p = cli(["--repo", repoWithTree(), "--plan-only"]);
+    expect(p.stderr).toContain("release playbook: none — the wave will complete");
+    expect(p.stdout).not.toContain("release playbook");
+  });
+
+  it("CLI: a repo with a playbook names it, its stages and the owner-gated ones", () => {
+    const repo = repoWithTree();
+    mkdirSync(join(repo, ".volley"), { recursive: true });
+    writeFileSync(
+      join(repo, ".volley", "release.yaml"),
+      `version: 1
+stages:
+  - { name: bump, brief: Bump. }
+  - { name: release-pr, brief: Open the PR. }
+  - { name: tag, brief: Tag. }
+  - { name: deploy, brief: Deploy. }
+`,
+    );
+    const r = cli(["--repo", repo]);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(
+      "release playbook: .volley/release.yaml (4 stages, 0 owner-gated)\n",
+    );
+    expect(r.stderr).not.toContain("release playbook: none");
+  });
+
+  it("CLI: a --repo that is not on this machine prints no playbook line", () => {
+    expect(cli(["--repo", OPTS.repo]).stderr).not.toContain("release playbook");
+  });
+
   it("CLI: a --repo with no git tree leaves footprints unresolved, says so, and exits 0", () => {
     const r = cli(["--repo", OPTS.repo]);
     expect(r.status).toBe(0);

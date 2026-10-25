@@ -355,6 +355,18 @@ a.dag-issue-link {
 .wave-train .train-failed {
   color: var(--bad-ink);
 }
+.wave-train-head {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.wave-train .train-divider {
+  color: var(--dim);
+  border-top: 1px dashed var(--line);
+  padding-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
 .dag-fixer {
   font-size: 11px;
 }

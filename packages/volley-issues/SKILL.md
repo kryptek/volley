@@ -205,6 +205,8 @@ volleyd run .volley/waves/$WAVE.yaml --owner "$VOLLEY_COORDINATOR"
 
 Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the user**, below) after showing them the wave file and the `volleyd validate` output.
 
+**Check the release playbook line.** The helper prints, beside its `footprints:` line, either `release playbook: .volley/release.yaml (N stages, M owner-gated)` or `release playbook: none — the wave will complete without a release`. On `none`, stop before submitting and tell the user: the wave's tasks will merge into the release branch and nothing will release it (no version bump, no release PR, no tag, no deploy) until someone does **Release branch merge** by hand or the repository gains a `.volley/release.yaml` (volleyd README, "The release train"). Submit only once they say to.
+
 `volleyd validate` needs no daemon and reports path-qualified errors (unknown `after:` target, cycle, bad id); fix the file and re-run until it prints `ok`. Check its `brief preface:` line: `brief preface: none (no <path>)` means the agents get no repo rules — write the preface first (above). `volleyd status "$WAVE"` shows the same line under its header for the running wave, with the sha256 of the file the agents got. `volleyd run` validates again, submits, and returns as soon as the daemon has journaled the wave; it prints any overlap warnings with other running waves (advisory). `--owner` is the coordinator name (`$VOLLEY_COORDINATOR`; without one, the coordinator's auto-suffixed id): only the owner — or the session currently bound to the name — may resolve, pause, stop or steer the wave. Those commands identify the caller by `--by`, else `VOLLEY_AGENT_ID`, else the session registered for this directory (its coordinator name when it has one), else `VOLLEY_COORDINATOR`; without a coordinator name, if the shell's `VOLLEY_AGENT_ID` is not the suffixed id, export it (`export VOLLEY_AGENT_ID=<COORDINATOR-AGENT-ID>`) or pass `--by <COORDINATOR-AGENT-ID>`.
 
 ### Step 5: submit and leave (autopilot)
@@ -213,9 +215,9 @@ Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the us
 
 **What still reaches the owner.** Only what autopilot must not, or could not, answer:
 
-- **Owner-only decision kinds** (`autopilot.owner_only`, by default `plan_change`, `repo_untrusted`, `model_switch`, `release_go` and `stage_go`): never answered automatically.
+- **Owner-only decision kinds** (`autopilot.owner_only`, by default `plan_change`, `repo_untrusted`, `model_switch`, `release_go`, `stage_go` and `release_pr_ci_failed`): never answered automatically.
 - **Escalations**: a decision no policy rule answers (`no_policy`), one whose remediation budget is spent (`budget_exhausted`) or whose answer could not be applied (`unattended_safety`). Its question starts with `Autopilot could not resolve this (<why>): `.
-- **`release_go`**: when the repository has a release playbook (`.volley/release.yaml`), the release train's final go/no-go once every stage has verified (`go` completes the wave, `hold` asks again), and each owner-gated stage's `stage_go` before it runs. volleyd never deploys to production on its own.
+- **`release_go`**: when the repository has a release playbook (`.volley/release.yaml`), the release train's one go/no-go, asked once every prepare stage has verified and the release PR's CI is green; it names the version, the PR and the changelog's first bullets. `go` is the owner's authority for the whole release: volleyd squash-merges the release PR (deleting the release branch), closes the issues and runs the playbook's ship stages (tag, deploy) at the merge commit; `hold` asks again. A red release PR asks `release_pr_ci_failed` (`retry` / `hold`) instead. Each owner-gated stage's `stage_go` still comes before it runs. Nothing after `release_go` runs without the `go`.
 - With `merge: manual`, every gated PR's merge: the owner merges each `merge_ready` gate by hand (as in **Driving a wave by hand**), and volleyd admits dependents once it sees the merge.
 
 Each decision is a needs-you inbox item and rings the owner's phone once. Answer it wherever is closest; the first answer wins and later ones are refused with where it was given:
@@ -234,7 +236,7 @@ volley sub --pattern "volley/_waves/$WAVE/digest" --max-messages 1 --timeout 144
 
 On the wake, `volleyd digest "$WAVE"` prints it: `## Shipped` (each merged task and PR), `## Autopilot handled` (decisions answered, flakes fixed, conflicts resolved, retries, merges), `## Waiting for you` (open decisions, the release train) and `## Failed`. Relay it to the user, help them answer what waits (above), and either leave again or re-arm the sub for the next digest. Each digest also sends one push (a `progress` envelope of type `digest` on volleyd's own topic, which `volley notify` rings for), so a user away from the terminal hears it anyway. `volley wait` is not the tool for this: it watches one agent's `status` channel, not volleyd's `progress`. Exit `124` is the fallback wake (re-arm, or check `volleyd status "$WAVE"`); exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake.
 
-When the digest reports the wave complete (or `volleyd status "$WAVE"` shows every task `done` or `cancelled`), go to Step 6; the release branch's merge to main follows **Release branch merge** or the repository's release playbook.
+When the digest reports the wave complete (or `volleyd status "$WAVE"` shows every task `done` or `cancelled`), go to Step 6; with a release playbook the release already went out on the owner's `release_go`, without one the release branch's merge to main follows **Release branch merge**.
 
 **Asking the user: go/no-go through `AskUserQuestion`.** This is the convention for every coordinator, under autopilot or not. Whenever the run needs the user's go-ahead (before `volleyd run`, before merging a gate or the release branch by hand, a decision that is theirs, a `release_go` the user answers in this session), ask it with the `AskUserQuestion` tool, never as a question at the end of your turn: one question, options `go`, `hold`, `cancel` (each with a one-line description of what happens), `multiSelect: false`. The volley hooks publish the picker, and volleyd opens it as a needs-you inbox item the user can answer from the Desk or a phone as well as in this terminal: volleyd selects the answer on this session's screen, and whichever answer comes first wins. A question left at the end of a turn becomes a handoff item instead, whose reply is typed into your prompt; keep those for questions that need words, not buttons. Act on `go`; on `hold`, wait and ask again when the user says so; on `cancel`, stop (`volleyd stop "$WAVE"` once a wave is running) and say what you stopped.
 
@@ -558,44 +560,26 @@ If a `claude` CLI agent dies (OOM, kill -9, segfault, SIGSEGV), MQTT keepalive e
 
 ## Release branch merge
 
-Under autopilot, when the repository has a release playbook (`.volley/release.yaml`), volleyd's release train runs these steps as playbook stages once every task is merged, and the owner answers each owner-gated `stage_go` and the final `release_go` (see **What still reaches the owner** above). Without a playbook, or with `--autopilot off`, the coordinator runs them by hand:
+**With a release playbook** (`.volley/release.yaml` in the repository, under autopilot), the release train does it end to end, and the owner answers one question, `release_go`:
 
-Once every dispatched agent has reached `done` AND its PR is merged into the release branch:
+- When the wave's last task merges, volleyd resolves the release version from the newest `v*` tag and the release branch's `changes/` fragments: **minor** when any fragment is `added` or `removed`, else **patch**. `release_version: X.Y.Z` in the wave file overrides it (the only way to cut `1.0.0`).
+- The playbook's **prepare** stages run on the release branch: they bump the version, assemble the changelog and open the release PR (the release branch into the default branch, a `release: v<X.Y.Z> — <theme>` title, the `no-changelog` label and the `Closes #N` lines volleyd hands the stage).
+- volleyd waits for the release PR's CI to go green, then asks `release_go`, naming the version, the PR and the changelog's first bullets.
+- On `go`, volleyd squash-merges the release PR at its CI-green head and deletes the release branch, closes every task's issue at once, runs the **ship** stages (tag, deploy) at the merge commit, and completes the wave. `hold` keeps it waiting and asks again.
 
-1. **Deploy the release branch to staging** for end-to-end testing:
+No rc branch, no `--admin`, no coordinator session: once the wave is submitted, the coordinator only relays the `release_go`.
+
+**Without a playbook** (`playbook: none`, a repository that has none, or `--autopilot off`) the wave completes with the release branch merged into nothing. The coordinator ships it by hand, once every task is `done` and its PR merged into the release branch:
+
+1. **Open the release PR** from the release branch into the default branch, under a `release:` title with the `no-changelog` label (a release PR passes CI's changelog guards only with both: the squash subject is the title, and a bump touches `packages/` without a fragment; `labels --ensure` creates the label where the repository lacks it), its body carrying one `Closes #N` line per done task's issue (`volleyd digest "$WAVE"` lists them):
    ```bash
-   gh workflow run deploy-backend.yml --ref release/<date>-<theme> -f environment=staging
-   gh workflow run deploy-portal.yml --ref release/<date>-<theme> -f environment=staging
-   gh workflow run deploy-admin-frontend.yml --ref release/<date>-<theme> -f environment=staging
-   ```
-
-2. **Assemble the changelog and bump the versions** in a release-prep PR into the release branch:
-   ```bash
-   git checkout -b release-prep/<v> release/<date>-<theme>
-   bun run changelog --version <v> --date <YYYY-MM-DD> --commit
-   # bump the package.json versions, commit as `release: <v>`
-   git push -u origin release-prep/<v>
    bun scripts/changelog-ci.ts labels --ensure
-   gh pr create --base release/<date>-<theme> --head release-prep/<v> --title "release: <v> — <theme>" --label no-changelog
-   gh pr merge release-prep/<v> --squash --subject "release: <v> — <theme>"
+   gh pr create --base <default-branch> --head release/<date>-<theme> --title "release: <theme>" --label no-changelog --body-file <closes-lines>
    ```
-   `bun run changelog --commit` turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; the volley-cli version test checks that the newest section matches the root version. The PR passes CI's changelog guards by construction: its squash subject starts with `release:` (the only commits allowed to change `CHANGELOG.md`), and it carries the `no-changelog` label because the version bump touches `packages/` without a fragment. `labels --ensure` creates that label when the repository lacks it. Each merge names its PR by branch: the coordinator is still checked out on `release-prep/<v>`, so a bare `gh pr merge` would pick that PR.
-
-3. **After staging verification**, squash-merge the release branch into main, again under a `release:` subject:
+2. **Wait for its CI** to go green (`gh pr checks release/<date>-<theme> --watch`).
+3. **Squash-merge it** under the same `release:` subject and delete the release branch, after the owner's go (the go/no-go picker, **Asking the user**). Name the PR by its branch, never a bare `gh pr merge`:
    ```bash
-   gh pr create --base main --head release/<date>-<theme> --title "release: <date> — <theme>"
-   gh pr merge release/<date>-<theme> --squash --subject "release: <date> — <theme>"
-   ```
-
-4. **Delete the release branch** after merge:
-   ```bash
-   git branch -D release/<date>-<theme>
-   git push origin --delete release/<date>-<theme>
-   ```
-
-5. **Remove the migration counter** (cleanup):
-   ```bash
-   rm -f /tmp/example-next-migration.txt /tmp/example-next-migration.txt.lock.d
+   gh pr merge release/<date>-<theme> --squash --delete-branch --subject "release: <theme>"
    ```
 
 ### Post-merge deployment
@@ -612,7 +596,7 @@ When the user says to deploy after merging:
    - Minor bump for features; patch bump for bug-fix-only releases.
    - Update `APP_VERSION` in `frontend-admin/src/changelog.js` to match; add changelog entries; commit + push.
    - `git tag v<X.Y.Z> -m "Release v<X.Y.Z> — <summary>" && git push origin v<X.Y.Z>`.
-7. **Only when the repo is Volley itself** (kryptek/volley), deploy to the supervisor's machine: `volley deploy v<X.Y.Z>`; it rebuilds the Desk, restarts both services (volleyd and the Desk) and rolls back on failure. Run `volley deploy v<X.Y.Z> --dry-run` first to see the steps; a checkout with local changes is refused until they are committed or `--force-clean` stashes them.
+7. **Only when the repo is Volley itself** (kryptek/volley): its own playbook's `deploy` ship stage already ran `volley deploy v<X.Y.Z>` on the owner's `release_go`; by hand (a release shipped without the train), deploy to the supervisor's machine with `volley deploy v<X.Y.Z>`; it rebuilds the Desk, restarts both services (volleyd and the Desk) and rolls back on failure. Run `volley deploy v<X.Y.Z> --dry-run` first to see the steps; a checkout with local changes is refused until they are committed or `--force-clean` stashes them.
 
 ### Rollback
 

@@ -44,6 +44,7 @@ const STATE_LABEL: Record<WaveRelease["stages"][number]["state"], string> = {
   running: "running",
   verified: "verified",
   failed: "failed",
+  skipped: "skipped",
 };
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() ?? "";

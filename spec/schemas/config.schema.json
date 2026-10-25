@@ -654,6 +654,7 @@
                   "merge_refused",
                   "release_go",
                   "stage_go",
+                  "release_pr_ci_failed",
                   "terminal_status_lost",
                   "churn_exhausted"
                 ]
@@ -663,7 +664,8 @@
                 "repo_untrusted",
                 "model_switch",
                 "release_go",
-                "stage_go"
+                "stage_go",
+                "release_pr_ci_failed"
               ],
               "description": "Decision kinds the supervisor never answers itself: it escalates them to the owner (owner_only)."
             },

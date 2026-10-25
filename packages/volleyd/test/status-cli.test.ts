@@ -483,6 +483,32 @@ describe("volleyd status formatting", () => {
       release: { stage: null, stages: [{ name: "bump", state: "verified" }] },
     });
     expect(idle.split("\n")[1]).toBe("  release: - (1/1 verified)");
+    // Every prepare stage settled while releasing: the owner's go is next.
+    const ready = formatWave({
+      ...plain,
+      status: "releasing",
+      gates: [],
+      release: { stage: null, stages: [{ name: "bump", state: "verified" }] },
+    });
+    expect(ready.split("\n")[1]).toBe("  release: awaiting release_go (1/1 verified)");
+    // With its version (SPEC §4.6.19): `release: v0.13.3 · tag running (2/4 verified)`.
+    const shipping = formatWave({
+      ...plain,
+      status: "releasing",
+      gates: [],
+      release: {
+        stage: "tag",
+        phase: "ship",
+        version: "0.13.3",
+        stages: [
+          { name: "bump", state: "verified" },
+          { name: "release-pr", state: "verified" },
+          { name: "tag", state: "running", phase: "ship" },
+          { name: "deploy", state: "pending", phase: "ship" },
+        ],
+      },
+    });
+    expect(shipping.split("\n")[1]).toBe("  release: v0.13.3 · tag running (2/4 verified)");
   });
 
   it("names the agent a coordinator-name owner acts through; it needs you when you are that agent", () => {

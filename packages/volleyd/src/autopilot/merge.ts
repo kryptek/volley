@@ -1,12 +1,14 @@
 import type { ExecFn } from "../exec";
-import type { MergeToken, TrainToken } from "../fence";
+import type { MergeToken, ReleaseToken, TrainToken } from "../fence";
 
 /**
  * Autopilot merging (SPEC §4.6.17, the merge train §4.6.23): the ONE module that may build
  * `gh pr merge` (test/no-merge.test.ts exempts exactly this file). Each argv is the only shape the
  * fence allows with its token: a squash with the gate's MergeToken, a merge commit with a train's
  * TrainToken, for exactly that PR and head: GitHub refuses the merge when the head moved since the
- * gate (`--match-head-commit`). Never --admin or --auto: a refused merge is reported, not forced.
+ * gate (`--match-head-commit`); the release PR's squash, deleting the release branch, with the
+ * `release_go` go's ReleaseToken (SPEC §4.6.19). Never --admin or --auto: a refused merge is
+ * reported, not forced.
  */
 
 /**
@@ -97,6 +99,51 @@ export async function mergeTrain(
   return merged(exec, token, trainMergeArgv(token, repo), { train: token }, cwd, repo);
 }
 
+/** The release PR's squash merge, deleting the release branch (the only shape a ReleaseToken unlocks). */
+export function releaseMergeArgv(token: ReleaseToken, repo: string[] = []): string[] {
+  return [
+    "gh",
+    "pr",
+    "merge",
+    String(token.pr),
+    "--squash",
+    "--match-head-commit",
+    token.head,
+    "--delete-branch",
+    ...repo,
+  ];
+}
+
+/**
+ * Squash-merge the release PR into `base` (the default branch) at the token's head, deleting the
+ * release branch, with the same re-read before and outcome as mergePr. A PR already merged at
+ * that head (a merge whose result a restart lost) is that merge, not merged again.
+ */
+export async function mergeRelease(
+  exec: ExecFn,
+  token: ReleaseToken,
+  base: string,
+  cwd?: string,
+  repo: string[] = [],
+): Promise<MergeOutcome> {
+  const where = cwd !== undefined ? { cwd } : {};
+  const view = await exec(
+    ["gh", "pr", "view", String(token.pr), "--json", "state,headRefOid,mergeCommit", ...repo],
+    where,
+  );
+  if (view.code === 0) {
+    try {
+      const v = JSON.parse(view.stdout) as { state?: unknown; headRefOid?: unknown };
+      if (v.state === "MERGED" && v.headRefOid === token.head)
+        return { ok: true, merge_sha: mergeSha(view.stdout) };
+    } catch {}
+  }
+  // `release_branch` is the base the PR merges into (notMergeable checks it): for the release PR
+  // that is the default branch.
+  const target = { pr: token.pr, head: token.head, release_branch: base };
+  return merged(exec, target, releaseMergeArgv(token, repo), { release: token }, cwd, repo);
+}
+
 /** The PR one token may merge: its number, its gated head, its release branch. */
 type Target = Pick<MergeToken, "pr" | "head" | "release_branch">;
 
@@ -104,7 +151,7 @@ async function merged(
   exec: ExecFn,
   token: Target,
   argv: string[],
-  fenced: { merge: MergeToken } | { train: TrainToken },
+  fenced: { merge: MergeToken } | { train: TrainToken } | { release: ReleaseToken },
   cwd: string | undefined,
   repo: string[],
 ): Promise<MergeOutcome> {

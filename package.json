@@ -16,6 +16,7 @@
     "validate:schemas": "bun run scripts/validate-schemas.ts",
     "check:spec-refs": "bun run scripts/check-spec-refs.ts",
     "changelog": "bun scripts/changelog.ts",
+    "release:version": "bun scripts/release-version.ts",
     "sounds:generate": "bun scripts/sounds/generate.ts",
     "sounds:pick": "bun scripts/sounds/pick.ts",
     "sounds:check": "bun scripts/sounds/check.ts"

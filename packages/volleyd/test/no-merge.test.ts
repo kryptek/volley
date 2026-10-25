@@ -89,9 +89,9 @@ describe("volleyd merges only behind the fence", () => {
         const prMerge = argv[0] === "gh" && argv[1] === "pr" && argv[2] === "merge";
         if (file === MERGE_MODULE && prMerge) {
           merges++;
-          // Even there: a squash (the gate's) or a merge commit (a train's) at a matched head
-          // only, never --admin / --auto / --rebase (the PR number and head are variables between
-          // these literals).
+          // Even there: a squash (the gate's, the release PR's) or a merge commit (a train's) at
+          // a matched head only, never --admin / --auto / --rebase (the PR number and head are
+          // variables between these literals).
           expect([
             ["gh", "pr", "merge", "--squash", "--match-head-commit", "--delete-branch"],
             ["gh", "pr", "merge", "--merge", "--match-head-commit"],
@@ -102,7 +102,8 @@ describe("volleyd merges only behind the fence", () => {
       }
     }
     expect(offenders).toEqual([]);
-    expect(merges).toBe(2); // the exemption is used, by exactly the gate's and the train's argv
+    // The exemption is used, by exactly the gate's, the train's and the release PR's argv.
+    expect(merges).toBe(3);
     expect(seen).toBeGreaterThan(10); // the scan really sees the argvs (artifacts, worktree, …)
     const merge = readFileSync(MERGE_MODULE, "utf-8");
     expect(merge).toContain('"--squash",\n    "--match-head-commit",');

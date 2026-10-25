@@ -22,8 +22,7 @@ volleyd then checks the facts above (read-only) and writes the stage's evidence;
 
 ## Rules
 
-- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from the tip of `{{release_branch}}`).
-- Run only what the stage says. Any push goes to the release branch as a fast-forward: `git push origin HEAD:{{release_branch}}`. Never force-push, never push to or merge into any other branch, and never deploy to production: the release itself is the owner's.
+{{stage_rules}}
 
 ## Volley protocol (mandatory)
 

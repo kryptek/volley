@@ -5,9 +5,11 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { RELEASE_TASK } from "../src/autopilot/release-train";
 import { ControlClient } from "../src/control";
+import type { DaemonOptions } from "../src/daemon";
 import { SpawnError } from "../src/spawn-error";
 import type { JournalEvent } from "../src/types";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
+import { asApiRuns } from "./helpers/fake-exec";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 import { type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
@@ -54,13 +56,17 @@ interface Stages {
   ) => Promise<unknown>;
 }
 
-async function start(config?: string): Promise<Stages> {
+async function start(
+  config?: string,
+  playbook = PLAYBOOK,
+  daemon: Partial<DaemonOptions> = {},
+): Promise<Stages> {
   s = await makeSupervisedEnv({
-    daemon: AUTOPILOT_ON,
+    daemon: { ...AUTOPILOT_ON, ...daemon },
     ...(config !== undefined ? { config } : {}),
   });
   mkdirSync(join(s.repo, ".volley"), { recursive: true });
-  writeFileSync(join(s.repo, ".volley", "release.yaml"), PLAYBOOK);
+  writeFileSync(join(s.repo, ".volley", "release.yaml"), playbook);
   const pubAs = (id: string, channel: string, type: string, payload: unknown, retain = true) =>
     s.agent.publish(
       channel === "_system/registry" ? registryTopic(id) : buildTopic(NS, id, channel),
@@ -437,6 +443,266 @@ describe("release stages (SPEC §4.6.19)", () => {
         { stage: "bump", attempt: 1 },
         { stage: "bump", attempt: 2 },
       ]);
+    },
+  );
+
+  it(
+    "the Volley playbook end to end: version, release PR, its CI, one go, the merge, the tag at the merge commit, deploy across a restart",
+    { timeout: 60_000 },
+    async () => {
+      const HEAD = "d".repeat(40);
+      const MERGED = "e".repeat(40);
+      let skew = 0;
+      const own = readFileSync(new URL("../../../.volley/release.yaml", import.meta.url), "utf-8");
+      // The daemon's clock runs `skew` ahead of the wall: a CI read again after ci_poll_ms.
+      const st = await start(undefined, own, { now: () => skew + Date.now() });
+      const ci = { status: "in_progress", conclusion: "" };
+      const merge = {
+        code: 1,
+        stderr: "GraphQL: Base branch was modified. Review and try the merge again.",
+      };
+      const pr = {
+        number: 12,
+        headRefOid: HEAD,
+        title: "release: v0.13.3 — one go",
+        labels: [{ name: "no-changelog" }],
+      };
+      s.host.fake
+        .on(["gh", "repo", "view"], {
+          stdout: JSON.stringify({ defaultBranchRef: { name: "main" } }),
+        })
+        .on(["git", "-C", s.repo, "ls-tree"], {
+          stdout: "changes/600.fixed.md\nchanges/README.md\n",
+        })
+        .on(["gh", "pr", "list"], (argv) => ({
+          stdout: JSON.stringify(argv.includes("open") ? [pr] : []),
+        }))
+        .on(["git", "-C", s.repo, "show"], {
+          stdout: "# Changelog\n\n## 0.13.3 — 2026-10-25\n\n- **One go.** (#609)\n- Two.\n",
+        })
+        .on(["gh", "issue", "view"], {
+          stdout: JSON.stringify({ state: "OPEN", labels: [], comments: [] }),
+        })
+        .on(["gh", "pr", "merge"], () => merge)
+        .on(["gh", "pr", "view"], (argv) => {
+          const fields = String(argv.at(-1));
+          if (fields === "baseRefName,headRefOid,isDraft,state")
+            return {
+              stdout: JSON.stringify({
+                baseRefName: "main",
+                headRefOid: HEAD,
+                isDraft: false,
+                state: "OPEN",
+              }),
+            };
+          if (fields === "mergeCommit,state")
+            return { stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: MERGED } }) };
+          return { stdout: JSON.stringify({ state: "OPEN", headRefOid: HEAD, mergeCommit: null }) };
+        })
+        .on(["gh", "api"], (argv) => {
+          const endpoint = String(argv[2]);
+          if (endpoint === "repos/{owner}/{repo}/git/matching-refs/tags/v")
+            return {
+              stdout: JSON.stringify([
+                [{ ref: "refs/tags/v0.13.2", object: { sha: "1".repeat(40), type: "commit" } }],
+              ]),
+            };
+          if (endpoint.endsWith("matching-refs/tags/v0.13.3"))
+            return {
+              stdout: JSON.stringify([
+                [{ ref: "refs/tags/v0.13.3", object: { sha: MERGED, type: "commit" } }],
+              ]),
+            };
+          if (endpoint.includes(`actions/runs?head_sha=${HEAD}`))
+            return {
+              stdout: asApiRuns(
+                JSON.stringify([
+                  {
+                    databaseId: 9,
+                    name: "CI",
+                    workflowName: "CI",
+                    status: ci.status,
+                    conclusion: ci.conclusion,
+                    url: "https://x/9",
+                    headSha: HEAD,
+                  },
+                ]),
+              ),
+            };
+          return { stdout: "[]" };
+        });
+      await settleTasks();
+      const started = await s.event("release_started");
+      // Read before the match: bun's toMatchObject writes an asymmetric matcher back into the
+      // object it matched, and the bump agent reports this date as its `--date`.
+      const date = String(started.data.date);
+      expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(started.data).toMatchObject({ version: "0.13.3", default_branch: "main" });
+
+      // bump: its run lines substituted, verified as before.
+      await s.event(registered("w1-release-bump-1"));
+      await s.settled();
+      const bumpMd = readFileSync(
+        join(st.launched.get("w1-release-bump-1") as string, ".volley", "stage.md"),
+        "utf-8",
+      );
+      expect(bumpMd).toContain("bun scripts/release-version.ts --set 0.13.3");
+      await st.finish("w1-release-bump-1", {
+        stage: "bump",
+        commands: [
+          { argv: ["bun", "scripts/release-version.ts", "--set", "0.13.3"], code: 0, seconds: 1 },
+          {
+            argv: ["bun", "run", "changelog", "--version", "0.13.3", "--date", date],
+            code: 0,
+            seconds: 1,
+          },
+        ],
+        artifacts: { files: ["CHANGELOG.md"] },
+      });
+      await s.event((e) => e.type === "release_stage_verified" && e.data.stage === "bump");
+
+      // release-pr: its done verifies the PR, journaled as release_pr_detected.
+      await s.event(registered("w1-release-release-pr-1"));
+      await s.settled();
+      await st.finish("w1-release-release-pr-1", { stage: "release-pr", commands: [] });
+      const detected = await s.event("release_pr_detected");
+      expect(detected.data).toMatchObject({
+        pr: 12,
+        head: HEAD,
+        title: "release: v0.13.3 — one go",
+      });
+      await s.event((e) => e.type === "release_stage_verified" && e.data.stage === "release-pr");
+
+      // Its CI is running: no release_go.
+      const ciReads = () =>
+        s.host.fake.argvs(["gh", "api"]).filter((a) => String(a[2]).includes(HEAD)).length;
+      await s.until(() => ciReads() > 0);
+      await s.daemon.tick();
+      await s.settled();
+      expect(ofType("decision_opened").filter((e) => e.data.kind === "release_go")).toEqual([]);
+      // Green (read again after ci_poll_ms): release_go names the version, the PR, the bullets.
+      ci.status = "completed";
+      ci.conclusion = "success";
+      skew += 61_000;
+      await s.daemon.tick();
+      const opened = await s.event(
+        (e) => e.type === "decision_opened" && e.data.kind === "release_go",
+      );
+      expect(String(opened.data.question)).toContain("release v0.13.3 is ready: PR #12");
+      expect(String(opened.data.question)).toContain("- **One go.** (#609)");
+      await s.settled();
+      expect((await runCli(["status", "w1"], s.env.env)).stdout).toContain(
+        "release: v0.13.3 · awaiting release_go (2/4 verified)",
+      );
+
+      // go, the merge refused: release_merge_failed, and release_go again with the reason.
+      ctl = await ControlClient.connect(s.env.broker.url, NS);
+      const r1 = await ctl.request("resolve", {
+        decision_id: opened.data.decision_id,
+        answer: "go",
+        by: "owner",
+      });
+      expect(r1.error).toBeUndefined();
+      const failed = await s.event("release_merge_failed");
+      expect(failed.data).toMatchObject({ pr: 12, head: HEAD });
+      expect(String(failed.data.reason)).toContain("Base branch was modified");
+      const again = await s.event(
+        (e) => e.type === "decision_opened" && e.data.kind === "release_go",
+        2,
+      );
+      expect(String(again.data.question)).toContain("The last go did not merge:");
+
+      // go again, the merge goes through: exactly the release squash, deleting the branch.
+      merge.code = 0;
+      merge.stderr = "";
+      const r2 = await ctl.request("resolve", {
+        decision_id: again.data.decision_id,
+        answer: "go",
+        by: "owner",
+      });
+      expect(r2.error).toBeUndefined();
+      const merged = await s.event("release_merged");
+      expect(merged.data).toMatchObject({ pr: 12, sha: MERGED });
+      expect(s.host.fake.argvs(["gh", "pr", "merge"]).at(-1)).toEqual([
+        "gh",
+        "pr",
+        "merge",
+        "12",
+        "--squash",
+        "--match-head-commit",
+        HEAD,
+        "--delete-branch",
+      ]);
+      expect(s.host.fake.argvs(["gh", "pr", "merge"]).every((a) => !a.includes("--admin"))).toBe(
+        true,
+      );
+      // The issues are closed now, not on the release poll.
+      const verified = await s.event("issues_verified");
+      expect(verified.data).toMatchObject({ release_pr: 12 });
+
+      // tag: a ship stage, detached at the merge commit, the tag checked there.
+      await s.event(registered("w1-release-tag-1"));
+      await s.settled();
+      const cut = s.host.worktrees.find((w) => w.base === MERGED);
+      expect(cut).toMatchObject({ detach: true });
+      const tagMd = readFileSync(
+        join(st.launched.get("w1-release-tag-1") as string, ".volley", "stage.md"),
+        "utf-8",
+      );
+      expect(tagMd).toContain("git push origin v0.13.3");
+      expect(tagMd).toContain("Push nothing but the tag");
+      await st.finish("w1-release-tag-1", {
+        stage: "tag",
+        commands: [
+          { argv: ["git", "tag", "-a", "v0.13.3", "-m", "v0.13.3"], code: 0, seconds: 1 },
+          { argv: ["git", "push", "origin", "v0.13.3"], code: 0, seconds: 1 },
+        ],
+        artifacts: { tag: "v0.13.3" },
+      });
+      await s.event((e) => e.type === "release_stage_verified" && e.data.stage === "tag");
+      await s.event(registered("w1-release-deploy-1"));
+      await s.settled();
+      expect((await runCli(["status", "w1"], s.env.env)).stdout).toContain(
+        "release: v0.13.3 · deploy running (3/4 verified)",
+      );
+
+      // deploy restarts volleyd under its own agent: the agent's done lands while it is down.
+      await s.daemon.stop();
+      await st.finish("w1-release-deploy-1", {
+        stage: "deploy",
+        commands: [{ argv: ["volley", "deploy", "v0.13.3"], code: 0, seconds: 30 }],
+        artifacts: {},
+        deployed: "v0.13.3",
+      });
+      s.daemon = await s.restart();
+      const done = await s.event("release_done");
+      expect(done.data).toMatchObject({ by: "owner", version: "0.13.3", merged_sha: MERGED });
+      await s.settled();
+      expect(s.daemon.record("w1")?.state?.status).toBe("complete");
+      const order = s
+        .journal()
+        .map((e) => e.type)
+        .filter((t) =>
+          ["release_started", "release_pr_detected", "release_merged", "release_done"].includes(t),
+        );
+      expect(order).toEqual([
+        "release_started",
+        "release_pr_detected",
+        "release_merged",
+        "release_done",
+      ]);
+      for (const e of s.journal())
+        expect(
+          schemaErrors("wave-event.schema.json", {
+            schema_version: "0.1",
+            agent_id: "volleyd",
+            parent_id: null,
+            wall_time: e.at,
+            channel: "_waves/events",
+            type: e.type,
+            payload: { wave: "w1", ...e },
+          }),
+        ).toEqual([]);
     },
   );
 });

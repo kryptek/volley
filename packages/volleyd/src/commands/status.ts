@@ -264,19 +264,27 @@ export function formatWave(
       : "";
   const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
   const spawns = s.spawns !== undefined ? `  ${formatSpawns(s.spawns)}\n` : "";
-  // The release train (SPEC §4.6.19): the stage running, awaiting its go or failed, and how far
-  // the train is (`release: smoke running (2/4 verified)`).
+  // The release train (SPEC §4.6.19): its version, the stage running, awaiting its go or failed,
+  // and how far the train is (`release: v0.13.3 · smoke running (2/4 verified)`).
   const r = s.release;
   const cur = r?.stages.find(
     (x) => x.state === "running" || x.state === "awaiting_go" || x.state === "failed",
   );
+  // Every prepare stage settled and nothing shipping yet: the owner's go (or the PR's CI) is next.
+  const prepared =
+    r !== undefined &&
+    s.status === "releasing" &&
+    r.phase !== "ship" &&
+    r.stages.every((x) => x.phase === "ship" || x.state === "verified" || x.state === "skipped");
   const where =
     cur !== undefined
       ? `${cur.name} ${cur.state === "awaiting_go" ? "awaiting go" : cur.state}`
-      : "-";
+      : prepared
+        ? "awaiting release_go"
+        : "-";
   const release =
     r !== undefined
-      ? `  release: ${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
+      ? `  release: ${r.version !== undefined ? `v${r.version} · ` : ""}${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
       : "";
   // The overlap plan (SPEC §4.6.22): each cluster, how it runs now, its members in flight, and why.
   const plan = (s.overlap_plan?.clusters ?? [])
