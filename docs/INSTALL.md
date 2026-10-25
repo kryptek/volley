@@ -51,6 +51,13 @@ Then, for the clone:
 3. **Setup.** `volley setup` on your terminal (the piped script reads your answers from
    `/dev/tty`, not from the pipe). With no terminal (a CI job, an ssh command) it prints the
    command to run instead.
+4. **Getting started.** Setup ends with a one-time admin link to the Desk; opening it lands in
+   the Desk's **Getting started** wizard (Welcome → This computer → Your machines → Repos →
+   People → Access → You're good to go!), the same setup seen from a browser: this machine's
+   checks, your other computers paired, repositories added, people invited, the private network
+   chosen and the coordinator's always-on machine picked. Each step shows what it will change
+   before it applies it. The Desk's README has
+   [every step](../packages/volley-desk/README.md#getting-started).
 
 ## What `volley setup` does
 
@@ -100,7 +107,8 @@ Two things are yours:
 
 - **The Desk.** Under *One-time admin token* setup printed `Open the Desk with it on this machine:
   http://localhost:5199/#signin=…`: open that link within 10 minutes (single use;
-  `volley auth token` prints another). Your phone signs in by scanning the QR.
+  `volley auth token` prints another). Your phone signs in by scanning the QR. The link opens
+  **Getting started** (above) until you finish or skip it; Settings › Setup & Security reopens it.
 - **Claude Code.** A session started after setup has `/volley` and the volley MCP server. One that
   was already open does not: exit it and start `claude` again (MCP servers are read when a
   session starts). Then `/volley list` shows your session.
@@ -158,6 +166,24 @@ you set up once, never a public listener, a relay or Tailscale Funnel:
 - **Your own VPN**: `volley setup --network manual --network-address <host-or-ip>`, the address
   your VPN gives this machine (it must be one of this machine's addresses). Nothing is installed.
 - **Neither**: `--network none` (what `--yes` alone means) keeps the Desk on this network.
+
+The same choice, wherever you make it:
+
+| Where | Tailscale | Your own VPN | Neither |
+| --- | --- | --- | --- |
+| The installer | `--network tailscale` (also installs Tailscale) | `--network manual --network-address <host-or-ip>` | `--network none` |
+| `volley setup` | `--network tailscale` | `--network manual --network-address <host-or-ip>` | `--network none` |
+| The Desk | Getting started › Access › **Tailscale** | **I'll VPN in to the network <machine> is on** | **This network only** |
+| A Desk-only machine | `volley desk install --tailscale` | | |
+
+`volley setup --step network` reruns only that step. Once the private network is up, pick an
+always-on machine for the **coordinator** (Getting started › Access, or Settings › Machines'
+Coordinator card): volleyd keeps a Claude Code Remote Control session alive there, which you
+open from the Claude app on your phone or with `volley coordinator open`
+([the coordinator role](../packages/volleyd/README.md#the-coordinator-role)). When a command
+cannot reach the supervisor from away, it says which rung failed (internet, private network,
+tunnel, broker, volleyd), prints the fix and exits 69
+([When the supervisor does not answer](../packages/volley-cli/README.md#when-the-supervisor-does-not-answer)).
 
 `volley peer doctor` reports the choice as `network.private` (a warning when nothing is set up or
 Tailscale is signed out; the fix is `volley setup --step network`).
@@ -271,8 +297,10 @@ one command on the supervisor's machine:
 volley machine add you@box-a
 ```
 
-or from the Desk, Settings › Machines › **Add a bare machine…**. It installs Volley on the box in
-peer mode at the supervisor's release (no broker, no Desk), pairs it, signs it in to GitHub and
+or from the Desk, Settings › Machines › **Add a bare machine…**, or the
+**Your machines** step of Getting started (**SSH key**, or **Username and password**, which is
+exchanged for a key and forgotten; **Pairing code** for a machine that already has Volley). It
+installs Volley on the box in peer mode at the supervisor's release (no broker, no Desk), pairs it, signs it in to GitHub and
 Claude (sign-ins only when signed out) and runs the doctor, ending with one `ready ✓` row. sudo
 on the box is asked only when git, tmux, curl or gh (Linux) or Homebrew (Mac) are missing, and
 announced first. Details: the volley-cli README's

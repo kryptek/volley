@@ -52,6 +52,18 @@ online within seconds, volleyd journals `owner_reconnected`, and nothing needs c
 job, launchd agent or scheduled prompt is needed to look alive; if one is left over from an
 earlier release (a periodic status republish, say), remove it.
 
+**The coordinator is a role now.** A session you start yourself is one way to be present; the
+other is to let volleyd keep one alive. Pick an always-on machine for the coordinator role
+(Getting started › Access, Settings › Machines' Coordinator card, or `volleyd config set
+coordinator.machine <name>`) and volleyd runs a Claude Code Remote Control server there under
+your coordinator name, restarts it when it dies and adopts it across its own restarts, so the
+waves it starts stay owned while your laptop sleeps. Open it from the Claude app on your phone,
+from the Desk's **Open coordinator**, or with `volley coordinator open`; a new link arrives as a
+notice in Needs you (and on the phone), and a fresh session's first turn is a handoff naming the
+running waves, the open items and the previous session. A laptop is refused by default: it sleeps
+and travels. Details: volleyd's README, [The coordinator role](../packages/volleyd/README.md#the-coordinator-role),
+and the CLI's [`volley coordinator`](../packages/volley-cli/README.md#volley-coordinator).
+
 ## What runs unattended
 
 | What | How volleyd handles it | Reference |
