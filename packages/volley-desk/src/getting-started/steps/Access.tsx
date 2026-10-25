@@ -71,6 +71,8 @@ export function Access({ ctx, summary, setSummary }: StepProps) {
   /** The coordinator's machine as picked here, until volleyd's config says so too. */
   const [coordinator, setCoordinator] = useState<string | null | undefined>(configured);
   const live = useRef(true);
+  /** The newest plan asked for: an older answer arriving after it is dropped. */
+  const planSeq = useRef(0);
   useEffect(() => {
     live.current = true;
     return () => {
@@ -80,8 +82,9 @@ export function Access({ ctx, summary, setSummary }: StepProps) {
 
   const plan = useCallback(
     async (w: Want) => {
+      const seq = ++planSeq.current;
       const r = await requestOrFail(ctx.ops, "setup_plan", planFields(w));
-      if (!live.current) return;
+      if (!live.current || seq !== planSeq.current) return;
       const parsed = r.ok ? parseSetupPlan(r.result) : null;
       if (isUnknownOp(r)) setLoad({ state: "unsupported" });
       else if (parsed === null)
@@ -182,6 +185,7 @@ export function Access({ ctx, summary, setSummary }: StepProps) {
         applying={applying}
         onPick={pick}
         onApply={(s) => void apply(s)}
+        onRecheck={() => pick(want)}
         onRetry={() => {
           setLoad({ state: "loading" });
           void plan(want);
@@ -224,6 +228,7 @@ function NetworkCard({
   applying,
   onPick,
   onApply,
+  onRecheck,
   onRetry,
 }: {
   load: Load;
@@ -234,6 +239,7 @@ function NetworkCard({
   applying: Applying;
   onPick: (w: Want) => void;
   onApply: (s: SetupStepPlan) => void;
+  onRecheck: () => void;
   onRetry: () => void;
 }) {
   const id = useId();
@@ -328,9 +334,9 @@ function NetworkCard({
             className="recessed mono"
             autoComplete="off"
             spellCheck={false}
-            placeholder="192.168.1.20"
+            placeholder="192.0.2.20"
             value={address}
-            aria-invalid={step.blocked !== undefined}
+            aria-invalid={step.blocked !== undefined && /network_address/.test(step.blocked)}
             onChange={(e) => setAddress(e.target.value)}
             onBlur={commitAddress}
             onKeyDown={(e) => {
@@ -351,6 +357,7 @@ function NetworkCard({
         applying={applying}
         applicable={applicable}
         onApply={() => onApply(step)}
+        onRecheck={onRecheck}
       />
       <p className="s-hint">Change it later in Settings › Setup &amp; Security.</p>
     </section>
@@ -363,12 +370,14 @@ function PlanBody({
   applying,
   applicable,
   onApply,
+  onRecheck,
 }: {
   step: SetupStepPlan;
   report: Extract<Applying, { state: "done" }>["report"] | null;
   applying: Applying;
   applicable: number;
   onApply: () => void;
+  onRecheck: () => void;
 }) {
   return (
     <div className="gs-access-plan">
@@ -405,10 +414,16 @@ function PlanBody({
           )}
           {applicable > 0 && (
             <div className="wiz-actions wiz-actions--inline">
+              {/* volleyd may still be applying it: check again rather than send it twice. */}
+              {applying.state === "unanswered" && (
+                <button type="button" className="btn" onClick={onRecheck}>
+                  Check again
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn--hot"
-                disabled={applying.state === "busy"}
+                disabled={applying.state === "busy" || applying.state === "unanswered"}
                 onClick={onApply}
               >
                 {applying.state === "busy" ? "Applying…" : "Apply this change"}

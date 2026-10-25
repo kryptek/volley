@@ -35,7 +35,7 @@ function fakeConfig() {
 }
 
 function mount(
-  handlers: Record<string, (f: Record<string, unknown>) => AuthAnswer> = {
+  handlers: Record<string, (f: Record<string, unknown>) => AuthAnswer | Promise<AuthAnswer>> = {
     setup_plan: () => ({ ok: true, result: withNetwork(NETWORK) }),
   },
 ) {
@@ -200,6 +200,60 @@ describe("Getting started › Access", () => {
     expect(sent).toEqual([{ coordinator: { machine: "box-a" } }]);
     // The VPN choice names the coordinator's machine now.
     expect(await screen.findByRole("radio", { name: /network box-a is on/i })).toBeInTheDocument();
+  });
+
+  it("a stale plan answering late never replaces the newer choice's plan", async () => {
+    const NONE = {
+      ...NETWORK,
+      found: ["Reached on this network only"],
+      changes: [{ summary: "Stop routing through Tailscale" }],
+      plan_id: "network-none",
+      network: { planned: "none", current: "tailscale" },
+    };
+    const MANUAL = {
+      ...NETWORK,
+      found: ["The VPN plan"],
+      changes: [{ summary: "Record the VPN address" }],
+      plan_id: "network-manual",
+      network: { planned: "manual", current: "tailscale" },
+    };
+    let releaseManual: () => void = () => {};
+    const { calls } = mount({
+      setup_plan: (f) =>
+        f.network === "manual"
+          ? new Promise<AuthAnswer>((resolve) => {
+              releaseManual = () => resolve({ ok: true, result: withNetwork(MANUAL) });
+            })
+          : f.network === "none"
+            ? { ok: true, result: withNetwork(NONE) }
+            : { ok: true, result: withNetwork(NETWORK) },
+      setup_apply: () => ({ ok: true, result: { lines: [], problems: [], terminal: [] } }),
+    });
+    fireEvent.click(await screen.findByRole("radio", { name: /i'll vpn in/i }));
+    fireEvent.click(radio(/this network only/i));
+    expect(await screen.findByText("Stop routing through Tailscale")).toBeInTheDocument();
+    releaseManual();
+    await waitFor(() => expect(calls.filter((c) => c.op === "setup_plan")).toHaveLength(3));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(radio(/this network only/i)).toBeChecked();
+    expect(screen.queryByText("Record the VPN address")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /apply this change/i }));
+    await waitFor(() => expect(calls.some((c) => c.op === "setup_apply")).toBe(true));
+    expect(calls.find((c) => c.op === "setup_apply")?.fields).toMatchObject({
+      step: "network",
+      plan_id: "network-none",
+      network: "none",
+    });
+  });
+
+  it("an unanswered apply keeps Apply disabled until the report or a re-check", async () => {
+    mount({
+      setup_plan: () => ({ ok: true, result: withNetwork(NETWORK) }),
+      setup_apply: () => ({ ok: false, unanswered: true, error: "volleyd did not answer" }),
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /apply this change/i }));
+    expect(await screen.findByText(/volleyd may still be applying it/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /apply this change/i })).toBeDisabled();
   });
 
   it("a volleyd without a network step points at the terminal", async () => {

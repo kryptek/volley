@@ -2,7 +2,7 @@
  * Getting started › You're good to go!: what the steps set up, from the stored summary, and how to
  * add a computer to the cluster: the two lines to paste on it, the installer as a peer and then
  * `volley peer join <code> --to <this machine>`. **Make a pairing code** asks `peer_invite` (SPEC
- * §4.6.14: one use, 10 minutes) and fills the code in; the `--to` address starts at the Desk's own
+ * §4.6.14: one use, `peer_code_ttl_s`, 10 minutes by default) and fills the code in; the `--to` address starts at the Desk's own
  * host and is editable, as in Settings › Machines; **Copy both lines** copies them together.
  */
 import { Copy01Icon } from "@hugeicons/core-free-icons";
@@ -23,8 +23,9 @@ const CONNECTED_BY: Record<NonNullable<Summary["connectedBy"]>, string> = {
 /** The installer, run as a peer on the computer being added (README Quickstart, `--peer`). */
 export const PEER_INSTALL =
   "curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --peer";
-/** How long a pairing code lives (volleyd's `peer_code_ttl_s` default). */
-const CODE_TTL_MIN = 10;
+/** How many minutes a code made now lives: counted from its expiry, as `peer_code_ttl_s` is a tunable. */
+const minutesLeft = (expiresAt: string) =>
+  Math.max(1, Math.round((Date.parse(expiresAt) - Date.now()) / 60_000));
 
 const list = (xs: readonly string[]) => (xs.length > 0 ? xs.join(", ") : null);
 
@@ -62,7 +63,7 @@ export function Done({ ctx, summary }: StepProps) {
 type Code =
   | { k: "none" }
   | { k: "busy" }
-  | { k: "made"; code: string; expiresAt: string }
+  | { k: "made"; code: string; expiresAt: string; minutes: number }
   | { k: "failed"; error: string };
 
 /** "To add a computer to your Volley cluster": the two lines, a fresh code, Copy. */
@@ -80,7 +81,9 @@ function JoinCard({ ctx }: { ctx: StepProps["ctx"] }) {
     setCopied(null);
     const r = await peerOps.invite();
     setCode(
-      r.ok ? { k: "made", code: r.code, expiresAt: r.expiresAt } : { k: "failed", error: r.error },
+      r.ok
+        ? { k: "made", code: r.code, expiresAt: r.expiresAt, minutes: minutesLeft(r.expiresAt) }
+        : { k: "failed", error: r.error },
     );
   };
 
@@ -123,9 +126,9 @@ function JoinCard({ ctx }: { ctx: StepProps["ctx"] }) {
       </label>
       {code.k === "made" && (
         <p className="s-hint">
-          The code works once and lives {CODE_TTL_MIN} minutes (until{" "}
-          {new Date(code.expiresAt).toLocaleTimeString()}); get a new one here or under Settings ›
-          Machines.
+          The code works once and lives {code.minutes} {code.minutes === 1 ? "minute" : "minutes"}{" "}
+          (until {new Date(code.expiresAt).toLocaleTimeString()}); get a new one here or under
+          Settings › Machines.
         </p>
       )}
       {code.k === "failed" && (

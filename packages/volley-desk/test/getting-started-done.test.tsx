@@ -6,6 +6,7 @@ import type { WizardContext } from "../src/getting-started/steps";
 import { Done, summaryRows } from "../src/getting-started/steps/Done";
 import { initialState } from "../src/store/reducer";
 import { fakeOps } from "./helpers/auth-ops";
+import { NOW } from "./helpers/desk-msgs";
 import { fakePeerOps } from "./helpers/peer-ops";
 
 const FILLED: Summary = {
@@ -52,6 +53,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   Reflect.deleteProperty(navigator, "clipboard");
+  vi.restoreAllMocks();
 });
 
 describe("Getting started › You're good to go!", () => {
@@ -87,6 +89,8 @@ describe("Getting started › You're good to go!", () => {
   });
 
   it("Make a pairing code sends peer_invite and fills the join line; Copy copies both lines", async () => {
+    // The fake invite expires 10 minutes after the helpers' fixed NOW.
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
     const { peerOps } = mount(FILLED);
     const card = screen.getByRole("region", { name: /to add a computer/i });
     expect(within(card).getByText(/install\.sh \| sh -s -- --peer/)).toBeInTheDocument();
@@ -106,6 +110,20 @@ describe("Getting started › You're good to go!", () => {
         "curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --peer\nvolley peer join MXQ4-7KDP --to user@desk.example",
       ),
     );
+  });
+
+  it("the code's lifetime comes from the answer's expiry, not a constant", async () => {
+    const { ctx } = context();
+    ctx.peerOps = fakePeerOps({
+      invite: vi.fn(async () => ({
+        ok: true as const,
+        code: "MXQ4-7KDP",
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      })),
+    });
+    render(<Done ctx={ctx} summary={EMPTY} setSummary={vi.fn()} onContinue={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /make a pairing code/i }));
+    expect(await screen.findByText(/lives 15 minutes/)).toBeInTheDocument();
   });
 
   it("a refused invite says why", async () => {
