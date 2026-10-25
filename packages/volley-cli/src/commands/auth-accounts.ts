@@ -67,7 +67,12 @@ export interface AccountFlags {
   deskUrl?: string;
   /** token: the address other devices reach that Desk at (default: setup's record). */
   deskHost?: string;
+  /** add: the wave the account is for (`--for-wave`): volleyd creates it, journaled as the wave's. */
+  forWave?: string;
 }
+
+/** A wave id (the id grammar volleyd checks): what `--for-wave` names. */
+const WAVE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 /** One-time admin tokens live 10 minutes unless `--ttl` says otherwise. */
 const DEFAULT_TOKEN_TTL_S = 600;
@@ -200,6 +205,52 @@ async function createAccount(
     json
       ? `${JSON.stringify({ username: account.name, password, role: account.role, ...extra })}\n`
       : `${password}\n`,
+  );
+  return EXIT.OK;
+}
+
+/**
+ * `add --for-wave <wave>`: the account is the wave's, so volleyd makes it (`account_create` with
+ * `wave`, an admin op): it runs `volley auth add` on its own machine, journals `account_created
+ * { …, wave }`, and the wave's cleanup revokes it. The password comes back sealed to a throwaway
+ * key and is printed once, as a local add prints it.
+ */
+async function addForWave(
+  ctx: AuthContext,
+  name: string,
+  flags: AccountFlags,
+  wave: string,
+): Promise<ExitCode> {
+  const peer = await import("./peer");
+  const ask = ctx.deps.askVolleyd ?? peer.askVolleyd;
+  const key = peer.replyKeyPair();
+  const fields = {
+    name,
+    role: flags.role as Role,
+    ...(flags.kind !== undefined ? { kind: flags.kind } : {}),
+    wave,
+    reply_key: key.jwk,
+  };
+  const a = await ask(
+    "volley auth add",
+    "account_create",
+    fields,
+    { "broker-url": ctx.url, json: flags.json },
+    ctx.env,
+    ctx.io,
+    true,
+  );
+  if (typeof a === "number") return a;
+  const creds = peer.unseal(key.privateKey, a.sealed);
+  if (typeof creds?.password !== "string") {
+    ctx.io.stderr("volley auth add: volleyd's answer carried no credentials\n");
+    return EXIT.ERROR;
+  }
+  const result = (a.result ?? {}) as { role?: string };
+  ctx.io.stdout(
+    flags.json
+      ? `${JSON.stringify({ username: typeof creds.username === "string" ? creds.username : name, password: creds.password, role: result.role ?? flags.role, wave })}\n`
+      : `${creds.password}\n`,
   );
   return EXIT.OK;
 }
@@ -421,6 +472,7 @@ export async function accountVerb(
     return usage("--role only applies to add and signin-link");
   }
   if (flags.kind !== undefined && verb !== "add") return usage("--kind only applies to add");
+  if (flags.forWave !== undefined && verb !== "add") return usage("--for-wave only applies to add");
   if (flags.ttl !== undefined && verb !== "token" && verb !== "signin-link") {
     return usage("--ttl only applies to token and signin-link");
   }
@@ -440,6 +492,12 @@ export async function accountVerb(
     }
     if (flags.kind !== undefined && !(KINDS as readonly string[]).includes(flags.kind)) {
       return usage(`--kind must be one of ${KINDS.join(", ")}`);
+    }
+    if (flags.forWave !== undefined) {
+      if (!WAVE_ID_RE.test(flags.forWave)) {
+        return usage(`--for-wave "${flags.forWave}" is not a wave id ([a-z0-9][a-z0-9_-]{0,62})`);
+      }
+      return addForWave(ctx, name as string, flags, flags.forWave);
     }
   }
   if (verb === "signin-link") {

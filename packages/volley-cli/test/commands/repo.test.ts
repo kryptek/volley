@@ -105,6 +105,34 @@ describe("volley repo: arguments", () => {
     expect((await run(["add", "a/a", "--machine", "box"], answer())).stdout).not.toContain("CI:");
   });
 
+  it("add --for-wave sends the wave with repo_add; without it no wave field (#612)", async () => {
+    const { deps, asked } = fakeDeps(() => ({
+      ok: true,
+      result: { slug: "a/a", machines: ["box"], status: [] },
+    }));
+    expect((await run(["add", "a/a", "--for-wave", "hello-ab12"], deps)).exitCode).toBe(EXIT.OK);
+    expect((await run(["add", "a/a"], deps)).exitCode).toBe(EXIT.OK);
+    expect(asked.map((a) => a.fields)).toEqual([
+      { slug: "a/a", wave: "hello-ab12" },
+      { slug: "a/a" },
+    ]);
+  });
+
+  it("refuses a --for-wave that is no wave id, and --for-wave on another verb", async () => {
+    const { deps, asked } = fakeDeps(() => ({ ok: true }));
+    for (const argv of [
+      ["add", "a/a", "--for-wave", "Hello"],
+      ["add", "a/a", "--for-wave", "-x"],
+      ["add", "a/a", "--for-wave", ""],
+      ["add", "a/a", "--for-wave", "w/1"],
+      ["remove", "a/a", "--for-wave", "w1"],
+      ["status", "--for-wave", "w1"],
+    ]) {
+      expect((await run(argv, deps)).exitCode, argv.join(" ")).toBe(EXIT.USAGE);
+    }
+    expect(asked).toEqual([]);
+  });
+
   it("refuses a URL, a missing slug, a relative --path and a flag another verb owns", async () => {
     const { deps, asked } = fakeDeps(() => ({ ok: true }));
     for (const argv of [

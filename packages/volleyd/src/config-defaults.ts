@@ -62,6 +62,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
   retire_close_session: true,
+  cleanup_on_end: true,
   placement: {
     nudge_on_merge: "files",
     // a wave file without placement: (wave-file.ts defaultPlacement)
@@ -338,6 +339,10 @@ export const DAEMON_DEFAULTS = {
   proc_kill_grace_ms: 5_000,
   /** Hard bound on the `ps` that lists processes (procs.ts). */
   ps_timeout_ms: 10_000,
+  /** Hard bound on the `lsof` that reads processes' working directories on macOS (procs.ts). */
+  lsof_timeout_ms: 15_000,
+  /** How long `volleyd cleanup` waits for the daemon's run of it (every machine's steps). */
+  cleanup_op_timeout_ms: 600_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
   /**

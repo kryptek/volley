@@ -50,14 +50,19 @@ import { AGENT_BRANCH } from "./worktree";
  * silently un-deny a verb), then the allow-list; anything not allowed is denied.
  *
  * DENY (never, consent or not):
- *   git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force
+ *   git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force,
+ *     except exactly `git -C <repo> branch -D <agent branch>` with that branch's BranchDeleteToken
+ *     (`mintBranchDeleteToken`, minted by `volleyd cleanup` for one agent branch the journal
+ *     proves merged at its current tip, SPEC §4.6.26)
  *   gh pr merge (except MERGE below) | gh workflow run | gh repo delete | gh api with any method
  *     other than GET
  *   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
  *     ansible, ansible-playbook, eksctl, doctl, flyctl
  *   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
  *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
- *     step a ProfileRemoveToken unlocks (below)
+ *     step a ProfileRemoveToken unlocks (below), and exactly `rm -rf <path>` with that path's
+ *     CloneRemoveToken (`mintCloneRemoveToken`, minted by `volleyd cleanup` for a managed clone
+ *     a `repo_clone_run { cloned: true }` of a wave-owned registration recorded, SPEC §4.6.26)
  *
  * MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
  *   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -76,12 +81,14 @@ import { AGENT_BRANCH } from "./worktree";
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
- *   git worktree remove · cmux close-workspace
+ *   git worktree remove · cmux close-workspace · a paired machine's `peer cleanup … --yes`
  *
  * ALLOW (program by bare name only — never a path):
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
  *     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
- *     remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied)
+ *     remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied) |
+ *     stash list (exactly) | for-each-ref [--format=…] refs/heads | rev-list --count <range>
+ *     (the clone checks of `volleyd cleanup`, read-only)
  *     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
  *     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
  *     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
@@ -136,6 +143,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
  *   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
  *     agent's claude by `process.kill`, never by a spawned `kill`)
+ *   lsof -a -d cwd -F pn   (exactly, read-only: every process's working directory on macOS, so
+ *     procs.ts counts a process the agent started in its worktree; Linux reads /proc instead)
  *   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
  *     retains no $SYS/broker/version)
  *   pmset -g batt   (exactly, on macOS: whether this machine has a battery, its record's
@@ -333,6 +342,11 @@ import { AGENT_BRANCH } from "./worktree";
  *     cli.ts <args>` (remoteVolleyArgv; the host's `volley_dir` exactly), never a `volley` on its
  *     PATH; VOLLEY below is that prefix:
  *   VOLLEY peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
+ *   VOLLEY peer cleanup --json [--worktree <abs under the host's worktree_root>]...
+ *     [--repo <abs> --branch <agent branch>...] [--clone <abs>]... [--yes] — `volleyd cleanup`
+ *     on the box (RemoteHost.runCleanup): it stops the processes under each worktree, deletes
+ *     each named branch, removes each clone after re-checking it; `--yes` is CONSENT, and each
+ *     `--clone` needs that path's CloneRemoveToken
  *   VOLLEY peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
  *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
@@ -1093,6 +1107,61 @@ export function mintProfileRemoveToken(dir: string): ProfileRemoveToken {
   return token;
 }
 
+const branchDeletes = new WeakSet<object>();
+
+/**
+ * Permission to delete one agent branch in one repository: exactly
+ * `git -C <repo> branch -D <branch>`. `-D` because a squash-merged branch is never an ancestor of
+ * the release branch; the token is the guard. Only `mintBranchDeleteToken` creates one (checked
+ * by identity), and only `volleyd cleanup` mints it, after the journal proves the task's PR
+ * merged at the branch's current tip (commands/cleanup.ts).
+ */
+export interface BranchDeleteToken {
+  readonly repo: string;
+  readonly branch: string;
+}
+
+/** Mint the delete token; throws `FenceError` unless `branch` is an agent branch, `repo` absolute. */
+export function mintBranchDeleteToken(repo: string, branch: string): BranchDeleteToken {
+  if (!AGENT_BRANCH.test(branch))
+    throw new FenceError("git branch -D", "only an agent branch <wave>/<task>-<role>-<n>");
+  if (!posix.isAbsolute(repo)) throw new FenceError("git branch -D", "the repo is not absolute");
+  const token = Object.freeze({ repo, branch });
+  branchDeletes.add(token);
+  return token;
+}
+
+const cloneRemovals = new WeakSet<object>();
+
+/**
+ * Permission to delete one managed clone: exactly `rm -rf <path>` on the supervisor, or a paired
+ * machine's `peer cleanup --clone <path> --yes`. Only `mintCloneRemoveToken` creates one (checked
+ * by identity), and only `volleyd cleanup` mints it, for a path a `repo_clone_run { cloned: true }`
+ * of a wave-owned registration recorded, after the clone's checks passed (SPEC §4.6.26).
+ */
+export interface CloneRemoveToken {
+  readonly path: string;
+}
+
+/** An absolute, normalized path at least three segments deep: never `/`, a home or a root. */
+const isClonePath = (path: string): boolean =>
+  posix.isAbsolute(path) &&
+  posix.normalize(path) === path &&
+  !path.endsWith("/") &&
+  path.split("/").filter((x) => x !== "").length >= 3;
+
+/** Mint the removal token for `path`; throws `FenceError` unless it can be a clone's path. */
+export function mintCloneRemoveToken(path: string): CloneRemoveToken {
+  if (!isClonePath(path)) throw new FenceError("rm -rf", "only a managed clone's absolute path");
+  const token = Object.freeze({ path });
+  cloneRemovals.add(token);
+  return token;
+}
+
+/** `path` is named by one of the clone tokens volleyd minted. */
+const cloneTokenFor = (path: string, tokens: readonly CloneRemoveToken[] | undefined): boolean =>
+  (tokens ?? []).some((t) => cloneRemovals.has(t) && t.path === path && isClonePath(path));
+
 const entries = new WeakSet<object>();
 /** Entry tokens already used: a pasted code is typed, a pasted redirect requested, once. */
 const spentEntries = new WeakSet<object>();
@@ -1449,6 +1518,10 @@ export interface FenceOptions {
   forward?: SigninForwardToken;
   /** For a remote `rm -rf <home>/.volley/claude/<acct>`: the removal's token for that dir. */
   profileRemove?: ProfileRemoveToken;
+  /** For `git -C <repo> branch -D <agent branch>`: cleanup's token for that branch. */
+  branchDelete?: BranchDeleteToken;
+  /** For `rm -rf <clone>` (or a box's `peer cleanup --clone`): cleanup's tokens, one per path. */
+  cloneRemove?: readonly CloneRemoveToken[];
   /** For typing a pasted sign-in code or requesting a pasted callback: the entry's token. */
   signinEntry?: SigninEntryToken;
   /** A setup step for the Desk (setup-ops.ts): only the SETUP rows, and nothing else. */
@@ -1720,6 +1793,12 @@ const GIT_SPECS: Record<string, OptSpec> = {
     optional: ["--format", "--pretty", "--stat", "--date", "--decorate"],
     pathspecs: true,
   },
+  // The clone checks of `volleyd cleanup` (SPEC §4.6.26): local branches and unpushed counts.
+  "for-each-ref": {
+    optional: ["--format"],
+    positional: (a) => a === "refs/heads" || a.startsWith("refs/heads/"),
+  },
+  "rev-list": { flags: ["--count"] },
 };
 
 /** Explicitly denied `git branch` options (named in the error), whatever the allow-list says. */
@@ -1881,6 +1960,11 @@ const DOCKER_DENY = new Set([
 
 /** The one process listing (procs.ts): read-only; signals are sent with `process.kill`, never a child. */
 export const PS_ARGV: readonly string[] = ["ps", "-axo", "pid=,command="];
+/**
+ * The one working-directory listing (procs.ts, macOS; Linux reads `/proc/<pid>/cwd`): read-only,
+ * every process's cwd as `-F pn` records, so a dev server an agent started counts by where it runs.
+ */
+export const LSOF_ARGV: readonly string[] = ["lsof", "-a", "-d", "cwd", "-F", "pn"];
 
 /** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
 const PRESSURE_READS: readonly (readonly string[])[] = [
@@ -1947,7 +2031,7 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
   if (prog.includes("/")) return deny(`${prog} (programs are named, not pathed)`);
   switch (prog) {
     case "git":
-      return git(args);
+      return git(args, opts.branchDelete);
     case "gh":
       return gh(args, opts);
     case "cmux":
@@ -1981,6 +2065,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return isBrokerService(argv) ? ALLOW : deny(`${prog} ${args[0] ?? ""}`.trim());
     case "ps":
       return exactly(argv, [PS_ARGV]);
+    case "lsof":
+      return exactly(argv, [LSOF_ARGV]);
     case "sysctl":
     case "memory_pressure":
       return exactly(argv, PRESSURE_READS);
@@ -1992,7 +2078,12 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return deny(`docker ${args[0] ?? ""}`.trim());
     }
     case "rm":
-      return deny(isRecursiveForce(args) ? "rm -rf" : "rm");
+      // A wave-owned managed clone (SPEC §4.6.26): exactly `rm -rf <path>`, its token's.
+      return args.length === 2 &&
+        args[0] === "-rf" &&
+        cloneTokenFor(args[1] ?? "", opts.cloneRemove)
+        ? ALLOW
+        : deny(isRecursiveForce(args) ? "rm -rf" : "rm");
     default:
       if (INFRA.has(prog)) return deny(`${prog} (infrastructure tooling)`);
       return deny(args[0] !== undefined ? `${prog} ${args[0]}` : prog);
@@ -2053,7 +2144,15 @@ function checkArgs(verb: string, args: readonly string[], spec: OptSpec): Verdic
   return ALLOW;
 }
 
-function git(args: string[]): Verdict {
+function git(args: string[], branchDelete?: BranchDeleteToken): Verdict {
+  // The one branch delete (SPEC §4.6.26): exactly `-C <repo> branch -D <branch>`, its token's.
+  if (
+    branchDelete !== undefined &&
+    branchDeletes.has(branchDelete) &&
+    AGENT_BRANCH.test(branchDelete.branch) &&
+    sameArgv(args, ["-C", branchDelete.repo, "branch", "-D", branchDelete.branch])
+  )
+    return ALLOW;
   // Global options volleyd uses; anything else before the subcommand (`-c`, `--config-env`,
   // `--exec-path`, …) is refused, because git config can turn any subcommand into a command.
   let i = 0;
@@ -2092,6 +2191,9 @@ function git(args: string[]): Verdict {
       : deny(`git remote ${rest[0] ?? ""}`.trim());
   }
   if (sub === "branch" && rest[0] === "--track") return trackingBranch(rest.slice(1));
+  // The clone checks' stash reading: exactly `stash list`; every other stash verb writes.
+  if (sub === "stash")
+    return sameArgv(rest, ["list"]) ? ALLOW : deny(`git stash ${rest[0] ?? ""}`.trim());
   if (sub === "branch" && !rest.includes("--list") && !rest.includes("-l")) {
     return deny("git branch (without --list)");
   }
@@ -2778,6 +2880,42 @@ function isRemoteDoctor(rest: readonly string[]): boolean {
   return fix && adds > 0 && i === rest.length - 1 && rest[i] === "--clone";
 }
 
+/** An absolute path with no `.`/`..` segment or trailing slash. */
+const isAbsPath = (p: string): boolean =>
+  posix.isAbsolute(p) && posix.normalize(p) === p && (p === "/" || !p.endsWith("/"));
+
+/**
+ * `volley peer cleanup --json …` on a box (SPEC §4.6.26, RemoteHost.runCleanup): each
+ * `--worktree` under the host's worktree_root, `--branch` agent branches after one `--repo`, each
+ * `--clone` with its CloneRemoveToken, `--yes` last (CONSENT). Null: not a cleanup argv.
+ */
+function peerCleanupVerdict(args: readonly string[], opts: FenceOptions): Verdict | null {
+  if (!sameArgv(args.slice(0, 3), ["peer", "cleanup", "--json"])) return null;
+  const bad = deny("peer cleanup (only --worktree/--repo/--branch/--clone/--yes, as fenced)");
+  const root = opts.remote?.host?.worktree_root ?? "";
+  const yes = args.at(-1) === "--yes";
+  const rest = args.slice(3, yes ? -1 : undefined);
+  if (rest.length === 0 || rest.length % 2 !== 0) return bad;
+  let repo = false;
+  let clones = false;
+  for (let i = 0; i < rest.length; i += 2) {
+    const [flag, v = ""] = [rest[i], rest[i + 1]];
+    if (flag === "--worktree") {
+      if (root === "" || !isAbsPath(v) || !v.startsWith(`${root}/`)) return bad;
+    } else if (flag === "--repo") {
+      if (repo || !isAbsPath(v)) return bad;
+      repo = true;
+    } else if (flag === "--branch") {
+      if (!repo || !AGENT_BRANCH.test(v)) return bad;
+    } else if (flag === "--clone") {
+      if (!cloneTokenFor(v, opts.cloneRemove)) return bad;
+      clones = true;
+    } else return bad;
+  }
+  if (clones && !yes) return bad;
+  return yes ? { kind: "consent", verb: "volley peer cleanup --yes" } : ALLOW;
+}
+
 const REMOTE_VOLLEY_ARGS =
   "peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>], peer doctor --json --probe-login <profile>, or a role move's step";
 
@@ -3265,12 +3403,12 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       // The box's own checkout (remoteVolleyArgv), never a bare `volley` from its PATH (#550).
       const dir = opts.remote?.host?.volley_dir;
       const [script, ...rest] = args;
-      return dir !== undefined &&
-        isVolleyDir(dir) &&
-        script === volleyCliPath(dir) &&
-        remoteVolleyArgs(rest)
-        ? ALLOW
-        : deny(`bun (only <volley_dir>/packages/volley-cli/src/cli.ts ${REMOTE_VOLLEY_ARGS})`);
+      if (dir !== undefined && isVolleyDir(dir) && script === volleyCliPath(dir)) {
+        const cleanup = peerCleanupVerdict(rest, opts);
+        if (cleanup !== null) return cleanup;
+        if (remoteVolleyArgs(rest)) return ALLOW;
+      }
+      return deny(`bun (only <volley_dir>/packages/volley-cli/src/cli.ts ${REMOTE_VOLLEY_ARGS})`);
     }
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.

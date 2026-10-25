@@ -1120,3 +1120,49 @@ describe("the overlap plan (task_queued, wave_planned; SPEC §4.6.22)", () => {
     expect(dropped.spec?.tasks.T1).not.toHaveProperty("footprint");
   });
 });
+
+describe("wave_cleaned (#612)", () => {
+  const counts = (o: Partial<Record<string, number>> = {}) => ({
+    worktrees: 0,
+    sessions: 0,
+    processes: 0,
+    branches: 0,
+    logins: 0,
+    repos: 0,
+    accounts: 0,
+    clones: 0,
+    ...o,
+  });
+  const cleaned = (seq: number, data: Record<string, unknown>): JournalEvent => ({
+    seq: events.length + seq,
+    at: `2026-10-25T12:0${seq}:00.000Z`,
+    type: "wave_cleaned",
+    data: { by: "volleyd", kept: [], dry_run: false, ...data },
+  });
+
+  it("folds the last real run into state.cleanup; a later one replaces it; a dry run does not", () => {
+    const kept = [{ kind: "release_branch", host: "local", what: "release/x", why: "3 commits" }];
+    const first = cleaned(1, {
+      removed: counts({ worktrees: 3 }),
+      kept,
+      summary: "cleaned w1: 3 worktrees; kept 1",
+    });
+    const state = reduce([...events, first]);
+    expect(state.cleanup).toEqual({
+      at: first.at,
+      removed: counts({ worktrees: 3 }),
+      kept,
+      summary: "cleaned w1: 3 worktrees; kept 1",
+    });
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    const later = cleaned(2, { removed: counts(), summary: "nothing to clean" });
+    expect(reduce([...events, first, later]).cleanup?.summary).toBe("nothing to clean");
+    const dry = cleaned(3, { removed: counts(), summary: "would clean", dry_run: true });
+    expect(reduce([...events, first, dry]).cleanup?.summary).toBe(
+      "cleaned w1: 3 worktrees; kept 1",
+    );
+    expect(reduce(events).cleanup).toBeUndefined();
+  });
+});

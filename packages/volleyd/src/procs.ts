@@ -1,17 +1,19 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { type Clock, sleep, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
-import { PS_ARGV } from "./fence";
+import { LSOF_ARGV, PS_ARGV } from "./fence";
 
 /**
  * Stopping a retired agent's `claude` process (retire's session end on the local host, and
  * `volleyd cleanup --yes`). The only module that signals a process volleyd did not spawn
  * (exec.ts signals only its own children): it lists processes with the fenced, read-only
  * `ps -axo pid=,command=` and signals them with `process.kill`, so no child process is spawned
- * for it. A process counts only by its argv: the launch script passes
- * `--mcp-config=<worktree>/.volley/mcp.json`, and that worktree must lie under the given root.
+ * for it. A process counts by its argv (the launch script passes
+ * `--mcp-config=<worktree>/.volley/mcp.json`, and that worktree must lie under the given root) or
+ * by its working directory (a dev server, a watcher, a REPL the agent started in its worktree):
+ * Linux reads `/proc/<pid>/cwd`, macOS the fenced `lsof -a -d cwd -F pn`.
  */
 
 export interface PsEntry {
@@ -58,6 +60,87 @@ export async function listAgentProcesses(exec: ExecFn): Promise<(PsEntry & { mcp
   return parsePs(r.stdout).flatMap((p) => {
     const mcp = mcpConfigOf(p.command);
     return mcp === null || p.pid === process.pid ? [] : [{ ...p, mcp }];
+  });
+}
+
+/** `lsof -a -d cwd -F pn` output → pid → working directory. Pure. */
+export function parseLsofCwd(stdout: string): Map<number, string> {
+  const out = new Map<number, string>();
+  let pid: number | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("p")) pid = /^p(\d+)$/.test(line) ? Number(line.slice(1)) : null;
+    else if (line.startsWith("n") && pid !== null && !out.has(pid)) out.set(pid, line.slice(1));
+  }
+  return out;
+}
+
+/** A listed process with what makes it a wave's: its agent's mcp path and its working directory. */
+export interface ProcEntry extends PsEntry {
+  /** Its `--mcp-config=` value, or null. */
+  mcp: string | null;
+  /** Its working directory, or null when it cannot be read (another user's process). */
+  cwd: string | null;
+}
+
+export interface ListOptions {
+  /** Paths under which a process is left alone (a live agent's worktree). */
+  exclude?: readonly string[];
+  /** Which way the cwd is read (tests; default this machine's). */
+  platform?: NodeJS.Platform;
+}
+
+/** Every process's working directory: Linux `/proc/<pid>/cwd`, otherwise one fenced `lsof`. */
+async function cwdsOf(
+  exec: ExecFn,
+  pids: readonly number[],
+  platform: NodeJS.Platform,
+): Promise<Map<number, string>> {
+  if (platform === "linux") {
+    const out = new Map<number, string>();
+    for (const pid of pids) {
+      try {
+        out.set(pid, readlinkSync(`/proc/${pid}/cwd`));
+      } catch {}
+    }
+    return out;
+  }
+  const r = await exec(LSOF_ARGV, { timeoutMs: DAEMON_DEFAULTS.lsof_timeout_ms });
+  // lsof exits 1 when some process could not be read; what it printed still counts.
+  if (r.timedOut || (r.code !== 0 && r.stdout === "")) {
+    throw new Error(`lsof failed: ${r.stderr.trim() || r.code}`);
+  }
+  return parseLsofCwd(r.stdout);
+}
+
+/**
+ * The processes that belong under one of `roots`: their `--mcp-config=` worktree lies under it
+ * (an agent) or their working directory does (anything the agent started there). Never this
+ * process, never one under an `exclude`.
+ */
+export async function listProcessesUnder(
+  exec: ExecFn,
+  roots: readonly string[],
+  opts: ListOptions = {},
+): Promise<(ProcEntry & { root: string })[]> {
+  if (roots.length === 0) return [];
+  const r = await exec(PS_ARGV, { timeoutMs: DAEMON_DEFAULTS.ps_timeout_ms });
+  if (r.code !== 0 || r.timedOut) throw new Error(`ps failed: ${r.stderr.trim() || r.code}`);
+  const ps = parsePs(r.stdout).filter((p) => p.pid !== process.pid);
+  const cwds = await cwdsOf(
+    exec,
+    ps.map((p) => p.pid),
+    opts.platform ?? process.platform,
+  );
+  const exclude = opts.exclude ?? [];
+  const inside = (path: string | null) => {
+    if (path === null || exclude.some((x) => underRoot(path, x))) return undefined;
+    return roots.find((root) => underRoot(path, root));
+  };
+  return ps.flatMap((p) => {
+    const mcp = mcpConfigOf(p.command);
+    const cwd = cwds.get(p.pid) ?? null;
+    const root = inside(mcp === null ? null : dirname(dirname(mcp))) ?? inside(cwd);
+    return root === undefined ? [] : [{ ...p, mcp, cwd, root }];
   });
 }
 
@@ -137,28 +220,28 @@ export interface ReapOptions extends StopOptions {
 }
 
 /**
- * Stop every process whose `--mcp-config=` worktree lies under `root` (and under no `exclude`).
- * `stopped` carries each one's mcp path; `skipped` counts the agent processes outside the root.
+ * Stop every process under `root` (and under no `exclude`), by argv or by working directory
+ * (listProcessesUnder). `stopped` carries each one's mcp path ("" for a process that counted by
+ * its cwd alone) and command.
  */
 export async function reapUnder(
   exec: ExecFn,
   root: string,
   opts: ReapOptions = {},
-): Promise<{ stopped: (Stopped & { mcp: string })[]; skipped: number }> {
-  const procs = await listAgentProcesses(exec);
-  const worktreeOf = (mcp: string) => dirname(dirname(mcp));
-  const mine = procs.filter(
-    (p) =>
-      underRoot(worktreeOf(p.mcp), root) &&
-      !(opts.exclude ?? []).some((x) => underRoot(worktreeOf(p.mcp), x)),
-  );
+): Promise<{ stopped: (Stopped & { mcp: string; command: string })[] }> {
+  const mine = await listProcessesUnder(exec, [root], {
+    ...(opts.exclude !== undefined ? { exclude: opts.exclude } : {}),
+  });
   const stopped = await stopProcesses(
     mine.map((p) => p.pid),
     opts,
   );
-  const mcpOf = new Map(mine.map((p) => [p.pid, p.mcp]));
+  const byPid = new Map(mine.map((p) => [p.pid, p]));
   return {
-    stopped: stopped.map((s) => ({ ...s, mcp: mcpOf.get(s.pid) ?? "" })),
-    skipped: procs.length - mine.length,
+    stopped: stopped.map((s) => ({
+      ...s,
+      mcp: byPid.get(s.pid)?.mcp ?? "",
+      command: byPid.get(s.pid)?.command ?? "",
+    })),
   };
 }

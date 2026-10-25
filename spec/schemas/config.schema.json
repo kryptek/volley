@@ -396,6 +396,11 @@
           "default": true,
           "description": "Before cutting an agent's worktree on any host, the supervisor fetches the release branch there; true: a fetch that fails fails the spawn, so no agent starts on a stale base (spec section 4.6.15). false: the host's last fetched copy is used. Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "cleanup_on_end": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: the supervisor cleans a task's items (worktrees, sessions, processes, its merged branch) once the task ends and its agents are retired, and the whole wave's (logins, wave-owned registrations, accounts and clones) once the wave ended and no agent is live, journaling wave_cleaned (spec section 4.6.26). false: only volleyd cleanup does. Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "retire_close_session": {
           "type": "boolean",
           "default": true,

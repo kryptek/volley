@@ -1,4 +1,10 @@
-import { createHash } from "node:crypto";
+import {
+  constants,
+  type JsonWebKeyInput,
+  createHash,
+  createPublicKey,
+  publicEncrypt,
+} from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -689,6 +695,96 @@ describe("volley auth", () => {
         role: "supervisor",
       });
       expect(accounts().accounts[0]?.kind).toBe("machine");
+    });
+
+    describe("add --for-wave (#612)", () => {
+      interface Asked {
+        op: string;
+        fields: Record<string, unknown>;
+        admin: boolean;
+      }
+      /** Deps whose volleyd answers account_create with credentials sealed to its reply_key. */
+      const askDeps = () => {
+        const asked: Asked[] = [];
+        const deps = fakeDeps(fake, layout);
+        deps.askVolleyd = async (_cmd, op, fields, _v, _env, _io, admin) => {
+          asked.push({ op, fields, admin: admin === true });
+          const sealed = publicEncrypt(
+            {
+              key: createPublicKey({
+                key: fields.reply_key as JsonWebKeyInput["key"],
+                format: "jwk",
+              }),
+              padding: constants.RSA_PKCS1_OAEP_PADDING,
+              oaepHash: "sha256",
+            },
+            Buffer.from(JSON.stringify({ username: fields.name, password: "sealed-pw" })),
+          ).toString("base64url");
+          return { ok: true, result: { name: fields.name, role: fields.role }, sealed };
+        };
+        return { deps, asked };
+      };
+
+      it("sends account_create with the wave to volleyd as an admin op and prints the password", async () => {
+        const { deps, asked } = askDeps();
+        const r = await run(["add", "demo-admin", "--role", "admin", "--for-wave", "w1"], deps);
+        expect(r.code).toBe(0);
+        expect(r.stdout).toBe("sealed-pw\n");
+        expect(asked).toHaveLength(1);
+        const { reply_key, ...fields } = asked[0]?.fields ?? {};
+        expect(asked[0]).toMatchObject({ op: "account_create", admin: true });
+        expect(fields).toEqual({ name: "demo-admin", role: "admin", wave: "w1" });
+        expect((reply_key as { kty?: string }).kty).toBe("RSA");
+        // volleyd makes the login: nothing is written here.
+        expect(existsSync(join(authDir, "accounts.json"))).toBe(false);
+      });
+
+      it("--json prints the credentials, role and wave; --kind is passed on", async () => {
+        const { deps, asked } = askDeps();
+        const r = await run(
+          ["add", "ci", "--role", "supervisor", "--kind", "machine", "--for-wave", "w1", "--json"],
+          deps,
+        );
+        expect(r.code).toBe(0);
+        expect(JSON.parse(r.stdout)).toEqual({
+          username: "ci",
+          password: "sealed-pw",
+          role: "supervisor",
+          wave: "w1",
+        });
+        expect(asked[0]?.fields).toMatchObject({ kind: "machine", wave: "w1" });
+      });
+
+      it("refuses a --for-wave that is no wave id, or on another verb", async () => {
+        const { deps, asked } = askDeps();
+        for (const argv of [
+          ["add", "x", "--role", "watch", "--for-wave", "W1"],
+          ["add", "x", "--role", "watch", "--for-wave", "w/1"],
+          ["add", "x", "--for-wave", "w1"],
+          ["rotate", "x", "--for-wave", "w1"],
+          ["init", "--for-wave", "w1"],
+        ]) {
+          expect((await run(argv, deps)).code, argv.join(" ")).toBe(2);
+        }
+        expect(asked).toEqual([]);
+      });
+
+      it("without --for-wave no op is sent (the login is made here)", async () => {
+        const deps = await initDeps();
+        let asks = 0;
+        deps.askVolleyd = async () => {
+          asks++;
+          return { ok: true };
+        };
+        expect((await run(["add", "tablet", "--role", "watch"], deps)).code).toBe(0);
+        expect(asks).toBe(0);
+      });
+
+      it("a refusal from volleyd is the exit code askVolleyd returned", async () => {
+        const deps = fakeDeps(fake, layout);
+        deps.askVolleyd = async () => 1;
+        expect((await run(["add", "x", "--role", "watch", "--for-wave", "w1"], deps)).code).toBe(1);
+      });
     });
 
     it("add refuses a missing/unknown role or kind, a taken name and reserved names", async () => {

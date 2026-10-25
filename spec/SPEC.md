@@ -519,6 +519,8 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `role_rolled_back` — `{ by, move_id, role, to }`, in `_system` (§4.6.24)
 - `peer_retargeted` — `{ by, name, address, port?, tunnel? }`, in `_system` (§4.6.14)
 - `machine_added` — `{ by, name, target, auth, sudo, ok, ready?, step? }`, in `_system` (§4.6.14; never a password)
+- `wave_cleaned` — `{ by, removed, kept[], summary, dry_run, task? }`: one cleanup run of the wave (§4.6.26)
+- `repo_clone_removed` — `{ machine, slug, path, wave }`, in `_system`: cleanup deleted a managed clone volleyd made for a wave's registration (§4.6.26)
 <!-- /spec-list -->
 
 #### 4.6.4 Supervisor config
@@ -575,6 +577,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `repos` — default `{}`; `{ <owner/name>: { machines: all | [<name>] } }`: repositories by canonical GitHub `owner/name` (compared case-insensitively) and the machines holding a clone of each; a listed machine's clone is its adopted one, `hosts.<name>.repos: { <owner/name>: <absolute path> }`, else the managed one under `fleet.repo_root`; the deprecated `hosts.<name>.repo` is still accepted, and migrated to both once the machine's record reports its clone's origin. A wave file's `repo:` may name one: it is the supervisor's clone when the supervisor's machine holds one, stays the `owner/name` when only paired machines hold one, and is refused when no machine does.
 - `require_fresh_base` — boolean, default `true` (§4.6.15).
 - `retire_close_session` — boolean, default `true`: retiring an agent also ends its session (below).
+- `cleanup_on_end` — boolean, default `true`: the supervisor cleans a task's items once it ends and the whole wave's once it ended (§4.6.26); `false`: only `volleyd cleanup` does.
 - `placement.default` — `local` | `auto`, default `auto` (§4.6.15).
 - `placement.load_per_core_max` — default 1.5 (§4.6.15).
 - `placement.mem_available_min_pct` — default 10 (§4.6.15).

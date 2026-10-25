@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
 import type { ExecFn } from "../src/exec";
+import { LSOF_ARGV } from "../src/fence";
 import {
+  listProcessesUnder,
   mcpConfigOf,
+  parseLsofCwd,
   parsePs,
   reapUnder,
   sessionsRunningIn,
@@ -175,5 +178,80 @@ describe("reapUnder (real processes)", () => {
     });
     expect(r.stopped.map((s) => s.pid)).toEqual([a]);
     expect(alive(b)).toBe(true);
+  });
+});
+
+describe("listProcessesUnder (by argv or by working directory)", () => {
+  const children: ChildProcess[] = [];
+  afterEach(() => {
+    for (const c of children.splice(0)) {
+      try {
+        process.kill(c.pid as number, "SIGKILL");
+      } catch {}
+    }
+  });
+
+  /** A long-lived process started in `cwd`, with `argv` after the script. */
+  const child = (cwd: string, argv: string[] = []): number => {
+    const c = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)", "--", ...argv], {
+      stdio: "ignore",
+      cwd,
+    });
+    children.push(c);
+    return c.pid as number;
+  };
+
+  it.skipIf(process.platform !== "linux")(
+    "finds a dev server by its cwd and an agent by its argv, never a <wt>10 sibling (Linux /proc)",
+    async () => {
+      const dir = tempDir("volleyd-cwd-");
+      const wt = join(dir, "w1", "T1-implementer");
+      mkdirSync(join(wt, "web"), { recursive: true });
+      mkdirSync(`${wt}10`, { recursive: true });
+      const dev = child(join(wt, "web"));
+      const agent = child(dir, [`--mcp-config=${wt}/.volley/mcp.json`]);
+      const sibling = child(`${wt}10`);
+      let found: number[] = [];
+      for (let i = 0; i < 50; i++) {
+        found = (await listProcessesUnder(exec, [wt])).map((p) => p.pid);
+        if (found.includes(dev) && found.includes(agent)) break;
+        // real process: waiting for ps to list the fresh children
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(found).toContain(dev);
+      expect(found).toContain(agent);
+      expect(found).not.toContain(sibling);
+      expect(found).not.toContain(process.pid);
+      const excluded = (await listProcessesUnder(exec, [wt], { exclude: [join(wt, "web")] })).map(
+        (p) => p.pid,
+      );
+      expect(excluded).not.toContain(dev);
+      expect(excluded).toContain(agent);
+    },
+  );
+
+  it("parseLsofCwd reads lsof's -F pn records", () => {
+    expect(parseLsofCwd("p101\nfcwd\nn/r/w1/T1\np202\nfcwd\nn/\n")).toEqual(
+      new Map([
+        [101, "/r/w1/T1"],
+        [202, "/"],
+      ]),
+    );
+  });
+
+  it("on macOS the cwd comes from the one fenced lsof argv", async () => {
+    const calls: string[][] = [];
+    const fake: ExecFn = async (argv) => {
+      calls.push([...argv]);
+      const stdout =
+        argv[0] === "ps"
+          ? "  11 npm run dev\n  12 claude --mcp-config=/r/w1/T2/.volley/mcp.json\n  13 vim\n"
+          : "p11\nfcwd\nn/r/w1/T1/web\np12\nfcwd\nn/elsewhere\np13\nfcwd\nn/r/w1/T10\n";
+      return { code: 0, stdout, stderr: "", timedOut: false };
+    };
+    const found = await listProcessesUnder(fake, ["/r/w1/T1", "/r/w1/T2"], { platform: "darwin" });
+    expect(found.map((p) => p.pid)).toEqual([11, 12]);
+    expect(calls).toEqual([["ps", "-axo", "pid=,command="], [...LSOF_ARGV]]);
+    expect(LSOF_ARGV).toEqual(["lsof", "-a", "-d", "cwd", "-F", "pn"]);
   });
 });

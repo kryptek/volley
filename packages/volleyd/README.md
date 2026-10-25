@@ -4654,14 +4654,19 @@ verbatim from `src/fence.ts`:
 
 ```
 DENY (never, consent or not):
-  git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force
+  git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force,
+    except exactly `git -C <repo> branch -D <agent branch>` with that branch's BranchDeleteToken
+    (`mintBranchDeleteToken`, minted by `volleyd cleanup` for one agent branch the journal
+    proves merged at its current tip, SPEC §4.6.26)
   gh pr merge (except MERGE below) | gh workflow run | gh repo delete | gh api with any method
     other than GET
   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
     ansible, ansible-playbook, eksctl, doctl, flyctl
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
-    step a ProfileRemoveToken unlocks (below)
+    step a ProfileRemoveToken unlocks (below), and exactly `rm -rf <path>` with that path's
+    CloneRemoveToken (`mintCloneRemoveToken`, minted by `volleyd cleanup` for a managed clone
+    a `repo_clone_run { cloned: true }` of a wave-owned registration recorded, SPEC §4.6.26)
 
 MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -4680,12 +4685,14 @@ MERGE (only with a token, checked by identity like consent tokens; either unlock
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):
-  git worktree remove · cmux close-workspace
+  git worktree remove · cmux close-workspace · a paired machine's `peer cleanup … --yes`
 
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
-    remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied)
+    remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied) |
+    stash list (exactly) | for-each-ref [--format=…] refs/heads | rev-list --count <range>
+    (the clone checks of `volleyd cleanup`, read-only)
     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
@@ -4740,6 +4747,8 @@ ALLOW (program by bare name only — never a path):
   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
     agent's claude by `process.kill`, never by a spawned `kill`)
+  lsof -a -d cwd -F pn   (exactly, read-only: every process's working directory on macOS, so
+    procs.ts counts a process the agent started in its worktree; Linux reads /proc instead)
   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
     retains no $SYS/broker/version)
   pmset -g batt   (exactly, on macOS: whether this machine has a battery, its record's
@@ -4937,6 +4946,11 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     cli.ts <args>` (remoteVolleyArgv; the host's `volley_dir` exactly), never a `volley` on its
     PATH; VOLLEY below is that prefix:
   VOLLEY peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
+  VOLLEY peer cleanup --json [--worktree <abs under the host's worktree_root>]...
+    [--repo <abs> --branch <agent branch>...] [--clone <abs>]... [--yes] — `volleyd cleanup`
+    on the box (RemoteHost.runCleanup): it stops the processes under each worktree, deletes
+    each named branch, removes each clone after re-checking it; `--yes` is CONSENT, and each
+    `--clone` needs that path's CloneRemoveToken
   VOLLEY peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
     <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no

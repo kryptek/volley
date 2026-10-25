@@ -138,6 +138,21 @@
               },
               "description": "When, by whom and why the wave was archived (spec section 4.6.20). Only on an archived wave; a supervisor's status listing carries it, the retained topic need not."
             },
+            "cleanup": {
+              "type": "object",
+              "required": ["at", "removed", "kept", "summary"],
+              "properties": {
+                "at": { "type": "string", "format": "date-time" },
+                "removed": { "$ref": "wave-event.schema.json#/$defs/cleanupCounts" },
+                "kept": {
+                  "type": "array",
+                  "items": { "$ref": "wave-event.schema.json#/$defs/cleanupResource" }
+                },
+                "summary": { "type": "string", "minLength": 1 },
+                "task": { "type": "string" }
+              },
+              "description": "The last cleanup run (wave_cleaned, spec section 4.6.26): what it removed by kind, what it kept and why, and its summary line. task: the run cleaned that task only. Absent until the wave was cleaned."
+            },
             "merge_queue": {
               "type": "array",
               "description": "The merge queue (spec section 4.6.17), in merge order: the wave's gated tasks the supervisor merges itself, one per release branch at a time. merging: its merge is running; updating: it is being brought up to date with the release branch before its merge; queued: waiting for its turn; refused: GitHub refused its last merge, and it goes after the tasks still queued. since: when the task entered the queue. Absent while the queue is empty.",

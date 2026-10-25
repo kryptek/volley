@@ -16,6 +16,7 @@ import {
   managedClonePath,
   managedWorktreeRoot,
   originToSlug,
+  ownedClonesOf,
   pendingRepoRuns,
   remoteRepoRoot,
   repoStateLine,
@@ -473,5 +474,59 @@ describe("repos: repo_add / repo_remove assignments (SPEC §4.6.21)", () => {
     );
     expect(repoStateLine("box", { state: "cloning", reasons: [] })).toBe("box: cloning");
     expect(repoStateLine("box", undefined)).toBe("box: not assigned");
+  });
+});
+
+describe("ownedClonesOf (#612 D10)", () => {
+  const cfg = { repo_root: "/path/to/volleyd/repos", localName: "athena" };
+  let seq = 0;
+  const e = (type: string, data: Record<string, unknown>) => ({ seq: ++seq, type, data });
+  const added = (wave?: string) =>
+    e("repo_added", {
+      by: "c",
+      slug: "acme/demo",
+      machines: ["athena", "box"],
+      ...(wave ? { wave } : {}),
+    });
+  const run = (machine: string, path: string, cloned = true) =>
+    e("repo_clone_run", { machine, slug: "acme/demo", ok: true, cloned, path });
+  const LOCAL = "/path/to/volleyd/repos/acme/demo";
+  const BOX = "/path/to/box-home/.volley/repos/acme/demo";
+
+  it("yields the clones volleyd's own run made at the managed path, for an owned registration", () => {
+    expect(ownedClonesOf("w1", [added("w1"), run("athena", LOCAL), run("box", BOX)], cfg)).toEqual([
+      { machine: "athena", slug: "acme/demo", path: LOCAL },
+      { machine: "box", slug: "acme/demo", path: BOX },
+    ]);
+  });
+
+  it("nothing for an adopted clone, a registration without wave, another wave's, or a path outside the root", () => {
+    expect(ownedClonesOf("w1", [added("w1"), run("athena", LOCAL, false)], cfg)).toEqual([]);
+    expect(ownedClonesOf("w1", [added(), run("athena", LOCAL)], cfg)).toEqual([]);
+    expect(ownedClonesOf("w1", [added("w2"), run("athena", LOCAL)], cfg)).toEqual([]);
+    expect(
+      ownedClonesOf("w1", [added("w1"), run("athena", "/path/to/elsewhere/acme/demo")], cfg),
+    ).toEqual([]);
+    // a run before the owned add does not count
+    expect(ownedClonesOf("w1", [run("athena", LOCAL), added("w1")], cfg)).toEqual([]);
+  });
+
+  it("a removed clone is gone from the list", () => {
+    expect(
+      ownedClonesOf(
+        "w1",
+        [
+          added("w1"),
+          run("athena", LOCAL),
+          e("repo_clone_removed", {
+            machine: "athena",
+            slug: "acme/demo",
+            path: LOCAL,
+            wave: "w1",
+          }),
+        ],
+        cfg,
+      ),
+    ).toEqual([]);
   });
 });

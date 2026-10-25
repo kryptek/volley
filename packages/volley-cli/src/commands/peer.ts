@@ -116,6 +116,13 @@ const HELP = `Usage:
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
     volley peer redeem                         Run by join on the host over ssh (JSON on stdin)
+    volley peer cleanup --json [--worktree <abs>]... [--repo <abs> --branch <name>...]
+                       [--clone <abs>]... [--yes]
+                                               Run by the supervisor's \`volleyd cleanup\` on
+                                               this machine over ssh: stops the processes in
+                                               each worktree, deletes the named agent branches,
+                                               removes each named clone with nothing unpushed
+                                               (\`volley peer cleanup --help\`)
 
 join options:
   --to <host>              ssh destination of the supervisor's machine (key-based login)
@@ -470,6 +477,8 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
     io.stdout(HELP);
     return verb === undefined ? EXIT.USAGE : EXIT.OK;
   }
+  // cleanup has its own flags (--clone and --repo mean other things to doctor): its own table.
+  if (verb === "cleanup") return (await import("../peer/cleanup")).runPeerCleanup(rest, io);
   let parsed: ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>;
   try {
     parsed = parseArgs({ args: rest, options: OPTIONS, allowPositionals: true, strict: true });
