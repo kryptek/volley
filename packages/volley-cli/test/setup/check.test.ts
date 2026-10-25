@@ -18,6 +18,7 @@ const READ_ONLY = (a: string[]) =>
   (a[0] === "claude" && a[1] === "auth" && a[2] === "status") ||
   (a[0] === "gh" && a[1] === "auth" && a[2] === "status") ||
   (a[0] === "gh" && a[1] === "api" && a[2] === "user") ||
+  a.join(" ") === "git var GIT_COMMITTER_IDENT" ||
   (a[0] === "tailscale" && (a[1] === "version" || a[1] === "status"));
 
 const STEP_NAMES = [

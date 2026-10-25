@@ -5,6 +5,7 @@ import {
   type Issue,
   type Pr,
   type Repo,
+  SIM_GH_USER,
   SIM_LOGIN,
   WEB,
   type World,
@@ -381,8 +382,7 @@ const COMMANDS: Record<string, Spec> = {
         const program = one(a, "--jq");
         return ok(program !== undefined ? jq(v, program) : `${JSON.stringify(v)}\n`);
       };
-      if (endpoint === "user")
-        return reply({ login: SIM_LOGIN, id: 1, name: "Volley Sim", type: "User" });
+      if (endpoint === "user") return reply({ ...SIM_GH_USER, type: "User" });
       const runs = /^repos\/([^/]+\/[^/]+)\/actions\/runs\?(.*)$/.exec(endpoint);
       const head = runs !== null ? new URLSearchParams(runs[2]).get("head_sha") : null;
       if (runs !== null && head !== null) {

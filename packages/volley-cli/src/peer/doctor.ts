@@ -13,6 +13,7 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type NetworkRecord, readNetworkRecord } from "../setup/journal";
 import { TAILSCALE_APP_CLI, type TailscaleStatus, parseTailscaleStatus } from "../setup/network";
+import { identityOf } from "../setup/signin";
 import { claudeChecks, isRepoTrusted, loginIdentity, parseClaudeStatus } from "./checks/claude";
 import { canonicalSlug, ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import {
@@ -244,6 +245,8 @@ export interface Facts {
     user: string | null;
     slug: string | null;
     permission: string | null;
+    /** `Name <email>` git commits as here (`git var GIT_COMMITTER_IDENT`); null: none, or no git. */
+    gitIdentity: string | null;
   };
   claude: {
     state: AuthClaude;
@@ -628,6 +631,20 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     signedIn && ghBin !== null
       ? ghUser((await sh([ghBin, "api", "user", "--jq", ".login"])).stdout)
       : null;
+  // git's own verdict on whether an agent's commit can work here (its identity, from any source).
+  const ident =
+    gitBin !== null
+      ? await sh([
+          "env",
+          "GIT_TERMINAL_PROMPT=0",
+          gitBin,
+          "-C",
+          deps.home,
+          "var",
+          "GIT_COMMITTER_IDENT",
+        ])
+      : null;
+  const gitIdentity = ident?.code === 0 ? identityOf(ident.stdout) : null;
   // peer.json's repositories, sorted by slug (the first is the one gh.auth checks push access to).
   const configured = Object.entries(opts.repos ?? {}).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
@@ -836,7 +853,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       fetchable,
       fetchedAt,
     },
-    github: { present: ghPresent, signedIn, user, slug, permission },
+    github: { present: ghPresent, signedIn, user, slug, permission, gitIdentity },
     claude: {
       ...claude,
       trust,

@@ -32,11 +32,15 @@ questions under `--yes`, every `volley setup --check` row `done`.
 Linux, inside the container as `owner`:
 
 1. Start mosquitto 2.1 with an anonymous config (listeners 1883 and 9001), the `container` layout.
+   The user has no git identity (no `user.name`, no `user.email`, no `~/.gitconfig`): anything that
+   pre-seeded one would hide "Author identity unknown".
 2. `sh install.sh --source <checkout> --no-setup`: apt packages, bun, gh and Claude Code's
    installer, the `volley` / `volleyd` commands in `~/.volley/bin`.
 3. `eval "$(volley sim env)"`, then `volley setup --yes --no-lan --layout container --simulated`.
    The container layout leaves the broker's restart to you ("restart your container yourself"):
-   the run restarts mosquitto and runs setup again, as a person would.
+   the run restarts mosquitto and runs setup again, as a person would. Then `git var
+   GIT_COMMITTER_IDENT` is the identity setup's Sign-ins step gave git (`Volley Sim
+   <1+volley-sim@users.noreply.github.com>`), and the test wave's scratch commit carries it.
 4. `volley setup --check --json`: every row `done`. `install.sh --check` exits 0. The Desk answers
    `/version.json`.
 5. A second `volley setup --yes` applies nothing: the lines it adds to the setup journal are all
@@ -111,8 +115,10 @@ VMs' sudo being password-less), as it does for a person.
 
 ### What each layer checks
 
-**Layer 2** (`vm-linux.sh`): launch the VM from cloud-init, install, set up, `volley setup --check
---json`; then `sudo reboot` and wait for a new boot (the boot time moves), then: `--check` exits 0
+**Layer 2** (`vm-linux.sh`): launch the VM from cloud-init; before the install, the user has no
+git identity (`assert_no_git_identity`: `FAIL: the VM has a git identity before the install …`
+otherwise); install, set up, `volley setup --check --json`; git commits as the simulated account
+and every scratch clone's last commit carries it (`check_git_identity`); then `sudo reboot` and wait for a new boot (the boot time moves), then: `--check` exits 0
 within 2 minutes of ssh answering (`reboot_check_ms`), `volleyd.service` and
 `volley-desk.service` are `systemctl --user is-active`, and volleyd's retained status is
 `working` and newer than the boot.
@@ -130,7 +136,7 @@ Under `--no-lan` the `phone` row may be `skipped`, as on Layer 1's Mac (and on L
 whose VMs have a LAN address too).
 
 **Layer 4** (`vm-pair.sh`): two Ubuntu 24.04 VMs on multipass's private network. The hub is
-installed and set up; the peer gets this checkout as a peer install (`install.sh --peer`; `volley
+installed and set up, with Layer 2's two identity checks around it; the peer gets this checkout as a peer install (`install.sh --peer`; `volley
 machine add` would install the hub's release tag, which a checkout under test is not), the
 simulator in every shell (a line at the top of `~/.bashrc`) and the simulated GitHub and Claude
 sign-ins. The run's key is copied to the hub, which then runs `volley machine add volley@<peer>

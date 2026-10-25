@@ -46,7 +46,7 @@ import { SetupMeter, completeLine, setupMetricsFile, writeSetupMetrics } from ".
 import { NETWORK_KINDS, isNetworkKind, planNetwork, privateDeskLine } from "../setup/network";
 import { peerBrokerUrl, planPeerService } from "../setup/peer-service";
 import { planServices } from "../setup/services";
-import { planSignin, simulatedExec } from "../setup/signin";
+import { planGitIdentity, planSignin, simulatedExec } from "../setup/signin";
 import {
   type Planner,
   type SetupContext,
@@ -290,6 +290,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         network: { type: "string" },
         "network-address": { type: "string" },
         step: { type: "string", multiple: true },
+        "git-identity": { type: "boolean" },
         dir: { type: "string" },
         layout: { type: "string" },
         config: { type: "string" },
@@ -405,6 +406,12 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     );
     return EXIT.USAGE;
   }
+  // --git-identity: the Sign-ins step's git identity alone (`volley machine add` runs it on a box).
+  const gitIdentityOnly = values["git-identity"] === true;
+  if (gitIdentityOnly && only.some((s) => s !== "signin")) {
+    io.stderr("volley setup: --git-identity is part of the Sign-ins step: no other --step\n");
+    return EXIT.USAGE;
+  }
   const portText =
     str("desk-port") ??
     String(
@@ -497,7 +504,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     },
     firstWave,
   };
-  const steps = ALL.filter(([n]) => only.length === 0 || only.includes(n));
+  const steps: [StepName, Planner][] = gitIdentityOnly
+    ? [["signin", planGitIdentity]]
+    : ALL.filter(([n]) => only.length === 0 || only.includes(n));
 
   if (check) {
     const rows = await checkSteps(ctx, steps);
@@ -732,6 +741,7 @@ const PEER_HEADER = "this machine joins a supervisor's fleet (paired with `volle
 export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
        volley setup --check [--json] [--step <name>]...
        volley setup --peer [--yes] [--check] [--step <name>]...
+       volley setup [--peer] [--yes] [--check] --git-identity
 
 First-run (and repair) wizard: ten steps, each showing what it found and what it will change
 before changing anything.
@@ -816,6 +826,8 @@ Options:
   --step <name>        Only this step (repeatable): detect, security, accounts, network,
                        signin, claude-code, terminal, services, phone, first-wave (--peer:
                        signin, network, claude-code, terminal, peer-service)
+  --git-identity       Only git's commit identity, from the GitHub account (the Sign-ins step's,
+                       without its sign-ins or Claude Code's settings; gh must be signed in)
   --no-first-wave      Skip the test wave (run it later: volley setup --step first-wave)
   --repo <path>        The test wave on this clone (its origin's repository) instead of a
                        scratch repository

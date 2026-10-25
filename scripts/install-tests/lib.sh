@@ -262,6 +262,44 @@ setup_volley() {
     fail "volley setup --check exited non-zero after setup (check-setup.json)"
 }
 
+# The identity setup's Sign-ins step gives git under the simulator (the simulated account's name
+# and noreply address), and what the test wave's scratch commit must carry.
+SIM_GIT_NAME='Volley Sim'
+SIM_GIT_EMAIL='1+volley-sim@users.noreply.github.com'
+
+# Before the install: the fresh user has no git identity (no user.name, no user.email, no
+# ~/.gitconfig), so the one setup gives it is the only one. An image or a harness that pre-seeds
+# one would hide "Author identity unknown" again.
+assert_no_git_identity() {
+  local addr=$1 seeded
+  # shellcheck disable=SC2016 # expanded on the VM
+  seeded=$(on "$addr" 'git config --global --get user.name; git config --global --get user.email;' \
+    '[ ! -e ~/.gitconfig ] || echo "~/.gitconfig exists"' 2>>"$TRANSCRIPT")
+  [ -z "$seeded" ] ||
+    fail "the VM has a git identity before the install (the image or the harness pre-seeded one): $(printf '%s' "$seeded" | tr '\n' ' ')"
+}
+
+# After setup: git commits as the simulated account, and so did every test wave's scratch clone.
+check_git_identity() {
+  local addr=$1 ident logs line
+  ident=$(on "$addr" 'git var GIT_COMMITTER_IDENT' 2>>"$TRANSCRIPT")
+  printf 'check_git_identity: git var GIT_COMMITTER_IDENT: %s\n' "$ident" | tee -a "$TRANSCRIPT"
+  case $ident in
+    "$SIM_GIT_NAME <$SIM_GIT_EMAIL> "*) ;;
+    *) fail "git does not commit as $SIM_GIT_NAME <$SIM_GIT_EMAIL> after setup: '$ident'" ;;
+  esac
+  # shellcheck disable=SC2016 # expanded on the VM
+  logs=$(on "$addr" 'for c in ~/.volley/volleyd/first-wave/volley-hello-*; do' \
+    '[ -d "$c/.git" ] && git -C "$c" log -1 --format=%an,%ae; done' 2>>"$TRANSCRIPT")
+  printf 'check_git_identity: the scratch clones'"'"' last commits: %s\n' "$(printf '%s' "$logs" | tr '\n' ' ')" |
+    tee -a "$TRANSCRIPT"
+  [ -n "$logs" ] || fail "no test wave scratch clone to read the commit author of (~/.volley/volleyd/first-wave)"
+  while IFS= read -r line; do
+    [ -z "$line" ] || [ "$line" = "$SIM_GIT_NAME,$SIM_GIT_EMAIL" ] ||
+      fail "a scratch clone's last commit is by '$line', not $SIM_GIT_NAME <$SIM_GIT_EMAIL>"
+  done <<<"$logs"
+}
+
 # After a reboot: `volley setup --check` exits 0 within 2 minutes (the `reboot_check_ms` target),
 # its report kept as check.json for the summary.
 check_after_reboot() {

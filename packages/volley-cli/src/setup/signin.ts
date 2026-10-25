@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { SIM_GH_USER } from "volley-sim/world";
 import { loginIdentity, parseClaudeStatus } from "../peer/checks/claude";
 import { ghUser } from "../peer/checks/github";
 import { simulated } from "./first-wave";
@@ -24,6 +25,10 @@ export const GH_STATUS = ["gh", "auth", "status"] as const;
 export const GH_LOGIN = ["gh", "auth", "login", "--web", "--git-protocol", "https"] as const;
 export const GH_SETUP_GIT = ["gh", "auth", "setup-git"] as const;
 export const GH_USER = ["gh", "api", "user", "--jq", ".login"] as const;
+/** The signed-in account (its name, id and login: git's identity is derived from them). */
+export const GH_API_USER = ["gh", "api", "user"] as const;
+/** git's own verdict on whether it can commit here: non-zero exactly when a commit would die. */
+export const GIT_IDENT_PROBE = ["git", "var", "GIT_COMMITTER_IDENT"] as const;
 
 const same = (argv: readonly string[], want: readonly string[]) =>
   argv.length === want.length && want.every((w, i) => argv[i] === w);
@@ -36,21 +41,80 @@ export const SIGNIN_COMMANDS: readonly (readonly string[])[] = [
   GH_LOGIN,
   GH_SETUP_GIT,
   GH_USER,
+  GH_API_USER,
 ];
 
 export const isSigninCommand = (argv: readonly string[]) =>
   SIGNIN_COMMANDS.some((c) => same(argv, c));
 
+/** The identity setup gives git: the account's name (else its login) and its noreply address. */
+export interface GitIdentity {
+  name: string;
+  email: string;
+}
+
+const NOREPLY = /^\d{1,20}\+[A-Za-z0-9-]{1,39}@users\.noreply\.github\.com$/;
+const GIT_NAME = (v: string) =>
+  v.length >= 1 && v.length <= 100 && !/[\n\0]/.test(v) && !v.startsWith("-");
+
+/** The two writes, to git's global config (never `--replace-all`, never local or system). */
+export const gitConfigGlobalArgv = (id: GitIdentity): string[][] => [
+  ["git", "config", "--global", "user.name", id.name],
+  ["git", "config", "--global", "user.email", id.email],
+];
+
+/**
+ * git's commands this step runs (the fence's entries): the probe, and the two global writes with
+ * a plain name and GitHub's noreply address only (an arbitrary address is refused).
+ */
+export function isGitIdentityCommand(argv: readonly string[]): boolean {
+  if (same(argv, GIT_IDENT_PROBE)) return true;
+  if (argv.length !== 5 || !same(argv.slice(0, 3), ["git", "config", "--global"])) return false;
+  const v = argv[4] ?? "";
+  return (argv[3] === "user.name" && GIT_NAME(v)) || (argv[3] === "user.email" && NOREPLY.test(v));
+}
+
+/** `Name <email>` out of `git var GIT_COMMITTER_IDENT` (its timestamp and zone stripped). */
+export function identityOf(stdout: string): string | null {
+  const line = (stdout.split("\n")[0] ?? "").trim();
+  if (line === "") return null;
+  return line.replace(/\s+\d+\s+[+-]\d{4}$/, "");
+}
+
+/** git's identity from `gh api user`'s JSON; null when the account's id or login is not usable. */
+export function identityFromGhUser(json: string): GitIdentity | null {
+  let u: unknown;
+  try {
+    u = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof u !== "object" || u === null) return null;
+  const { login, id, name } = u as { login?: unknown; id?: unknown; name?: unknown };
+  if (typeof login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(login)) return null;
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id < 0) return null;
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  const identity = {
+    name: trimmed !== "" && GIT_NAME(trimmed) ? trimmed : login,
+    email: `${id}+${login}@users.noreply.github.com`,
+  };
+  return NOREPLY.test(identity.email) ? identity : null;
+}
+
 /**
  * `exec` with the sign-ins answered by fakes (`VOLLEY_SIMULATED=1`: the soak, CI): signed in
- * everywhere, a login that opens nothing. Every other command runs for real.
+ * everywhere as volley-sim's account, a login that opens nothing. Every other command runs for
+ * real: git's identity is written to the machine's global config, as it is signed in for real.
  */
 export function simulatedExec(exec: SetupExec): SetupExec {
   return async (argv, opts) => {
     if (same(argv, CLAUDE_STATUS)) {
       return { code: 0, stdout: '{"loggedIn":true,"subscriptionType":"max"}\n', stderr: "" };
     }
-    if (same(argv, GH_USER)) return { code: 0, stdout: "volley-simulated\n", stderr: "" };
+    if (same(argv, GH_USER)) return { code: 0, stdout: `${SIM_GH_USER.login}\n`, stderr: "" };
+    if (same(argv, GH_API_USER)) {
+      return { code: 0, stdout: `${JSON.stringify(SIM_GH_USER)}\n`, stderr: "" };
+    }
     if (isSigninCommand(argv)) return { code: 0, stdout: "", stderr: "" };
     return exec(argv, opts);
   };
@@ -100,6 +164,94 @@ export function withAdditionalDirectory(settings: Record<string, unknown>, dir: 
     null,
     2,
   )}\n`;
+}
+
+/** What the Sign-ins step (or `--git-identity`) finds about git's commit identity. */
+interface GitIdentityPlan {
+  found: string[];
+  rows: string[];
+  change?: Change;
+}
+
+/**
+ * git's commit identity, from the GitHub account (a commit dies "Author identity unknown" without
+ * one). Only when git cannot commit here: an identity it already has is never changed. `ghCode`:
+ * `gh auth status`'s exit code (127: no gh; non-zero: signed out, the identity read once signed in).
+ */
+async function gitIdentity(ctx: SetupContext, ghCode: number): Promise<GitIdentityPlan> {
+  const found: string[] = [];
+  const rows: string[] = [];
+  let change: Change | undefined;
+  const gitOpts = {
+    cwd: ctx.home,
+    env: { ...ctx.auth.env, HOME: ctx.home, GIT_TERMINAL_PROMPT: "0" },
+  };
+  const probe = await ctx.deps.exec(GIT_IDENT_PROBE, gitOpts);
+  const ident = probe.code === 0 ? identityOf(probe.stdout) : null;
+  if (ident !== null) rows.push(`✓ git commits as ${ident}`);
+  else {
+    const none = "git has no commit identity (user.name/user.email)";
+    found.push(none);
+    if (ghCode === 127) {
+      rows.push(
+        `${none}: set one (git config --global user.name …; … user.email …) or install gh and rerun`,
+      );
+    } else {
+      rows.push(none);
+      const write = async (id: GitIdentity) => {
+        for (const argv of gitConfigGlobalArgv(id)) {
+          const r = await ctx.deps.exec(argv, gitOpts);
+          if (r.code !== 0) {
+            throw new Error(`\`${argv.join(" ")}\` failed (exit ${r.code}): ${r.stderr.trim()}`);
+          }
+        }
+        return [`git commits as ${id.name} <${id.email}>.`];
+      };
+      const account = async () => {
+        const r = await ctx.deps.exec(GH_API_USER);
+        return r.code === 0 ? identityFromGhUser(r.stdout) : null;
+      };
+      const shown = (id: GitIdentity) =>
+        gitConfigGlobalArgv(id)
+          .map((a) =>
+            [...a.slice(0, 4), a[3] === "user.name" ? JSON.stringify(a[4]) : a[4]].join(" "),
+          )
+          .join("\n");
+      if (ghCode === 0) {
+        const id = await account();
+        if (id === null) {
+          found.push("GitHub: could not read the account (`gh api user`) to derive one from");
+        } else {
+          change = {
+            summary: `Give git a commit identity from your GitHub account: user.name ${JSON.stringify(id.name)}, user.email ${id.email} (git config --global)`,
+            detail: shown(id),
+            apply: () => write(id),
+          };
+        }
+      } else {
+        // Placed after the GitHub sign-in (the sign-ins go first): the account is read then.
+        change = {
+          summary:
+            "Give git a commit identity from your GitHub account once signed in (user.name from its name, user.email its noreply address; git config --global)",
+          detail: shown({
+            name: "<the account's name>",
+            email: "<id>+<login>@users.noreply.github.com",
+          }),
+          apply: async () => {
+            const id = (await ctx.deps.exec(GH_STATUS)).code === 0 ? await account() : null;
+            if (id === null) {
+              throw new Error(
+                "git has no commit identity and gh is not signed in: sign in (gh auth login --web), then rerun volley setup --step signin",
+              );
+            }
+            return write(id);
+          },
+        };
+      }
+    }
+  }
+
+  return { found, rows, ...(change !== undefined ? { change } : {}) };
 }
 
 export async function planSignin(ctx: SetupContext): Promise<StepPlan> {
@@ -190,6 +342,12 @@ export async function planSignin(ctx: SetupContext): Promise<StepPlan> {
     }
   }
 
+  // git's commit identity, from the GitHub account (placed after the GitHub sign-in, if any).
+  const id = await gitIdentity(ctx, gh.code);
+  plan.found.push(...id.found);
+  rows.push(...id.rows);
+  if (id.change !== undefined) plan.changes.push(id.change);
+
   // Claude Code may read the Volley checkout (an unattended coordinator start needs it).
   const repo = ctx.deps.repoRoot;
   const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");
@@ -250,6 +408,34 @@ export async function planSignin(ctx: SetupContext): Promise<StepPlan> {
       ...(again.blocked !== undefined ? [again.blocked] : []),
       ...again.changes.map((c) => `still not in place: ${c.summary}`),
     ];
+  };
+  return plan;
+}
+
+/**
+ * `volley setup --git-identity`: the Sign-ins step's git commit identity alone, no sign-in, nothing
+ * of Claude Code's (`volley machine add` runs it on a box over ssh, after the box's GitHub sign-in
+ * and before or without its Claude one). gh signed out: skipped, with the sign-in to run first.
+ */
+export async function planGitIdentity(ctx: SetupContext): Promise<StepPlan> {
+  const plan: StepPlan = { step: "signin", title: "git's commit identity", found: [], changes: [] };
+  if (ctx.auth.deps.invokingUser(ctx.auth.env) !== null) {
+    plan.skipped =
+      "running as root, and git's identity is your user's: run `volley setup --git-identity` as that user (without sudo)";
+    return plan;
+  }
+  const gh = await ctx.deps.exec(GH_STATUS);
+  const id = await gitIdentity(ctx, gh.code);
+  plan.found.push(...id.found);
+  plan.row = id.rows.join("\n");
+  if (id.change !== undefined && gh.code !== 0) {
+    plan.skipped = `GitHub is not signed in, and git's identity comes from that account: sign in (\`${GH_LOGIN.join(" ")}\`), then rerun \`volley setup --git-identity\``;
+    return plan;
+  }
+  if (id.change !== undefined) plan.changes.push(id.change);
+  plan.verify = async () => {
+    const again = await planGitIdentity({ ...ctx, check: true });
+    return again.changes.map((c) => `still not in place: ${c.summary}`);
   };
   return plan;
 }

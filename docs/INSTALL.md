@@ -73,7 +73,8 @@ README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has eve
 4. **Network**: how you reach this machine from outside your network: Tailscale (installed and
    signed in, its private name and address recorded), your own VPN's address, or none
    ([below](#reach-it-from-outside-your-network)).
-5. **Sign-ins**: Claude Code and GitHub, each in your browser when signed out.
+5. **Sign-ins**: Claude Code and GitHub, each in your browser when signed out; and, when git has
+   no commit identity here, one from your GitHub account (its name, its noreply address).
 6. **Claude Code**: your coordinator name; the volley MCP server registered at user scope with
    **no password in it** (it logs in with `coordinator.json` from the auth dir it names); the
    `/volley`, `/volley-issues` and `/wait` skills; the Volley hooks.

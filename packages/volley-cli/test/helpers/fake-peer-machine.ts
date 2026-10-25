@@ -90,6 +90,8 @@ export interface FakeMachineOptions {
    * `tailscale status --json` reports it (null: not installed; default Running).
    */
   network?: { record?: Record<string, unknown> | null; tailscale?: string | null };
+  /** git's commit identity (`git var GIT_COMMITTER_IDENT`'s `Name <email>`); null: none. */
+  gitIdentity?: string | null;
 }
 
 /** The default network record of the fake box (Tailscale, signed in). */
@@ -428,6 +430,15 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
         return {};
       }
       if (sub[0] === "rev-parse") return c?.isGit === true ? { stdout: "true\n" } : { code: 128 };
+      if (sub[0] === "var" && sub[1] === "GIT_COMMITTER_IDENT") {
+        const id =
+          opts.gitIdentity === undefined
+            ? "Octo Cat <1+octocat@users.noreply.github.com>"
+            : opts.gitIdentity;
+        return id !== null
+          ? { stdout: `${id} 1760000000 +0000\n` }
+          : { code: 128, stderr: "fatal: unable to auto-detect email address\n" };
+      }
       if (sub[0] === "remote" && sub[1] === "set-url") {
         if (c === undefined) return { code: 2 };
         c.origin = sub.at(-1) as string;
