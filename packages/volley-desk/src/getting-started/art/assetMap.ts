@@ -31,23 +31,32 @@ export function parseArtMap(raw: unknown): ArtMap {
 }
 
 let pending: Promise<ArtMap> | null = null;
+/** The map once it has arrived, so later mounts start from it instead of a vector frame. */
+let loaded: ArtMap | null = null;
 
-function loadArtMap(): Promise<ArtMap> {
+/** The asset map, fetched on the first call of the page load; later calls share it. */
+export function loadArtMap(): Promise<ArtMap> {
   pending ??= fetch(ART_MAP_URL)
     .then((r) => (r.ok ? r.json() : null))
-    .then(parseArtMap, () => ({}));
+    .then(parseArtMap, (): ArtMap => ({}))
+    .then((m) => {
+      loaded = m;
+      return m;
+    });
   return pending;
 }
 
 /** Forget the fetched map, so the next `useArtMap` fetches again. */
 export function __resetArtMapForTests(): void {
   pending = null;
+  loaded = null;
 }
 
 /** The asset map; `{}` until it arrives and whenever it cannot be read. */
 export function useArtMap(): ArtMap {
-  const [map, setMap] = useState<ArtMap>({});
+  const [map, setMap] = useState<ArtMap>(() => loaded ?? {});
   useEffect(() => {
+    if (loaded) return;
     let live = true;
     loadArtMap().then((m) => {
       if (live && Object.keys(m).length > 0) setMap(m);

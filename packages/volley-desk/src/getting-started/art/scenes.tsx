@@ -30,6 +30,7 @@ function Scene({
       className={className ? `gs-art ${className}` : "gs-art"}
       width={size}
       height={size}
+      style={size === undefined ? undefined : { width: size, height: size }}
       {...data}
     >
       <title>{SCENE_ALT[id]}</title>

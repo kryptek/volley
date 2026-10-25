@@ -15,6 +15,7 @@ export function StepArt({ scene, size, className }: SceneProps & { scene: SceneI
         className={className ? `gs-art ${className}` : "gs-art"}
         width={size}
         height={size}
+        style={size === undefined ? undefined : { width: size, height: size }}
       />
     );
   }

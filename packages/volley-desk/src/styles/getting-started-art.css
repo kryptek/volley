@@ -6,9 +6,6 @@
   aspect-ratio: 1;
   object-fit: contain;
 }
-.gs-art[width] {
-  width: auto;
-}
 
 .gs-bob {
   animation: gs-bob 2.6s ease-in-out infinite;

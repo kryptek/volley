@@ -3,7 +3,11 @@ import path from "node:path";
 import { render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SCENE_ALT, SCENE_IDS, type SceneId, StepArt } from "../src/getting-started/art";
-import { ART_MAP_URL, __resetArtMapForTests } from "../src/getting-started/art/assetMap";
+import {
+  ART_MAP_URL,
+  __resetArtMapForTests,
+  loadArtMap,
+} from "../src/getting-started/art/assetMap";
 
 const ART_DIR = path.resolve(__dirname, "../src/getting-started/art");
 
@@ -77,7 +81,22 @@ describe("StepArt scenes", () => {
     expect(svg?.getAttribute("aria-label")).toBe(SCENE_ALT[id]);
     expect(svg?.querySelector("title")?.textContent).toBe(SCENE_ALT[id]);
     expect(svg?.querySelectorAll('[data-part="otter"]')).toHaveLength(PROPS[id].otters);
-    for (const sel of PROPS[id].parts) expect(svg?.querySelector(sel), sel).not.toBeNull();
+    for (const sel of PROPS[id].parts) {
+      // The drawn hat or prop itself, not an attribute on the otter's group.
+      const part = svg?.querySelector(`${sel}:not([data-part="otter"])`);
+      expect(part, sel).not.toBeNull();
+      expect(part?.children.length, sel).toBeGreaterThan(0);
+    }
+  });
+
+  it("only the Welcome scene blinks", () => {
+    for (const id of SCENE_IDS) {
+      const { container, unmount } = render(<StepArt scene={id} />);
+      const blinks = container.querySelectorAll(".gs-blink").length;
+      if (id === "welcome") expect(blinks, id).toBeGreaterThan(0);
+      else expect(blinks, id).toBe(0);
+      unmount();
+    }
   });
 
   it("the repos box is labelled repo", () => {
@@ -101,10 +120,14 @@ describe("StepArt scenes", () => {
     const svg = container.querySelector("svg");
     expect(svg?.getAttribute("width")).toBe("96");
     expect(svg?.getAttribute("height")).toBe("96");
+    // Inline, so it beats `.gs-art { width: 100% }` in a browser.
+    expect(svg?.style.width).toBe("96px");
+    expect(svg?.style.height).toBe("96px");
     expect(svg?.classList.contains("gs-art")).toBe(true);
     expect(svg?.classList.contains("x")).toBe(true);
     rerender(<StepArt scene="machines" />);
     expect(container.querySelector("svg")?.hasAttribute("width")).toBe(false);
+    expect(container.querySelector("svg")?.style.width).toBe("");
   });
 });
 
@@ -155,6 +178,8 @@ describe("the asset map", () => {
     expect(img?.getAttribute("src")).toBe("/getting-started/repos.webp");
     expect(img?.getAttribute("alt")).toBe(SCENE_ALT.repos);
     expect(img?.getAttribute("width")).toBe("200");
+    expect(img?.style.width).toBe("200px");
+    expect(img?.style.height).toBe("200px");
     expect(img?.classList.contains("gs-art")).toBe(true);
     expect(container.querySelector('svg[data-scene="repos"]')).toBeNull();
     expect(container.querySelector('svg[data-scene="welcome"]')).not.toBeNull();
@@ -166,8 +191,9 @@ describe("the asset map", () => {
     const a = render(<StepArt scene="done" />);
     await waitFor(() => expect(a.container.querySelector("img")).not.toBeNull());
     a.unmount();
+    // The map has arrived: a later mount paints the raster at once, no vector frame first.
     const b = render(<StepArt scene="done" />);
-    await waitFor(() => expect(b.container.querySelector("img")).not.toBeNull());
+    expect(b.container.querySelector("img")).not.toBeNull();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -200,7 +226,9 @@ describe("the asset map", () => {
         ))}
       </div>,
     );
-    await new Promise((r) => setTimeout(r, 20));
+    // The failed load has settled to the empty map, so the svgs are final, not merely early.
+    await expect(loadArtMap()).resolves.toEqual({});
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
     expect(container.querySelectorAll("svg[data-scene]")).toHaveLength(SCENE_IDS.length);
     expect(container.querySelector("img")).toBeNull();
   });

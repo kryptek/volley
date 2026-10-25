@@ -361,15 +361,22 @@ function Face({
   look,
   mouth,
   sw,
+  blink,
   stagger,
-}: { look: Look; mouth: Mouth; sw: number; stagger: { animationDelay: string } | undefined }) {
+}: {
+  look: Look;
+  mouth: Mouth;
+  sw: number;
+  blink: boolean;
+  stagger: { animationDelay: string } | undefined;
+}) {
   const [px, py] = PUPIL[look];
   return (
     <>
       <ellipse cx={0} cy={-70} rx={15.5} ry={11.5} fill={P.belly} />
       <circle cx={-15} cy={-67} r={3.6} fill={P.blush} opacity={0.65} />
       <circle cx={15} cy={-67} r={3.6} fill={P.blush} opacity={0.65} />
-      <g className="gs-blink" style={stagger}>
+      <g className={blink ? "gs-blink" : undefined} style={blink ? stagger : undefined}>
         {[-9, 9].map((ex) => (
           <g key={ex}>
             <ellipse cx={ex + px} cy={-83 + py} rx={3.2} ry={3.9} fill={P.ink} />
@@ -441,7 +448,7 @@ export interface OtterProps {
   hat?: Hat;
   prop?: Prop;
   armsUp?: boolean;
-  /** Bob gently (CSS `gs-bob`); `delay` staggers the bob and the blink, in seconds. */
+  /** Bob gently and blink (CSS `gs-bob`, `gs-blink`); `delay` staggers both, in seconds. */
   bob?: boolean;
   delay?: number;
 }
@@ -469,8 +476,6 @@ export function Otter({
   return (
     <g
       data-part="otter"
-      data-hat={hat}
-      data-prop={prop}
       transform={`translate(${x} ${y}) scale(${flip ? -scale : scale} ${scale})`}
     >
       <Shadow rx={32} ry={5.5} />
@@ -503,9 +508,9 @@ export function Otter({
         ))}
         <circle cx={0} cy={-78} r={24} fill={P.body} stroke={P.ink} strokeWidth={sw} />
         <path d="M 10 -99.5 A 24 24 0 0 1 10 -56.5 A 30 30 0 0 0 10 -99.5 Z" fill={P.mid} />
-        <Face look={look} mouth={mouth} sw={sw} stagger={stagger} />
-        {hat && HATS[hat](sw)}
-        {spec?.draw(sw)}
+        <Face look={look} mouth={mouth} sw={sw} blink={bob} stagger={stagger} />
+        {hat && <g data-hat={hat}>{HATS[hat](sw)}</g>}
+        {spec && <g data-prop={prop}>{spec.draw(sw)}</g>}
         <Arm from={SHOULDER_L} to={left} sw={sw} />
         <Arm from={SHOULDER_R} to={right} sw={sw} />
       </g>
