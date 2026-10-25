@@ -592,7 +592,7 @@ describe("release stages (SPEC §4.6.19)", () => {
       expect(String(opened.data.question)).toContain("- **One go.** (#609)");
       await s.settled();
       expect((await runCli(["status", "w1"], s.env.env)).stdout).toContain(
-        "release: v0.13.3 · - (2/4 verified)",
+        "release: v0.13.3 · awaiting release_go (2/4 verified)",
       );
 
       // go, the merge refused: release_merge_failed, and release_go again with the reason.

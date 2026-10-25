@@ -170,6 +170,7 @@ import {
   RELEASE_TASK,
   ReleaseTrain,
   STAGE_STEER_REASON,
+  type ShipTarget,
   releaseView,
   releaseWaveTask,
   renderStageMd,
@@ -866,6 +867,8 @@ interface SpawnPipelineOptions {
   start?: SpawnStart;
   /** The release role's playbook stage (SPEC §4.6.19): spawned under the `_release` pseudo task. */
   stage?: PlaybookStage;
+  /** A ship stage's target (SPEC §4.6.19): its brief reads the facts at the merge commit. */
+  ship?: ShipTarget;
   files?: Record<string, string>;
   /** A merge-mode rebase step (`branch_update: merge`): the role gets the merge brief. */
   branch_update?: "merge";
@@ -9167,6 +9170,7 @@ export class Daemon {
       }
       await this.startSpawn(wave, RELEASE_TASK, "release", {
         stage: resolved,
+        ship,
         files,
         start: { ref: ship.merged_sha, detach: true },
       });

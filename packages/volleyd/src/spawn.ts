@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { flakeIssue } from "./autopilot/flake-brief";
 import { trainIssue, trainIssues } from "./autopilot/merge-train";
 import type { PlaybookStage } from "./autopilot/playbook";
-import { releaseWaveTask, stageBriefVars } from "./autopilot/release-train";
+import { type ShipTarget, releaseWaveTask, stageBriefVars } from "./autopilot/release-train";
 import {
   BriefPrefaceTooLarge,
   NO_STAGE,
@@ -160,6 +160,8 @@ export interface SpawnRequest {
    * cut from the release branch's tip; its brief is the stage's.
    */
   stage?: PlaybookStage;
+  /** A ship stage's target (the merge commit on the default branch): its brief's facts are read there. */
+  ship?: ShipTarget;
   /**
    * An implementer respawn (F6): the branch an earlier attempt of the role was cut on. When
    * origin has it, this attempt continues on it (cut from origin's copy, the same name) and its
@@ -727,7 +729,7 @@ async function launchAttempt(
     hygiene_rule: hygiene.rule,
     hygiene_contract: hygiene.contract,
     ...(req.stage !== undefined
-      ? stageBriefVars(req.stage, req.wave.release_branch, ctx.worktree)
+      ? stageBriefVars(req.stage, req.wave.release_branch, ctx.worktree, req.ship)
       : NO_STAGE),
   });
   const brief = withPreface(preface, rendered);

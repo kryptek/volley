@@ -234,11 +234,15 @@ export function stageRulesText(
   ].join("\n");
 }
 
-/** The release brief's stage placeholders (brief.ts BriefVars); `stage` already substituted. */
+/**
+ * The release brief's stage placeholders (brief.ts BriefVars); `stage` already substituted, and
+ * `ship` a ship stage's target (its facts are read at the merge commit, as stage.md says).
+ */
 export function stageBriefVars(
   stage: PlaybookStage,
   releaseBranch: string,
   worktree: string,
+  ship?: ShipTarget,
 ): {
   stage: string;
   stage_brief: string;
@@ -250,7 +254,7 @@ export function stageBriefVars(
     stage: stage.name,
     stage_brief: stage.brief.trim(),
     stage_commands: stageCommandsText(stage),
-    stage_verify: stageVerifyText(stage, releaseBranch),
+    stage_verify: stageVerifyText(stage, releaseBranch, ship),
     stage_rules: stageRulesText(stage, releaseBranch, worktree),
   };
 }
@@ -360,8 +364,11 @@ export interface ReleaseView {
   evidence: Record<string, string>;
   /** The playbook variables known now (`{{version}}`, …; `merged_sha` once merged). */
   vars: PlaybookVars;
-  /** The owner's `go` on `release_go` not yet merged or failed: who and which decision. */
-  go?: { by: string; decision_id: string };
+  /**
+   * The owner's `go` on `release_go` not yet merged or failed: who, which decision, and the
+   * release PR head that question named (the go merges that head only).
+   */
+  go?: { by: string; decision_id: string; head?: string };
   /** Why the last go did not merge (`release_merge_failed`), until the next go. */
   merge_failure?: string;
   /** Whether `release_done` is journaled. */
@@ -421,9 +428,14 @@ export function releaseView(o: {
       e.type === "decision_resolved" &&
       o.decisions[String(e.data.decision_id)]?.kind === "release_go"
     ) {
+      const head = (o.decisions[String(e.data.decision_id)] as { head?: unknown }).head;
       go =
         String(e.data.answer).trim().toLowerCase() === "go"
-          ? { by: String(e.data.by), decision_id: String(e.data.decision_id) }
+          ? {
+              by: String(e.data.by),
+              decision_id: String(e.data.decision_id),
+              ...(typeof head === "string" ? { head } : {}),
+            }
           : undefined;
       if (go !== undefined) mergeFailure = undefined;
     } else if (e.type === "release_merge_failed") {
@@ -710,7 +722,7 @@ function askRelease(v: ReleaseView): ReleaseAction {
       stages,
       ...(n > 0 ? { class: "held" } : {}),
       ...(v.train.version !== undefined ? { version: v.train.version } : {}),
-      ...(v.train.pr !== undefined ? { pr: v.train.pr.number } : {}),
+      ...(v.train.pr !== undefined ? { pr: v.train.pr.number, head: v.train.pr.head } : {}),
     },
   };
 }
@@ -737,7 +749,8 @@ function askCiFailed(v: ReleaseView, pr: { number: number; head: string }): Rele
 /** `release_done` with the go that released it (and the version). */
 const releaseDone = (v: ReleaseView, go: { by: string; decision_id: string }): ReleaseAction =>
   journal("release_done", {
-    ...go,
+    by: go.by,
+    decision_id: go.decision_id,
     ...(v.train.version !== undefined ? { version: v.train.version } : {}),
     ...(v.train.merged_sha !== undefined ? { merged_sha: v.train.merged_sha } : {}),
   });
@@ -774,6 +787,23 @@ function goStep(v: ReleaseView): ReleaseAction[] {
   if (v.go !== undefined) {
     if (pr === undefined) return [releaseDone(v, v.go)];
     if (v.merging === true) return [];
+    // The go is for the head its question named: a moved head, or a red one, drops it (asked again).
+    if (v.go.head !== undefined && v.go.head !== pr.head)
+      return [
+        journal("release_merge_failed", {
+          pr: pr.number,
+          head: pr.head,
+          reason: `the head moved from ${v.go.head.slice(0, 7)} to ${pr.head.slice(0, 7)} after release_go was asked`,
+        }),
+      ];
+    if (v.ci?.head === pr.head && v.ci.state === "red")
+      return [
+        journal("release_merge_failed", {
+          pr: pr.number,
+          head: pr.head,
+          reason: `CI is red at ${pr.head.slice(0, 7)}`,
+        }),
+      ];
     // Only at the head whose CI was read green (a moved head is read again first).
     if (v.ci?.head !== pr.head || v.ci.state !== "green") return [{ kind: "check_pr" }];
     return [{ kind: "merge", pr: pr.number, head: pr.head }];

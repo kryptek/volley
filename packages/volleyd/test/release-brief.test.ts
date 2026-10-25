@@ -96,4 +96,15 @@ describe("briefs/release.md.tmpl", () => {
     expect(brief).toContain("## Volley protocol (mandatory)");
     expect(brief).not.toMatch(/vol_register/);
   });
+  it("a ship stage's brief reads its facts at the merge commit, never on the deleted release branch", () => {
+    const ship = { default_branch: "main", merged_sha: "e".repeat(40) };
+    const brief = renderBrief(loadTemplate("release"), {
+      ...VARS,
+      ...stageBriefVars({ ...TAG, phase: "ship" }, "release/w1", "/path/to/wt", ship),
+    });
+    expect(brief).not.toContain("{{");
+    expect(brief).toContain("eeeeeee");
+    expect(brief).not.toContain("at the head of `release/w1`");
+    expect(brief).toContain("squash-merged and deleted");
+  });
 });

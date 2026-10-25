@@ -590,6 +590,59 @@ stages:
     expect(go(t, "hold")).toMatchObject([{ kind: "decide", data: { class: "held" } }]);
   });
 
+  it("release_go names the head it was asked at, and the go is for that head only", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    const acts = t.step({ kind: "advance" });
+    expect((acts[0] as Extract<ReleaseAction, { kind: "decide" }>).data).toMatchObject({
+      pr: 12,
+      head: HEAD,
+    });
+    go(t);
+    expect(t.view().go).toMatchObject({ by: "owner", head: HEAD });
+  });
+
+  it("go, then the head moves: the go is dropped (never merged), release_go asked at the new head", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    const drv = t.driver;
+    t.step({ kind: "advance" });
+    // A push to the release branch lands while release_go is open; the driver reads it after.
+    const moved = "f".repeat(40);
+    t.push("release_pr_detected", { ...PR, head: moved, moved_from: HEAD });
+    drv.ci = { head: moved, state: "green" };
+    const acts = go(t);
+    expect(kinds(acts)).toEqual(["release_merge_failed undefined"]);
+    const failed = acts[0] as Extract<ReleaseAction, { kind: "journal" }>;
+    expect(failed.event.data).toMatchObject({ pr: 12, head: moved });
+    expect(String(failed.event.data.reason)).toContain("moved");
+    const again = t.step({ kind: "advance" });
+    expect(kinds(again)).toEqual(["decide release_go undefined"]);
+    expect((again[0] as Extract<ReleaseAction, { kind: "decide" }>).data).toMatchObject({
+      head: moved,
+    });
+    // The go on the question about the new head merges it.
+    expect(go(t)).toEqual([{ kind: "merge", pr: 12, head: moved }]);
+  });
+
+  it("go, then the head's CI reads red: the go is dropped and release_pr_ci_failed is asked", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    const drv = t.driver;
+    t.step({ kind: "advance" });
+    // A restart between the go and the merge, and the head's CI re-ran red.
+    drv.ci = { head: HEAD, state: "red" };
+    expect(kinds(go(t))).toEqual(["release_merge_failed undefined"]);
+    expect(t.view().go).toBeUndefined();
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide release_pr_ci_failed undefined"]);
+    // retry reads CI afresh; green again asks release_go again (a new decision).
+    const d = Object.values(t.decisions).find((x) => x.kind === "release_pr_ci_failed");
+    if (d === undefined) throw new Error("no decision");
+    d.resolved = { answer: "retry", by: "owner", at: "2026-10-25T00:00:00.000Z" };
+    expect(t.step({ kind: "decision_resolved", decision: d })).toEqual([
+      { kind: "check_pr", fresh: true },
+    ]);
+    drv.ci = { head: HEAD, state: "green" };
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide release_go undefined"]);
+  });
+
   it("a playbook with no release PR and no ship stage: go → release_done at once (as before)", () => {
     const t = train(PLAYBOOK, STARTED);
     for (const stage of ["bump", "deploy-staging", "smoke"])

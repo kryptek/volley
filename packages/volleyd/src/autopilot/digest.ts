@@ -369,8 +369,17 @@ export function renderDigestMd(d: Digest): string {
       `  - ${f.test}: fixed by ${f.fixer}, ${count(f.prs_released, "task", "tasks")} released`,
     );
   if (d.release !== undefined) {
-    const stages = d.release.stages.map((s) => `${s.name} ${s.state}`).join(", ");
-    out.push(`- release: ${stages}`);
+    const r = d.release;
+    const stages = r.stages.map((s) => `${s.name} ${s.state}`).join(", ");
+    const facts = [
+      ...(r.pr !== undefined ? [`PR #${r.pr.number}`] : []),
+      ...(r.merged_sha !== undefined ? [`merged at ${r.merged_sha.slice(0, 7)}`] : []),
+    ];
+    const what =
+      r.version === undefined
+        ? "release"
+        : `release v${r.version}${facts.length > 0 ? ` (${facts.join(", ")})` : ""}`;
+    out.push(`- ${what}: ${stages}`);
   }
   out.push("", "## Waiting for you", "");
   if (d.waiting.length === 0) out.push("Nothing is waiting for you.");

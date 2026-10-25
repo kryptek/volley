@@ -269,10 +269,18 @@ export function formatWave(
   const cur = r?.stages.find(
     (x) => x.state === "running" || x.state === "awaiting_go" || x.state === "failed",
   );
+  // Every prepare stage settled and nothing shipping yet: the owner's go (or the PR's CI) is next.
+  const prepared =
+    r !== undefined &&
+    s.status === "releasing" &&
+    r.phase !== "ship" &&
+    r.stages.every((x) => x.phase === "ship" || x.state === "verified" || x.state === "skipped");
   const where =
     cur !== undefined
       ? `${cur.name} ${cur.state === "awaiting_go" ? "awaiting go" : cur.state}`
-      : "-";
+      : prepared
+        ? "awaiting release_go"
+        : "-";
   const release =
     r !== undefined
       ? `  release: ${r.version !== undefined ? `v${r.version} · ` : ""}${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`

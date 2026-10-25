@@ -1087,7 +1087,7 @@ tried in order; the first whose kind and condition match wins):
 
 ```text
 autopilot: on
-  plan_change, repo_untrusted, model_switch, release_go, stage_go · always · escalate owner_only · no budget
+  plan_change, repo_untrusted, model_switch, release_go, stage_go, release_pr_ci_failed · always · escalate owner_only · no budget
     owner_only: autopilot.owner_only: only the owner answers these
   spawn_failed · next_retry_at !== null (the daemon still retries) · retry now · no budget
     spawn_failed/retrying: the daemon retries with backoff; the question is informational
@@ -1320,8 +1320,10 @@ stages:
   `go` and `hold`, with each stage's evidence in `stages`); its question names the version, the
   PR and the first bullets of the changelog section on the release branch. It is owner-only
   (`autopilot.owner_only`), so it rings. A red head opens `release_pr_ci_failed` instead (`retry`
-  reads CI again, `hold` asks again; never answered automatically). **`go`** squash-merges the
-  release PR at exactly that head, deleting the release branch (`gh pr merge <n> --squash
+  reads CI again, `hold` asks again; never answered automatically: it is in
+  `autopilot.owner_only` too). **`go`** squash-merges the release PR at exactly the head
+  `release_go` named (its `head`; a head that moved since, or whose CI then reads red, drops the
+  go as `release_merge_failed` and is asked again), deleting the release branch (`gh pr merge <n> --squash
   --match-head-commit <sha> --delete-branch`, under a `ReleaseToken` only the go mints; never
   `--admin`), journals `release_merged { pr, sha }`, closes the wave's issues at once (below),
   runs the ship stages at the merge commit, and journals `release_done { by, decision_id,

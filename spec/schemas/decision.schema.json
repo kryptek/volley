@@ -136,7 +136,7 @@
             "head": {
               "type": "string",
               "pattern": "^[0-9a-f]{40}$",
-              "description": "release_pr_ci_failed: the release PR's head whose CI is red."
+              "description": "release_pr_ci_failed: the release PR's head whose CI is red. release_go: the CI-green head it asks about; a go merges that head only."
             },
             "stages": {
               "type": "array",

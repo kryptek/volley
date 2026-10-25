@@ -538,8 +538,8 @@ describe("evaluate: guards", () => {
     }
   });
 
-  it("release_go and stage_go are owner_only by default, and no rule answers them without it", () => {
-    for (const kind of ["release_go", "stage_go"] as const) {
+  it("release_go, stage_go and release_pr_ci_failed are owner_only by default, and no rule answers them without it", () => {
+    for (const kind of ["release_go", "stage_go", "release_pr_ci_failed"] as const) {
       expect(whyOf(evaluate(rec(kind, ["go", "hold"]), ctx()))).toBe("owner_only");
       const bare = ctx({ autopilot: { ...AP, owner_only: [] } });
       expect(whyOf(evaluate(rec(kind, ["go", "hold"]), bare))).toBe("no_policy");

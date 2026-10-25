@@ -138,6 +138,8 @@ export async function mergeRelease(
         return { ok: true, merge_sha: mergeSha(view.stdout) };
     } catch {}
   }
+  // `release_branch` is the base the PR merges into (notMergeable checks it): for the release PR
+  // that is the default branch.
   const target = { pr: token.pr, head: token.head, release_branch: base };
   return merged(exec, target, releaseMergeArgv(token, repo), { release: token }, cwd, repo);
 }

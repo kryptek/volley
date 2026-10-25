@@ -419,6 +419,31 @@ describe("renderDigestMd", () => {
     expect(md).toContain("- D: superseded by #99");
   });
 
+  it("the release line names the version, the release PR and its merge commit", () => {
+    const stages = [
+      { name: "bump", state: "verified" as const },
+      { name: "tag", state: "verified" as const, phase: "ship" as const },
+    ];
+    const md = renderDigestMd({
+      ...digest,
+      release: {
+        stage: null,
+        stages,
+        phase: "ship",
+        version: "0.13.3",
+        pr: { number: 12, head: "d".repeat(40) },
+        merged_sha: "e".repeat(40),
+      },
+    });
+    expect(md).toContain(
+      "- release v0.13.3 (PR #12, merged at eeeeeee): bump verified, tag verified",
+    );
+    // Before the version is known: the stages alone, as before.
+    expect(renderDigestMd({ ...digest, release: { stage: null, stages } })).toContain(
+      "- release: bump verified, tag verified",
+    );
+  });
+
   it("says none for an empty section", () => {
     const md = renderDigestMd({ ...digest, shipped: [], waiting: [], failures: [] });
     expect(md).toContain("## Shipped\n\nNothing shipped.");

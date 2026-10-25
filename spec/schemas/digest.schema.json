@@ -176,8 +176,24 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["stage", "stages"],
+          "description": "The wave state's release (spec section 4.6.19): the train's stages with their states, and once known its version, release PR and merge commit.",
           "properties": {
             "stage": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "phase": { "enum": ["prepare", "ship"] },
+            "version": { "type": "string", "minLength": 1 },
+            "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "default_branch": { "type": "string", "minLength": 1 },
+            "pr": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["number", "head"],
+              "properties": {
+                "number": { "type": "integer", "minimum": 1 },
+                "head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                "title": { "type": "string" }
+              }
+            },
+            "merged_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
             "stages": {
               "type": "array",
               "items": {
@@ -186,7 +202,10 @@
                 "required": ["name", "state"],
                 "properties": {
                   "name": { "type": "string" },
-                  "state": { "enum": ["pending", "awaiting_go", "running", "verified", "failed"] }
+                  "phase": { "const": "ship" },
+                  "state": {
+                    "enum": ["pending", "awaiting_go", "running", "verified", "failed", "skipped"]
+                  }
                 }
               }
             }
