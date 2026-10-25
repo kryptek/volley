@@ -21,6 +21,7 @@ export const REPO_DEFAULTS = {
 
 const HELP = `Usage:
   volley repo add <owner/name> [--machine <name>]... [--path <name>=<abs path>]... [--wait]
+                 [--for-wave <wave>]
                                      Add a repository to every machine (or these): each paired
                                      machine clones it (or adopts the clone at --path) and
                                      trusts it; --wait follows each machine until it is ready
@@ -36,6 +37,9 @@ Options:
   --path <name>=<abs>  add: adopt the existing clone at <abs> on paired machine <name>
   --wait               add: wait until every machine is ready or blocked (exit 1 if one is blocked)
   --wait-timeout <s>   add --wait: how long to wait (default ${REPO_DEFAULTS.wait_timeout_s})
+  --for-wave <wave>    add: the registration is for that wave only; cleaning the wave up removes
+                       it (and the clones volleyd made for it); without it the repository is
+                       yours and cleanup never removes it
   --json               list, status: the answer as JSON
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
@@ -49,6 +53,7 @@ const OPTIONS = {
   path: { type: "string", multiple: true },
   wait: { type: "boolean" },
   "wait-timeout": { type: "string" },
+  "for-wave": { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
   "broker-url": { type: "string" },
@@ -64,6 +69,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   path: ["add"],
   wait: ["add"],
   "wait-timeout": ["add"],
+  "for-wave": ["add"],
   json: ["list", "status"],
 };
 
@@ -105,6 +111,9 @@ export function realRepoDeps(): RepoDeps {
 export function repo(args: RepoArgs): Promise<ExitCode> {
   return runRepo(args, realRepoDeps());
 }
+
+/** A wave id (the id grammar volleyd checks): what `--for-wave` names. */
+export const WAVE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 /** One repository on each machine, as `repo_status` answers it. */
 interface RepoStatus {
@@ -174,10 +183,14 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
           return usage(e instanceof Error ? e.message : String(e));
         }
       }
+      const wave = v["for-wave"];
+      if (wave !== undefined && !WAVE_ID_RE.test(wave))
+        return usage(`--for-wave "${wave}" is not a wave id ([a-z0-9][a-z0-9_-]{0,62})`);
       const fields = {
         slug,
         ...machines,
         ...(Object.keys(paths).length > 0 ? { paths } : {}),
+        ...(wave !== undefined ? { wave } : {}),
       };
       const a = await deps.ask("volley repo add", "repo_add", fields, v, env, io, true);
       if (typeof a === "number") return a;

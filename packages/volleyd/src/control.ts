@@ -75,6 +75,8 @@ export type ControlOp =
   | "stop"
   // Retire an ended wave (archive.ts); also an admin op on the account-op topic.
   | "archive"
+  // Clean a wave's items on every machine (commands/cleanup.ts, SPEC §4.6.26).
+  | "cleanup"
   | "steer"
   // The Desk's Terminal popout sizes the agent's terminal (#403; hosts/ssh-tmux.ts resize).
   | "terminal_resize"

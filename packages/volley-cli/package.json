@@ -22,6 +22,7 @@
     "./machine/add": "./src/machine/add.ts",
     "./machine/laptop": "./src/machine/laptop.ts",
     "./machine/ssh": "./src/machine/ssh.ts",
+    "./peer/cleanup": "./src/peer/cleanup.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
     "./peer/repo": "./src/peer/checks/repo.ts",
     "./setup/accounts": "./src/setup/accounts.ts",

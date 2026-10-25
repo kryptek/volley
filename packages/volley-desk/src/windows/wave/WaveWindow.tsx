@@ -258,6 +258,9 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
   });
 }
 
+/** A kept item's kind as cleanup's lines name it (`release_branch` → `release branch`). */
+export const keptKind = (kind: string): string => kind.replace(/_/g, " ");
+
 /** The header chip: `autopilot on · 4 auto · 1 escalated`, or `autopilot off`. */
 export function autopilotChip(a: NonNullable<WaveStatePayload["autopilot"]>): string {
   return a.enabled
@@ -510,6 +513,11 @@ export function WaveWindow(p: WaveWindowProps) {
         </span>
       )}
       {ended && <span className="chip chip--ended">{ended}</span>}
+      {s?.cleanup && s.cleanup.task === undefined && (
+        <span className="chip chip--cleaned" title={s.cleanup.summary}>
+          cleaned
+        </span>
+      )}
       {s?.autopilot && (
         // Never ellipsized: the full sentence, or its tokens in a compact window (desk.css).
         <span
@@ -635,6 +643,17 @@ export function WaveWindow(p: WaveWindowProps) {
               compact={p.frame.maxWidth !== undefined}
             />
             <HostChips tasks={s.tasks} />
+            {s.cleanup && s.cleanup.task === undefined && s.cleanup.kept.length > 0 && (
+              <ul className="wave-kept" aria-label="Kept by cleanup">
+                {s.cleanup.kept.map((k) => (
+                  <li key={`${k.kind}:${k.host}:${k.what}`}>
+                    <span className="dim">{keptKind(k.kind)}</span>{" "}
+                    <span className="mono">{k.what}</span>
+                    {k.host !== "local" ? ` on ${k.host}` : ""}: {k.why ?? "kept"}
+                  </li>
+                ))}
+              </ul>
+            )}
             {!ended && (queue.length > 0 || trains.length > 0) && <QueueLine s={s} />}
             {s.status === "releasing" && s.release && (
               <TrainRows release={s.release} github={s.github} />

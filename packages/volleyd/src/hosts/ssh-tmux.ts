@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import { type PeerCleanupReport, parsePeerCleanupReport } from "volley-cli/peer/cleanup";
 import { normalizeOrigin } from "volley-cli/peer/repo";
 import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import type { ProbeLogin } from "../claude/usage";
@@ -8,6 +9,7 @@ import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../confi
 import { COORDINATOR_COMMAND } from "../coordinator/role";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
+  type CloneRemoveToken,
   type ConsentToken,
   type CoordinatorToken,
   FenceError,
@@ -236,6 +238,11 @@ export interface RemoteHost extends Host {
    */
   runDoctor(opts: DoctorRunOptions): Promise<DoctorReport>;
   /**
+   * `volley peer cleanup --json …` on the box (SPEC §4.6.26): null when ssh failed. Optional:
+   * a host without it gets no process, branch or clone step.
+   */
+  runCleanup?(opts: PeerCleanupOptions): Promise<PeerCleanupReport | null>;
+  /**
    * One Claude login's usage probe on the box (`volley peer doctor --json --probe-login
    * <profile>`, a prime): its `claude_logins`. Null when the box's volley has no such flag.
    */
@@ -293,7 +300,24 @@ export type RemoteRunOptions = Pick<
   | "profileRemove"
   | "signinEntry"
   | "coordinator"
+  | "cloneRemove"
 >;
+
+/** What `volley peer cleanup` is asked to do on a box (RemoteHost.runCleanup, SPEC §4.6.26). */
+export interface PeerCleanupOptions {
+  /** Worktrees whose processes it lists (stops, with `consent`). */
+  worktrees?: readonly string[];
+  /** The box's clone the `branches` are deleted in. */
+  repo?: string;
+  /** Agent branches the supervisor proved merged: deleted with `consent`. */
+  branches?: readonly string[];
+  /** Managed clones it re-checks and removes, each with its CloneRemoveToken (and `consent`). */
+  clones?: readonly CloneRemoveToken[];
+  /** Absent: a listing only. */
+  consent?: ConsentToken;
+}
+
+export type { PeerCleanupReport };
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
 const SSH_FAILED = 255;
@@ -408,6 +432,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.profileRemove !== undefined ? { profileRemove: opts.profileRemove } : {}),
         ...(opts.signinEntry !== undefined ? { signinEntry: opts.signinEntry } : {}),
         ...(opts.coordinator !== undefined ? { coordinator: opts.coordinator } : {}),
+        ...(opts.cloneRemove !== undefined ? { cloneRemove: opts.cloneRemove } : {}),
       },
     );
   }
@@ -989,6 +1014,41 @@ export class SshTmuxHost implements RemoteHost {
       throw new Error(noReportReason(this.spec.target, this.spec.volley_dir, r));
     }
     return report;
+  }
+
+  /**
+   * `volley peer cleanup --json …` on the box (SPEC §4.6.26): stop the processes under each
+   * worktree, delete each proven-merged branch, re-check and remove each managed clone; without
+   * `consent` it only lists. Null when ssh failed (the box is unreachable); throws when the box
+   * printed no report.
+   */
+  async runCleanup(opts: PeerCleanupOptions): Promise<PeerCleanupReport | null> {
+    const branches = opts.repo !== undefined ? (opts.branches ?? []) : [];
+    const args = [
+      "peer",
+      "cleanup",
+      "--json",
+      ...(opts.worktrees ?? []).flatMap((w) => ["--worktree", w]),
+      ...(opts.repo !== undefined && branches.length > 0 ? ["--repo", opts.repo] : []),
+      ...branches.flatMap((b) => ["--branch", b]),
+      ...(opts.consent !== undefined
+        ? (opts.clones ?? []).flatMap((c) => ["--clone", c.path])
+        : []),
+      ...(opts.consent !== undefined ? ["--yes"] : []),
+    ];
+    const r = await this.run([{ argv: remoteVolleyArgv(this.spec.volley_dir, args) }], {
+      timeoutMs: DAEMON_DEFAULTS.remote_exec_timeout_ms,
+      ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
+      ...(opts.clones !== undefined && opts.clones.length > 0 ? { cloneRemove: opts.clones } : {}),
+    }).catch(this.noResult("peer cleanup"));
+    if (r === null || transportFailed(r)) return null;
+    try {
+      return parsePeerCleanupReport(r.stdout);
+    } catch {
+      throw new Error(
+        `volley peer cleanup on ${this.spec.target}: ${r.stderr.trim() || `exit ${r.code}`}`,
+      );
+    }
   }
 
   /**

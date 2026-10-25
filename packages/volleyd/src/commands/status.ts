@@ -250,6 +250,8 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  // The last cleanup run (SPEC §4.6.26), under hygiene: absent until the wave was cleaned.
+  const cleanup = s.cleanup !== undefined ? `  ${formatCleanup(s.cleanup)}\n` : "";
   const ci = s.ci_mode !== undefined ? `  ${formatCiMode(s)}\n` : "";
   const github = s.github !== undefined ? `  github: ${s.github.slug}\n` : "";
   // What autopilot did in the wave (absent: a state from before autopilot).
@@ -332,6 +334,7 @@ export function formatWave(
     autopilot +
     preface +
     hygiene +
+    cleanup +
     ci +
     github +
     rows.join("") +
@@ -374,6 +377,11 @@ export function formatCiMode(s: WaveState): string {
   if (s.ci_mode === "required")
     return `ci: required (${(s.ci_required_checks ?? []).join(", ") || "no check named on the branch"})`;
   return `ci: workflows (${typeof s.ci_workflows === "number" ? s.ci_workflows : "not read"})`;
+}
+
+/** `cleanup: cleaned w1: 3 worktrees, 2 sessions; kept 1`: the wave's last cleanup run. Pure. */
+export function formatCleanup(c: NonNullable<WaveState["cleanup"]>): string {
+  return `cleanup: ${c.summary}`;
 }
 
 /**

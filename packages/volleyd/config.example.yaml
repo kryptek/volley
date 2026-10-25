@@ -125,6 +125,10 @@
 # retire_close_session: true     # a retire also ends the agent's session: closes its workspace and
 #                                # stops its claude process (agent_session_closed); false: finished
 #                                # sessions stay open for inspection (README "Retire and cleanup")
+# cleanup_on_end: true          # the daemon cleans a task's worktrees, sessions, processes and merged
+#                                # branch once it ends, and the whole wave's (logins, --for-wave
+#                                # registrations, accounts, managed clones) once the wave ended;
+#                                # false: only `volleyd cleanup` does (README "Retire and cleanup")
 # placement:
 #   nudge_on_merge: files        # when a wave's PR merges, steer its running implementers once:
 #                                # files (their task's files hints overlap the PR's), all, or off

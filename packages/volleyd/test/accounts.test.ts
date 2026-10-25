@@ -230,3 +230,44 @@ describe("deskRefusal (a Desk login's Needs-you answers, SPEC §4.6.18)", () => 
     expect([...DESK_OPS].sort()).toEqual(["hold", "inbox_answer", "release", "resolve"]);
   });
 });
+
+describe("account_create { wave } (#612 D5)", () => {
+  const withAdd = () =>
+    auth().on(["volley", "auth", "add"], (argv) => ({
+      stdout: JSON.stringify({ username: argv[3], password: "p", role: "admin" }),
+    }));
+  const isWave = (id: string) => id === "w1";
+
+  it("journals the wave an account was made for, and never passes it to volley auth add", async () => {
+    const exec = withAdd();
+    const r = await accountOp(
+      exec.exec,
+      "admin-1",
+      { op: "account_create", name: "demo-admin", role: "admin", wave: "w1", reply_key: jwk },
+      undefined,
+      undefined,
+      isWave,
+    );
+    expect(r.reply).toMatchObject({ ok: true });
+    expect(r.event).toEqual({
+      type: "account_created",
+      data: { by: "admin-1", name: "demo-admin", role: "admin", wave: "w1" },
+    });
+    expect(exec.argvs(["volley", "auth", "add"]).flat()).not.toContain("--for-wave");
+  });
+
+  it("refuses an id that is no wave id (or an archived wave's), at `wave`", async () => {
+    const exec = withAdd();
+    const r = await accountOp(
+      exec.exec,
+      "admin-1",
+      { op: "account_create", name: "demo-admin", role: "admin", wave: "nope", reply_key: jwk },
+      undefined,
+      undefined,
+      isWave,
+    );
+    expect(r.reply).toMatchObject({ ok: false });
+    expect(r.reply.error).toMatch(/^wave/);
+    expect(exec.argvs(["volley", "auth", "add"])).toEqual([]);
+  });
+});

@@ -803,7 +803,8 @@ describe("daemon: volleyd run on a running wave, volleyd diff", () => {
     const events = daemon.journalEvents("w-plan");
     expect(
       events
-        .filter((e) => e.task === "T3")
+        // The cancelled task's own cleanup run (#612) may follow it.
+        .filter((e) => e.task === "T3" && e.type !== "wave_cleaned")
         .map((e) => e.type)
         .slice(-3),
     ).toEqual(["decision_resolved", "steering_sent", "task_cancelled"]);
