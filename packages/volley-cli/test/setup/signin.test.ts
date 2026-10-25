@@ -14,6 +14,7 @@ import {
   identityFromGhUser,
   identityOf,
   maskLogin,
+  planGitIdentity,
   planSignin,
   simulatedExec,
 } from "../../src/setup/signin";
@@ -335,6 +336,45 @@ describe("the Sign-ins step", () => {
       const plan = await planSignin({ ...m.ctx, check: true });
       expect(plan.changes.map((c) => c.summary)).toContain(SUMMARY);
       expect(gitConfigs()).toEqual([]);
+    });
+  });
+
+  describe("--git-identity (planGitIdentity): the identity alone (#595)", () => {
+    it("Claude Code signed out: only the identity's change, no sign-in, nothing of Claude Code's", async () => {
+      m.git.identity = null;
+      m.claude.signedIn = false;
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.skipped).toBeUndefined();
+      expect(plan.changes.map((c) => c.summary)).toEqual([
+        'Give git a commit identity from your GitHub account: user.name "Octo Volley", user.email 1+octo-volley@users.noreply.github.com (git config --global)',
+      ]);
+      expect(m.execCalls.some((a) => a[0] === "claude")).toBe(false);
+      await plan.changes[0]?.apply();
+      expect(m.git.identity).toBe(OCTO_IDENTITY);
+      expect((await plan.verify?.()) ?? []).toEqual([]);
+      expect(existsSync(m.settingsFile)).toBe(false);
+    });
+
+    it("Claude Code not installed: not blocked, the identity all the same", async () => {
+      m.git.identity = null;
+      m.claude.installed = false;
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.blocked).toBeUndefined();
+      expect(plan.changes).toHaveLength(1);
+    });
+
+    it("gh signed out: skipped with the sign-in to run first, nothing applied", async () => {
+      m.git.identity = null;
+      m.gh.signedIn = false;
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.skipped).toContain("gh auth login --web");
+      expect(plan.changes).toEqual([]);
+    });
+
+    it("present: nothing to change, the ✓ row", async () => {
+      const plan = await planGitIdentity(m.ctx);
+      expect(plan.changes).toEqual([]);
+      expect(plan.row).toBe(`✓ git commits as ${OCTO_IDENTITY}`);
     });
   });
 

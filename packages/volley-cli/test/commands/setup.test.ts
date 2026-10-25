@@ -17,6 +17,7 @@ import {
   lanAddress,
   setup,
 } from "../../src/commands/setup";
+import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { LAN_QUESTION } from "../../src/setup/broker";
 import { readSetupInstall } from "../../src/setup/journal";
@@ -24,7 +25,13 @@ import { NETWORK_QUESTION } from "../../src/setup/network";
 import { setupFence } from "../../src/setup/step";
 import { CMUX_CHECK_SCRIPT } from "../../src/setup/terminal";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
-import { ANONYMOUS_CONFIG, type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
+import {
+  ANONYMOUS_CONFIG,
+  type FakeMachine,
+  NOW,
+  OCTO_IDENTITY,
+  fakeMachine,
+} from "../helpers/setup-machine";
 import { tempDir } from "../helpers/tmp";
 
 /** Commands that only read state. */
@@ -951,6 +958,27 @@ describe("volley setup", () => {
       expect(r.stdout.match(/already done/g)).toHaveLength(5);
       expect(m.questions).toEqual([]);
       expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
+    });
+
+    it("--git-identity: git's identity alone, with Claude Code signed out and on a terminal (#595)", async () => {
+      m.git.identity = null;
+      m.claude.signedIn = false;
+      const r = await run(["--peer", "--yes", "--git-identity"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("git's commit identity");
+      expect(r.stdout).not.toContain("[2/5]");
+      expect(m.git.identity).toBe(OCTO_IDENTITY);
+      // No sign-in ran, Claude Code's settings untouched.
+      expect(m.execCalls.filter((a) => a[1] === "auth" && a[2] === "login")).toEqual([]);
+      expect(m.claude.signedIn).toBe(false);
+      expect(existsSync(m.settingsFile)).toBe(false);
+    });
+
+    it("--git-identity takes no other --step", async () => {
+      const r = await run(["--peer", "--git-identity", "--step", "network"]);
+      expect(r.code).toBe(EXIT.USAGE);
+      expect(r.stderr).toContain("--git-identity is part of the Sign-ins step: no other --step");
     });
 
     it("--check reports the peer steps only", async () => {

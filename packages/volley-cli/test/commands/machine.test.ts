@@ -51,7 +51,9 @@ const VOLLEY_STUB = `#!/bin/bash
 printf 'volley %s\\n' "$*" >>"$STUB_STATE/calls.log"
 case "$1" in
   --version) cat "$STUB_STATE/volley-version" ;;
-  setup) echo "volley setup --peer: this machine joins a supervisor's fleet"; echo "  ✓ already done" ;;
+  setup)
+    case " $* " in *" --git-identity "*) touch "$STUB_STATE/git-id" ;; esac
+    echo "volley setup --peer: this machine joins a supervisor's fleet"; echo "  ✓ already done" ;;
   peer)
     case "$2" in
       join)
@@ -66,7 +68,8 @@ case "$1" in
       doctor)
         gh=out; [ -f "$STUB_STATE/gh-in" ] && gh=in
         cl=out; [ -f "$STUB_STATE/claude-in" ] && cl=in
-        cat "$STUB_STATE/doctor-$gh-$cl.json"
+        id=out; [ -f "$STUB_STATE/git-id" ] && id=in
+        cat "$STUB_STATE/doctor-$gh-$cl-$id.json"
         ;;
     esac
     ;;
@@ -94,6 +97,8 @@ interface BoxOptions {
   tools?: string[];
   ghIn?: boolean;
   claudeIn?: boolean;
+  /** git has a commit identity on the box (default true). */
+  gitIdentity?: boolean;
   /** What else the doctor finds (a missing tool, say). */
   doctor?: FakeMachineOptions;
   hubPlatform?: NodeJS.Platform;
@@ -146,19 +151,21 @@ exit 0`
   writeFileSync(join(state, "volley-stub"), VOLLEY_STUB);
   for (const gh of [true, false]) {
     for (const cl of [true, false]) {
-      const r = await report({
-        ...o.doctor,
-        gh: { signedIn: gh },
-        ...(cl ? {} : { claudeStatus: { loggedIn: false }, claudeCode: 1 }),
-      });
-      writeFileSync(
-        join(state, `doctor-${gh ? "in" : "out"}-${cl ? "in" : "out"}.json`),
-        JSON.stringify(r),
-      );
+      for (const id of [true, false]) {
+        const r = await report({
+          ...o.doctor,
+          gh: { signedIn: gh },
+          ...(cl ? {} : { claudeStatus: { loggedIn: false }, claudeCode: 1 }),
+          ...(id ? {} : { gitIdentity: null }),
+        });
+        const io = (b: boolean) => (b ? "in" : "out");
+        writeFileSync(join(state, `doctor-${io(gh)}-${io(cl)}-${io(id)}.json`), JSON.stringify(r));
+      }
     }
   }
   if (o.ghIn !== false) writeFileSync(join(state, "gh-in"), "");
   if (o.claudeIn !== false) writeFileSync(join(state, "claude-in"), "");
+  if (o.gitIdentity !== false) writeFileSync(join(state, "git-id"), "");
   mkdirSync(join(hubHome, ".ssh"), { recursive: true });
   if (o.hubKey !== false) writeFileSync(join(hubHome, ".ssh", "id_ed25519.pub"), `${HUB_KEY}\n`);
   const authorizedOnBox = join(boxHome, ".ssh", "authorized_keys");
@@ -435,9 +442,10 @@ describe("volley machine add (#462)", () => {
     expect(tty).toHaveLength(2);
     expect(tty[0]?.argv.slice(0, 5)).toEqual(["ssh", "-t", "-o", "ConnectTimeout=10", TARGET]);
     expect(tty[0]?.argv[5]).toContain(
-      "gh auth login --web --git-protocol https && gh auth setup-git && volley setup --peer --yes --step signin",
+      "gh auth login --web --git-protocol https && gh auth setup-git",
     );
-    expect(tty[0]?.argv[5]).toMatch(/&& volley setup --peer --yes --step signin'?$/);
+    // The box's Claude is signed in by volleyd's remote sign-in, never by setup there.
+    expect(tty[0]?.argv[5]).not.toContain("volley setup");
     expect(tty[1]?.argv).toEqual([
       ...VOLLEY_ARGV,
       "claude",
@@ -450,6 +458,72 @@ describe("volley machine add (#462)", () => {
     expect(box.boxCalls()).toContain("gh auth login --web --git-protocol https");
     expect(r.stdout).toMatch(/^ {2}gh +✓ signed in/m);
     expect(r.stdout).toMatch(/^ {2}claude +✓ signed in/m);
+  });
+
+  describe("git's commit identity on the box", () => {
+    const IDENTITY = "volley setup --peer --yes --git-identity";
+    const setups = () => box.boxCalls().filter((c) => c.startsWith("volley setup"));
+
+    it("none, both signed out: GitHub over ssh -t, then the identity alone over BatchMode, before Claude's", async () => {
+      box = await fakeBox({ keyed: true, ghIn: false, claudeIn: false, gitIdentity: false });
+      const r = await add(box);
+      expect(r.code).toBe(0);
+      expect(setups()).toEqual(["volley setup --peer --yes", IDENTITY]);
+      const i = box.calls.findIndex((c) => c.input?.includes(IDENTITY) === true);
+      expect(box.calls[i]?.argv).toEqual(batchArgv(TARGET));
+      expect(box.calls[i]?.tty).toBeUndefined();
+      // No setup ran Claude's sign-in on the box.
+      expect(box.calls.filter((c) => c.tty === true)).toHaveLength(2);
+      expect(r.stdout).toContain(
+        `→ git: a commit identity from the GitHub account (${IDENTITY} on box)`,
+      );
+      expect(r.stdout).not.toContain("✗ git's commit identity");
+    });
+
+    it("none, GitHub signed in already: the identity all the same", async () => {
+      box = await fakeBox({ keyed: true, claudeIn: false, gitIdentity: false });
+      const r = await add(box);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("✓ GitHub is signed in");
+      expect(setups()).toContain(IDENTITY);
+    });
+
+    it("none, both signed in: the identity all the same", async () => {
+      box = await fakeBox({ keyed: true, gitIdentity: false });
+      const r = await add(box);
+      expect(r.code).toBe(0);
+      expect(setups()).toContain(IDENTITY);
+    });
+
+    it("none, --no-signin with GitHub signed out: names the command, runs nothing", async () => {
+      box = await fakeBox({ keyed: true, ghIn: false, gitIdentity: false });
+      const r = await add(box, ["--no-signin"]);
+      expect(setups()).not.toContain(IDENTITY);
+      expect(r.stdout).toContain(
+        `– git's commit identity: once GitHub is signed in, \`${IDENTITY}\` on box`,
+      );
+    });
+
+    it("present: not run", async () => {
+      box = await fakeBox({ keyed: true, ghIn: false, claudeIn: false });
+      const r = await add(box);
+      expect(r.code).toBe(0);
+      expect(setups()).not.toContain(IDENTITY);
+    });
+
+    it("a failed run is reported as git's identity, not as the GitHub sign-in", async () => {
+      box = await fakeBox({ keyed: true, gitIdentity: false });
+      writeFileSync(
+        join(box.state, "volley-stub"),
+        VOLLEY_STUB.replace(
+          "  setup)\n",
+          '  setup)\n    case " $* " in *" --git-identity "*) exit 3 ;; esac\n',
+        ),
+      );
+      const r = await add(box);
+      expect(r.stdout).toContain("✗ git's commit identity was not set (exit 3)");
+      expect(r.stdout).not.toContain("GitHub sign-in did not finish");
+    });
   });
 
   it("--no-signin defers both sign-ins", async () => {

@@ -270,12 +270,16 @@ linux_inside() {
     "Volley Sim <1+volley-sim@users.noreply.github.com> "*) ;;
     *) fail "git does not commit as the simulated account after setup: '$ident'" ;;
   esac
+  clones=0
   for c in "$(volleyd_home)"/first-wave/volley-hello-*; do
     [ -d "$c/.git" ] || continue
+    clones=$((clones + 1))
     author=$(git -C "$c" log -1 --format=%an,%ae)
     [ "$author" = "Volley Sim,1+volley-sim@users.noreply.github.com" ] ||
       fail "the scratch clone $c's last commit is by '$author'"
   done
+  [ "$clones" -gt 0 ] ||
+    fail "no test wave scratch clone to read the commit author of ($(volleyd_home)/first-wave)"
   keep_metrics
   common_checks "$label" "$total_ms"
 
