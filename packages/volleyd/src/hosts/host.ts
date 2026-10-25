@@ -1,5 +1,5 @@
 import type { ExecFn } from "../exec";
-import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
+import type { ConsentToken, CoordinatorToken, FenceOptions, LaunchToken } from "../fence";
 import type { LocalTerminal } from "../types";
 
 /**
@@ -59,6 +59,11 @@ export interface LaunchSpec {
   launch?: LaunchToken;
   /** The terminal's size at launch (`tmux_cols` × `tmux_rows`); hosts that cannot size ignore it. */
   size?: TermSize;
+  /**
+   * The coordinator role (SPEC §4.6.25): `command` is `bash .volley/coordinator.sh`, sealed by this
+   * token, and `name` is its session (`volley-coordinator-<name>`), taken as it is. tmux hosts only.
+   */
+  coordinator?: CoordinatorToken;
 }
 
 /** A terminal's size in character cells. */

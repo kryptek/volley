@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { SIM_BIN, WORLD_ENTRIES } from "../src/env";
 import {
+  SERVE_FILE,
   SIM_ADDRESS,
   SIM_LOGIN_URL,
   TAILSCALE_VERSION,
@@ -42,7 +43,30 @@ describe("the fake tailscale", () => {
     expect(WORLD_ENTRIES).toContain(UP_MARKER);
   });
 
-  it("refuses funnel, serve and anything else, recording it in unknown.jsonl", () => {
+  it("serve: --bg adds a loopback target, status --json reports it, --https=<port> off removes it", () => {
+    expect(ts(["serve", "status", "--json"]).stdout).toBe("{}\n");
+    expect(ts(["serve", "--bg", "--https=443", "http://127.0.0.1:5199"]).code).toBe(0);
+    expect(ts(["serve", "--bg", "--https=8443", "http://127.0.0.1:9001"]).code).toBe(0);
+    const s = JSON.parse(ts(["serve", "status", "--json"]).stdout) as {
+      Web: Record<string, { Handlers: Record<string, { Proxy: string }> }>;
+    };
+    expect(s.Web["sim-machine.example.ts.net:443"]?.Handlers["/"]?.Proxy).toBe(
+      "http://127.0.0.1:5199",
+    );
+    expect(s.Web["sim-machine.example.ts.net:8443"]?.Handlers["/"]?.Proxy).toBe(
+      "http://127.0.0.1:9001",
+    );
+    expect(ts(["serve", "--https=443", "off"]).code).toBe(0);
+    expect(Object.keys(JSON.parse(ts(["serve", "status", "--json"]).stdout).Web)).toEqual([
+      "sim-machine.example.ts.net:8443",
+    ]);
+    expect(JSON.parse(readFileSync(join(home, SERVE_FILE), "utf-8"))).toEqual({
+      "8443": "http://127.0.0.1:9001",
+    });
+    expect(WORLD_ENTRIES).toContain(SERVE_FILE);
+  });
+
+  it("refuses funnel, any other serve and anything else, recording it in unknown.jsonl", () => {
     for (const argv of [
       ["funnel", "443"],
       ["serve", "5199"],

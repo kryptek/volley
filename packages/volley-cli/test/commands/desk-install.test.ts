@@ -143,6 +143,134 @@ describe("volley desk install | uninstall", () => {
     });
   });
 
+  describe("--tailscale: the Desk on the private network", () => {
+    const NAME = "studio.example.ts.net";
+    const SERVES = [
+      ["serve", "--bg", "--https=443", "http://127.0.0.1:5199"],
+      ["serve", "--bg", "--https=8443", "http://127.0.0.1:9001"],
+    ];
+    const roles = () => join(m.ctx.volleydHome, "roles.json");
+    const rolesRecord = (url: string) => ({
+      broker: {
+        machine: "studio",
+        address: { ssh: null, mqtt_port: 1883, ws_port: 9001 },
+        lan: true,
+      },
+      supervisor: { machine: "studio" },
+      desk: { machine: "studio", url },
+      version: 3,
+      updated_at: NOW,
+      updated_by: "volleyd-defaults",
+    });
+    /** A machine whose Network step recorded Tailscale (and volleyd's roles record). */
+    const onTailnet = (platform: NodeJS.Platform) => {
+      m = fakeMachine(fake, tempDir("volley-desk-install-ts-"), { platform });
+      m.tailscale.installed = true;
+      m.tailscale.state = "Running";
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(
+        join(m.ctx.volleydHome, "setup.json"),
+        JSON.stringify({ network: { kind: "tailscale", name: NAME, address: "100.64.0.2" } }),
+      );
+      writeFileSync(roles(), JSON.stringify(rolesRecord("http://desk.example:5199")));
+    };
+
+    it("configures the two serves under sudo (Linux), writes --ws-url, records the private address", async () => {
+      onTailnet("linux");
+      const r = await run(["install", "--tailscale"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      for (const s of SERVES) expect(m.execCalls).toContainEqual(["sudo", "tailscale", ...s]);
+      expect(m.execCalls.some((a) => a.includes("funnel") || a.includes("reset"))).toBe(false);
+      expect(readFileSync(unit(), "utf-8")).toMatch(
+        new RegExp(
+          `^ExecStart=.* desk serve --host 0\\.0\\.0\\.0 --port 5199 --ws-url wss://${NAME}:8443$`,
+          "m",
+        ),
+      );
+      expect(record()).toMatchObject({
+        desk_port: 5199,
+        desk_private_url: `https://${NAME}`,
+        network: { kind: "tailscale", name: NAME },
+      });
+      const rr = JSON.parse(readFileSync(roles(), "utf-8"));
+      expect(rr.desk).toEqual({
+        machine: "studio",
+        url: `https://${NAME}`,
+        lan_url: "http://desk.example:5199",
+      });
+      expect(rr.version).toBe(4);
+      expect(r.stdout).toContain(`on your private network at https://${NAME}`);
+      // A second run (with or without the flag) changes nothing and keeps the serve.
+      const calls = m.execCalls.length;
+      const again = await run(["install"]);
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain("already installed");
+      expect(
+        m.execCalls
+          .slice(calls)
+          .every(
+            (a) => READ_ONLY(a) || a.join(" ").match(/^tailscale (version|serve status --json)$/),
+          ),
+      ).toBe(true);
+      expect(record().desk_private_url).toBe(`https://${NAME}`);
+    });
+
+    it("runs serve without sudo on macOS", async () => {
+      onTailnet("darwin");
+      expect((await run(["install", "--tailscale"])).code).toBe(0);
+      for (const s of SERVES) expect(m.execCalls).toContainEqual(["tailscale", ...s]);
+      expect(m.execCalls.some((a) => a[0] === "sudo")).toBe(false);
+    });
+
+    it("without a Tailscale record it refuses with the volley setup --network tailscale line", async () => {
+      m = fakeMachine(fake, tempDir("volley-desk-install-ts-"), { platform: "linux" });
+      const r = await run(["install", "--tailscale"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("run `volley setup --network tailscale` first");
+      expect(m.execCalls.some((a) => a.includes("serve"))).toBe(false);
+      expect(existsSync(unit())).toBe(false);
+    });
+
+    it("refuses --tailscale together with a broker on another machine (no broker behind 8443 here)", async () => {
+      onTailnet("linux");
+      const r = await run(["install", "--tailscale", "--broker-host", "box-a"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("broker on box-a");
+      expect(m.execCalls.some((a) => a.includes("serve") && a.includes("--bg"))).toBe(false);
+      expect(existsSync(unit())).toBe(false);
+    });
+
+    it("never replaces the owner's own serve on 443", async () => {
+      onTailnet("linux");
+      m.tailscale.serves.set(443, "http://127.0.0.1:3000");
+      const r = await run(["install", "--tailscale"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("already serves http://127.0.0.1:3000");
+      expect(m.tailscale.serves.get(443)).toBe("http://127.0.0.1:3000");
+    });
+
+    it("uninstall takes off the two serves it added and nothing else", async () => {
+      onTailnet("linux");
+      m.tailscale.serves.set(10000, "http://127.0.0.1:8080");
+      expect((await run(["install", "--tailscale"])).code).toBe(0);
+      const calls = m.execCalls.length;
+      const r = await run(["uninstall"]);
+      expect(r.code).toBe(0);
+      const offs = m.execCalls.slice(calls).filter((a) => a.includes("serve") && a.includes("off"));
+      expect(offs).toEqual([
+        ["sudo", "tailscale", "serve", "--https=443", "off"],
+        ["sudo", "tailscale", "serve", "--https=8443", "off"],
+      ]);
+      expect(m.tailscale.serves).toEqual(new Map([[10000, "http://127.0.0.1:8080"]]));
+      expect(record().desk_private_url).toBeUndefined();
+      expect(JSON.parse(readFileSync(roles(), "utf-8")).desk).toEqual({
+        machine: "studio",
+        url: "http://desk.example:5199",
+      });
+    });
+  });
+
   describe("macOS (launchd)", () => {
     beforeEach(() => {
       m = fakeMachine(fake, tempDir("volley-desk-install-mac-"), { platform: "darwin" });

@@ -72,7 +72,13 @@
                   "type": "string",
                   "format": "uri",
                   "pattern": "^https?://[^#?]*$",
-                  "description": "The address browsers and phones open the Desk at."
+                  "description": "The address browsers and phones open the Desk at: its private HTTPS address when it is served on the private network, else its LAN address."
+                },
+                "lan_url": {
+                  "type": "string",
+                  "format": "uri",
+                  "pattern": "^https?://[^#?]*$",
+                  "description": "The Desk's LAN address, kept when url is its private HTTPS address (volley desk install --tailscale)."
                 }
               }
             },

@@ -425,6 +425,116 @@
 }
 .gs-add .m-add-form {
   margin-top: 8px;
+
+/* ------------------------------------------------------- repos and people */
+.gs-ok {
+  margin: 0;
+  color: var(--ok-text);
+  font-size: 13px;
+}
+.gs-status-line {
+  margin: 0 0 4px;
+}
+.gs-card > .dim {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.gs-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.gs-repo-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.gs-repo-form .ny-actions {
+  justify-content: flex-start;
+}
+.gs-folder,
+.gs-invite {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+.gs-grow {
+  flex: 1;
+  min-width: 200px;
+}
+.gs-repos {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+.gs-repos li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+.gs-people {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.gs-people th {
+  padding: 0 8px 6px 0;
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--dim);
+}
+.gs-people td {
+  padding: 7px 8px 7px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.gs-people-pending td {
+  color: var(--mute);
+}
+.gs-role {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--mute);
+  white-space: nowrap;
+}
+.gs-roles {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.gs-role-choice {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.gs-invite-link {
+  margin-top: 12px;
+}
+.gs-invite-link .s-hint {
+  margin: 6px 0 0;
+}
+.gs-invite-failed {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+.gs-invite-failed p {
+  margin: 0;
 }
 
 /* ----------------------------------------------------------------- phone */

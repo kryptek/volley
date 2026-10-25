@@ -7,10 +7,16 @@ import { type AuthContext, volleydHome } from "../auth/context";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { parseBrokerHost } from "../setup/desk-build";
-import { recordDeskInstall } from "../setup/journal";
+import {
+  forgetDeskPrivateUrl,
+  readDeskPort,
+  readDeskPrivateUrl,
+  recordDeskInstall,
+} from "../setup/journal";
 import { unloadLaunchd } from "../setup/launchd";
 import { DESK_LABEL, planDeskInstall } from "../setup/services";
 import { type SetupContext, type SetupDeps, fencedExec, setupFence } from "../setup/step";
+import { removeDeskServes } from "../setup/tailscale-serve";
 import { defaultAuthDir } from "./auth";
 
 /**
@@ -22,6 +28,12 @@ import { defaultAuthDir } from "./auth";
  * setup.json, so a later `volley setup` keeps them. Idempotent. `uninstall` stops and removes
  * the service and keeps the build. `check` is the health check the target runs on itself
  * (volleyd makes no http calls): `/` answers 200 and `/version.json` is the version.
+ *
+ * `install --tailscale` also serves the Desk on the private network (tailscale-serve.ts): the
+ * two loopback-only `tailscale serve` targets, `--ws-url wss://<name>:8443` on the service, and
+ * the private address in setup.json (`desk_private_url`) and the roles record. It needs the
+ * Network step's Tailscale record. A later install without the flag keeps a recorded one;
+ * `uninstall` takes the two serves off (nothing else).
  */
 
 export interface DeskInstallArgs {
@@ -47,7 +59,7 @@ async function deskContext(
   env: Record<string, string | undefined>,
   io: IO,
   given: SetupDeps | undefined,
-  desk: { port: number; brokerHost: string | null; root?: string },
+  desk: { port: number; brokerHost: string | null; root?: string; serve?: boolean },
 ): Promise<SetupContext> {
   const real = given ?? (await import("./setup")).realSetupDeps(env);
   const repoRoot = desk.root ?? real.repoRoot;
@@ -76,10 +88,11 @@ async function deskContext(
     deskHost: "0.0.0.0",
     deskPort: desk.port,
     brokerHost: desk.brokerHost,
+    ...(desk.serve !== undefined ? { deskServe: desk.serve } : {}),
   };
 }
 
-/** `volley desk install [--port <n>] [--broker-host <host>] [--root <checkout>]`. */
+/** `volley desk install [--port <n>] [--broker-host <host>] [--root <checkout>] [--tailscale]`. */
 export async function deskInstall({
   argv,
   env,
@@ -94,6 +107,7 @@ export async function deskInstall({
         port: { type: "string" },
         "broker-host": { type: "string" },
         root: { type: "string" },
+        tailscale: { type: "boolean" },
       },
       strict: true,
       allowPositionals: false,
@@ -127,6 +141,7 @@ export async function deskInstall({
     port: p,
     brokerHost,
     ...(root !== undefined ? { root } : {}),
+    serve: values.tailscale === true || readDeskPrivateUrl(volleydHome(env)) !== null,
   });
   if (ctx.deps.platform !== "darwin" && ctx.deps.platform !== "linux") {
     io.stderr(
@@ -149,9 +164,10 @@ export async function deskInstall({
       return EXIT.ERROR;
     }
   }
+  const at = `0.0.0.0:${p}${ctx.deskPrivateUrl != null ? ` and on your private network at ${ctx.deskPrivateUrl}` : ""}`;
   if (plan.changes.length === 0) {
     recordDeskInstall(ctx, { port: p, brokerHost });
-    io.stdout(`The Desk is already installed on 0.0.0.0:${p}.\n`);
+    io.stdout(`The Desk is already installed on ${at}.\n`);
     return EXIT.OK;
   }
   const left = (await plan.verify?.()) ?? [];
@@ -160,7 +176,7 @@ export async function deskInstall({
     return EXIT.ERROR;
   }
   recordDeskInstall(ctx, { port: p, brokerHost });
-  io.stdout(`Installed the Desk on 0.0.0.0:${p}.\n`);
+  io.stdout(`Installed the Desk on ${at}.\n`);
   return EXIT.OK;
 }
 
@@ -175,8 +191,23 @@ export async function deskUninstall({
     io.stderr(`volley desk uninstall: takes no arguments (got ${argv.join(" ")})\n`);
     return EXIT.USAGE;
   }
-  const ctx = await deskContext(env, io, setupDeps, { port: 0, brokerHost: null });
+  const home = volleydHome(env);
+  const { DESK_PORT } = await import("./desk-serve");
+  const ctx = await deskContext(env, io, setupDeps, {
+    port: readDeskPort(home) ?? DESK_PORT,
+    brokerHost: null,
+  });
   const { deps } = ctx;
+  // The private network's serves first: they point at the Desk's port, whatever the service.
+  if (readDeskPrivateUrl(home) !== null) {
+    try {
+      for (const l of await removeDeskServes(ctx, ctx.deskPort)) io.stdout(`${l}\n`);
+    } catch (e) {
+      io.stderr(`volley desk uninstall: ${e instanceof Error ? e.message : String(e)}\n`);
+      return EXIT.ERROR;
+    }
+    forgetDeskPrivateUrl(ctx);
+  }
   if (deps.platform === "darwin") {
     const plist = join(ctx.home, "Library", "LaunchAgents", `${DESK_LABEL}.plist`);
     const domain = `gui/${deps.uid}`;

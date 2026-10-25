@@ -1,0 +1,8 @@
+Remote Control starts Claude Code sessions in this folder, driven from your other devices:
+  /path/to/home/.volley/coordinator
+
+Quick safety check: is this a project you created or one you trust? Sessions started here can read, edit, and execute files, and this folder's project settings (hooks, MCP servers, permission rules, helper commands) apply to them.
+
+Security guide: https://code.claude.com/docs/en/security
+
+Trust /path/to/home/.volley/coordinator? [y/N]
