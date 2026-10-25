@@ -49,7 +49,7 @@ import {
   useState,
 } from "react";
 import type { OfflineSpan } from "../attention";
-import { DEMO_IDENTITY, createDemoSteerClient } from "../steer/demoClient";
+import { DEMO_IDENTITY, type DemoSteerClient, createDemoSteerClient } from "../steer/demoClient";
 import type { SteerClient } from "../steer/transport";
 import {
   DIGEST_WAVE,
@@ -520,7 +520,7 @@ export function DeskStoreProvider({
   // The demo writer re-publishes a wave's state when its account is set.
   const waveStates = useRef<DeskState["waves"]>({});
   waveStates.current = state.waves;
-  const [demoWriter] = useState<SteerClient | null>(() =>
+  const [demoWriter] = useState<DemoSteerClient | null>(() =>
     demo
       ? createDemoSteerClient(
           (msgs) => dispatch({ type: "apply", msgs }),
@@ -530,6 +530,8 @@ export function DeskStoreProvider({
         )
       : null,
   );
+  // Its answers still in flight would dispatch into an unmounted store.
+  useEffect(() => () => demoWriter?.close(), [demoWriter]);
 
   useEffect(() => {
     if (!demo) return;
