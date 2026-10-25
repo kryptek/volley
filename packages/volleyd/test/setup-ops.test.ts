@@ -138,6 +138,7 @@ function machine(root: string, layoutName: "brew-arm64" | "etc" | "snap" = "brew
           }),
         };
       }
+      if (sub === "serve status --json") return { stdout: "{}\n" };
       if (sub === "up") {
         if (t.upCode === 0) t.state = "Running";
         return {
@@ -1112,9 +1113,23 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     await collect();
     cmuxSays(1, "Failed to connect to /tmp/cmux.sock: Connection refused");
     await collect();
-    // Tailscale on Linux: its install and its sudo sign-in.
+    // Tailscale on Linux: its install and its sudo sign-in; then, signed in and recorded, the
+    // Desk's serve under sudo.
     platform = "linux";
     await collect();
+    const setupJson = join(m.volleydHome, "setup.json");
+    const before = existsSync(setupJson) ? readFileSync(setupJson, "utf-8") : null;
+    m.tailscale = { installed: true, state: "Running", upCode: 0 };
+    writeFileSync(
+      setupJson,
+      JSON.stringify({
+        ...(before !== null ? JSON.parse(before) : {}),
+        network: { kind: "tailscale", name: "supervisor.example.ts.net", address: "100.64.0.1" },
+      }),
+    );
+    await collect();
+    if (before !== null) writeFileSync(setupJson, before);
+    else rmSync(setupJson);
     platform = "darwin";
     // A root-owned broker (etc) not secured yet: its config, its state file and its restart.
     m = machine(root, "etc");

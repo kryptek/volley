@@ -60,6 +60,21 @@ describe("Settings › Setup & Security", () => {
     expect(row("Last setup").getByText(/backups kept/i)).toBeInTheDocument();
   });
 
+  it("a Desk on the private network shows the wss:// broker it signs in to", async () => {
+    const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });
+    render(
+      <Setup
+        ops={ops}
+        admin={true}
+        identity="admin-0123abcd"
+        brokerUrl="wss://desk.example.ts.net:8443"
+        deskUrl="https://desk.example.ts.net/"
+      />,
+    );
+    expect(await screen.findByText("On")).toBeInTheDocument();
+    expect(row("Connected to").getByText("wss://desk.example.ts.net:8443")).toBeInTheDocument();
+  });
+
   it("reads accounts-required from the listeners, and shows pending Security changes apart", async () => {
     // Both listeners refuse anonymous clients; Security still has a change (a LAN toggle).
     const { ops } = fakeOps({ setup_plan: () => ({ ok: true, result: PLAN }) });

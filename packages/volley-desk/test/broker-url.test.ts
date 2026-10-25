@@ -97,6 +97,41 @@ describe("resolveBrokerUrl with the served /desk-config.json", () => {
   });
 });
 
+describe("resolveBrokerUrl with the served ws_url (the Desk on the tailnet)", () => {
+  const served = {
+    broker: { host: "desk.example.ts.net", ws_port: 8443 },
+    ws_url: "wss://desk.example.ts.net:8443",
+  };
+
+  it("an https page opens ws_url as served", () => {
+    expect(resolveBrokerUrl(undefined, {}, at("https://desk.example.ts.net/"), served)).toBe(
+      "wss://desk.example.ts.net:8443",
+    );
+    expect(brokerSource(undefined, {}, served)).toBe("served");
+  });
+
+  it("a ws:// ws_url is used on an http page too", () => {
+    const plain = { broker: { host: "box-a", ws_port: 9001 }, ws_url: "ws://box-a:9001" };
+    expect(resolveBrokerUrl(undefined, {}, at("http://192.0.2.10:5199/"), plain)).toBe(
+      "ws://box-a:9001",
+    );
+  });
+
+  it("the same Desk loaded on the LAN over http keeps the LAN broker (its own host)", () => {
+    // A page at http://<lan>:5199 is no secure context; a phone on the LAN may not be on the tailnet.
+    expect(resolveBrokerUrl(undefined, {}, at("http://192.0.2.10:5199/"), served)).toBe(
+      "ws://192.0.2.10:9001",
+    );
+  });
+
+  it("the env and the prop still win over it", () => {
+    const env = { VITE_VOLLEY_BROKER_URL: "ws://env.test:9001" };
+    expect(resolveBrokerUrl(undefined, env, at("https://desk.example.ts.net/"), served)).toBe(
+      "ws://env.test:9001",
+    );
+  });
+});
+
 describe("fetchDeskConfig", () => {
   const ok = (body: unknown) =>
     vi.fn(
@@ -107,6 +142,16 @@ describe("fetchDeskConfig", () => {
     const f = ok({ broker: { host: "box-a", ws_port: 9001 } });
     expect(await fetchDeskConfig(f)).toEqual({ broker: { host: "box-a", ws_port: 9001 } });
     expect(f).toHaveBeenCalledWith("/desk-config.json", { cache: "no-store" });
+  });
+
+  it("reads ws_url beside the broker; drops one that is not a bare ws(s):// URL", async () => {
+    const both = { broker: { host: "desk.example.ts.net", ws_port: 8443 } };
+    expect(
+      await fetchDeskConfig(ok({ ...both, ws_url: "wss://desk.example.ts.net:8443" })),
+    ).toEqual({ ...both, ws_url: "wss://desk.example.ts.net:8443" });
+    for (const ws_url of ["https://x:8443", "wss://u:p@x:8443", "wss://x:8443/p", 7, ""]) {
+      expect(await fetchDeskConfig(ok({ ...both, ws_url })), String(ws_url)).toEqual(both);
+    }
   });
 
   it("is null on a 404, a network error, bad JSON or a malformed body", async () => {

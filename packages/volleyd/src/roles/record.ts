@@ -19,7 +19,8 @@ export interface RolesRecord {
     lan: boolean;
   };
   supervisor: { machine: string };
-  desk: { machine: string; url: string };
+  /** `url`: where devices open the Desk (its private HTTPS address, when served there); `lan_url`: then its LAN one. */
+  desk: { machine: string; url: string; lan_url?: string };
   version: number;
   updated_at: string;
   updated_by: string;
@@ -39,6 +40,8 @@ export interface RolesDefaults {
   /** `setup.json`'s `lan` (false without one). */
   lan: boolean;
   deskUrl: string;
+  /** `setup.json`'s `desk_private_url`: then `desk.url`, with `deskUrl` as `desk.lan_url`. */
+  deskPrivateUrl?: string;
   now: string;
 }
 
@@ -50,7 +53,10 @@ export function defaultRoles(d: RolesDefaults): RolesRecord {
       lan: d.lan,
     },
     supervisor: { machine: d.machine },
-    desk: { machine: d.machine, url: d.deskUrl },
+    desk:
+      d.deskPrivateUrl !== undefined
+        ? { machine: d.machine, url: d.deskPrivateUrl, lan_url: d.deskUrl }
+        : { machine: d.machine, url: d.deskUrl },
     version: 1,
     updated_at: d.now,
     updated_by: DEFAULTS_BY,
@@ -137,7 +143,7 @@ export function sameRoles(a: RolesRecord, b: RolesRecord): boolean {
     return JSON.stringify([
       [machine, address.ssh, address.mqtt_port, address.ws_port, lan],
       r.supervisor.machine,
-      [r.desk.machine, r.desk.url],
+      [r.desk.machine, r.desk.url, r.desk.lan_url ?? null],
     ]);
   };
   return where(a) === where(b);

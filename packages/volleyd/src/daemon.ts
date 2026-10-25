@@ -4368,6 +4368,9 @@ export class Daemon {
         wsPort: DAEMON_DEFAULTS.ws_default_port,
         lan: setup?.lan ?? false,
         deskUrl: `http://${deskHost.includes(":") && !deskHost.startsWith("[") ? `[${deskHost}]` : deskHost}:${setup?.desk_port ?? DESK_PORT}`,
+        ...(setup?.desk_private_url !== undefined
+          ? { deskPrivateUrl: setup.desk_private_url }
+          : {}),
         now: dateOf(this.time).toISOString(),
       },
     );

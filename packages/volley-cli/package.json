@@ -33,6 +33,7 @@
     "./setup/service-path": "./src/setup/service-path.ts",
     "./setup/services": "./src/setup/services.ts",
     "./setup/step": "./src/setup/step.ts",
+    "./setup/tailscale-serve": "./src/setup/tailscale-serve.ts",
     "./test/fake-dynsec": "./test/helpers/fake-dynsec.ts",
     "./test/vm-stat": "./test/fixtures/vm-stat.ts"
   },

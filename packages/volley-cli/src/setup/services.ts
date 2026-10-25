@@ -14,11 +14,12 @@ import { installedBrokerUrl, withoutLogin } from "../peer/profile-checks";
 import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
 import { withSimulator } from "./first-wave";
-import { deskBrokerHost } from "./journal";
+import { deskBrokerHost, readNetworkRecord } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
 import { serviceEnv, servicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
+import { planServeChange } from "./tailscale-serve";
 import { planCmux } from "./terminal";
 
 export { DESK_STAMP, deskStamp } from "./desk-build";
@@ -490,18 +491,31 @@ async function deskServicePid(
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
-/** The Desk's line under the Services row of `volley setup --check`: which broker the page uses. */
-export const deskRow = (brokerHost: string | null): string =>
-  brokerHost === null
-    ? "Desk: broker on the page's host (port 9001)"
-    : `Desk: broker ${brokerHost.includes(":") ? `[${brokerHost}]` : brokerHost}:9001 (served to the page at /desk-config.json)`;
+/**
+ * The Desk's line under the Services row of `volley setup --check`: which broker the page uses,
+ * and the Desk's private address when it is served on the tailnet.
+ */
+export const deskRow = (brokerHost: string | null, privateUrl: string | null = null): string =>
+  `${
+    brokerHost === null
+      ? "Desk: broker on the page's host (port 9001)"
+      : `Desk: broker ${brokerHost.includes(":") ? `[${brokerHost}]` : brokerHost}:9001 (served to the page at /desk-config.json)`
+  }${privateUrl !== null ? `; on your private network: ${privateUrl}` : ""}`;
+
+/**
+ * Whether the Desk is served on the private network: `ctx.deskServe` when set (`volley desk
+ * install`), else when the Network step recorded Tailscale (`volley setup`'s Services step).
+ */
+const servesPrivately = (ctx: SetupContext): boolean =>
+  ctx.deskServe ?? (ctx.networkRecord ?? readNetworkRecord(ctx.volleydHome))?.kind === "tailscale";
 
 /**
  * The Desk's part of the Services step, shared with `volley desk install`: the build (rebuilt
  * when its sources changed since; never with a `VITE_VOLLEY_BROKER_*` env file, nor the env's),
  * the stamp, then `volley desk serve` as a service for this platform, with `--broker-host` when
- * the Desk names a broker on another machine (`deskBrokerHost`). Adds to `out`; sets
- * `out.blocked` when it cannot go on.
+ * the Desk names a broker on another machine (`deskBrokerHost`), and on the private network
+ * (`servesPrivately`) the two `tailscale serve` targets and `--ws-url wss://<name>:8443`. Adds to
+ * `out`; sets `out.blocked` when it cannot go on.
  */
 async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise<void> {
   const { platform, bun } = ctx.deps;
@@ -543,6 +557,26 @@ async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise
       },
     });
   }
+  // The private network first: the service's --ws-url depends on it.
+  let serve: Change | null = null;
+  let wsUrl: string | null = null;
+  ctx.deskPrivateUrl = null;
+  if (servesPrivately(ctx)) {
+    const p = await planServeChange(ctx, ctx.deskPort, out.found);
+    if ("blocked" in p && ctx.deskServe === true) {
+      out.blocked = p.blocked;
+      return;
+    }
+    if ("blocked" in p) {
+      // `volley setup`: the rest of the step (and every later one) still runs; the Desk stays
+      // on the LAN until this is fixed and the step runs again.
+      out.found.push(`The Desk on your private network: not served (${p.blocked})`);
+    } else {
+      serve = p.change;
+      wsUrl = p.wsUrl;
+      ctx.deskPrivateUrl = p.url;
+    }
+  }
   const desk: ServiceSpec = {
     name: "volley-desk",
     label: DESK_LABEL,
@@ -557,13 +591,14 @@ async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise
       "--port",
       String(ctx.deskPort),
       ...(brokerHost !== null ? ["--broker-host", brokerHost] : []),
+      ...(wsUrl !== null ? ["--ws-url", wsUrl] : []),
     ],
     env: { PATH: servicePath(ctx) },
     log: join(ctx.volleydHome, "desk.log"),
     workdir: ctx.volleydHome,
   };
   const on = `0.0.0.0:${ctx.deskPort}`;
-  out.row = deskRow(brokerHost);
+  out.row = deskRow(brokerHost, ctx.deskPrivateUrl);
   // The Desk's release evidence route stays off: setup only names the choice (no behaviour change).
   out.found.push(
     `Release evidence: off (the Needs you window shows release screenshots and logs once the Desk serves them: add \`volley desk serve --evidence ${ctx.volleydHome}\`; anyone on your LAN who can load the Desk can read them without signing in, the same trust as \`--lan\`)`,
@@ -592,6 +627,7 @@ async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise
       ),
     );
   }
+  push(serve);
 }
 
 /**

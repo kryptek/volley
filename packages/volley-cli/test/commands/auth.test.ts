@@ -711,6 +711,38 @@ describe("volley auth", () => {
         expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
       });
 
+      it("with the Desk on the private network, token and signin-link print its HTTPS link first", async () => {
+        const deps = await initDeps();
+        const home = join(dir, "volleyd-home");
+        mkdirSync(home, { recursive: true });
+        writeFileSync(
+          join(home, "setup.json"),
+          JSON.stringify({
+            layout: "etc",
+            config: "/c/mosquitto.conf",
+            state_file: "/c/dynsec.json",
+            auth_dir: authDir,
+            desk_host: "192.0.2.7",
+            desk_port: 5288,
+            desk_private_url: "https://studio.example.ts.net",
+          }),
+        );
+        const r = await run(["token"], deps);
+        const lines = r.stdout.split("\n");
+        const at = (s: string) => lines.findIndex((l) => l.includes(s));
+        expect(r.stdout).toContain(
+          `On your private network: https://studio.example.ts.net/#signin=${TOKEN}`,
+        );
+        expect(at("On your private network")).toBeLessThan(at("on this machine"));
+        expect(r.stdout).toContain(`From another device: http://192.0.2.7:5288/#signin=${TOKEN}`);
+        const s = await run(["signin-link", "--role", "steer", "--label", "phone"], deps);
+        const token = /vly_signin_[0-9a-f]{8}_[0-9a-f]{32}/.exec(s.stdout)?.[0] as string;
+        const url = `https://studio.example.ts.net/#signin=${token}`;
+        expect(s.stdout).toContain(`  ${url}\n`);
+        expect(s.stdout).toContain(renderQr(encodeQr(url)));
+        expect(s.stdout).toContain(`On your LAN: http://192.0.2.7:5288/#signin=${token}`);
+      });
+
       it("signin-link prints the ready-to-open link on setup's LAN address, and its QR code", async () => {
         const deps = await initDeps();
         const home = join(dir, "volleyd-home");

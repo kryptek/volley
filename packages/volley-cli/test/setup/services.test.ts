@@ -455,6 +455,81 @@ describe("setup: services", () => {
     });
   });
 
+  describe("the Desk on the private network (the Network step's Tailscale record)", () => {
+    const NAME = "studio.example.ts.net";
+    const SUMMARY = `Serve the Desk on your private network (https://${NAME})`;
+    const record = (network: Record<string, unknown>) => {
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(join(m.ctx.volleydHome, "setup.json"), `${JSON.stringify({ network })}\n`);
+    };
+    beforeEach(() => {
+      m = fakeMachine(fake, dir, { platform: "darwin" });
+      m.tailscale.installed = true;
+      m.tailscale.state = "Running";
+    });
+
+    it("plans the serve change as one more change, with --ws-url on the Desk's service", async () => {
+      record({ kind: "tailscale", name: NAME, address: "100.64.0.2" });
+      const p = await planServices(m.ctx);
+      expect(p.blocked).toBeUndefined();
+      expect(p.changes.map((c) => c.summary)).toContain(SUMMARY);
+      const serve = p.changes.find((c) => c.summary === SUMMARY);
+      expect(serve?.detail).toContain("tailscale serve --bg --https=443 http://127.0.0.1:5199");
+      expect(serve?.detail).toContain("tailscale serve --bg --https=8443 http://127.0.0.1:9001");
+      expect(p.row).toContain(`on your private network: https://${NAME}`);
+      expect(m.ctx.deskPrivateUrl).toBe(`https://${NAME}`);
+      await applyAll(p);
+      const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.desk.plist");
+      expect(readFileSync(plist, "utf-8")).toContain(`<string>wss://${NAME}:8443</string>`);
+      expect(m.tailscale.serves).toEqual(
+        new Map([
+          [443, "http://127.0.0.1:5199"],
+          [8443, "http://127.0.0.1:9001"],
+        ]),
+      );
+      const again = await planServices(m.ctx);
+      expect(again.changes).toEqual([]);
+      expect(again.found.join("\n")).toContain(`The Desk on your private network: https://${NAME}`);
+    });
+
+    it("is not offered without a Tailscale record (none, manual, or no record)", async () => {
+      for (const network of [{ kind: "none" }, { kind: "manual", address: "10.0.0.5" }, null]) {
+        if (network === null) rmSync(join(m.ctx.volleydHome, "setup.json"), { force: true });
+        else record(network);
+        const p = await planServices(m.ctx);
+        expect(p.changes.some((c) => c.summary.startsWith("Serve the Desk"))).toBe(false);
+        expect(m.execCalls.some((a) => a.includes("serve") && a[0] !== "bun")).toBe(false);
+        expect(m.ctx.deskPrivateUrl).toBeNull();
+      }
+    });
+
+    it("Tailscale not answering, or the owner's own serve on 443, never blocks the step: the Desk stays on the LAN", async () => {
+      record({ kind: "tailscale", name: NAME });
+      m.tailscale.installed = false;
+      const p = await planServices(m.ctx);
+      expect(p.blocked).toBeUndefined();
+      expect(p.found.join("\n")).toContain("The Desk on your private network: not served (");
+      expect(p.changes.some((c) => c.summary.startsWith("Serve the Desk"))).toBe(false);
+      m.tailscale.installed = true;
+      m.tailscale.serves.set(443, "http://127.0.0.1:3000");
+      const q = await planServices(m.ctx);
+      expect(q.blocked).toBeUndefined();
+      expect(q.found.join("\n")).toContain("already serves http://127.0.0.1:3000");
+      expect(m.ctx.deskPrivateUrl).toBeNull();
+    });
+
+    it("on Linux the change runs under sudo and says so", async () => {
+      m = fakeMachine(fake, dir, { platform: "linux" });
+      m.tailscale.installed = true;
+      m.tailscale.state = "Running";
+      record({ kind: "tailscale", name: NAME });
+      const p = await planServices(m.ctx);
+      expect(p.changes.map((c) => c.summary)).toContain(
+        `Serve the Desk on your private network (sudo tailscale serve: https://${NAME})`,
+      );
+    });
+  });
+
   describe("Linux (systemd --user)", () => {
     beforeEach(() => {
       m = fakeMachine(fake, dir, { platform: "linux" });

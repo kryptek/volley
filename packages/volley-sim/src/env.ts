@@ -44,6 +44,8 @@ export const WORLD_ENTRIES = [
   "origins",
   // The fake tailscale's first `up` (its sign-in link printed once).
   "tailscale-up",
+  // The fake tailscale's serve config (`serve --bg`, `serve status --json`).
+  "tailscale-serve.json",
 ];
 
 /** Clear the world: every entry the simulator wrote in `home` (nothing else there). */

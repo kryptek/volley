@@ -12,7 +12,7 @@ import {
   TOKEN_ROLES,
 } from "../auth/roles";
 import { EXIT, type ExitCode } from "../exit-codes";
-import { readSetupInstall } from "../setup/journal";
+import { readDeskPrivateUrl, readSetupInstall } from "../setup/journal";
 import { encodeQr, renderQr } from "../setup/qr";
 import {
   DEFAULT_KIND,
@@ -204,32 +204,55 @@ async function createAccount(
   return EXIT.OK;
 }
 
-/** The Desk `volley setup` recorded (its port and LAN address), else this machine's on 5199. */
-function deskOf(ctx: AuthContext): { url: string; host?: string } {
-  const saved = readSetupInstall(volleydHome(ctx.env));
+/** Where a sign-in link may point: this machine's Desk, its LAN host, its private address. */
+interface DeskAt {
+  url: string;
+  host?: string;
+  /** `https://<name>`: the Desk served on the tailnet (`volley desk install --tailscale`). */
+  privateUrl?: string;
+}
+
+/**
+ * The Desk `volley setup` recorded (its port, LAN address and private address), else this
+ * machine's on 5199.
+ */
+function deskOf(ctx: AuthContext): DeskAt {
+  const home = volleydHome(ctx.env);
+  const saved = readSetupInstall(home);
+  const privateUrl = readDeskPrivateUrl(home);
   return {
     url: `http://localhost:${saved?.desk_port ?? DESK_PORT}/`,
     ...(saved?.desk_host !== undefined ? { host: saved.desk_host } : {}),
+    ...(privateUrl !== null ? { privateUrl } : {}),
   };
 }
 
 /**
- * A sign-in token as what the device opens: the link to the Desk on the LAN address `volley setup`
- * recorded (`#signin=<token>`, which the Desk redeems), and its QR code, like setup's phone step.
+ * A sign-in token as what the device opens: the link to the Desk at its private address when it is
+ * served on the tailnet, else on the LAN address `volley setup` recorded (`#signin=<token>`, which
+ * the Desk redeems), and its QR code, like setup's phone step; the LAN link beside a private one.
  */
-function signinLines(desk: { url: string; host?: string }, token: string): string[] {
+function signinLines(desk: DeskAt, token: string): string[] {
   const port = new URL(desk.url).port || "80";
   const host =
     desk.host?.includes(":") && !desk.host.startsWith("[") ? `[${desk.host}]` : desk.host;
-  const url =
+  const lan =
     host !== undefined ? `http://${host}:${port}/#signin=${token}` : `${desk.url}#signin=${token}`;
+  const url = desk.privateUrl !== undefined ? `${desk.privateUrl}/#signin=${token}` : lan;
   return [
     "Open this link on the device (or scan it) to open the Desk, signed in:",
     "",
     renderQr(encodeQr(url)),
     `  ${url}`,
     "",
-    ...(host === undefined
+    ...(desk.privateUrl !== undefined
+      ? [
+          "(on your private network: the device needs the Tailscale app, signed in to your account)",
+          `On your LAN: ${lan}`,
+          "",
+        ]
+      : []),
+    ...(host === undefined && desk.privateUrl === undefined
       ? [
           "(this link names localhost: on another device use this machine's address instead, or run `volley setup` so links name it)",
           "",
@@ -248,7 +271,7 @@ async function issueToken(
   ttlS: number,
   label: string | undefined,
   json: boolean,
-  desk: { url: string; host?: string } = { url: `http://localhost:${DESK_PORT}/` },
+  desk: DeskAt = { url: `http://localhost:${DESK_PORT}/` },
 ): Promise<ExitCode> {
   const taken = new Set(readJson<TokenEntry>(tokensFile(ctx.dir), "tokens").map((t) => t.id));
   for (let tries = 0; ; tries++) {
@@ -294,6 +317,9 @@ async function issueToken(
           // The Desk's sign-in form takes a username and password: a token works as a link.
           ...(kind === "admin"
             ? [
+                ...(desk.privateUrl !== undefined
+                  ? [`On your private network: ${desk.privateUrl}/#signin=${token}`]
+                  : []),
                 `Open the Desk with it on this machine: ${desk.url}#signin=${token}`,
                 desk.host !== undefined
                   ? `From another device: http://${desk.host}:${new URL(desk.url).port || "80"}/#signin=${token}`
