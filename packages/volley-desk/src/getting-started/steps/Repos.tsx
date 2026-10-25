@@ -134,7 +134,7 @@ function GitHubCard({ record, name }: { record: MachinePayload | undefined; name
   const signedIn = gh === "ok" || gh === "no_write";
   /** The record's `last_seen` when Check again was pressed: waiting until a newer one lands. */
   const [waitingFrom, setWaitingFrom] = useState<string | null>(null);
-  const waiting = waitingFrom !== null && record?.last_seen === waitingFrom;
+  const waiting = waitingFrom !== null && (record?.last_seen ?? "") === waitingFrom;
   const titleId = useId();
   return (
     <section className="gs-card" aria-labelledby={titleId}>
@@ -179,7 +179,9 @@ function FolderForm({
   local: string | null;
   onAdded(r: RepoAdded): void;
 }) {
-  const [machine, setMachine] = useState(paired[0] ?? "");
+  const [picked, setMachine] = useState("");
+  // The machines can land after the step mounts: until one is picked, the select's first option.
+  const machine = paired.includes(picked) ? picked : (paired[0] ?? "");
   const [path, setPath] = useState("");
   const [slug, setSlug] = useState("");
   /** The slug came from the folder's origin, not from the person. */
@@ -205,7 +207,7 @@ function FolderForm({
         slug,
         machines: [machine],
         localName: local,
-        adopt: { [machine]: { on: true, path } },
+        adopt: { [machine]: { on: true, path: folder } },
         checks,
       }) ?? noOrigin)
     : "Pick a computer";

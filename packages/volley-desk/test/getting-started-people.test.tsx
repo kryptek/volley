@@ -1,8 +1,8 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Summary } from "../src/getting-started/state";
 import type { WizardContext } from "../src/getting-started/steps";
-import { People } from "../src/getting-started/steps/People";
+import { INVITE_POLL_MS, People, inviteCommand } from "../src/getting-started/steps/People";
 import { ROLE_WORDS, roleFromWord, wordOfRole } from "../src/getting-started/steps/roleWords";
 import type { AuthAnswer } from "../src/store/control";
 import { initialState } from "../src/store/reducer";
@@ -11,8 +11,8 @@ import { fakeOps } from "./helpers/auth-ops";
 const EMPTY: Summary = { machines: [], repos: [], people: [] };
 const DESK = "http://desk.example:5199/";
 const ME = "admin-0123abcd";
-const SIGNIN = "vly_signin_0a1b2c3d.s3cr3t";
-const ADMIN = "vly_admin_4e5f6a7b.s3cr3t";
+const SIGNIN = `vly_signin_0a1b2c3d_${"a".repeat(32)}`;
+const ADMIN = `vly_admin_4e5f6a7b_${"b".repeat(32)}`;
 
 const ACCOUNTS = [
   { name: "volleyd", role: "admin", kind: "service", created: "2026-10-01T00:00:00Z" },
@@ -57,7 +57,7 @@ function mount(handlers: Record<string, Handler> = {}, summary: Summary = EMPTY)
     }),
     admin_token: () => ({
       ok: true,
-      result: { token_id: "vly_admin_4e5f6a7b", expires_at: "2026-10-25T12:10:00Z" },
+      result: { token_id: "4e5f6a7b", expires_at: "2026-10-25T12:10:00Z" },
       secret: { token: ADMIN },
     }),
     ...handlers,
@@ -98,6 +98,18 @@ describe("role words", () => {
     expect(wordOfRole("admin")).toBe("Superuser");
     expect(wordOfRole("peer")).toBeNull();
     expect(ROLE_WORDS.map((w) => w.word)).toEqual(["Standard", "Superuser", "Viewer"]);
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("the invite's terminal command", () => {
+  it("escapes what a shell would expand inside the double quotes", () => {
+    expect(inviteCommand("steer", 'P$(id) `x` \\ "q" $HOME')).toBe(
+      'volley auth signin-link --role steer --label "P\\$(id) \\`x\\` \\\\ \\"q\\" \\$HOME"',
+    );
   });
 });
 
@@ -184,6 +196,49 @@ describe("Getting started › People: invite links", () => {
         { name: "Person B", role: "steer" },
       ],
     });
+  });
+
+  it("turns the invite's row into the redeemed account, named <role>-<token id>, and stops polling", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let redeemed = false;
+    const { calls } = mount({
+      account_list: () => ({
+        ok: true,
+        result: {
+          accounts: redeemed
+            ? [
+                ...ACCOUNTS,
+                {
+                  name: "steer-0a1b2c3d",
+                  role: "steer",
+                  kind: "device",
+                  created: "2026-10-25T12:01:00Z",
+                  label: "Desk on Firefox",
+                },
+              ]
+            : ACCOUNTS,
+          seen_since: "2026-10-01T00:00:00Z",
+        },
+      }),
+    });
+    await settle();
+    await invite("Person B");
+    expect(rows().some((r) => r.textContent?.includes("invite link made"))).toBe(true);
+    redeemed = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVITE_POLL_MS);
+    });
+    const texts = rows().map((r) => r.textContent ?? "");
+    expect(texts.some((t) => t.includes("invite link made"))).toBe(false);
+    // The redeemed account carries the device's label; the row shows the invite's name too.
+    const row = texts.find((t) => t.includes("Desk on Firefox") && t.includes("Person B"));
+    expect(row).toBeDefined();
+    const lists = () => calls.filter((c) => c.op === "account_list").length;
+    const before = lists();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVITE_POLL_MS * 3);
+    });
+    expect(lists()).toBe(before);
   });
 
   it("an unknown op answer renders the terminal command, never a dead end", async () => {

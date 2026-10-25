@@ -192,7 +192,9 @@ export function AddRepoForm({
   submitLabel = "Add",
 }: AddRepoFormProps) {
   const [slug, setSlug] = useState("");
-  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(machines));
+  /** The machines unticked: one that is listed later (the config landing) starts ticked. */
+  const [dropped, setDropped] = useState<ReadonlySet<string>>(() => new Set());
+  const picked = new Set(machines.filter((m) => !dropped.has(m)));
   /** Per paired machine: adopt an existing clone, and its path. */
   const [adopt, setAdopt] = useState<Record<string, { on: boolean; path: string }>>({});
   const [sending, setSending] = useState(false);
@@ -230,7 +232,7 @@ export function AddRepoForm({
   }, [checks, slug]);
 
   const toggle = (m: string) =>
-    setPicked((s) => {
+    setDropped((s) => {
       const next = new Set(s);
       if (next.has(m)) next.delete(m);
       else next.add(m);

@@ -11,16 +11,25 @@
  * one-time sign-in link bound to the name, 10 minutes); a Superuser is an `admin_token` rendered
  * as `<desk>#signin=<token>`, shown once (`signin_link` never grants admin). The link comes with
  * Copy and a QR code; the person's row reads "invite link made" until their account appears (the
- * list is read again meanwhile). A volleyd that does not know the op gets the terminal command.
+ * list is read again meanwhile). Redeeming names the account `<role>-<token id>` and labels it
+ * with the device ("Desk on iPhone"), so the invite is matched by that name, and the account's
+ * row shows the invite's name beside the label. A volleyd that does not know the op gets the
+ * terminal command.
  */
 import { useCallback, useEffect, useId, useState } from "react";
 import { lastSeen } from "../../settings/BrokerAccounts";
 import { CopyText, Qr } from "../../settings/onboardingParts";
-import { type BrokerAccount, isUnknownOp, parseAccounts, signinLink } from "../../store/control";
+import {
+  type BrokerAccount,
+  isUnknownOp,
+  parseAccounts,
+  parseToken,
+  signinLink,
+} from "../../store/control";
 import { FIXED_IDENTITIES } from "../../store/peerOps";
 import type { PersonRole } from "../state";
 import type { StepProps } from "../steps";
-import { ROLE_WORDS, type RoleWord, wordOfRole } from "./roleWords";
+import { ROLE_WORDS, type RoleWord, roleFromWord, wordOfRole } from "./roleWords";
 
 /** How often the accounts are read again while an invite has not been redeemed. */
 export const INVITE_POLL_MS = 10_000;
@@ -32,11 +41,11 @@ const isPerson = (a: BrokerAccount) =>
   a.kind !== "machine" &&
   !FIXED_IDENTITIES.has(a.name);
 
-/** The terminal twin of an invite. */
+/** The terminal twin of an invite (inside double quotes, nothing in the name is expanded). */
 export const inviteCommand = (role: PersonRole, name: string) =>
   role === "admin"
     ? "volley auth token"
-    : `volley auth signin-link --role ${role} --label "${name.replace(/"/g, '\\"')}"`;
+    : `volley auth signin-link --role ${role} --label "${name.replace(/["$`\\]/g, "\\$&")}"`;
 
 type Invite =
   | { k: "idle" }
@@ -55,8 +64,8 @@ export function People({ ctx, summary, setSummary }: StepProps) {
   const [name, setName] = useState("");
   const [word, setWord] = useState<RoleWord["word"]>("Standard");
   const [invite, setInvite] = useState<Invite>({ k: "idle" });
-  /** The invites made here, by name: a row each until the account appears. */
-  const [made, setMade] = useState<{ name: string; role: PersonRole }[]>([]);
+  /** The invites made here: a row each until `account` (`<role>-<token id>`) appears. */
+  const [made, setMade] = useState<{ name: string; role: PersonRole; account: string }[]>([]);
   const ids = useId();
 
   const load = useCallback(async () => {
@@ -70,7 +79,8 @@ export function People({ ctx, summary, setSummary }: StepProps) {
   const people = (accounts ?? []).filter(isPerson);
   const me = people.find((a) => a.name === ctx.identity);
   const others = people.filter((a) => a.name !== ctx.identity);
-  const pending = made.filter((m) => !others.some((a) => a.label === m.name));
+  const pending = made.filter((m) => !others.some((a) => a.name === m.account));
+  const invitedAs = (a: BrokerAccount) => made.find((m) => m.account === a.name)?.name;
   // Read the accounts again while an invite is out, so its row turns into the account.
   useEffect(() => {
     if (pending.length === 0) return;
@@ -78,7 +88,7 @@ export function People({ ctx, summary, setSummary }: StepProps) {
     return () => clearInterval(t);
   }, [pending.length, load]);
 
-  const role = ROLE_WORDS.find((w) => w.word === word)?.role ?? "steer";
+  const role = roleFromWord(word);
   const who = name.trim();
   const create = async () => {
     setInvite({ k: "busy" });
@@ -99,7 +109,11 @@ export function People({ ctx, summary, setSummary }: StepProps) {
       return;
     }
     setInvite({ k: "made", name: who, role, link: signinLink(base, token) });
-    setMade((m) => [...m.filter((x) => x.name !== who), { name: who, role }]);
+    const id = parseToken(token)?.id;
+    if (id) {
+      const account = `${role}-${id}`;
+      setMade((m) => [...m.filter((x) => x.name !== who), { name: who, role, account }]);
+    }
     setName("");
     setSummary({ people: [...summary.people.filter((p) => p.name !== who), { name: who, role }] });
   };
@@ -130,7 +144,10 @@ export function People({ ctx, summary, setSummary }: StepProps) {
             </tr>
             {others.map((a) => (
               <tr key={a.name}>
-                <td>{a.label ?? a.name}</td>
+                <td>
+                  {invitedAs(a) ?? a.label ?? a.name}
+                  {invitedAs(a) && <span className="dim">{` · ${a.label ?? a.name}`}</span>}
+                </td>
                 <td>
                   <RolePill of={a.role} />
                 </td>

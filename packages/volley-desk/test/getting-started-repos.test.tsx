@@ -260,6 +260,47 @@ describe("Getting started › Repos: Add a repo", () => {
     expect(screen.getByRole("button", { name: "Add repo" })).toBeDisabled();
   });
 
+  it("machines that land after the step mounts start ticked and pickable", async () => {
+    vi.useFakeTimers();
+    const { rerender, ctx, calls } = mount({
+      handlers: {
+        repo_probe: (f) => ({
+          ok: true,
+          result: { machine: f.machine, path: f.path, state: "not_git" },
+        }),
+      },
+    });
+    const bare = {
+      ...ctx.state,
+      config: { ...repoConfig(), hosts: {} },
+      machines: { hub: machine("hub", { kind: "supervisor" }) },
+    };
+    rerender({ ctx: { ...ctx, state: bare } });
+    fireEvent.click(screen.getByRole("tab", { name: "A folder on a computer" }));
+    expect(screen.getByText(/No computer is paired yet/)).toBeInTheDocument();
+    rerender({ ctx });
+    // The select shows box-a, and the form probes box-a without the person picking it.
+    expect(screen.getByRole("combobox", { name: "Computer" })).toHaveValue("box-a");
+    fireEvent.change(screen.getByRole("textbox", { name: "Folder" }), {
+      target: { value: FOLDER },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(calls.find((c) => c.op === "repo_probe")?.fields).toEqual({
+      machine: "box-a",
+      path: FOLDER,
+    });
+    expect(screen.queryByText("Pick a computer")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "From GitHub" }));
+    rerender({ ctx: { ...ctx, state: bare } });
+    rerender({ ctx });
+    for (const m of ["box-a", "box-b"]) {
+      expect(screen.getByRole("checkbox", { name: m })).toBeChecked();
+    }
+  });
+
   it("A folder: without a paired machine it says so and offers no form", () => {
     const { rerender, ctx } = mount();
     rerender({
