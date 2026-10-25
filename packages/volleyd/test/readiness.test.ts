@@ -424,6 +424,71 @@ describe("readiness per (machine, repository) (#436)", () => {
     expect(r.reasons).toEqual(["gh: no write permission on a/a"]);
   });
 
+  describe("the path the supervisor would spawn in (#608)", () => {
+    const BOX = "/path/to/home/.volley/repos/a/a";
+    const SPAWN = "/sup/.volley/volleyd/repos/a/a";
+    const rec = many([repo("a/a", { path: BOX })]);
+    const at = (repos: Partial<ReadinessInput["repos"]>, over: Partial<ReadinessInput> = {}) =>
+      readiness(input({ record: rec, repos: { ...reposOf(rec, ["a/a"]), ...repos }, ...over }))
+        .repos["a/a"];
+
+    it("a spawn path other than the reported clone blocks the repository, keeping the clone's path", () => {
+      const v = at({ spawn: { "a/a": SPAWN } });
+      expect(v?.state).toBe("blocked");
+      expect(v?.path).toBe(BOX);
+      expect(v?.reasons[0]).toBe(
+        `the supervisor would spawn in ${SPAWN} but box-a reports its clone at ${BOX}`,
+      );
+    });
+
+    it("the same path (trailing slash aside), no spawn path, or the own machine: ready", () => {
+      expect(at({ spawn: { "a/a": `${BOX}/` } })?.state).toBe("ready");
+      expect(at({})?.state).toBe("ready");
+      expect(at({ spawn: { "a/a": SPAWN } }, { local: true })?.state).toBe("ready");
+    });
+
+    it("a probe that finds no clone, or another repository's, at the spawn path blocks it", () => {
+      const probed = (p: object) => at({ spawn: { "a/a": BOX }, probed: { "a/a": p as never } });
+      expect(probed({ state: "missing" })).toMatchObject({
+        state: "blocked",
+        reasons: [`no clone at ${BOX} on box-a`],
+      });
+      expect(probed({ state: "not_git" })?.reasons[0]).toBe(`no clone at ${BOX} on box-a`);
+      expect(probed({ state: "missing", at: CHECKED.getTime() - 40_000 })?.reasons[0]).toBe(
+        `no clone at ${BOX} on box-a (probed 40 s ago)`,
+      );
+      expect(probed({ state: "found", slug: "b/b" })).toMatchObject({
+        state: "blocked",
+        reasons: [`${BOX} on box-a is a clone of b/b`],
+      });
+      expect(probed({ state: "found", slug: "a/a" })?.state).toBe("ready");
+      expect(probed({ state: "no_origin" })?.state).toBe("ready");
+    });
+
+    it("a spawn that failed there (a runs entry) blocks it with its why", () => {
+      const why = "no clone at /x on box-a";
+      expect(at({ runs: { "a/a": { state: "blocked", reasons: [why] } } })).toMatchObject({
+        state: "blocked",
+        reasons: [why],
+      });
+    });
+
+    it("the probe's age never makes a re-publish on its own", () => {
+      const v = (ago: number) =>
+        readiness(
+          input({
+            record: rec,
+            repos: {
+              ...reposOf(rec, ["a/a"]),
+              spawn: { "a/a": BOX },
+              probed: { "a/a": { state: "missing", at: CHECKED.getTime() - ago } },
+            },
+          }),
+        );
+      expect(readinessKey(v(5_000))).toBe(readinessKey(v(65_000)));
+    });
+  });
+
   it("every per-repository verdict validates against readiness.schema.json", () => {
     const rec = many([
       repo("a/a", { toolchain: { ok: false, missing: ["java"], outdated: [] } }),

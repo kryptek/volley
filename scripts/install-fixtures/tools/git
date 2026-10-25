@@ -12,6 +12,7 @@ case "${1:-}" in
       shift
     done
     mkdir -p "$last/.git"
+    printf '{ "lockfileVersion": 1 }\n' >"$last/bun.lock"
     printf '%s\n' "$tag" >"$last/.git/stub-tag"
     ;;
   describe) cat "$dir/.git/stub-tag" 2>/dev/null || exit 128 ;;

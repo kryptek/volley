@@ -22,13 +22,14 @@ export function fakeRepo(opts: {
   bun?: string;
   /** Builds write no version.json at these versions (a release before it existed). */
   noVersionJson?: string[];
+  /** `bun install` leaves no node_modules (so nothing can be recorded in it). */
+  noNodeModules?: boolean;
 }) {
   const repo = tempDir("volley-deploy-repo-");
   const bun = opts.bun ?? "/opt/bun";
   const dist = join(repo, "packages", "volley-desk", "dist");
   mkdirSync(join(repo, "packages", "volley-desk", "src"), { recursive: true });
   writeFileSync(join(repo, "packages", "volley-desk", "src", "main.ts"), "export {};");
-  writeFileSync(join(repo, "bun.lock"), "{}");
   const state = {
     head: { ...opts.head },
     dirty: opts.dirty ?? "",
@@ -36,8 +37,11 @@ export function fakeRepo(opts: {
   };
   const versionAt = () =>
     (state.head.tag ?? (state.head.branch !== undefined ? "v0.4.1" : "v0.3.0")).replace(/^v/, "");
-  const writePkg = () =>
+  // Each version has its own bun.lock, so a marker names the one it was installed from.
+  const writePkg = () => {
     writeFileSync(join(repo, "package.json"), JSON.stringify({ version: versionAt() }));
+    writeFileSync(join(repo, "bun.lock"), JSON.stringify({ lockfileVersion: 1, at: versionAt() }));
+  };
   writePkg();
   const ran: Ran[] = [];
   const failures: { line: string; atVersion?: string; stderr?: string }[] = [];
@@ -81,6 +85,10 @@ export function fakeRepo(opts: {
         writePkg();
         return res(0);
       }
+    }
+    if (argv[0] === bun && argv[1] === "install") {
+      if (opts.noNodeModules !== true) mkdirSync(join(repo, "node_modules"), { recursive: true });
+      return res(0);
     }
     if (argv[0] === bun && argv[1] === "run" && argv[2] === "build") {
       mkdirSync(dist, { recursive: true });

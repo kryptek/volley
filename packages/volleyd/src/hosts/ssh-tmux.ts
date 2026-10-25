@@ -217,9 +217,10 @@ export interface RemoteHost extends Host {
   /**
    * `repo_probe` (SPEC §4.6.21): what is at `path` on the box, read only — its clone's root and
    * origin (and the GitHub repository that names). Throws when ssh fails or git says something
-   * else.
+   * else. Readiness also probes each repository's spawn path with it, on the PATH probe's
+   * cadence and bounded by `timeoutMs` (#608).
    */
-  probeClone(path: string): Promise<CloneProbe>;
+  probeClone(path: string, opts?: { timeoutMs?: number }): Promise<CloneProbe>;
   /**
    * Readiness's PATH probe: whether `claude` and `bun` resolve on the non-interactive ssh PATH
    * (the same `bash -s` that runs launch.sh). Throws when ssh fails.
@@ -892,19 +893,22 @@ export class SshTmuxHost implements RemoteHost {
     return r.code === 0 ? r.stdout : null;
   }
 
-  async probeClone(path: string): Promise<CloneProbe> {
+  async probeClone(path: string, opts: { timeoutMs?: number } = {}): Promise<CloneProbe> {
+    const timeout = opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {};
     // Two scripts: a failing first step is an answer, not an aborted script.
-    const top = await this.run([
-      { argv: ["git", "-C", path, "rev-parse", "--show-toplevel"] },
-    ]).catch(this.noResult("clone probe"));
+    const top = await this.run(
+      [{ argv: ["git", "-C", path, "rev-parse", "--show-toplevel"] }],
+      timeout,
+    ).catch(this.noResult("clone probe"));
     if (top === null || transportFailed(top)) throw this.sshFailed("clone probe", top);
     const found = classifyRevParse(top);
     if (found === null) throw new Error(firstLine(top.stderr, `git rev-parse exited ${top.code}`));
     if (found.state !== "found" || found.root === undefined) return found;
     const root = found.root;
-    const o = await this.run([{ argv: ["git", "-C", root, "remote", "get-url", "origin"] }]).catch(
-      this.noResult("clone probe"),
-    );
+    const o = await this.run(
+      [{ argv: ["git", "-C", root, "remote", "get-url", "origin"] }],
+      timeout,
+    ).catch(this.noResult("clone probe"));
     if (o === null || transportFailed(o)) throw this.sshFailed("clone probe", o);
     if (o.code !== 0) return { state: "no_origin", root };
     const origin = o.stdout.trim();

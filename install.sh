@@ -552,9 +552,17 @@ install_source() {
     fi
   fi
   if [ -n "$CHANGED" ] || [ ! -d "$ROOT/node_modules" ]; then
-    (cd "$ROOT" && bun install --frozen-lockfile)
+    (cd "$ROOT" && bun install --frozen-lockfile && record_lock)
   fi
 }
+
+# After the install, in the checkout: record the bun.lock it installed from, so the machine's
+# `volley peer doctor` reads the install as synced. The body is RECORD_LOCK_ARGV's, which
+# `volley deploy` runs on paired machines (packages/volley-cli/src/deploy/plan.ts); a test keeps
+# the two the same.
+record_lock() (
+  set -e; if command -v sha256sum >/dev/null 2>&1; then h=$(sha256sum bun.lock); else h=$(shasum -a 256 bun.lock); fi; printf '%s\n' "${h%% *}" > node_modules/.volley-lock-sha256
+)
 
 # `volley setup`'s quoting (shQuote in packages/volley-cli/src/setup/services.ts).
 sh_quote() {

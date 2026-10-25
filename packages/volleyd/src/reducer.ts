@@ -583,6 +583,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         score: d.score,
         decided_at: ev.at,
         candidates: d.candidates,
+        ...(typeof d.why === "string" ? { why: d.why } : {}),
       };
       setTaskHost(next, ev.task, d.local === true ? LOCAL_HOST : d.host);
       break;
