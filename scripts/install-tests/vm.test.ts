@@ -210,10 +210,7 @@ describe("Layer 2: vm-linux.sh", () => {
       // The checkout under test, then its install.sh.
       new RegExp(`^ssh ${vm}: rm -rf ~/volley .*tar -C ~/volley -xzf - \\(stdin \\d+ bytes\\)$`),
       new RegExp(`^ssh ${vm}: .*sh -s -- --source ~/volley --no-setup +<~/volley/install\\.sh$`),
-      // The snap broker's files are root's: its steps under sudo first (docs/INSTALL.md).
-      new RegExp(
-        `^ssh ${vm}: .*\\[ ! -d /snap/mosquitto/current \\] \\|\\| sudo ~/\\.volley/bin/volley setup --step detect --step security --step accounts --yes --no-lan$`,
-      ),
+      // One `volley setup`, as a person runs it: it takes the snap's broker steps through sudo.
       new RegExp(
         `^ssh ${vm}: .*eval "\\$\\(volley sim env\\)"; volley setup --yes --no-lan --simulated$`,
       ),
@@ -230,6 +227,7 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(
       r.calls.filter((c) => c === `ssh ${vm}: cat /proc/sys/kernel/random/boot_id`).length,
     ).toBeGreaterThan(2);
+    expect(r.calls.some((c) => /volley setup --step detect/.test(c))).toBe(false);
     expect(vmsLeft(w)).toEqual([]);
     expect(readFileSync(join(w.state, "ssh-key"), "utf8")).toBe(
       `${join(w.out, "key", "id_ed25519")}\n`,

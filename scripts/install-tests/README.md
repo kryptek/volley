@@ -105,7 +105,9 @@ process that exits stays down, and `is-active` says so. Anything else exits 1 na
 Each script takes `--version vX.Y.Z` to install that release (`install.sh` through curl, from the
 tag) instead of this checkout, which it otherwise copies into the VM (tracked and untracked files,
 not what `.gitignore` excludes) and installs with `--source`. Every VM runs
-`volley setup --yes --no-lan --simulated` against volley-sim, as Layer 1 does.
+`volley setup --yes --no-lan --simulated` against volley-sim, as Layer 1 does, and nothing
+before it: on the snap broker, setup runs its broker steps through sudo itself (`sudo -n`, the
+VMs' sudo being password-less), as it does for a person.
 
 ### What each layer checks
 

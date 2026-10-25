@@ -48,7 +48,8 @@ export class SetupMeter {
 
   /**
    * `deps` counting what the person sees: a question only when someone is at the terminal to
-   * see it (`interactive`), a sudo prompt for each command run through sudo there.
+   * see it (`interactive`), a sudo prompt for each command run through sudo there (`sudo -n`
+   * never prompts).
    */
   wrap(deps: SetupDeps): SetupDeps {
     const seen = () => {
@@ -78,7 +79,7 @@ export class SetupMeter {
           }
         : {}),
       exec: async (argv, opts) => {
-        if (argv[0] === "sudo" && deps.interactive) this.sudoPrompts++;
+        if (argv[0] === "sudo" && argv[1] !== "-n" && deps.interactive) this.sudoPrompts++;
         return deps.exec(argv, opts);
       },
     };
