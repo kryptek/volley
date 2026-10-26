@@ -21,7 +21,7 @@ Commands:
   config      Get or set supervisor config (volleyd config get|set)
   admission   Show the spawn admission verdict and its reasons
   spawn       Spawn one task's agent now (worktree, identity, launch, verify)
-  cleanup     Remove a wave's finished tasks' retired worktrees and workspaces (--yes, --all)
+  cleanup     Remove everything a wave made, on every machine (owner only; --yes, --all, --by)
   decisions   List open decisions
   resolve     Answer a decision (owner only)
   hold        Hold a decision: waiting on a task, PR or issue, never escalated (owner only)

@@ -243,6 +243,31 @@ export interface OpCommand {
   takesOwnership?: boolean;
 }
 
+/** How an owner identifies, for the hints of a command that has no caller identity (SPEC §6.2). */
+export const IDENTITY_HINT =
+  "pass --by <name|agent-id> or set VOLLEY_COORDINATOR (the name `volley setup` saved applies on its own)";
+
+/**
+ * The caller of a mutating command, as the request's `by`: `--by`, else the caller's session,
+ * else `VOLLEY_COORDINATOR` (or the name `volley setup` saved), else null (`resolveCaller`).
+ * `warning` is resolveCaller's (an unregistered `VOLLEY_AGENT_ID`, a malformed name).
+ */
+export async function callerFor(
+  client: Parameters<typeof resolveCaller>[0],
+  flag: string | undefined,
+  env: Record<string, string | undefined>,
+): Promise<{ by: string | null; warning?: string }> {
+  const who = await resolveCaller(client, flag, withSetupCoordinator(env).env);
+  return { by: who.id, ...(who.warning !== undefined ? { warning: who.warning } : {}) };
+}
+
+/** A refusal's text, with the identity hint when it was `owned by` and the caller unknown. */
+export function ownedByHint(error: string, by: string | null): string {
+  return by === null && /owned by/.test(error)
+    ? `${error}\n(no caller identity: ${IDENTITY_HINT})`
+    : error;
+}
+
 /** Build a `Command` from an op description. Exit codes follow the CLI table in io.ts. */
 export function opCommand(spec: OpCommand): Command {
   return async ({ argv, env, io }: CommandArgs): Promise<ExitCode> => {
@@ -280,19 +305,14 @@ export function opCommand(spec: OpCommand): Command {
     }
     return withClient(target, io, `volleyd ${spec.name}`, async (client) => {
       const flag = typeof parsed.values.by === "string" ? parsed.values.by : undefined;
-      const who =
-        spec.needsCaller === false
-          ? null
-          : await resolveCaller(client, flag, withSetupCoordinator(env).env);
-      const caller = who?.id ?? null;
+      const who = spec.needsCaller === false ? { by: null } : await callerFor(client, flag, env);
+      const caller = who.by;
       if (spec.takesOwnership === true) {
         if (caller === null) {
-          io.stderr(
-            `volleyd ${spec.name}: ${spec.name} needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID\n`,
-          );
+          io.stderr(`volleyd ${spec.name}: ${spec.name} needs an identity: ${IDENTITY_HINT}\n`);
           return EXIT.ERROR;
         }
-        if (who?.warning !== undefined) io.stderr(`warning: ${who.warning}\n`);
+        if (who.warning !== undefined) io.stderr(`warning: ${who.warning}\n`);
       }
       const res = await client.request(
         built.op,
@@ -303,11 +323,7 @@ export function opCommand(spec: OpCommand): Command {
         },
       );
       if (!res.ok) {
-        const hint =
-          caller === null && /owned by/.test(res.error ?? "")
-            ? "\n(no caller identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID)"
-            : "";
-        io.stderr(`volleyd ${spec.name}: ${res.error ?? "rejected"}${hint}\n`);
+        io.stderr(`volleyd ${spec.name}: ${ownedByHint(res.error ?? "rejected", caller)}\n`);
         return res.code === BAD_ANSWER ? EXIT.BAD_ANSWER : EXIT.ERROR;
       }
       io.stdout(

@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
 import { ConfigStore, volleydHome } from "../config-store";
 import { resolveControlTarget, withClient } from "../control";
+import { callerFor, ownedByHint } from "../controls";
 import { type ExecFn, type ExecResult, exec as fencedExec } from "../exec";
 import {
   type CloneRemoveToken,
@@ -33,7 +34,8 @@ import type {
 } from "../types";
 import { expandHome } from "../worktree";
 
-const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force] [--all]
+const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force] [--all] [--by <name|agent-id>] [--json]
+                       [--broker-url <url>] [--namespace <ns>]
 
 Remove everything Volley made for a wave, on every machine (SPEC "Wave cleanup"): its agents'
 workspaces or tmux sessions, git worktrees and locks; every process under those worktrees (by
@@ -48,9 +50,11 @@ Without --yes, only prints what it would do. Only worktrees whose every agent is
 uncommitted changes is skipped unless --force is given. Only tasks that are done or cancelled are
 touched: an unfinished task (e.g. merge_ready, its agents retired while the merge waits) is listed
 and skipped unless --all is given. With \`cleanup_on_end\` on (the default) the supervisor runs
-this itself as each task and the wave end. With the daemon up, the run is the daemon's; while it
-is down, the command reads $VOLLEYD_HOME directly and leaves logins, registrations and accounts
-for the daemon.
+this itself as each task and the wave end. With the daemon up, the run is the daemon's, for the
+wave's owner only: it acts as the caller (--by, else the caller's session, else
+VOLLEY_COORDINATOR), like \`stop\` and \`steer\`, and --json prints { wave, lines, failed }. While
+it is down, the command reads $VOLLEYD_HOME directly, needs no identity, and leaves logins,
+registrations and accounts for the daemon.
 `;
 
 /** A worktree the wave's agents used, and what cleanup does with it. */
@@ -1266,12 +1270,27 @@ export async function cleanupWave(
   );
   // Only one writer per journal: a daemon that holds the home journals its own runs.
   if (!daemonUp(home))
-    Journal.open(join(home, "waves", wave)).append(cleanedEvent("volleyd cleanup", run, !opts.yes));
+    Journal.open(join(home, "waves", wave)).append(
+      cleanedEvent("volleyd cleanup", run, !opts.yes, undefined, coveredTasks(state)),
+    );
   return run.failed;
 }
 
-/** The `wave_cleaned` event of a run (SPEC §4.6.26). */
-export function cleanedEvent(by: string, run: CleanupRun, dry: boolean, task?: string): NewEvent {
+/**
+ * The tasks a whole-wave run covers: every one done or cancelled when it ran (`wave_cleaned.tasks`),
+ * whose own pass is then never needed.
+ */
+export const coveredTasks = (state: WaveState): string[] =>
+  state.tasks.filter((t) => t.stage === "done" || t.stage === "cancelled").map((t) => t.id);
+
+/** The `wave_cleaned` event of a run (SPEC §4.6.26); `tasks`: a whole-wave run's `coveredTasks`. */
+export function cleanedEvent(
+  by: string,
+  run: CleanupRun,
+  dry: boolean,
+  task?: string,
+  tasks?: string[],
+): NewEvent {
   return {
     type: "wave_cleaned",
     ...(task !== undefined ? { task } : {}),
@@ -1283,6 +1302,7 @@ export function cleanedEvent(by: string, run: CleanupRun, dry: boolean, task?: s
       dry_run: dry,
       ...(Object.keys(run.worktrees_on).length > 0 ? { worktrees_on: run.worktrees_on } : {}),
       ...(task !== undefined ? { task } : {}),
+      ...(task === undefined && tasks !== undefined ? { tasks } : {}),
     },
   };
 }
@@ -1325,21 +1345,29 @@ export async function cleanup({ argv, env, io }: CommandArgs): Promise<ExitCode>
   if (daemonUp(home)) {
     let target: ReturnType<typeof resolveControlTarget>;
     try {
-      target = resolveControlTarget({}, env);
+      target = resolveControlTarget(parsed.values, env);
     } catch (e) {
       io.stderr(`volleyd cleanup: ${e instanceof Error ? e.message : String(e)}\n`);
       return EXIT.USAGE;
     }
     return withClient(target, io, "volleyd cleanup", async (client) => {
+      // The owner's identity, as every owner-gated command resolves it (controls.ts).
+      const flag = typeof parsed.values.by === "string" ? parsed.values.by : undefined;
+      const who = await callerFor(client, flag, env);
+      if (who.warning !== undefined) io.stderr(`warning: ${who.warning}\n`);
       const res = await client.request(
         "cleanup",
-        { wave, dry_run: !yes, force, all },
+        { wave, dry_run: !yes, force, all, ...(who.by !== null ? { by: who.by } : {}) },
         { text: `volleyd cleanup ${wave}`, timeoutMs: DAEMON_DEFAULTS.cleanup_op_timeout_ms },
       );
       const r = (res.result ?? {}) as { lines?: string[]; failed?: number };
-      for (const l of r.lines ?? []) io.stdout(`${l}\n`);
+      if (parsed.values.json === true && res.ok)
+        io.stdout(
+          `${JSON.stringify({ wave, lines: r.lines ?? [], failed: r.failed ?? 0 }, null, 2)}\n`,
+        );
+      else for (const l of r.lines ?? []) io.stdout(`${l}\n`);
       if (!res.ok) {
-        io.stderr(`volleyd cleanup: ${res.error ?? "refused"}\n`);
+        io.stderr(`volleyd cleanup: ${ownedByHint(res.error ?? "refused", who.by)}\n`);
         return EXIT.ERROR;
       }
       return (r.failed ?? 0) > 0 ? EXIT.ERROR : EXIT.OK;
@@ -1361,6 +1389,10 @@ function parseCleanup(argv: string[]) {
       yes: { type: "boolean", default: false },
       force: { type: "boolean", default: false },
       all: { type: "boolean", default: false },
+      by: { type: "string" },
+      json: { type: "boolean", default: false },
+      "broker-url": { type: "string" },
+      namespace: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     strict: true,

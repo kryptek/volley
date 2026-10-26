@@ -112,6 +112,50 @@ describe("cleanup_on_end: true (the default)", () => {
     expect(cleaned()).toHaveLength(n);
   });
 
+  it("the whole-wave run covers the tasks: no task pass after it, status shows it (#630)", async () => {
+    await ranAndRetired("A");
+    await ranAndRetired("B");
+    await stage("A", "done");
+    await stage("B", "done");
+    await stage("C", "cancelled");
+    await daemon.tick();
+    await daemon.tick();
+    const real = () => cleaned().filter((e) => e.data.dry_run === false);
+    await eventually(() => real().some((e) => e.task === undefined));
+    const whole = real().find((e) => e.task === undefined);
+    // It names the tasks it covered (every done or cancelled one).
+    expect([...((whole?.data.tasks as string[]) ?? [])].sort()).toEqual(["A", "B", "C"]);
+    for (let i = 0; i < 3; i++) {
+      await daemon.tick();
+      await daemon.settled();
+    }
+    expect(real().filter((e) => e.task !== undefined)).toEqual([]);
+    expect(daemon.record(WAVE)?.state?.cleanup?.task).toBeUndefined();
+    expect(daemon.record(WAVE)?.state?.cleanup?.summary).toBe(whole?.data.summary);
+  });
+
+  it("a wave that ended before the daemon started is cleaned on its first ticks (#630 D6)", async () => {
+    // Journaled with no tick in between: nothing has cleaned it when the daemon stops.
+    await ranAndRetired("A");
+    await stage("A", "done");
+    await stage("B", "done");
+    await stage("C", "done");
+    await daemon.recordEvent(WAVE, { type: "wave_complete", data: {} });
+    expect(daemon.record(WAVE)?.state?.status).toBe("complete");
+    expect(cleaned()).toEqual([]);
+    await client.close();
+    await daemon.stop();
+    daemon = await t.start({ clock });
+    client = await ControlClient.connect(t.broker.url, NS);
+    await daemon.tick();
+    await daemon.tick();
+    await eventually(() =>
+      cleaned().some(
+        (e) => e.task === undefined && e.data.dry_run === false && e.data.by === "volleyd",
+      ),
+    );
+  });
+
   it("a wave resumed after its whole-wave run is cleaned again when it ends again", async () => {
     await ranAndRetired("A");
     await stage("A", "done");
