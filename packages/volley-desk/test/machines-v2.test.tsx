@@ -91,6 +91,16 @@ describe("machineFixes", () => {
     expect(fixFor("hooks", ctx)).toMatchObject({ safe: true });
     expect(fixFor("tool.tmux", ctx)?.text).toMatch(/install tmux on box-a/);
     expect(fixFor("bun_on_path", ctx)?.text).toMatch(/non-interactive ssh PATH/);
+    // #610: push access and the worktree root, per repository.
+    expect(fixFor("repo.push", ctx, "o/r")).toEqual({
+      text: "give box-a's GitHub account write access to o/r, or sign gh in there as one that has it",
+      command: "gh auth login",
+      safe: false,
+    });
+    expect(fixFor("repo.worktrees", ctx, "o/r")).toEqual({
+      text: "Repair creates the folder box-a cuts o/r's worktrees under",
+      safe: true,
+    });
     // Never "run the doctor by hand": Repair runs it.
     expect(fixFor("something.new", ctx)).toEqual({
       text: "Repair… runs the doctor on box-a again; its plan has this check's fix",

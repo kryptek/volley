@@ -312,3 +312,160 @@ describe("a wave the supervisor holds no clone of runs its gh work with --repo (
     });
   });
 });
+
+describe("a submit checks the repository first (#610)", () => {
+  let env: DaemonEnv;
+  let client: ControlClient;
+  let peer: VolleyBroker | null = null;
+  afterEach(async () => {
+    await peer?.disconnect();
+    peer = null;
+    await client.close();
+    await env.cleanup();
+  });
+
+  const B = "release/w-x";
+  const api = (path: string) => ["gh", "api", `repos/b/b/${path}`];
+  /** b/b on GitHub: pushed, unprotected, one workflow; `rules` its ruleset answer. */
+  const github = (rules: unknown[] = []) =>
+    fakeExec()
+      .on(["gh", "repo", "view", "b/b"], {
+        stdout: JSON.stringify({
+          nameWithOwner: "b/b",
+          url: "https://github.com/b/b",
+          visibility: "PRIVATE",
+        }),
+      })
+      .on(api("actions/workflows?per_page=100"), {
+        stdout: JSON.stringify({ workflows: [{ id: 1, state: "active" }] }),
+      })
+      .on(api(`branches/${B}`), { stdout: JSON.stringify({ name: B, protected: false }) })
+      .on(api(`rules/branches/${B}`), { stdout: JSON.stringify(rules) });
+  const REVIEW = [{ type: "pull_request", parameters: { required_approving_review_count: 1 } }];
+  const waveYaml = (merge?: string, issue = 1) =>
+    `wave: w-x\nrepo: b/b\nrelease_branch: ${B}\nmodel: claude-opus-5-5\npipeline: [implement, merge_ready]\nplacement: auto\n${merge !== undefined ? `merge: ${merge}\n` : ""}tasks:\n  A: { issue: ${issue} }\n`;
+  const events = () => readJournalFile(join(env.home, "waves", "w-x", "journal.jsonl"));
+
+  async function start(fake: ReturnType<typeof fakeExec>): Promise<void> {
+    env = await makeDaemonEnv();
+    writeFileSync(join(env.home, "config.yaml"), BOX_ONLY);
+    await env.start({ spawner: { host: fakeHost(fake) } });
+    client = await ControlClient.connect(env.broker.url, NS);
+  }
+
+  it("merge: auto on a release branch whose ruleset requires an approving review is refused with the fix; merge: manual is admitted with the ! line", async () => {
+    await start(github(REVIEW));
+    const r = await client.request("run", { wave_yaml: waveYaml() });
+    expect(r.ok).toBe(false);
+    expect(r.errors).toEqual([
+      {
+        path: "repo",
+        reason: `merge: auto cannot be honoured: ${B} requires 1 approving review, and GitHub refuses volleyd's own merge; set merge: manual, or drop the rule for ${B}`,
+      },
+    ]);
+    const file = join(env.home, "w-x.yaml");
+    writeFileSync(file, waveYaml("manual"));
+    const cli = await runCli(["run", file], env.env);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.stdout).toContain(
+      `repo check: ! branch.protection: ${B} requires 1 approving review: GitHub will refuse volleyd's merge: auto (fix: set merge: manual in the wave file, or drop the rule for this branch)\n`,
+    );
+    // A new version (merge: auto again) runs the same check.
+    const again = await client.request("run", { wave_yaml: waveYaml("auto", 2) });
+    expect(again.ok).toBe(false);
+    expect(again.errors?.[0]?.reason).toMatch(/^merge: auto cannot be honoured/);
+  });
+
+  it("a release branch never pushed is refused at submit (branch.release), not at the first spawn on the box", async () => {
+    await start(
+      github().on(api(`branches/${B}`), { code: 1, stderr: "gh: Not Found (HTTP 404)\n" }),
+    );
+    const r = await client.request("run", { wave_yaml: waveYaml("manual") });
+    expect(r.ok).toBe(false);
+    expect(r.errors?.[0]).toMatchObject({ path: "repo" });
+    expect(r.errors?.[0]?.reason).toMatch(
+      new RegExp(`^branch\\.release: ${B} is not on origin \\(github\\.com/b/b\\)`),
+    );
+  });
+
+  it("facts GitHub would not give refuse nothing: admitted, with repo_check_unknown", async () => {
+    await start(
+      github().on(api(`rules/branches/${B}`), { code: 1, stderr: "HTTP 403: rate limit\n" }),
+    );
+    const r = await client.request("run", { wave_yaml: waveYaml() });
+    expect(r.error).toBeUndefined();
+    expect(events().some((e) => e.data?.alarm === "repo_check_unknown")).toBe(true);
+  });
+
+  it("the only candidate without a git identity is refused, naming the fix; once it has one, that reason goes without a restart", async () => {
+    await start(github());
+    peer = new VolleyBroker();
+    await peer.connect({ url: env.broker.url, agentId: "box" });
+    const beat = (ok: boolean, at: string) =>
+      peer?.publish(
+        machineTopic("box"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "box",
+            parentId: null,
+            channel: MACHINE_CHANNEL,
+            type: "machine",
+            payload: {
+              name: "box",
+              os: "linux",
+              cores: 8,
+              tunnel: "up",
+              load: [0.1, 0.1, 0.1],
+              agents: 0,
+              last_seen: at,
+              versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.1", git: "2.43.0" },
+              auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+              repos: [
+                {
+                  slug: "b/b",
+                  path: "/srv/b/b",
+                  exists: true,
+                  managed: true,
+                  fetched_at: null,
+                  toolchain: { ok: true, missing: [], outdated: [] },
+                },
+              ],
+              checks: [
+                {
+                  id: "git.identity",
+                  ok,
+                  severity: "warn",
+                  detail: ok ? "git commits as x" : "git has no commit identity",
+                },
+              ],
+              doctor_at: at,
+            } satisfies MachineRecord,
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+    const reasons = async () =>
+      (
+        (await env.retained(`${machineTopic("box")}/readiness`)) as {
+          payload?: { reasons?: string[] };
+        } | null
+      )?.payload?.reasons ?? [];
+    await beat(false, "2026-10-25T09:00:00.000Z");
+    await eventually(async () =>
+      (await reasons()).includes(
+        "git: no commit identity on box (volley setup --peer --step signin)",
+      ),
+    );
+    const r = await client.request("run", { wave_yaml: waveYaml("manual") });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(
+      /^repo: no machine that could run this wave is ready for b\/b: box: not ready \(.*git: no commit identity on box \(volley setup --peer --step signin\)\); fix: /,
+    );
+    // Set on the box: the next record clears it, no restart (this test box is not ready for
+    // other reasons, its ssh among them, so the wave is still refused, without the identity).
+    await beat(true, "2026-10-25T09:01:00.000Z");
+    await eventually(async () => !(await reasons()).some((x) => x.startsWith("git:")));
+    const after = await client.request("run", { wave_yaml: waveYaml("manual") });
+    expect(after.error).not.toContain("git: no commit identity");
+  });
+});

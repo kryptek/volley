@@ -3540,11 +3540,15 @@ publishes there):
 yet, the tunnel down, no doctor report (`no doctor report: run volley peer doctor`), a failing
 `block` check, a volley version other than volleyd's, `claude` or `bun` missing from the PATH an
 agent gets, GitHub without push access (`gh: no write permission on <owner/name>`, the first
-repository the record reports), or Claude signed out (`claude: not signed in`). A repository is
+repository the record reports), git without a commit identity (`git: no commit identity on
+<machine> (volley setup --peer --step signin)`: the doctor's `git.identity` only warns, but an
+agent's first commit there would die), or Claude signed out (`claude: not signed in`). A repository is
 never a machine blocker: `repos` judges each one on its own, by `owner/name` — every running
 wave's, and every one the machine's record reports (an older peer's single `repo` by its origin's
 slug; one without an origin yet stands for every running wave's). `ready`: its clone exists and
-passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`) or a tool
+passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`; `repo.push:
+…`, the machine's own `gh` may not push to it; `repo.worktrees: …`, its worktree root can be
+neither written nor created) or a tool
 it needs that is missing or too old (`java not installed (needed by owner/name)`, `node older than
 required (needed by owner/name)`); `absent`: no clone (`no clone of owner/name on box-a`);
 `cloning` while a `repo_add` run makes the clone there. On the supervisor's own machine, a running
@@ -3635,15 +3639,17 @@ a Repair the box's PATH is probed again on the next re-compute. Repair runs the 
 the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
 `volley`), fix the PATH first, or Repair answers only `volley: command not found`.
 
-**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, SPEC §4.6.21).** Admin ops
-on the account-op topic beside `peer_doctor` (`repo_list` and `repo_status` are also answered on
-the mailbox); `volley repo` sends them.
+**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, `repo_check`, SPEC §4.6.21).** Admin ops
+on the account-op topic beside `peer_doctor` (`repo_list`, `repo_status` and `repo_check` without
+`fix` are also answered on the mailbox); `volley repo` sends them.
 
 - `repo_add { slug, machines?, paths? }` runs `gh repo view <slug> --json
   nameWithOwner,url,visibility` on the supervisor (refused with gh's reason; the canonical
   `nameWithOwner` is kept), patches `repos.<slug>.machines` (`all` by default) and each adopted
   `hosts.<m>.repos.<slug>` through the config store (`config_changed`; nothing when unchanged),
-  journals `repo_added` and answers with each machine's state line. Each machine's run then goes on
+  journals `repo_added` and answers with each machine's state line and `checks`, the repository
+  half of `repo_check` (`repo.exists`, `ci.mode`; `ci: { workflows }` kept for older clients).
+  Each machine's run then goes on
   in the background: a paired machine's doctor runs with `--repo-add <slug>[=<path>]` (plus
   `--fix --yes --clone` while its record reports no clone, its state `cloning` meanwhile) over
   `RemoteHost.runDoctor`, through the same one-run-per-host gate as Repair; the report is folded
@@ -3670,6 +3676,32 @@ the mailbox); `volley repo` sends them.
 - `repo_list` answers `{ repos: [{ slug, machines, paths? }] }`; `repo_status { slug? }` answers
   `{ repos: [{ slug, machines: { <m>: { state, path?, reasons } }, lines }] }`, the verdict entries
   as readiness judges them now and one `repoStateLine` per machine.
+- `repo_check { slug, release_branch?, machines?, fix? }` (`repo-check.ts`, #610) answers whether
+  the repository can run a wave on each machine that holds it. The repository half is read on the
+  supervisor (`readRepoCheck`: `gh repo view`, then `gh api` GETs of its workflows and, with a
+  release branch, `branches/<b>`, `rules/branches/<b>` and, for a protected branch,
+  `branches/<b>/protection`) as `repo.exists`, `branch.release`, `branch.protection` (its required
+  checks; `!` when a rule requires approving reviews, which `merge: auto` can never satisfy;
+  `reviews: unknown` when classic protection is not readable) and `ci.mode`. The machine half
+  runs each holder's doctor fresh, concurrently (a paired machine's over `PeerService.runDoctor`
+  behind the one-run-per-host gate, the own one's `runLocalDoctor`), folds its report, and filters
+  its checks to the repository's and the machine-level ones (`machineBlock`); a busy or down
+  machine is judged from its last record (`from: "record"`, with a `note`). `fix: true` (admin
+  only) runs each paired machine's doctor with `--fix --yes --repo-add <slug>[=<path>]`; the own
+  machine is never fixed. The answer: `{ slug, visibility?, repository, machines: { <m>: { checks,
+  ready, state, reasons, from, doctor_at, note? } }, ready_on, summary }`.
+- **Admission** (`admissionCheck`, beside the visibility and CI-mode reads of `submit`, every
+  version): the repository half comes from the same `gh api` reads as the CI mode
+  (`readRepoFacts` serves both), the machine half from the retained verdicts placement uses; no
+  doctor runs. The candidates are placement's (`candidateMachines`: a `local` task's own machine,
+  a `host: <m>` task's `m`, an `auto` task's holders). `admissionRefusals` refuses at path `repo`
+  a release branch not on origin for a wave with no local task, no candidate ready (and none
+  `cloning`) for the repository, a task pinned to a machine not ready for it, and `merge: auto`
+  on a branch that requires approving reviews. The own machine takes its local tasks whatever its
+  clone verdict says (`releaseBranchMissing` checks that clone) unless `git.identity` fails; a
+  candidate with no record yet, or not PATH-probed yet, refuses nothing. The rest comes back as
+  `repo_check.lines`, which `volleyd run` prints (`repo check: ! …`); unreadable facts journal
+  `alarm_raised { alarm: "repo_check_unknown" }`.
 - `repo_probe { machine, path }` reads what is at an adopted clone's path on a paired machine
   before an add (`RemoteHost.probeClone`: `git -C <path> rev-parse --show-toplevel`, then `git -C
   <root> remote get-url origin`, as two scripts) and answers `{ machine, path, state: found |

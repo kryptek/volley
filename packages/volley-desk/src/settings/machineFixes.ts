@@ -4,7 +4,7 @@
  * record supplies its own"), so the Desk keeps its own table, keyed by the ids
  * `volley peer doctor` writes: `tool.<name>`, `<name>_on_path`,
  * `volley.installed`, `volley.version`, `repo.clone`, `repo.origin`,
- * `repo.fetch`, `gh.auth`, `git.identity`, `claude.signin`, `claude.trust`, `machine.memory`,
+ * `repo.fetch`, `repo.push`, `repo.worktrees`, `gh.auth`, `git.identity`, `claude.signin`, `claude.trust`, `machine.memory`,
  * `machine.disk`, and the provisioning rows `skills`, `hooks`, `mcp` and
  * `sharing`. `safe` marks the fixes the doctor applies itself under `--fix`
  * (a Desk's Repair); the rest are for the person at that machine.
@@ -79,6 +79,15 @@ const FIXES: Record<string, Fixer> = {
     text: `check that ${c.machine} can fetch ${nameOf(c)} (its git credentials or network)`,
     command: `git -C ${repoOf(c)} fetch origin`,
     safe: false,
+  }),
+  "repo.push": (c) => ({
+    text: `give ${c.machine}'s GitHub account write access to ${nameOf(c)}, or sign gh in there as one that has it`,
+    command: "gh auth login",
+    safe: false,
+  }),
+  "repo.worktrees": (c) => ({
+    text: `Repair creates the folder ${c.machine} cuts ${nameOf(c)}'s worktrees under`,
+    safe: true,
   }),
   "gh.auth": (c) => ({
     text: `sign GitHub in on ${c.machine} with an account that can push to the wave repo`,

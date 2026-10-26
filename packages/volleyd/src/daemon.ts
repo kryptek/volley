@@ -189,7 +189,7 @@ import {
   requestOf,
 } from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
-import { type CiModeResult, readCiFacts, resolveCiMode } from "./ci-mode";
+import { type CiModeResult, resolveCiMode } from "./ci-mode";
 import { InFlightLedger } from "./claude/in-flight";
 import { lastAccountMove, moveAgentAccount, moveRespawn } from "./claude/move";
 import {
@@ -447,8 +447,23 @@ import {
   readiness,
   readinessKey,
   readinessTopic,
+  repoVerdictFromRecord,
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
+import {
+  type Candidate,
+  type MachineBlock,
+  type Refusal,
+  type RepoFacts,
+  admissionRefusals,
+  closingLine,
+  factsUnknown,
+  lacksIdentity,
+  machineBlock,
+  readRepoCheck,
+  readRepoFacts,
+  repositoryChecks,
+} from "./repo-check";
 import { readRepoView, readSlugView, viewFromSlug } from "./repo-visibility";
 import {
   type AddStep,
@@ -458,6 +473,7 @@ import {
   assignedSlugs,
   cloneFor,
   ghRepoContext,
+  holdersOf,
   homeFromClones,
   isSlug,
   legacyOrigin,
@@ -992,6 +1008,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "repo_list",
   "repo_status",
   "repo_probe",
+  "repo_check",
   // An admin archives any ended wave (SPEC §4.6.20), whoever owns it.
   "archive",
 ]);
@@ -7348,13 +7365,23 @@ export class Daemon {
           ),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
-        // Its workflows (no release branch yet to read required checks on): absent if unreadable.
-        const facts = await readCiFacts(this.host.exec, { slug: view.slug }, null);
-        const ci = facts !== null ? { ci: { workflows: facts.workflows } } : {};
+        // The repository half of repo_check (no release branch yet): `repo.exists`, `ci.mode`;
+        // `ci: { workflows }` kept one release for older clients (absent if unreadable).
+        const facts = {
+          ...(await readRepoFacts(this.host.exec, { slug: view.slug }, view.slug, null)),
+          view,
+        };
+        const ci = facts.ci !== null ? { ci: { workflows: facts.ci.workflows } } : {};
         return {
           reply: authReply("repo_add", {
             ok: true,
-            result: { ...r, url: view.url, visibility: view.visibility, ...ci },
+            result: {
+              ...r,
+              url: view.url,
+              visibility: view.visibility,
+              ...ci,
+              checks: repositoryChecks(facts),
+            },
           }),
         };
       },
@@ -7924,6 +7951,148 @@ export class Daemon {
       if (k !== undefined) out[m] = v.repos[k] as RepoVerdict;
     }
     return out;
+  }
+
+  /** A machine's last record: the supervisor's own, or a paired machine's. */
+  private recordOfMachine(name: string): MachineRecord | undefined {
+    return name === this.config.localName() ? this.ownRecord : this.machines.record(name);
+  }
+
+  /** `slug` on machine `name` as readiness judges it now: the machine, and its clone there. */
+  private readinessFor(
+    name: string,
+    slug: string,
+  ): { ready: boolean; reasons: string[]; repo: RepoVerdict | undefined } {
+    const cfg = this.config.effective();
+    const isLocal = name === this.config.localName();
+    const { verdict } = this.machineState(
+      name,
+      isLocal,
+      cfg,
+      this.requirementsExtra(),
+      cfg,
+      this.pressure(GLOBAL),
+    );
+    const k = Object.keys(verdict.repos).find((s) => sameSlug(s, slug));
+    const repo =
+      k !== undefined
+        ? verdict.repos[k]
+        : repoVerdictFromRecord(name, this.recordOfMachine(name), slug);
+    return { ready: verdict.ready, reasons: verdict.reasons, repo };
+  }
+
+  /**
+   * `repo_check { slug, release_branch?, machines?, fix? }` (SPEC §4.6.21, #610): is the
+   * repository ready to run a wave, on every machine that could run it? The repository half is
+   * read on the supervisor with read-only `gh`; the machine half runs each holder's doctor fresh
+   * (a paired machine's over Repair's channel, the own one's `runLocalDoctor`), concurrently,
+   * and judges the repository there as readiness does. A machine whose doctor is busy, or that is
+   * down, is judged from its last record. `fix: true` (`admin` only) runs each paired machine's
+   * doctor with `--fix` and the repository added (its safe fixes: the clone, a repoint, a fetch,
+   * the worktree root); the own machine is never fixed (its clone is the owner's checkout).
+   */
+  private async repoCheck(p: Record<string, unknown>, admin: boolean): Promise<Reply> {
+    const { slug, release_branch: branch } = p;
+    if (typeof slug !== "string" || !isSlug(slug))
+      return { ok: false, error: "slug must be a GitHub <owner/name>" };
+    if (
+      branch !== undefined &&
+      (typeof branch !== "string" || !/^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/.test(branch))
+    )
+      return { ok: false, error: "release_branch must be a branch name" };
+    const fix = p.fix === true;
+    if (fix && !admin) return { ok: false, error: "repo_check with fix: true is an admin op" };
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    let names = holdersOf(cfg, local, slug);
+    if (p.machines !== undefined) {
+      const asked = this.requestMachines(p.machines);
+      if ("error" in asked) return { ok: false, error: asked.error };
+      names = this.namedMachines(asked.machines);
+    }
+    // In repo_status' order: the own machine, then each configured host.
+    const order = this.allMachines();
+    names = [...new Set(names)].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    const [facts, runs] = await Promise.all([
+      readRepoCheck(this.host.exec, slug, typeof branch === "string" ? branch : null),
+      Promise.all(names.map((m) => this.repoCheckDoctor(m, slug, fix))),
+    ]);
+    const view = facts.view;
+    const canonical = view !== null && typeof view !== "string" ? view.slug : slug;
+    const blocks = await this.enqueue(async () => {
+      const out: Record<string, MachineBlock> = {};
+      for (const [i, m] of names.entries()) {
+        const run = runs[i] ?? { from: "record" as const };
+        const r = this.readinessFor(m, canonical);
+        out[m] = machineBlock(
+          canonical,
+          this.recordOfMachine(m),
+          run.checks,
+          { ready: r.ready, reasons: r.reasons },
+          r.repo,
+          { from: run.from, ...(run.note !== undefined ? { note: run.note } : {}) },
+        );
+      }
+      return out;
+    });
+    const machines = blocks ?? {};
+    return {
+      ok: true,
+      result: {
+        slug: canonical,
+        ...(view !== null && typeof view !== "string" ? { visibility: view.visibility } : {}),
+        repository: repositoryChecks(facts),
+        machines,
+        ready_on: names.filter((m) => machines[m]?.ready === true),
+        summary: closingLine(machines),
+      },
+    };
+  }
+
+  /**
+   * One machine's doctor for `repo_check`: its fresh report's checks (with fix text), or why its
+   * last record stands (a run in progress, the machine down, no doctor here).
+   */
+  private async repoCheckDoctor(
+    machine: string,
+    slug: string,
+    fix: boolean,
+  ): Promise<{ from: "doctor" | "record"; checks?: DoctorReport["checks"]; note?: string }> {
+    const record = (note: string) => ({ from: "record" as const, note });
+    if (machine === this.config.localName()) {
+      if (this.opts.fleet?.localDoctor === undefined) return record("no doctor run here");
+      if (!this.localDoctorRunning) this.localDoctorRun = this.runLocalDoctor();
+      await this.localDoctorRun;
+      return { from: "doctor" };
+    }
+    if (this.doctoring.has(machine)) return record("a doctor run is in progress");
+    if (this.machines.downSince(machine) !== undefined) return record(`${machine} is down`);
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") return record(host);
+    this.doctoring.add(machine);
+    let r: Awaited<ReturnType<PeerService["runDoctor"]>>;
+    try {
+      const adopted = slugKey(this.config.effective().hosts[machine]?.repos, slug);
+      const path =
+        adopted !== undefined
+          ? this.config.effective().hosts[machine]?.repos?.[adopted]
+          : undefined;
+      r = await this.peers.runDoctor({
+        name: machine,
+        fix,
+        clone: fix,
+        host,
+        ...(fix ? { repos_add: [path !== undefined ? `${slug}=${path}` : slug] } : {}),
+      });
+    } finally {
+      this.doctorDone(machine);
+    }
+    const report = r.report;
+    if (report === undefined) return record(r.error ?? "the doctor run failed");
+    // A fix may have changed the PATH: probe it again (a plain check changed nothing there).
+    if (r.ok && fix) this.probes.delete(machine);
+    await this.enqueue(() => this.foldDoctor(machine, report));
+    return { from: "doctor", checks: report.checks };
   }
 
   /** Each of `names`' line for `slug` (`repoStateLine`). */
@@ -12857,6 +13026,8 @@ export class Daemon {
     if (op === "repo_list") return { reply: authReply(op, this.repoList()) };
     if (op === "repo_status") return { reply: authReply(op, this.repoStatus(p)) };
     if (op === "repo_probe") return this.repoProbe(p);
+    if (op === "repo_check")
+      return { later: async () => ({ reply: authReply(op, await this.repoCheck(p, true)) }) };
     if (op === "archive") {
       const wave = typeof p.wave === "string" ? p.wave : "";
       const r: HandlerResult = this.archived.has(wave)
@@ -13336,6 +13507,15 @@ export class Daemon {
         return this.repoList();
       case "repo_status":
         return this.repoStatus(p);
+      case "repo_check":
+        // Its doctor runs take an ssh round-trip each: answered off the queue.
+        if (p.fix === true)
+          return {
+            ok: false,
+            error:
+              "repo_check with fix: true is answered only on volley/_system/auth/ops/<your username> (an admin's)",
+          };
+        return { ok: true, defer: this.repoCheck(p, false) };
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -13439,18 +13619,20 @@ export class Daemon {
     // serial queue (control ops and ticks, the kill switch included, keep running), then commit
     // inside it, re-checking what may have changed meanwhile (the kill switch, a racing submit of
     // the same wave id).
+    const visibility = this.repoVisibility(first.wave);
     return {
       ok: true,
       defer: Promise.all([
         this.fetchFootprints(first.wave, fetchFiles, readsTree),
-        this.repoVisibility(first.wave),
-        this.ciMode(first.wave),
-      ]).then(([read, visibility, ci]) =>
+        visibility,
+        this.repoRead(first.wave, visibility),
+      ]).then(([read, visibility, repo]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
+          const ci = repo?.ci ?? null;
           // `ci: none` the release branch's required checks make impossible (SPEC §4.6.8).
           if (ci !== null && "refused" in ci)
             return {
@@ -13458,17 +13640,35 @@ export class Daemon {
               error: ci.refused,
               errors: [{ path: "ci", reason: ci.refused }],
             };
-          if (again.existing !== undefined)
-            return this.resubmit(
-              again.existing,
-              again.wave,
-              text,
-              preface,
-              visibility,
-              read.tree,
-              ci,
-            );
-          return this.commitSubmit(again.wave, again.owner, read, text, preface, visibility, ci);
+          // The repository check (SPEC §4.6.21): refused with the fix, from the retained verdicts.
+          const check = repo?.facts != null ? this.admissionCheck(again.wave, repo.facts) : null;
+          if (check !== null && check.refusals.length > 0)
+            return {
+              ok: false,
+              error: check.refusals.map((r) => `repo: ${r.reason}`).join("\n"),
+              errors: check.refusals,
+            };
+          const reply =
+            again.existing !== undefined
+              ? await this.resubmit(
+                  again.existing,
+                  again.wave,
+                  text,
+                  preface,
+                  visibility,
+                  read.tree,
+                  ci,
+                )
+              : await this.commitSubmit(
+                  again.wave,
+                  again.owner,
+                  read,
+                  text,
+                  preface,
+                  visibility,
+                  ci,
+                );
+          return this.withRepoCheck(again.wave.wave, reply, repo?.facts ?? null, check);
         }),
       ),
     };
@@ -13506,16 +13706,107 @@ export class Daemon {
   }
 
   /**
-   * The wave version's CI mode (SPEC §4.6.8): its `ci:` override over the repository's active
-   * workflows and the release branch's required checks, read with `gh api`; or the refusal of a
-   * `ci: none` those checks make impossible. Null: not read (a daemon without a spawner); the
+   * A submit's repository read (`readRepoFacts`, with `gh api`): the wave version's CI mode (SPEC
+   * §4.6.8, its `ci:` override over the repository's active workflows and the release branch's
+   * required checks; or the refusal of a `ci: none` those checks make impossible) and the
+   * repository half of the admission check (SPEC §4.6.21; null when the repository's name is
+   * not known: a clone gh could not name). Null: not read (a daemon without a spawner); the
    * pipeline then reads `workflows`.
    */
-  private async ciMode(wave: Wave): Promise<CiModeResult | { refused: string } | null> {
+  private async repoRead(
+    wave: Wave,
+    visibility: Promise<VisibilityFacts | null>,
+  ): Promise<{ ci: CiModeResult | { refused: string }; facts: RepoFacts | null } | null> {
     if (!this.readsRepo()) return null;
-    const where = isSlugRepo(wave) ? { slug: wave.repo } : { cwd: expandHome(wave.repo) };
-    const facts = await readCiFacts(this.host.exec, where, wave.release_branch);
-    return resolveCiMode(wave.ci, facts, wave.release_branch);
+    const named = isSlugRepo(wave);
+    const where = named ? { slug: wave.repo } : { cwd: expandHome(wave.repo) };
+    const [facts, v] = await Promise.all([
+      readRepoFacts(this.host.exec, where, named ? wave.repo : "", wave.release_branch),
+      visibility,
+    ]);
+    const slug = named ? wave.repo : v?.github?.slug;
+    return {
+      ci: resolveCiMode(wave.ci, facts.ci, wave.release_branch),
+      facts: slug !== undefined ? { ...facts, slug } : null,
+    };
+  }
+
+  /**
+   * The machines a wave's tasks could run on (its placement's candidates): a `local` task's the
+   * supervisor's own (`local`: it spawns into the wave's clone whatever its verdict says), a
+   * `host: <name>` task's that machine (pinned), an `auto` one's every holder of the repository.
+   */
+  private candidateMachines(
+    wave: Wave,
+    slug: string,
+  ): Map<string, { pinned: boolean; local: boolean }> {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const out = new Map<string, { pinned: boolean; local: boolean }>();
+    for (const t of Object.values(wave.tasks)) {
+      const host = t.host ?? LOCAL_HOST;
+      if (host === LOCAL_HOST) out.set(local, { pinned: false, local: true });
+      else if (host === AUTO_HOST) {
+        for (const m of holdersOf(cfg, local, slug))
+          if (!out.has(m)) out.set(m, { pinned: false, local: false });
+      } else if (out.get(host)?.local !== true) out.set(host, { pinned: true, local: false });
+    }
+    return out;
+  }
+
+  /**
+   * The admission check (D7): the repository's facts and each candidate's retained verdict — what
+   * placement will use, at most a heartbeat old; no doctor runs. A machine not heard from yet, or
+   * not PATH-probed yet since the supervisor started, settles soon: it refuses nothing.
+   */
+  private admissionCheck(wave: Wave, facts: RepoFacts): { refusals: Refusal[]; lines: string[] } {
+    const candidates: Candidate[] = [...this.candidateMachines(wave, facts.slug)].map(
+      ([name, { pinned, local }]) => {
+        const record = this.recordOfMachine(name);
+        const r = this.readinessFor(name, facts.slug);
+        const settling =
+          record === undefined ||
+          (!r.ready && r.reasons.length > 0 && r.reasons.every((x) => /not probed yet/.test(x)));
+        return {
+          name,
+          pinned,
+          local,
+          ready: r.ready,
+          reasons: r.reasons,
+          repo: r.repo,
+          noIdentity: lacksIdentity(record),
+          settling,
+        };
+      },
+    );
+    return admissionRefusals(
+      {
+        slug: facts.slug,
+        release_branch: wave.release_branch,
+        merge: wave.merge ?? (this.config.effective().autopilot.merge as MergeMode),
+        spawnsLocally: spawnsLocally(wave),
+      },
+      facts,
+      candidates,
+    );
+  }
+
+  /**
+   * An admitted submit's reply with what the check found without refusing (`repo_check.lines`,
+   * which `volleyd run` prints), and `repo_check_unknown` journaled when a fact could not be read.
+   */
+  private async withRepoCheck(
+    wave: WaveId,
+    reply: Reply,
+    facts: RepoFacts | null,
+    check: { lines: string[] } | null,
+  ): Promise<Reply> {
+    if (!reply.ok) return reply;
+    if (facts !== null && factsUnknown(facts))
+      await this.append(wave, { type: "alarm_raised", data: { alarm: "repo_check_unknown" } });
+    return check !== null && check.lines.length > 0
+      ? { ...reply, repo_check: { lines: check.lines } }
+      : reply;
   }
 
   /** Journal a wave version's CI mode, and the alarm when the repository could not be read. */

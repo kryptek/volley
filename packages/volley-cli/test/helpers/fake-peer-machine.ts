@@ -83,6 +83,11 @@ export interface FakeMachineOptions {
    * not found). A slug not listed reports itself.
    */
   canonical?: Record<string, string | null>;
+  /**
+   * `gh repo view <slug> --json nameWithOwner,viewerPermission`'s permission: lower-cased slug →
+   * `viewerPermission`. A slug not listed has `gh.permission`.
+   */
+  permissions?: Record<string, string>;
   /** Tools beyond the doctor's own (`java`, `mvn`…): absent unless listed. */
   extraTools?: Record<string, Partial<FakeTool>>;
   /**
@@ -482,13 +487,17 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       }
       if (a[0] === "api" && a[1] === "user")
         return gh.signedIn ? { stdout: `${gh.user}\n` } : { code: 1 };
-      if (a[0] === "repo" && a[1] === "view" && a.includes("nameWithOwner")) {
+      if (a[0] === "repo" && a[1] === "view" && a.some((x) => x.startsWith("nameWithOwner"))) {
         const slug = a[2] as string;
         const known = opts.canonical ?? {};
         const name = Object.hasOwn(known, slug.toLowerCase()) ? known[slug.toLowerCase()] : slug;
-        return name === null || name === undefined
-          ? { code: 1, stderr: `GraphQL: Could not resolve to a Repository (${slug})\n` }
-          : { stdout: `${name}\n` };
+        if (name === null || name === undefined)
+          return { code: 1, stderr: `GraphQL: Could not resolve to a Repository (${slug})\n` };
+        if (a.includes("nameWithOwner,viewerPermission")) {
+          const viewerPermission = opts.permissions?.[slug.toLowerCase()] ?? gh.permission;
+          return { stdout: `${JSON.stringify({ nameWithOwner: name, viewerPermission })}\n` };
+        }
+        return { stdout: `${name}\n` };
       }
       if (a[0] === "repo" && a[1] === "view") return { stdout: `${gh.permission}\n` };
     }

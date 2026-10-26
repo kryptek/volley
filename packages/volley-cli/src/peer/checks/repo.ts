@@ -1,6 +1,7 @@
+import { mkdirSync } from "node:fs";
 import { originToSlug } from "volleyd/repos";
-import type { Check, Facts } from "../doctor";
-import { sameRepository } from "./github";
+import type { Check, Facts, RepoFacts } from "../doctor";
+import { PUSH, ghChecks, sameRepository } from "./github";
 import { binOf } from "./tools";
 
 /**
@@ -284,6 +285,75 @@ export function reposChecks(f: Facts): Check[] {
       git !== null
         ? { command: steps.map((s) => s.join(" ")).join(" && "), steps, refresh: true }
         : undefined;
-    return cloneChecks(f, view, origin, fetch).map((c) => ({ ...c, repo: r.slug }));
+    return [...cloneChecks(f, view, origin, fetch), pushCheck(f, r), worktreesCheck(r)].map(
+      (c) => ({ ...c, repo: r.slug }),
+    );
   });
+}
+
+/**
+ * `repo.push` (#610): this machine's own gh may push to this repository (`viewerPermission`
+ * WRITE, MAINTAIN or ADMIN). Without gh signed in it fails with gh.auth's fix, so readiness blocks
+ * the repository rather than letting it through unchecked.
+ */
+function pushCheck(f: Facts, r: RepoFacts): Check {
+  const g = f.github;
+  const who = g.user ?? "the signed-in GitHub user";
+  const fail = (detail: string, command: string): Check => ({
+    id: "repo.push",
+    ok: false,
+    severity: "block",
+    detail,
+    fix: { command },
+  });
+  if (!g.present || !g.signedIn) {
+    const auth = ghChecks(f)[0];
+    return fail(
+      `cannot check push access to ${r.slug}: ${auth?.detail ?? "gh is not signed in"}`,
+      auth?.fix?.command ?? "gh auth login && gh auth setup-git",
+    );
+  }
+  const ask = `ask for write access to ${r.slug} for ${who}, or gh auth login as an account that has it`;
+  if (r.permission === null) {
+    return fail(
+      `GitHub did not say whether ${who} may push to ${r.slug} (gh repo view ${r.slug} failed)`,
+      ask,
+    );
+  }
+  if (!PUSH.has(r.permission)) {
+    return fail(`${who} cannot push to ${r.slug} (permission ${r.permission})`, ask);
+  }
+  return {
+    id: "repo.push",
+    ok: true,
+    severity: "block",
+    detail: `${who} has ${r.permission} access to ${r.slug}`,
+  };
+}
+
+/**
+ * `repo.worktrees` (#610): the directory volleyd cuts this repository's worktrees under exists and
+ * is writable, or its nearest existing ancestor is. Its fix (`mkdir -p`) is safe: `--fix` applies it.
+ */
+function worktreesCheck(r: RepoFacts): Check {
+  const root = r.worktreeRoot;
+  if (r.worktreeWritable) {
+    return {
+      id: "repo.worktrees",
+      ok: true,
+      severity: "block",
+      detail: `${root} is writable`,
+    };
+  }
+  return {
+    id: "repo.worktrees",
+    ok: false,
+    severity: "block",
+    detail: `cannot write ${root} (nor create it): volleyd cuts ${r.slug}'s worktrees there`,
+    fix: {
+      command: `mkdir -p ${root}`,
+      steps: [],
+      apply: [{ what: `create ${root}`, run: () => mkdirSync(root, { recursive: true }) }],
+    },
+  };
 }

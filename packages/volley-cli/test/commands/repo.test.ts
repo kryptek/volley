@@ -80,7 +80,7 @@ describe("volley repo: arguments", () => {
       },
     ]);
     expect(r.stdout).toBe(
-      "Added a/a (public) to box.\n  box: cloning\nFollow it with: volley repo status a/a\n",
+      "Added a/a (public) to box.\n  box: cloning\nFollow it with: volley repo check a/a\n",
     );
   });
 
@@ -97,12 +97,32 @@ describe("volley repo: arguments", () => {
         },
       })).deps;
     expect((await run(["add", "a/a", "--machine", "box"], answer({ workflows: 0 }))).stdout).toBe(
-      "Added a/a (private) to box.\nCI: none — no GitHub Actions workflows; in a wave the two reviewers and the gate are the check\nFollow it with: volley repo status a/a\n",
+      "Added a/a (private) to box.\nCI: none — no GitHub Actions workflows; in a wave the two reviewers and the gate are the check\nFollow it with: volley repo check a/a\n",
     );
     expect(
       (await run(["add", "a/a", "--machine", "box"], answer({ workflows: 3 }))).stdout,
     ).toContain("Added a/a (private) to box.\nCI: 3 workflows\n");
     expect((await run(["add", "a/a", "--machine", "box"], answer())).stdout).not.toContain("CI:");
+  });
+
+  it("prints the repository block (repo_add's checks) instead of CI: when volleyd sends it (#610)", async () => {
+    const { deps } = fakeDeps(() => ({
+      ok: true,
+      result: {
+        slug: "a/a",
+        visibility: "private",
+        machines: ["box"],
+        status: [],
+        ci: { workflows: 3 },
+        checks: [
+          { id: "repo.exists", ok: true, severity: "block", detail: "GitHub knows it as a/a" },
+          { id: "ci.mode", ok: true, severity: "warn", detail: "workflows (3)" },
+        ],
+      },
+    }));
+    expect((await run(["add", "a/a", "--machine", "box"], deps)).stdout).toBe(
+      "Added a/a (private) to box.\n✓ repo.exists: GitHub knows it as a/a\n✓ ci.mode: workflows (3)\nFollow it with: volley repo check a/a\n",
+    );
   });
 
   it("add --for-wave sends the wave with repo_add; without it no wave field (#612)", async () => {
@@ -142,6 +162,10 @@ describe("volley repo: arguments", () => {
       ["add", "a/a", "--path", "/srv/a"],
       ["list", "--machine", "box"],
       ["status", "--wait"],
+      ["check"],
+      ["status", "--fix"],
+      ["add", "a/a", "--release-branch", "release/x"],
+      ["check", "a/a", "--path", "box=/srv/a"],
       ["remove", "a/a", "b/b"],
       ["frobnicate"],
     ]) {
@@ -203,6 +227,165 @@ describe("volley repo: arguments", () => {
   });
 });
 
+/** A `repo_check` answer: the repository block, then box-a (no git identity) and control. */
+const CHECKED = {
+  ok: true,
+  result: {
+    slug: "o/r",
+    visibility: "private",
+    repository: [
+      { id: "repo.exists", ok: true, severity: "block", detail: "GitHub knows it as o/r" },
+      { id: "branch.release", ok: true, severity: "block", detail: "release/x exists on origin" },
+      {
+        id: "branch.protection",
+        ok: false,
+        severity: "warn",
+        detail: "release/x requires 1 approving review: GitHub will refuse volleyd's merge: auto",
+        fix: "set merge: manual in the wave file, or drop the rule for this branch",
+      },
+      { id: "ci.mode", ok: true, severity: "warn", detail: "workflows (3)" },
+    ],
+    machines: {
+      "box-a": {
+        checks: [
+          { id: "repo.clone", ok: true, severity: "block", repo: "o/r", detail: "clone at /c" },
+          {
+            id: "git.identity",
+            ok: false,
+            severity: "warn",
+            detail: "git has no commit identity (user.name/user.email)",
+            fix: "volley setup --peer --step signin",
+          },
+        ],
+        ready: false,
+        state: "ready",
+        reasons: ["git: no commit identity on box-a (volley setup --peer --step signin)"],
+        from: "doctor",
+        doctor_at: "2026-10-25T08:59:20.000Z",
+      },
+      control: {
+        checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone at /d" }],
+        ready: true,
+        state: "ready",
+        reasons: [],
+        from: "record",
+        note: "a doctor run is in progress",
+        doctor_at: "2026-10-25T08:48:00.000Z",
+      },
+      "box-b": {
+        checks: [],
+        ready: false,
+        state: "none",
+        reasons: ["no machine record from box-b yet: is its `volley peer run` service running?"],
+        from: "record",
+        doctor_at: null,
+      },
+    },
+    ready_on: ["control"],
+    summary:
+      "not ready for a wave on box-a (git.identity), box-b (no machine record from box-b yet: is its `volley peer run` service running?); ready on control.",
+  },
+};
+
+describe("volley repo check (#610)", () => {
+  const at = Date.parse("2026-10-25T09:00:00.000Z");
+  const checkDeps = (answer: unknown = CHECKED) => {
+    const f = fakeDeps(() => answer as Answer);
+    f.deps.now = () => at;
+    return f;
+  };
+
+  it("asks repo_check as a read with the slug and release branch; prints each block and the closing line; exit 1 while a machine is not ready", async () => {
+    const { deps, asked } = checkDeps();
+    const r = await run(["check", "o/r", "--release-branch", "release/x"], deps);
+    expect(asked).toEqual([
+      {
+        cmd: "volley repo check",
+        op: "repo_check",
+        fields: { slug: "o/r", release_branch: "release/x" },
+        admin: false,
+      },
+    ]);
+    expect(r.stdout).toBe(
+      [
+        "o/r (private)",
+        "✓ repo.exists: GitHub knows it as o/r",
+        "✓ branch.release: release/x exists on origin",
+        "! branch.protection: release/x requires 1 approving review: GitHub will refuse volleyd's merge: auto",
+        "    fix: set merge: manual in the wave file, or drop the rule for this branch",
+        "✓ ci.mode: workflows (3)",
+        "",
+        "box-a (doctor 40 s ago)",
+        "✓ repo.clone: clone at /c",
+        "! git.identity: git has no commit identity (user.name/user.email)",
+        "    fix: volley setup --peer --step signin",
+        "1 warning(s) still keep this machine from being ready for agents (the supervisor needs them): git.identity",
+        "",
+        "control (last report 12 min ago; a doctor run is in progress)",
+        "✓ repo.clone: clone at /d",
+        "",
+        "box-b (no machine record)",
+        "  no machine record from box-b yet: is its `volley peer run` service running?",
+        "",
+        "not ready for a wave on box-a (git.identity), box-b (no machine record from box-b yet: is its `volley peer run` service running?); ready on control.",
+        "",
+      ].join("\n"),
+    );
+    expect(r.exitCode).toBe(EXIT.ERROR);
+  });
+
+  it("exit 0 when every machine asked is ready; --machine narrows; --json prints the answer", async () => {
+    const ready = {
+      ok: true,
+      result: {
+        ...CHECKED.result,
+        machines: { control: CHECKED.result.machines.control },
+        ready_on: ["control"],
+        summary: "ready for a wave on: control.",
+      },
+    };
+    const { deps, asked } = checkDeps(ready);
+    const r = await run(["check", "o/r", "--machine", "control"], deps);
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(r.stdout.endsWith("ready for a wave on: control.\n")).toBe(true);
+    expect(asked[0]?.fields).toEqual({ slug: "o/r", machines: ["control"] });
+    const json = await run(["check", "o/r", "--json"], deps);
+    expect(JSON.parse(json.stdout)).toEqual(ready.result);
+    expect(json.exitCode).toBe(EXIT.OK);
+  });
+
+  it("--fix asks as an admin with fix: true", async () => {
+    const { deps, asked } = checkDeps();
+    await run(["check", "o/r", "--fix"], deps);
+    expect(asked[0]).toMatchObject({
+      op: "repo_check",
+      fields: { slug: "o/r", fix: true },
+      admin: true,
+    });
+  });
+
+  it("a failing repository line (not on GitHub) exits 1 whatever the machines say", async () => {
+    const { deps } = checkDeps({
+      ok: true,
+      result: {
+        slug: "o/r",
+        repository: [
+          {
+            id: "repo.exists",
+            ok: false,
+            severity: "block",
+            detail: "gh repo view o/r: not found",
+          },
+        ],
+        machines: { control: CHECKED.result.machines.control },
+        ready_on: ["control"],
+        summary: "ready for a wave on: control.",
+      },
+    });
+    expect((await run(["check", "o/r"], deps)).exitCode).toBe(EXIT.ERROR);
+  });
+});
+
 describe("volley repo add --wait", () => {
   const added = { ok: true, result: { slug: "a/a", machines: ["control", "box"], status: [] } };
 
@@ -219,6 +402,26 @@ describe("volley repo add --wait", () => {
     expect(r.stdout).toBe(
       "Added a/a to control, box.\n  control: ready\n  box: cloning\n  box: ready\n",
     );
+  });
+
+  it("once settled, asks repo_check once and ends on its machine blocks and closing line (#610)", async () => {
+    const { deps, asked } = fakeDeps((op) =>
+      op === "repo_add"
+        ? added
+        : op === "repo_check"
+          ? CHECKED
+          : status({ control: "ready", "box-a": "ready" }),
+    );
+    deps.now = () => Date.parse("2026-10-25T09:00:00.000Z");
+    const r = await run(["add", "a/a", "--wait"], deps);
+    expect(asked.filter((a) => a.op === "repo_check")).toEqual([
+      { cmd: "volley repo add", op: "repo_check", fields: { slug: "a/a" }, admin: false },
+    ]);
+    expect(r.stdout).toContain("\nbox-a (doctor 40 s ago)\n✓ repo.clone: clone at /c\n");
+    expect(r.stdout).not.toContain("✓ repo.exists");
+    expect(r.stdout.endsWith("ready on control.\n")).toBe(true);
+    // The wait's exit code: every machine settled ready.
+    expect(r.exitCode).toBe(EXIT.OK);
   });
 
   it("a machine that ends blocked exits 1", async () => {

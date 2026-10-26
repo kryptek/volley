@@ -1196,7 +1196,9 @@ describe("volley peer doctor: many repositories (#435)", () => {
       expect(warn?.detail).toContain("remote names the old owner");
       expect(MUTATING(m).filter((a) => a.includes("set-url"))).toEqual([]);
       // One gh repo view per slug per run.
-      const views = m.ran("gh", "repo", "view").filter((a) => a.includes("nameWithOwner"));
+      const views = m
+        .ran("gh", "repo", "view")
+        .filter((a) => a.some((x) => x.startsWith("nameWithOwner")));
       expect(views.map((a) => a[3]).sort()).toEqual(["new-owner/name", "old-owner/name"]);
 
       m.calls.length = 0;
@@ -1377,6 +1379,81 @@ describe("volley peer doctor: many repositories (#435)", () => {
       const c = forRepo(r, "repo.requirements", "a/a");
       expect(c).toMatchObject({ ok: false, severity: "block" });
       expect(c?.detail).toContain("toolz");
+    });
+  });
+
+  describe("push access and the worktree root (#610)", () => {
+    it("repo.push per repository: WRITE on one, READ on the other blocks that one; gh.auth unchanged", async () => {
+      const m = machine({ permissions: { "a/a": "WRITE", "b/b": "READ" } });
+      const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      addClone(m, repos["b/b"], { origin: "git@github.com:b/b.git" });
+      const r = await reportRepos(m, repos);
+      expect(forRepo(r, "repo.push", "a/a")).toMatchObject({ ok: true, severity: "block" });
+      expect(forRepo(r, "repo.push", "a/a")?.detail).toBe("octocat has WRITE access to a/a");
+      const b = forRepo(r, "repo.push", "b/b");
+      expect(b).toMatchObject({ ok: false, severity: "block", repo: "b/b" });
+      expect(b?.detail).toBe("octocat cannot push to b/b (permission READ)");
+      expect(b?.fix).toBe(
+        "ask for write access to b/b for octocat, or gh auth login as an account that has it",
+      );
+      // gh.auth keeps its machine-level meaning: the first repository's permission.
+      expect(check(r, "gh.auth")?.ok).toBe(true);
+      expect(r.auth.gh).toBe("ok");
+      // One gh repo view per slug per run.
+      const views = m.ran("gh", "repo", "view");
+      expect(views.map((a) => a[3]).sort()).toEqual(["a/a", "b/b"]);
+    });
+
+    it("repo.push without gh signed in fails with gh.auth's fix", async () => {
+      const m = machine({ gh: { signedIn: false } });
+      const repos = { "a/a": managed(m, "a/a") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      const c = forRepo(await reportRepos(m, repos), "repo.push", "a/a");
+      expect(c).toMatchObject({ ok: false, severity: "block" });
+      expect(c?.fix).toBe("gh auth login && gh auth setup-git");
+    });
+
+    it("repo.worktrees: a writable root passes; one whose nearest ancestor is not writable fails with mkdir -p, which --fix applies", async () => {
+      const m = machine();
+      const repos = { "a/a": managed(m, "a/a") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      const root = join(m.home, ".volley", "worktrees", "a", "a");
+      const ok = forRepo(await reportRepos(m, repos), "repo.worktrees", "a/a");
+      expect(ok).toMatchObject({ ok: true, severity: "block" });
+      expect(ok?.detail).toContain(root);
+
+      // Nothing at the root yet and its nearest ancestor read-only (to the doctor).
+      const writable = (p: string) => existsSync(p) && p.startsWith(root);
+      const io = makeBufferIO();
+      await doctor(io, m.deps({ writable }), { repos, json: true });
+      const c = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(c).toMatchObject({ ok: false, severity: "block", repo: "a/a" });
+      expect(c?.fix).toBe(`mkdir -p ${root}`);
+
+      const fixed = makeBufferIO();
+      await doctor(fixed, m.deps({ writable }), { repos, fix: true, yes: true, json: true });
+      expect(existsSync(root)).toBe(true);
+      const after = (JSON.parse(fixed.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(after?.ok).toBe(true);
+    });
+
+    it("an adopted clone's worktree root is beside it (.volley-worktrees)", async () => {
+      const m = machine();
+      const adopted = join(m.root, "work", "a");
+      addClone(m, adopted, { origin: "https://github.com/a/a" });
+      const c = forRepo(await reportRepos(m, { "a/a": adopted }), "repo.worktrees", "a/a");
+      expect(c?.detail).toContain(join(m.root, "work", ".volley-worktrees"));
+    });
+
+    it("the closing line names git.identity while it fails", async () => {
+      const m = machine({ gitIdentity: null });
+      const r = await runRepos(m, {});
+      expect(r.stdout).toMatch(/keep this machine from being ready for agents.*git\.identity/);
     });
   });
 });
