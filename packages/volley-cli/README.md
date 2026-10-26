@@ -24,6 +24,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [`volley machine add`](#volley-machine-add)
 - [`volley peer`](#volley-peer)
 - [`volley repo`](#volley-repo)
+- [`volley bug`](#volley-bug)
 - [Common patterns](#common-patterns)
   - [Be a one-shot agent in CI](#be-a-one-shot-agent-in-ci)
   - [Background-wait for an agent and react](#background-wait-for-an-agent-and-react)
@@ -80,6 +81,7 @@ volley --help
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs); `volley desk install`, `uninstall` and `check` install it as a service on its own. See [`volley desk serve`](#volley-desk-serve) below. |
 | `volley broker` | A broker move's machine-side steps (volleyd runs them over ssh): `receive <bundle>` (set this machine's mosquitto up with the moved broker's logins), `probe`, `tunnel` (the supervisor's own tunnel to it). See [Moving the broker](#moving-the-broker-volley-broker) below. |
 | `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure; then every paired machine. See [`volley deploy`](#volley-deploy) below. |
+| `volley bug`    | Report a problem: gather this machine's diagnostics, redact them, show the exact text, then open a GitHub issue on a yes (or write a file). See [`volley bug`](#volley-bug) below. |
 
 Each has its own `--help`:
 
@@ -1046,6 +1048,52 @@ js-suite  3/4 held  max 2 per machine (box-a 3, laptop 1)  1 queued
   commands in `volley lease run` automatically.
 
 ---
+
+## `volley bug`
+
+```sh
+volley bug [-m <what happened>] [--wave <name>] [--events <n>] [--lines <n>] [--file [path]] [--keep-repos]
+```
+
+One command for a usable bug report from any machine, the daemon running or not. It changes
+nothing, and never needs the broker or `sudo`.
+
+**What it gathers**, each probe under its own 20-second timeout (a probe that fails is one line
+in its section, and the rest is still gathered): a header line (`volley 0.13.2 · installer
+(v0.13.2) · macOS 15.6 arm64 · bun 1.3.2 · layout brew-arm64 · network tailscale · this machine:
+supervisor`: the install method is read from where the CLI runs: the installer's clone under
+`~/.volley/src`, Homebrew's `libexec`, or a clone with its `git describe`, `-dirty` included);
+`bun`, `tmux`, `gh`, `claude` and `mosquitto` versions and whether `gh` is signed in; `volley
+setup --check --json`; `volley peer doctor --json`; `volleyd status --json` and `volleyd status
+<wave> --json` (when the supervisor does not answer, its diagnosis is the section); the wave's
+last `--events` journal events (default 40; the wave whose `journal.jsonl` is newest unless
+`--wave` names one) and `_system`'s last 10; its newest `v<N>.yaml`; the last `--lines` lines
+(default 80) of `volleyd.log`, `desk.log`, `peer.log` and `setup.log`; and `setup.json`'s
+layout, network kind, terminal and Desk port, with `peer.json`'s machine name and `remote_port`.
+
+**What it never reads**: `.volley/agent.json`, the auth directory and every login in it
+(`coordinator.json`, `admin.json`, `accounts.json`, `tokens.json`), volleyd's `broker.json` and
+`dynsec-admin.json`, the broker's `dynamic-security.json`, and `screens/*.txt` captures (the
+report names their folder: read one, then attach it yourself).
+
+**What it redacts**, over the whole rendered report as the last step: tokens and secrets (Anthropic
+and GitHub tokens, 40-hex strings, a `vly_…` token's secret (its id stays), JWTs, `code=`,
+`state=`, `token=`, `password=`, `secret=` and `key=` values, `Authorization` headers, a login in
+a URL, `password` / `secret` / `token` / `api_key` fields); e-mails (`[email]`); your user name
+and git name (`[user]`); home paths (`~`); this machine's hostnames, its private network's name
+and address and any `*.ts.net` name (`[host]`); IP addresses other than loopback (`[ip]`); the
+`gh` login (`[gh-user]`); and repository names (`[repo-1]`, `[repo-2]`… in first-seen order, the
+bare owner `[repo-owner]`; `--keep-repos` keeps them). Wave names and task ids stay. The footer
+line says what was redacted.
+
+**The two transports.** The report is printed first. In a terminal, one question follows:
+`Open a GitHub issue with exactly this text? [y/N]`. On a yes, with `gh` signed in: `gh issue
+create --repo kryptek/volley --label bug` with exactly that text, and the issue's URL printed.
+Without `gh`: the report is saved as `./volley-bug-<YYYYMMDD-HHMMSS>.md` and a browser page opens
+on the repository's bug form with the title and a summary (the header, the first failing rows,
+the file to paste) filled in (the URL is printed when no browser opens). A no, a non-interactive
+run, or `--file [path]` writes the file and sends nothing. A report longer than GitHub's 65 536
+characters loses log lines first, then journal events, never the header, and says how many.
 
 ## Common patterns
 

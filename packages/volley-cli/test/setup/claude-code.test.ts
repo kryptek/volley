@@ -19,7 +19,7 @@ import {
   planClaudeCode,
 } from "../../src/setup/claude-code";
 import { readSetupInstall } from "../../src/setup/journal";
-import { setupFence } from "../../src/setup/step";
+import { type Change as StepChange, setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
 import { tempDir } from "../helpers/tmp";
@@ -130,7 +130,7 @@ describe("the Claude Code step", () => {
     });
     const seed = (env: Record<string, string>) =>
       writeFileSync(m.claudeJson, JSON.stringify({ mcpServers: { volley: loginEntry(env) } }));
-    const mcpChange = (plan: { changes: { summary: string }[] }) =>
+    const mcpChange = <T extends { summary: string }>(plan: { changes: T[] }) =>
       plan.changes.find((c) => c.summary.startsWith("Move the broker login out of"));
 
     it("plans the move, applies setup's registration, and never shows the password", async () => {
@@ -149,7 +149,7 @@ describe("the Claude Code step", () => {
         "MCP: volley carries a broker login in ~/.claude.json (VOLLEY_AUTH_PASSWORD, VOLLEY_AUTH_USERNAME): to move",
       );
       expect(JSON.stringify(plan)).not.toContain(MARKER);
-      const lines = await (change as { apply: () => Promise<string[]> }).apply();
+      const lines = await (change as StepChange).apply();
       expect(lines.join("\n")).not.toContain(MARKER);
       const mcp = m.execCalls.filter((a) => a[0] === "claude" && a[1] === "mcp");
       expect(mcp.map((a) => a.slice(0, 3).join(" "))).toEqual([
@@ -184,7 +184,7 @@ describe("the Claude Code step", () => {
       const plan = await planClaudeCode(m.ctx);
       const change = mcpChange(plan);
       expect(change?.summary).toContain("the session will log in as coordinator (it was admin-1)");
-      const lines = await (change as { apply: () => Promise<string[]> }).apply();
+      const lines = await (change as StepChange).apply();
       expect(lines.join("\n")).toContain(
         "The old login is still admin-1's password on the broker: volley auth rotate admin-1 retires it.",
       );
@@ -206,7 +206,7 @@ describe("the Claude Code step", () => {
       expect(change?.summary).toContain("VOLLEY_BROKER_URL (user:password@)");
       expect(change?.summary).not.toContain("it was");
       expect(JSON.stringify(plan)).not.toContain(MARKER);
-      await (change as { apply: () => Promise<string[]> }).apply();
+      await (change as StepChange).apply();
       expect(JSON.stringify(volleyEntry())).not.toContain(MARKER);
     });
 

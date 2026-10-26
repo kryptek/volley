@@ -16,6 +16,7 @@ the Homebrew path, and how to add a second machine. The README's
 - [What `volley setup` does](#what-volley-setup-does)
 - [Flags](#flags)
 - [Checking an install: `--check`](#checking-an-install---check)
+- [When something goes wrong](#when-something-goes-wrong)
 - [Uninstalling: `--uninstall`](#uninstalling---uninstall)
 - [Linux notes](#linux-notes)
 - [The Homebrew path](#the-homebrew-path)
@@ -207,6 +208,23 @@ one older than 2.1 counts as missing) and where `volley` is. `volley setup --che
 step without asking anything and exits 0 only when nothing is pending or blocked; a pending row
 lists the changes a run would make. A healthy install is all `done` (the Phone row is `skipped`
 with LAN access off).
+
+## When something goes wrong
+
+Run `volley bug` on the machine with the problem:
+
+```sh
+volley bug -m "the first wave never started"
+volley bug --file report.md   # write the report and stop: no question, nothing sent
+```
+
+It gathers what a report needs (the version and how Volley was installed, `volley setup
+--check`, `volley peer doctor`, `volleyd status` or why the supervisor does not answer, the
+wave's last journal events and the service logs), redacts tokens, credentials, e-mails, your
+user, hostnames, IPs and repository names, and prints the exact text. Only after you answer yes
+does it open an issue: through `gh` when it is signed in, else a browser page on the bug form,
+with the report saved beside you as `volley-bug-<stamp>.md` to paste in. It never reads a
+login file or a screen capture, and changes nothing.
 
 ## Uninstalling: `--uninstall`
 

@@ -1,0 +1,28 @@
+name: Bug report
+description: Something in Volley went wrong. `volley bug` fills this in for you.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The quickest report is `volley bug` in a terminal on the machine with the problem: it
+        gathers the diagnostics, redacts tokens, e-mails, your user, hostnames, IPs and
+        repository names, shows you the exact text, and only then opens this issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, and what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: textarea
+    id: report
+    attributes:
+      label: Report
+      description: The output of `volley bug` (or the volley-bug-….md file it saved).
+      render: markdown
