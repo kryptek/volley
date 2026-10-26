@@ -1258,6 +1258,8 @@ describe("volley peer on the supervisor's machine", () => {
     expect(r.exitCode).toBe(EXIT.USAGE);
     expect(r.stderr).toContain("coordinator is a fixed identity, not an admin account");
     expect(r.stderr).toContain("volley auth status");
+    // And how to proceed: an admin's login, named on the command line.
+    expect(r.stderr).toContain("pass --username <admin>");
     expect(r.stderr).not.toContain("VOLLEY_AUTH_PASSWORD");
     expect(r.stderr).not.toContain("--password");
   });

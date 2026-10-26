@@ -96,7 +96,7 @@ describe("volley auth status: the four lines", () => {
     expect(r.stdout).toContain(`broker:  ${tb.url} · refused`);
     expect(r.exitCode).toBe(EXIT.ERROR);
     const flags = await status(["--username", "someone"], { VOLLEY_AUTH_PASSWORD: MARKER });
-    expect(flags.stdout).toContain("login:   someone (account (role not known here))");
+    expect(flags.stdout).toContain("login:   someone (account; role not known here)");
     expect(flags.stdout).toContain("source:  flags\n");
   });
 
@@ -117,6 +117,12 @@ describe("volley auth status: the four lines", () => {
 });
 
 describe("volley auth status: the broker's answer", () => {
+  it("--password without --username is a usage mistake, exit 2", async () => {
+    const r = await status(["--password", "x"]);
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toContain("--password requires --username");
+  });
+
   it("no login at all: every step says why, exit 1", async () => {
     useSavedLogin(linuxFile(null));
     const r = await status([]);

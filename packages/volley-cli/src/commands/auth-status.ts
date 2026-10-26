@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { VolleyError } from "volley-mcp/errors";
-import { resolveBrokerUrl } from "../args";
+import { argumentExit, resolveBrokerUrl } from "../args";
 import { withSetupAuthDir } from "../auth/coordinator-login";
 import {
   type BrokerResult,
@@ -104,9 +104,10 @@ export async function authStatus(
       brokerUrl: url,
     });
   } catch (e) {
-    // A damaged credentials file: its path, never a byte of it (parseCredentialsFile).
+    // A damaged credentials file (exit 1): its path, never a byte of it (parseCredentialsFile);
+    // a flag mistake such as --password without --username is a usage error (exit 2).
     io.stderr(`volley auth status: ${e instanceof Error ? e.message : String(e)}\n`);
-    return EXIT.ERROR;
+    return argumentExit(e);
   }
 
   let result: BrokerResult;

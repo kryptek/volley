@@ -740,6 +740,9 @@ export type RefusalKind = "admin" | "repo";
 /** Where every refusal points: the command that says which login this shell uses, and why. */
 const STATUS_HINT = "run `volley auth status` to see which login this shell uses and why";
 
+/** An admin op's refusal also says how to proceed: an admin's login, named on the command line. */
+const ADMIN_HINT = `${STATUS_HINT}, or pass --username <admin>`;
+
 /**
  * An account-op topic op's refusal before any connection (exit 2, said on stderr): no login, or
  * one this machine's records say may not send it (`localRefusal`). The broker drops such an op
@@ -754,13 +757,14 @@ export function adminRefusal(
   adminOnly = ADMIN_ONLY,
   kind: RefusalKind = "admin",
 ): ExitCode | null {
+  const hint = kind === "admin" ? ADMIN_HINT : STATUS_HINT;
   if (auth === null) {
-    io.stderr(`${cmd}: ${adminOnly}, and this shell has no broker login: ${STATUS_HINT}\n`);
+    io.stderr(`${cmd}: ${adminOnly}, and this shell has no broker login: ${hint}\n`);
     return EXIT.USAGE;
   }
   const refused = localRefusal(kind, auth.username, env);
   if (refused !== null) {
-    io.stderr(`${cmd}: ${refused}; ${adminOnly}: ${STATUS_HINT}\n`);
+    io.stderr(`${cmd}: ${refused}; ${adminOnly}: ${hint}\n`);
     return EXIT.USAGE;
   }
   return null;

@@ -223,7 +223,7 @@ export function loginLines(report: LoginReport): string[] {
         ? "fixed identity"
         : report.role !== undefined
           ? `${report.role} account`
-          : "account (role not known here)";
+          : "account; role not known here";
     lines.push(`login:   ${report.username} (${what})`);
   }
   if (report.source !== null) {

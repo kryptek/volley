@@ -81,13 +81,13 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
     throw new CredentialsFileError(`${path}: malformed identity file (not valid JSON)`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error(`${path}: identity file must be a JSON object`);
+    throw new CredentialsFileError(`${path}: identity file must be a JSON object`);
   }
   const file = raw as Record<string, unknown>;
 
   const agentId = file.agent_id;
   if (typeof agentId !== "string") {
-    throw new Error(`${path}: identity file must set agent_id to a string`);
+    throw new CredentialsFileError(`${path}: identity file must set agent_id to a string`);
   }
   if (!isValidAgentId(agentId)) {
     throw new VolleyError(
@@ -99,7 +99,7 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
 
   if (file.namespace !== undefined) {
     if (typeof file.namespace !== "string" || !isValidNamespace(file.namespace)) {
-      throw new Error(
+      throw new CredentialsFileError(
         `${path}: namespace ${JSON.stringify(file.namespace)} does not match [a-z0-9][a-z0-9_-]{0,62}`,
       );
     }
@@ -110,7 +110,7 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
       file.parent_id !== null &&
       (typeof file.parent_id !== "string" || !isValidAgentId(file.parent_id))
     ) {
-      throw new Error(
+      throw new CredentialsFileError(
         `${path}: parent_id ${JSON.stringify(file.parent_id)} does not match the agent id grammar`,
       );
     }
@@ -118,13 +118,13 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
   }
   if (file.broker_url !== undefined) {
     if (typeof file.broker_url !== "string" || file.broker_url.length === 0) {
-      throw new Error(`${path}: broker_url must be a non-empty string`);
+      throw new CredentialsFileError(`${path}: broker_url must be a non-empty string`);
     }
     identity.brokerUrl = file.broker_url;
   }
   if (file.claude_account !== undefined) {
     if (typeof file.claude_account !== "string" || !isValidAgentId(file.claude_account)) {
-      throw new Error(
+      throw new CredentialsFileError(
         `${path}: claude_account ${JSON.stringify(file.claude_account)} does not match [a-z0-9][a-z0-9_-]{0,62}`,
       );
     }
