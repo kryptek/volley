@@ -76,8 +76,10 @@ README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has eve
 5. **Sign-ins**: Claude Code and GitHub, each in your browser when signed out; and, when git has
    no commit identity here, one from your GitHub account (its name, its noreply address).
 6. **Claude Code**: your coordinator name; the volley MCP server registered at user scope with
-   **no password in it** (it logs in with `coordinator.json` from the auth dir it names); the
-   `/volley`, `/volley-issues` and `/wait` skills; the Volley hooks.
+   **no password in it** (it logs in with `coordinator.json` from the auth dir it names; a
+   registration from before v0.13.0 that still carries a broker login is re-registered without
+   it, shown as a change like any other, the password never printed); the `/volley`,
+   `/volley-issues` and `/wait` skills; the Volley hooks.
 7. **Terminal**: where volleyd starts agents here: cmux on a Mac that has it, else tmux.
 8. **Services**: volleyd and the Desk (`http://localhost:5199`) as services.
 9. **Phone**: a one-time sign-in QR for the Desk on your phone, when you let your network reach
