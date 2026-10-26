@@ -1,7 +1,14 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { generateAgentId, loadConfig, resolveBrokerAuth } from "../src/config";
+import {
+  CredentialsFileError,
+  generateAgentId,
+  loadConfig,
+  parseCredentialsFile,
+  readCoordinatorAuth,
+  resolveBrokerAuth,
+} from "../src/config";
 import { shutdownLifecycle, startLifecycle } from "../src/lifecycle";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { tempDir } from "./helpers/tmp";
@@ -383,5 +390,93 @@ describe("the coordinator's login from the auth dir (a registration without a se
       JSON.stringify({ agent_id: "worker-1", namespace: "default", broker_url: broker.url }),
     );
     expect(() => loadConfig(env(), cwd)).not.toThrow();
+  });
+});
+
+describe("a damaged credentials file never puts a byte of itself in a message", () => {
+  const MARKER = "hunter2-marker-7f3a";
+  /** The four ways a credentials file arrives broken: bare marker, unquoted, truncated, loose mode. */
+  const DAMAGED: [string, string][] = [
+    ["only the marker", MARKER],
+    ["the marker unquoted", `{"username":"coordinator","password":${MARKER}}`],
+    ["truncated inside the password", `{"username":"coordinator","password":"${MARKER}`],
+    ["0644 and only the marker", MARKER],
+  ];
+  const messageOf = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (e) {
+      return (e as Error).message;
+    }
+    throw new Error("expected a throw");
+  };
+
+  it("parseCredentialsFile: a fixed sentence naming the path", () => {
+    for (const [, text] of DAMAGED) {
+      const m = messageOf(() => parseCredentialsFile("/path/to/creds.json", text));
+      expect(m).toBe("/path/to/creds.json: not a JSON object with a string username and password");
+    }
+    expect(parseCredentialsFile("/p", JSON.stringify({ username: "u", password: "p" }))).toEqual({
+      username: "u",
+      password: "p",
+    });
+  });
+
+  it("readCoordinatorAuth: the path, never the marker", () => {
+    const dir = tempDir("volley-damaged-");
+    for (const [what, text] of DAMAGED) {
+      const f = join(dir, "coordinator.json");
+      writeFileSync(f, text, { mode: what.startsWith("0644") ? 0o644 : 0o600 });
+      const m = messageOf(() => readCoordinatorAuth({ VOLLEY_AUTH_DIR: dir }));
+      expect(m).toContain(f);
+      expect(m).not.toContain(MARKER);
+      expect(m).not.toContain("hunter2");
+    }
+  });
+
+  it("an unreadable file: `cannot read` and the errno code only", () => {
+    if (process.getuid?.() === 0) return;
+    const dir = tempDir("volley-damaged-");
+    const f = join(dir, "coordinator.json");
+    writeFileSync(f, JSON.stringify({ username: "coordinator", password: MARKER }), {
+      mode: 0o000,
+    });
+    expect(messageOf(() => readCoordinatorAuth({ VOLLEY_AUTH_DIR: dir }))).toBe(
+      `${f}: cannot read (EACCES)`,
+    );
+  });
+
+  it("agent.json: a malformed file or broker block names the path, never the marker", () => {
+    const cwd = tempDir("volley-damaged-agent-");
+    mkdirSync(join(cwd, ".volley"), { recursive: true });
+    const f = join(cwd, ".volley", "agent.json");
+    for (const [, text] of DAMAGED) {
+      writeFileSync(f, `{"agent_id":"w1-t1-impl","broker":${text}`);
+      const m = messageOf(() => loadConfig({}, cwd));
+      expect(m).toContain(f);
+      expect(m).not.toContain(MARKER);
+      writeFileSync(f, JSON.stringify({ agent_id: "w1-t1-impl", broker: text }));
+      const b = messageOf(() => loadConfig({}, cwd));
+      expect(b).toContain(`${f}: broker`);
+      expect(b).not.toContain(MARKER);
+    }
+  });
+
+  it("agent.json: a file of the wrong shape is a CredentialsFileError, so the CLIs exit 1", () => {
+    const cwd = tempDir("volley-damaged-agent-");
+    mkdirSync(join(cwd, ".volley"), { recursive: true });
+    const f = join(cwd, ".volley", "agent.json");
+    for (const text of [
+      '"just a string"',
+      "[]",
+      "{}",
+      '{"agent_id":"w1-t1-impl","namespace":"Bad NS"}',
+      '{"agent_id":"w1-t1-impl","broker_url":""}',
+      '{"agent_id":"w1-t1-impl","parent_id":7}',
+      '{"agent_id":"w1-t1-impl","claude_account":"No Way"}',
+    ]) {
+      writeFileSync(f, text);
+      expect(() => loadConfig({}, cwd)).toThrow(CredentialsFileError);
+    }
   });
 });

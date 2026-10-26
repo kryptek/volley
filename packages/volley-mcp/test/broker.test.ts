@@ -753,7 +753,7 @@ describe("VolleyBroker authentication", () => {
     await b.disconnect();
   });
 
-  it("throws AUTH_FAILED with the volley auth init hint on a wrong password", async () => {
+  it("throws AUTH_FAILED with the volley auth status hint on a wrong password", async () => {
     const b = new VolleyBroker();
     const err = await b
       .connect({ url: tb.url, agentId: "agent-aaaa", username: "desk", password: "wrong" })
@@ -761,7 +761,9 @@ describe("VolleyBroker authentication", () => {
     expect(err).toMatchObject({ code: "AUTH_FAILED" });
     const message = (err as Error).message;
     expect(message).toContain('"desk"');
-    expect(message).toContain("volley auth init");
+    expect(message).toContain("volley auth status");
+    // The hint never teaches the environment (#613).
+    expect(message).not.toContain("VOLLEY_AUTH_PASSWORD");
     expect(message).not.toContain("wrong"); // never echo the password
     expect(b.connected).toBe(false);
   });
@@ -770,7 +772,7 @@ describe("VolleyBroker authentication", () => {
     const b = new VolleyBroker();
     await expect(b.connect({ url: tb.url, agentId: "agent-aaaa" })).rejects.toMatchObject({
       code: "AUTH_FAILED",
-      message: expect.stringContaining("VOLLEY_AUTH_USERNAME"),
+      message: expect.stringContaining("volley auth status"),
     });
   });
 });

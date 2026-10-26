@@ -4,7 +4,14 @@ import type { BrokerAuth } from "volley-mcp/config";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic, isReservedTopic, isValidAgentId } from "volley-mcp/topics";
-import { parseJsonPayload, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { retainedTopics } from "volleyd/retire";
+import {
+  argumentExit,
+  parseJsonPayload,
+  resolveAuth,
+  resolveBrokerUrl,
+  resolveNamespace,
+} from "../args";
 import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -31,6 +38,7 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
         type: { type: "string" },
         payload: { type: "string" },
         "correlation-id": { type: "string" },
+        clear: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -49,6 +57,7 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
   const agentId = parsed.values["agent-id"];
   const channel = parsed.values.channel;
   const type = parsed.values.type;
+  if (parsed.values.clear === true) return clear(parsed.values, env, io);
 
   if (typeof agentId !== "string" || typeof channel !== "string" || typeof type !== "string") {
     io.stderr(`volley pub: --agent-id, --channel, and --type are required\n${PUB_HELP}`);
@@ -78,7 +87,7 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
     payload = parseJsonPayload(parsed.values.payload as string | undefined);
   } catch (e) {
     io.stderr(`volley pub: ${e instanceof Error ? e.message : String(e)}\n`);
-    return EXIT.USAGE;
+    return argumentExit(e);
   }
 
   const topic = buildTopic(namespace, agentId, channel);
@@ -125,7 +134,65 @@ export async function pub({ argv, env, io }: PubArgs): Promise<ExitCode> {
   }
 }
 
+/**
+ * `--clear`: an empty retained payload on every retained record of a finished agent (its registry
+ * entry and the channels volleyd clears when it retires one, `retainedTopics`), as the login the
+ * ladder finds. Per MQTT, an empty retained payload clears the slot.
+ */
+async function clear(
+  values: ReturnType<typeof parseArgs>["values"],
+  env: Record<string, string | undefined>,
+  io: IO,
+): Promise<ExitCode> {
+  const agentId = values["agent-id"];
+  if (typeof agentId !== "string" || !isValidAgentId(agentId)) {
+    io.stderr("volley pub --clear: --agent-id <id> (a valid agent id) is required\n");
+    return EXIT.USAGE;
+  }
+  for (const k of ["channel", "type", "payload", "parent-id", "correlation-id"]) {
+    if (values[k] !== undefined) {
+      io.stderr(`volley pub --clear: --${k} does not apply (it clears every retained record)\n`);
+      return EXIT.USAGE;
+    }
+  }
+  let namespace: string;
+  let brokerUrl: string;
+  let auth: BrokerAuth | null;
+  try {
+    namespace = resolveNamespace(values.namespace as string | undefined, env);
+    brokerUrl = resolveBrokerUrl(values["broker-url"] as string | undefined, env);
+    auth = resolveAuth(
+      {
+        username: values.username as string | undefined,
+        password: values.password as string | undefined,
+      },
+      env,
+      process.cwd(),
+      brokerUrl,
+    );
+  } catch (e) {
+    io.stderr(`volley pub: ${e instanceof Error ? e.message : String(e)}\n`);
+    return argumentExit(e);
+  }
+  const broker = await connectToSupervisor(brokerUrl, io, auth, { command: "volley pub", env });
+  if (typeof broker === "number") return broker;
+  try {
+    for (const topic of retainedTopics(namespace, agentId)) {
+      await broker.publish(topic, "", { qos: 1, retain: true });
+    }
+    return EXIT.OK;
+  } catch (e) {
+    io.stderr(`volley pub: ${e instanceof Error ? e.message : String(e)}\n`);
+    return EXIT.ERROR;
+  } finally {
+    await broker.disconnect();
+  }
+}
+
 const PUB_HELP = `Usage: volley pub --agent-id <id> --channel <name> --type <type> [options]
+       volley pub --clear --agent-id <id>   Clear a finished agent's retained records (its
+                                            registry entry, status, progress, result,
+                                            capability, screen, usage)
 
 Required:
   --agent-id <id>        Agent identifier (the topic-segment id, not the sender of this CLI run)

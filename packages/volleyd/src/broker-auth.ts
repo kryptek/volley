@@ -1,7 +1,13 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { type SavedLoginDeps, savedCoordinatorLogin } from "volley-cli/auth/coordinator-login";
-import { type BrokerAuth, authFromEnv, resolveBrokerAuth } from "volley-mcp/config";
+import type { SavedLoginDeps } from "volley-cli/auth/coordinator-login";
+import { resolveLogin } from "volley-cli/auth/login";
+import {
+  type BrokerAuth,
+  authFromEnv,
+  parseCredentialsFile,
+  readSecretText,
+} from "volley-mcp/config";
 
 /**
  * Broker credentials. The daemon authenticates as the fixed `volleyd` identity from a mode-0600
@@ -45,7 +51,10 @@ export function daemonAdminAuth(
   return null;
 }
 
-/** `{username, password}` from a mode-0600 file (anything looser is refused). */
+/**
+ * `{username, password}` from a mode-0600 file (anything looser is refused). A damaged file is
+ * reported by path only (`parseCredentialsFile`): never a byte of it.
+ */
 function readCredentialsFile(path: string): BrokerAuth {
   const mode = statSync(path).mode & 0o777;
   if ((mode & 0o077) !== 0) {
@@ -53,32 +62,16 @@ function readCredentialsFile(path: string): BrokerAuth {
       `${path} is mode 0${mode.toString(8)}; it holds the broker password, so run: chmod 600 ${path}`,
     );
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(path, "utf-8"));
-  } catch (e) {
-    throw new Error(`${path}: malformed broker credentials — ${(e as Error).message}`);
-  }
-  const c = raw as { username?: unknown; password?: unknown } | null;
-  if (
-    typeof c !== "object" ||
-    c === null ||
-    typeof c.username !== "string" ||
-    c.username === "" ||
-    typeof c.password !== "string"
-  ) {
-    throw new Error(`${path}: must hold a non-empty string username and a string password`);
-  }
-  return { username: c.username, password: c.password };
+  return parseCredentialsFile(path, readSecretText(path));
 }
 
 /**
- * A control client's credentials: the caller's own, resolved like every other Volley client (the
- * identity file's `broker` block in `cwd`, then `VOLLEY_AUTH_*`, then, for an operator (not an
- * agent) and a broker on this machine, the coordinator login `volley setup` saved: its
- * coordinator.json, which `cli.ts` turns on; volleyd never asks the keychain itself). The
- * shipped ACL lets only volleyd, the Desk and coordinators write the daemon's mailbox, so this is
- * normally the `coordinator` identity.
+ * A control client's credentials: the caller's own, by the one login ladder every Volley CLI
+ * climbs (volley-cli's auth/login.ts: flags, the identity file's `broker` block in `cwd`,
+ * `VOLLEY_AUTH_*`, the auth dir VOLLEY_AUTH_DIR names, then, for an operator and a broker on this
+ * machine, the coordinator.json `volley setup` saved, which `cli.ts` turns on; volleyd never asks
+ * the keychain itself). The shipped ACL lets only volleyd, the Desk and coordinators write the
+ * daemon's mailbox, so this is normally the `coordinator` identity.
  */
 export function controlAuth(
   env: Record<string, string | undefined>,
@@ -86,10 +79,7 @@ export function controlAuth(
   brokerUrl?: string,
   saved?: SavedLoginDeps,
 ): BrokerAuth | null {
-  return (
-    resolveBrokerAuth(env, cwd) ??
-    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, cwd, saved) : null)
-  );
+  return resolveLogin({ env, cwd, brokerUrl, saved }).auth;
 }
 
 /** Connect-option fields for `auth` (none for an anonymous connect). */

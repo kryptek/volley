@@ -56,7 +56,7 @@ describe("connectAsClient against a broker that requires credentials", () => {
     const broker = await connectAsClient(tb.url, io, { username: "desk", password: "wrong" });
     expect(broker).toBeNull();
     expect(io.readStderr()).toContain('refused the credentials for user "desk"');
-    expect(io.readStderr()).toContain("volley auth init");
+    expect(io.readStderr()).toContain("volley auth status");
     expect(io.readStderr()).not.toContain(MOSQUITTO_INSTALL_HINT);
   });
 });
@@ -127,7 +127,7 @@ describe("connectToSupervisor: the unreachable-supervisor diagnosis", () => {
         { command: "volley pub", env: {} },
       );
       expect(r).toBe(1);
-      expect(io.readStderr()).toContain("volley auth init");
+      expect(io.readStderr()).toContain("volley auth status");
       expect(io.readStderr()).not.toContain("supervisor unreachable");
     } finally {
       await tb.close();

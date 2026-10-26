@@ -23,6 +23,7 @@ import {
   RESERVED_ACCOUNT_NAMES,
   accountVerb,
 } from "./auth-accounts";
+import { authStatus } from "./auth-status";
 
 export type { AuthDeps } from "../auth/context";
 export {
@@ -61,6 +62,8 @@ export async function auth(
   { argv, env, io }: AuthArgs,
   deps: AuthDeps = realAuthDeps,
 ): Promise<ExitCode> {
+  // The one verb that needs no admin login, auth dir or layout: routed before all of them.
+  if (argv[0] === "status") return authStatus(argv.slice(1), env, io);
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -263,6 +266,10 @@ Broker logins on mosquitto >= 2.1 with the Dynamic Security plugin
 (examples/mosquitto-auth/). Changes go to the broker over its control topic: no password
 file, no ACL file, no reload. Every verb refuses a broker older than 2.1.
 
+  volley auth status [--json]      The login this shell's commands use: who, its role, which
+                                   source answered (flags, .volley/agent.json, VOLLEY_AUTH_*,
+                                   the auth dir, the keychain, coordinator.json) and whether
+                                   the broker accepts it. Never a password; no admin login.
   volley auth init                 Write the broker config (plugin before the listeners,
                                    per_listener_settings false, nodelay, raised queue; the
                                    WebSocket listener's LAN bind kept; the diff printed first,
@@ -294,8 +301,9 @@ Accounts (registry: <dir>/accounts.json; each account is a login with its role's
                  [--for-wave <wave>]
                                    Create an account; prints its password ONCE (or --json).
                                    --for-wave: volleyd creates it (account_create, needs an
-                                   admin login in VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD)
-                                   and revokes it when that wave is cleaned up.
+                                   admin login: VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD
+                                   for that one command) and revokes it when that wave is
+                                   cleaned up.
   volley auth rotate <name>        New password for an account (disconnects its sessions).
   volley auth revoke <name>        Delete the account and its login.
   volley auth list [--json]        The accounts (never their passwords).
