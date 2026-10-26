@@ -2293,7 +2293,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
-| `repos`, `hosts.<name>.repos` | spawns and submits after the change ([repositories](#repositories)) | running agents keep the clone and worktree they started in |
+| `repos`, `fleet.repos`, `hosts.<name>.repos` | spawns and submits after the change ([repositories](#repositories)) | running agents keep the clone and worktree they started in |
 | `fleet.repo_root` | spawns and submits after the change ([repositories](#repositories)) | clones already made stay where they are |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
@@ -3103,6 +3103,8 @@ repos:
   example-org/widgets: { machines: all }        # or a list: [box, mini]
 fleet:
   repo_root: ~/.volley/repos                    # default; ~ is each machine's own home
+  repos:                                        # the supervisor's own adopted clones
+    example-org/widgets: /path/to/widgets       # (a submit from a clone adds it, below)
 hosts:
   box:
     target: dev@box.example
@@ -3134,16 +3136,30 @@ Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (b
 itself.
 
 A wave file's `repo:` may be an `owner/name` too. At submit it becomes the supervisor's own clone
-of it when its machine holds one (its `hosts.<fleet.local_name>.repos` entry, else the managed
-path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
+of it when its machine holds one (its `fleet.repos` entry, else the managed path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
 holds is refused at `repo` (`no clone of <owner/name> on any machine: add it to one (…)`). A
 relative path shaped like `owner/name` is written `./owner/name`. `volleyd validate` gives the
 same verdict offline from `config.yaml`, and it and `volleyd run` print a `repo:` line saying
 which it became.
 
+**A submit adopts the clone it runs from.** A wave whose `repo:` is a path on a clone of a
+repository config names (its `github.slug`, else the clone's `origin`) makes that clone the
+supervisor's own when config gives its machine none: the clone's root goes to
+`fleet.repos.<owner/name>` and the machine to `repos.<owner/name>.machines` (one
+`config_changed`), `repo_added { by: "wave <id>" }` is journaled, the folder is trusted as by
+`volley repo add`, and `volleyd run` prints `note: adopted <root> as <machine>'s clone of
+<owner/name>`. From then on `volley repo list` shows `adopted: <machine>=<root>`, the Desk's
+machine card shows the repository `ready` there and `placement: auto` considers the machine for
+it. A second submit changes nothing; a clone config already gives the supervisor elsewhere is
+left alone (logged: `<owner/name>: the wave runs from <root>, the registry has <path>`); a
+repository config does not name is never registered. `volley repo add` with the supervisor's
+machine and no `--path` for it adopts the clone such a wave runs from the same way
+(`<machine>: ready (<root>, adopted from wave <id>)`; never one the coordinator sends: adopting
+trusts the folder, an admin's), and `--path <machine>=<abs>` adopts any.
+
 **The supervisor's own machine runs a repository's agents only when it is assigned there.** For a
 repository config names (`repos`, or an adopted clone on a host) without assigning it to the
-supervisor's machine, the supervisor's readiness says `blocked (<owner/name> is not assigned to
+supervisor's machine (nor adopting a clone there), the supervisor's readiness says `blocked (<owner/name> is not assigned to
 <machine>: add it (Settings → Repositories, or volley repo add <owner/name> --machine
 <machine>))`, and placement keeps the wave's tasks on the machines it is assigned to. Such a wave
 names the repository by `owner/name`: the wave keeps it (its state's `repo` is the `owner/name`),

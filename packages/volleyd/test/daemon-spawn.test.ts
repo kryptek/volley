@@ -1290,10 +1290,14 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         await tick();
         return spawnedOn("w1") !== undefined;
       });
-      const added = readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).find(
+      const added = readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).filter(
         (e) => e.type === "repo_added",
       );
-      expect(added?.data).toEqual({ by: "tester", slug: "a/a", machines: ["box"] });
+      // The submit adopted the supervisor's clone the wave runs from (#616); then the add.
+      expect(added.map((e) => e.data)).toEqual([
+        { by: "wave w1", slug: "a/a", machines: ["control"], paths: { control: repo } },
+        { by: "tester", slug: "a/a", machines: ["box"] },
+      ]);
       // Its run on box: the doctor adds it there (the clone is reported, so no clone runs).
       await eventually(async () => {
         await tick(0);

@@ -4,13 +4,15 @@ import type { FleetConfig, GitHubRepo, RemoteHostConfig, Tunables } from "./type
 
 /**
  * Repositories as a compute pool: every machine's clone of a repository, by its canonical GitHub
- * `owner/name` (config `repos`, `fleet.repo_root`, `hosts.<name>.repos`). Pure: no I/O.
+ * `owner/name` (config `repos`, `fleet.repo_root`, `fleet.repos`, `hosts.<name>.repos`). Pure: no
+ * I/O.
  */
 
 /**
  * A GitHub `owner/name`: an owner GitHub allows (alphanumerics and inner hyphens, at most 39) and
  * a repository name of `[A-Za-z0-9_.-]`, never `.`, `..` or ending `.git`. The config schema's
- * `repos` / `hosts.<name>.repos` key patterns are this string (a test checks they agree).
+ * `repos` / `fleet.repos` / `hosts.<name>.repos` key patterns are this string (a test checks they
+ * agree).
  */
 export const SLUG_PATTERN =
   "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$";
@@ -101,8 +103,49 @@ export function managedWorktreeRoot(home: string | undefined, slug: string): str
 /** What resolving a machine's clone reads from the config. */
 export interface RepoConfig {
   repos: Tunables["repos"];
-  fleet: Pick<FleetConfig, "repo_root">;
+  fleet: Pick<FleetConfig, "repo_root" | "repos">;
   hosts: Record<string, Pick<RemoteHostConfig, "repo" | "repos">>;
+}
+
+/**
+ * `machine`'s adopted clones, `owner/name` → path (#616): the supervisor's own (`local`) in
+ * `fleet.repos`, a paired machine's in `hosts.<machine>.repos`. `local` null: none is the
+ * supervisor's (a paired host's own spec).
+ */
+export function adoptedOn(
+  cfg: Pick<RepoConfig, "fleet" | "hosts">,
+  local: string | null,
+  machine: string,
+): Record<string, string> | undefined {
+  if (machine === local) return cfg.fleet.repos;
+  return Object.hasOwn(cfg.hosts, machine) ? cfg.hosts[machine]?.repos : undefined;
+}
+
+/** Every machine's adopted clones (`adoptedOn`): the supervisor's own first, then each host's. */
+export function adoptedMaps(
+  cfg: Pick<RepoConfig, "fleet" | "hosts">,
+  local: string,
+): [string, Record<string, string>][] {
+  const own: [string, Record<string, string>][] =
+    cfg.fleet.repos !== undefined ? [[local, cfg.fleet.repos]] : [];
+  return [
+    ...own,
+    ...Object.entries(cfg.hosts).flatMap(([m, h]): [string, Record<string, string>][] =>
+      h?.repos !== undefined && m !== local ? [[m, h.repos]] : [],
+    ),
+  ];
+}
+
+/** `machine`'s adopted path of `slug` (compared case-insensitively), or undefined. */
+export function adoptedPath(
+  cfg: Pick<RepoConfig, "fleet" | "hosts">,
+  local: string | null,
+  machine: string,
+  slug: string,
+): string | undefined {
+  const map = adoptedOn(cfg, local, machine);
+  const key = slugKey(map, slug);
+  return key !== undefined ? map?.[key] : undefined;
 }
 
 /**
@@ -147,7 +190,9 @@ function assigned(cfg: Pick<RepoConfig, "repos">, machine: string, slug: string)
 export type CloneKind = "adopted" | "managed" | "legacy";
 
 /**
- * `machine`'s clone of `slug`, where it comes from, and the slug as the config spells it: its adopted clone (`hosts.<m>.repos[slug]`),
+ * `machine`'s clone of `slug`, where it comes from, and the slug as the config spells it: its
+ * adopted clone (`adoptedOn`: `fleet.repos[slug]` on the supervisor's machine `local`,
+ * `hosts.<m>.repos[slug]` on a paired one),
  * else the managed clone when `repos[slug].machines` includes it (the one its record reports, else
  * the managed path), else its legacy `hosts.<m>.repo`
  * when the machine record's origin is that repository (or it reports none yet); undefined when it
@@ -155,15 +200,16 @@ export type CloneKind = "adopted" | "managed" | "legacy";
  */
 export function cloneSource(
   cfg: RepoConfig,
+  local: string | null,
   machine: string,
   slug: string,
   facts: MachineFacts = {},
 ): { path: string; kind: CloneKind; slug: string } | undefined {
-  const host = Object.hasOwn(cfg.hosts, machine) ? cfg.hosts[machine] : undefined;
+  const host =
+    machine !== local && Object.hasOwn(cfg.hosts, machine) ? cfg.hosts[machine] : undefined;
   // The slug as the config spells it (paths on disk are case-sensitive; GitHub is not).
   const canonical = slugKey(cfg.repos, slug) ?? slug;
-  const adopted = slugKey(host?.repos, slug);
-  const path = adopted !== undefined ? host?.repos?.[adopted] : undefined;
+  const path = adoptedPath(cfg, local, machine, slug);
   if (path !== undefined) return { path, kind: "adopted", slug: canonical };
   if (assigned(cfg, machine, slug)) {
     const managed = facts.clone ?? managedClonePath(cfg.fleet.repo_root, canonical, facts.home);
@@ -182,18 +228,22 @@ export function cloneSource(
 /** `machine`'s clone of `slug` (`cloneSource`'s path), or undefined. */
 export function cloneFor(
   cfg: RepoConfig,
+  local: string | null,
   machine: string,
   slug: string,
   facts: MachineFacts = {},
 ): string | undefined {
-  return cloneSource(cfg, machine, slug, facts)?.path;
+  return cloneSource(cfg, local, machine, slug, facts)?.path;
 }
 
 /** The slugs `machine` holds a clone of by config (assigned, or adopted), sorted. */
-export function assignedSlugs(cfg: RepoConfig, machine: string): string[] {
+export function assignedSlugs(
+  cfg: Pick<RepoConfig, "repos" | "fleet" | "hosts">,
+  local: string,
+  machine: string,
+): string[] {
   const out = Object.keys(cfg.repos).filter((s) => assigned(cfg, machine, s));
-  const host = Object.hasOwn(cfg.hosts, machine) ? cfg.hosts[machine] : undefined;
-  for (const s of Object.keys(host?.repos ?? {})) {
+  for (const s of Object.keys(adoptedOn(cfg, local, machine) ?? {})) {
     if (!out.some((o) => sameSlug(o, s))) out.push(s);
   }
   return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -201,8 +251,8 @@ export function assignedSlugs(cfg: RepoConfig, machine: string): string[] {
 
 /**
  * The machines that hold a clone of `slug` by config (#448): every machine `repos.<slug>.machines`
- * names (`all`: every `hosts.<name>` and the supervisor's machine `local`) and every host that
- * adopts one; sorted, each once.
+ * names (`all`: every `hosts.<name>` and the supervisor's machine `local`) and every machine that
+ * adopts one (`fleet.repos` for `local`); sorted, each once.
  */
 export function holdersOf(cfg: RepoConfig, local: string, slug: string): string[] {
   const key = slugKey(cfg.repos, slug);
@@ -210,8 +260,8 @@ export function holdersOf(cfg: RepoConfig, local: string, slug: string): string[
   const out = new Set<string>(
     machines === "all" ? [...Object.keys(cfg.hosts), local] : (machines ?? []),
   );
-  for (const [name, host] of Object.entries(cfg.hosts)) {
-    if (slugKey(host?.repos, slug) !== undefined) out.add(name);
+  for (const [name, map] of adoptedMaps(cfg, local)) {
+    if (slugKey(map, slug) !== undefined) out.add(name);
   }
   return [...out].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
@@ -225,20 +275,32 @@ export function ghRepoContext(repo: string): { args: string[]; cwd?: string } {
 }
 
 /**
- * Of `slugs`, those config names (in `repos`, or adopted on a host) without assigning them to
+ * Of `slugs`, those config names (in `repos`, or adopted on a machine) without assigning them to
  * `machine` (nor adopting a clone there): repositories other machines work on. A slug config
  * does not name is not one.
  */
 export function unassignedSlugs(
   cfg: RepoConfig,
+  local: string,
   machine: string,
   slugs: readonly string[],
 ): string[] {
-  const mine = assignedSlugs(cfg, machine);
-  const named = (s: string) =>
-    slugKey(cfg.repos, s) !== undefined ||
-    Object.values(cfg.hosts).some((h) => slugKey(h?.repos, s) !== undefined);
+  const mine = assignedSlugs(cfg, local, machine);
+  const named = (s: string) => namedSlug(cfg, local, s) !== undefined;
   return slugs.filter((s) => named(s) && !mine.some((m) => sameSlug(m, s)));
+}
+
+/**
+ * `slug` as config names it (#616): its `repos` key, else the key of a machine's adopted clone of
+ * it; undefined when config does not name the repository.
+ */
+export function namedSlug(cfg: RepoConfig, local: string, slug: string): string | undefined {
+  return (
+    slugKey(cfg.repos, slug) ??
+    adoptedMaps(cfg, local)
+      .map(([, map]) => slugKey(map, slug))
+      .find((k) => k !== undefined)
+  );
 }
 
 /**
@@ -327,6 +389,7 @@ export function addPlan(
     const home = isLocal ? o.localHome : homeFromClones(root, record?.repos);
     const source = cloneSource(
       { ...cfg, fleet: { ...cfg.fleet, repo_root: root } },
+      local,
       machine,
       slug,
       {
@@ -334,9 +397,12 @@ export function addPlan(
         ...(isLocal ? {} : { clone: reportedClone(record, slug) }),
       },
     );
-    const path =
-      reported?.path ??
-      (source !== undefined && posix.isAbsolute(source.path) ? source.path : undefined);
+    // The supervisor's adopted clone is where config says, whatever its doctor reported (#616).
+    const ownAdopted = isLocal && source?.kind === "adopted";
+    const path = ownAdopted
+      ? source.path
+      : (reported?.path ??
+        (source !== undefined && posix.isAbsolute(source.path) ? source.path : undefined));
     const profiles = accounts
       .filter((a) => a.signed_in_at !== undefined && (a.machine === "local") === isLocal)
       .filter((a) => isLocal || a.machine === machine)
@@ -347,7 +413,7 @@ export function addPlan(
       repo_add:
         source?.kind === "adopted" ? `${source.slug}=${source.path}` : (source?.slug ?? slug),
       ...(path !== undefined ? { path } : {}),
-      clone: reported?.exists !== true,
+      clone: !ownAdopted && reported?.exists !== true,
       profiles: [null, ...profiles],
     };
   });

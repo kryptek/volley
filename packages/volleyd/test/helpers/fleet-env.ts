@@ -95,6 +95,8 @@ export interface Fleet {
   ) => Promise<void>;
   /** The supervisor's own checkout every wave runs on by default (its `rev-parse` faked). */
   repo: string;
+  /** Every line the daemon logged, in order (its `log` option). */
+  logs: string[];
   /** The live agent's id for `wave/task/role` (its latest attempt). */
   agentOf: (wave: string, task: string, role?: string) => string;
   /** The simulated session publishes its terminal status. */
@@ -257,8 +259,10 @@ export async function makeFleet(
   };
   local.onLaunch = onLaunch;
 
+  const logs: string[] = [];
   const options: Parameters<DaemonEnv["start"]>[0] = {
     clock,
+    log: (line) => logs.push(line),
     authExec: auth.exec,
     ...(o.claudeRoot !== undefined ? { claude: { root: o.claudeRoot } } : {}),
     fleet: {
@@ -411,6 +415,7 @@ export async function makeFleet(
     },
     tick,
     repo,
+    logs,
     submit: async (wave, head, tasks, pipeline = "[implement]", waveRepo = repo) => {
       const file = join(env.home, `${wave}.yaml`);
       writeFileSync(

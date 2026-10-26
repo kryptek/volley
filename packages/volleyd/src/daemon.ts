@@ -357,6 +357,7 @@ import {
   type RepoRemoteHost,
   type SlugTarget,
   SshTmuxHost,
+  probeLocalClone,
   resolveRemoteHost,
   sessionName,
 } from "./hosts/ssh-tmux";
@@ -471,6 +472,8 @@ import {
   type MachineFacts,
   type RepoMachines,
   addPlan,
+  adoptedMaps,
+  adoptedPath,
   assignedSlugs,
   cloneFor,
   ghRepoContext,
@@ -479,12 +482,14 @@ import {
   isSlug,
   legacyOrigin,
   managedClonePath,
+  namedSlug,
   pendingRepoRuns,
   remoteRepoRoot,
   repoStateLine,
   reportedClone,
   sameSlug,
   slugKey,
+  trimPath,
   unassignedSlugs,
   waveSlug,
   withMachines,
@@ -5980,6 +5985,7 @@ export class Daemon {
     const { root, facts } = this.cloneFacts(name, slug, eff);
     return cloneFor(
       { repos: eff.repos, fleet: { repo_root: root }, hosts: eff.hosts },
+      this.config.localName(),
       name,
       slug,
       facts,
@@ -5991,7 +5997,9 @@ export class Daemon {
     const waves = this.waveSlugs();
     return [
       ...waves,
-      ...assignedSlugs(cfg, name).filter((s) => !waves.some((w) => sameSlug(w, s))),
+      ...assignedSlugs(cfg, this.config.localName(), name).filter(
+        (s) => !waves.some((w) => sameSlug(w, s)),
+      ),
     ];
   }
 
@@ -6497,8 +6505,8 @@ export class Daemon {
     const cfg = isLocal
       ? eff
       : { ...eff, fleet: { ...eff.fleet, repo_root: remoteRepoRoot(eff.fleet.repo_root) } };
-    return assignedSlugs(eff, machine).flatMap((slug) => {
-      const path = cloneFor(cfg, machine, slug, {
+    return assignedSlugs(eff, this.config.localName(), machine).flatMap((slug) => {
+      const path = cloneFor(cfg, this.config.localName(), machine, slug, {
         home,
         ...(isLocal ? {} : { clone: reportedClone(record, slug) }),
       });
@@ -6875,7 +6883,7 @@ export class Daemon {
         ...(probed.length > 0 ? { probed: Object.fromEntries(probed) } : {}),
         // The own doctor reports every running wave's clone; a repository config gives only to
         // other machines is checked out here for the supervisor, not for agents (#439).
-        ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, waves) } : {}),
+        ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, name, waves) } : {}),
       },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
@@ -6992,8 +7000,8 @@ export class Daemon {
   private ownAssignedClones(): { slug: string; dir: string }[] {
     const local = this.config.localName();
     const cfg = this.config.effective();
-    return assignedSlugs(cfg, local).flatMap((slug) => {
-      const path = cloneFor(cfg, local, slug, { home: homedir() });
+    return assignedSlugs(cfg, local, local).flatMap((slug) => {
+      const path = cloneFor(cfg, local, local, slug, { home: homedir() });
       return path !== undefined ? [{ slug, dir: resolve(path) }] : [];
     });
   }
@@ -7344,9 +7352,7 @@ export class Daemon {
     const local = this.config.localName();
     const hosts = this.config.effective().hosts;
     for (const [m, path] of Object.entries(paths)) {
-      if (m === local)
-        return refuse(`${m} is the supervisor's own machine: its clone is the managed one`);
-      if (!Object.hasOwn(hosts, m)) return refuse(`no configured host named "${m}"`);
+      if (m !== local && !Object.hasOwn(hosts, m)) return refuse(`no configured host named "${m}"`);
       if (!this.namedMachines(machines).includes(m))
         return refuse(`paths names ${m}, which machines does not`);
       if (typeof path !== "string" || !isRepoAdd(`${slug}=${path}`))
@@ -7356,16 +7362,31 @@ export class Daemon {
       later: async () => {
         const view = await readSlugView(this.host.exec, slug);
         if (typeof view === "string") return refuse(view);
+        const given = paths as Record<string, string>;
+        // The supervisor's machine without a path: the clone a wave already runs from (D3). Never
+        // for the coordinator: adopting trusts that folder, an admin's (coordinatorRepoRefusal).
+        const known =
+          sender !== "coordinator" &&
+          this.namedMachines(machines).includes(local) &&
+          !Object.hasOwn(given, local)
+            ? await this.knownWaveClone(view.slug)
+            : null;
         const r = await this.enqueue(() =>
           this.applyRepoAdd(
             view.slug,
             machines,
-            paths as Record<string, string>,
+            known !== null ? { ...given, [local]: known.root } : given,
             sender,
             typeof wave === "string" ? wave : undefined,
           ),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
+        if (known !== null)
+          r.status = r.status.map((line) =>
+            line.startsWith(`${local}: `)
+              ? `${local}: ready (${known.root}, adopted from wave ${known.wave})`
+              : line,
+          );
         // The repository half of repo_check (no release branch yet): `repo.exists`, `ci.mode`;
         // `ci: { workflows }` kept one release for older clients (absent if unreadable).
         const facts = {
@@ -7390,27 +7411,52 @@ export class Daemon {
   }
 
   /**
-   * `repo_probe { machine, path }` (admin): what is at `path` on a paired machine — its clone's
-   * root and origin (`probeClone`), so the Desk can say before an add whether an adopted clone is
-   * the repository being added. A reading: nothing is journaled and no config changes. Its ssh
-   * round-trip is awaited outside the queue.
+   * The clone a wave on a path of `slug` runs from, for a `repo_add` that gives the supervisor's
+   * machine no path (#616, D3): the wave's `repo:` path whose `github.slug` is `slug`, at its
+   * root (the last such wave in `this.waves`, which after a restart is load order, not submit
+   * order); null when the supervisor already holds one by config, or no wave does.
+   */
+  private async knownWaveClone(slug: string): Promise<{ root: string; wave: string } | null> {
+    const local = this.config.localName();
+    if (cloneFor(this.config.effective(), local, local, slug, { home: homedir() }) !== undefined)
+      return null;
+    for (const [id, l] of [...this.waves].reverse()) {
+      const repo = l.record.wave?.repo;
+      const known = l.record.state?.github?.slug;
+      if (typeof repo !== "string" || isSlug(repo) || known === undefined) continue;
+      if (!sameSlug(known, slug)) continue;
+      try {
+        return { root: trimPath(await repoRoot(this.host.exec, expandHome(repo))), wave: id };
+      } catch {}
+    }
+    return null;
+  }
+
+  /**
+   * `repo_probe { machine, path }` (admin): what is at `path` on a machine — its clone's root and
+   * origin (`probeClone`; on the supervisor's own machine the same two reads through its exec,
+   * #616), so the Desk can say before an add whether an adopted clone is the repository being
+   * added. A reading: nothing is journaled and no config changes. Its ssh round-trip is awaited
+   * outside the queue.
    */
   private repoProbe(p: Record<string, unknown>): AuthOutcome | DeferredAuth {
     const refuse = (error: string) => ({ reply: authReply("repo_probe", { ok: false, error }) });
     const { machine, path } = p;
     if (typeof machine !== "string" || machine === "") return refuse("machine must be a host name");
-    if (machine === this.config.localName())
-      return refuse(`${machine} is the supervisor's own machine: its clone is the managed one`);
-    if (!Object.hasOwn(this.config.effective().hosts, machine))
+    const isLocal = machine === this.config.localName();
+    if (!isLocal && !Object.hasOwn(this.config.effective().hosts, machine))
       return refuse(`no configured host named "${machine}"`);
     if (typeof path !== "string" || !isRepoAddPath(path))
       return refuse("path must be an absolute path");
-    const host = this.remoteFor(machine);
+    const host = isLocal ? null : this.remoteFor(machine);
     if (typeof host === "string") return refuse(host);
     return {
       later: async () => {
         try {
-          const found = await host.probeClone(path);
+          const found =
+            host === null
+              ? await probeLocalClone(this.host.exec, path)
+              : await host.probeClone(path);
           return {
             reply: authReply("repo_probe", { ok: true, result: { machine, path, ...found } }),
           };
@@ -7436,11 +7482,9 @@ export class Daemon {
     const key = slugKey(cfg.repos, slug);
     const current = key !== undefined ? cfg.repos[key]?.machines : undefined;
     const next = withMachines(current, machines);
+    const local = this.config.localName();
     const changed = Object.fromEntries(
-      Object.entries(paths).filter(([m, path]) => {
-        const adopted = cfg.hosts[m]?.repos;
-        return adopted?.[slugKey(adopted, slug) ?? slug] !== path;
-      }),
+      Object.entries(paths).filter(([m, path]) => adoptedPath(cfg, local, m, slug) !== path),
     );
     if (JSON.stringify(next) !== JSON.stringify(current) || Object.keys(changed).length > 0) {
       const r = this.config.setRepo(key ?? slug, next, changed, by);
@@ -7710,7 +7754,9 @@ export class Daemon {
 
   /** Whether config still assigns `slug` to `machine` (a repo_remove since ends its run). */
   private assigned(machine: string, slug: string): boolean {
-    return assignedSlugs(this.config.effective(), machine).some((s) => sameSlug(s, slug));
+    return assignedSlugs(this.config.effective(), this.config.localName(), machine).some((s) =>
+      sameSlug(s, slug),
+    );
   }
 
   /** Set (null: clear) machine's run of `slug` as readiness shows it. */
@@ -7762,7 +7808,7 @@ export class Daemon {
       dir = remote !== null ? (a.dir ?? null) : profileDir(root, id);
       if (dir === null) return;
     }
-    const slugs = assignedSlugs(this.config.effective(), machine);
+    const slugs = assignedSlugs(this.config.effective(), this.config.localName(), machine);
     if (slugs.length === 0) return;
     const run = this.trustRepos(machine, slugs, dir, id).catch((e: unknown) =>
       this.log(`trust after sign-in ${acct}: ${e instanceof Error ? e.message : String(e)}`),
@@ -7823,18 +7869,15 @@ export class Daemon {
     if ("error" in asked) return refuse(asked.error);
     const { machines } = asked;
     const cfg = this.config.effective();
-    const key =
-      slugKey(cfg.repos, slug) ??
-      Object.values(cfg.hosts)
-        .map((h) => slugKey(h.repos, slug))
-        .find((k) => k !== undefined);
+    const local = this.config.localName();
+    const key = namedSlug(cfg, local, slug);
     if (key === undefined) return refuse(`${slug} is not a configured repository`);
     const names = this.namedMachines(machines);
     // Each clone as it is now (the path stays on disk), before config forgets it.
     const clones = Object.fromEntries(
       names.flatMap((m) => {
         const path = this.repoStep(m, key).path;
-        return path !== undefined && assignedSlugs(cfg, m).some((s) => sameSlug(s, key))
+        return path !== undefined && assignedSlugs(cfg, local, m).some((s) => sameSlug(s, key))
           ? [[m, path]]
           : [];
       }),
@@ -7845,7 +7888,7 @@ export class Daemon {
       this.allMachines(),
     );
     const drops = Object.fromEntries(
-      names.filter((m) => slugKey(cfg.hosts[m]?.repos, key) !== undefined).map((m) => [m, null]),
+      names.filter((m) => adoptedPath(cfg, local, m, key) !== undefined).map((m) => [m, null]),
     );
     const r = this.config.setRepo(key, next, drops, sender);
     if (!r.applied)
@@ -7853,7 +7896,7 @@ export class Daemon {
         `repos.${key} not changed: ${r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ")}`,
       );
     for (const m of names) this.setRepoRun(m, key, null);
-    const remote = names.filter((m) => m !== this.config.localName() && Object.hasOwn(clones, m));
+    const remote = names.filter((m) => m !== local && Object.hasOwn(clones, m));
     return {
       later: async () => {
         const boxes: Record<string, string> = {};
@@ -7893,19 +7936,22 @@ export class Daemon {
     }
   }
 
-  /** `repo_list`: each configured repository, its machines and adopted paths. */
+  /**
+   * `repo_list`: each configured repository, its machines and adopted paths (the supervisor's own
+   * under its name, #616).
+   */
   private repoList(): { ok: true; result: { repos: Record<string, unknown>[] } } {
     const cfg = this.config.effective();
+    const adoptions = adoptedMaps(cfg, this.config.localName());
     const slugs = Object.keys(cfg.repos);
-    for (const h of Object.values(cfg.hosts)) {
-      for (const s of Object.keys(h.repos ?? {}))
-        if (!slugs.some((o) => sameSlug(o, s))) slugs.push(s);
+    for (const [, map] of adoptions) {
+      for (const s of Object.keys(map)) if (!slugs.some((o) => sameSlug(o, s))) slugs.push(s);
     }
     const repos = slugs.sort().map((slug) => {
       const adopted = Object.fromEntries(
-        Object.entries(cfg.hosts).flatMap(([m, h]) => {
-          const k = slugKey(h.repos, slug);
-          return k !== undefined ? [[m, h.repos?.[k] as string]] : [];
+        adoptions.flatMap(([m, map]) => {
+          const k = slugKey(map, slug);
+          return k !== undefined ? [[m, map[k] as string]] : [];
         }),
       );
       return {
@@ -7932,7 +7978,7 @@ export class Daemon {
     const cfg = this.config.effective();
     const repos = slugs.map((slug) => {
       const names = this.allMachines().filter((m) =>
-        assignedSlugs(cfg, m).some((s) => sameSlug(s, slug)),
+        assignedSlugs(cfg, this.config.localName(), m).some((s) => sameSlug(s, slug)),
       );
       const verdicts = this.repoVerdicts(slug, names);
       return { slug, machines: verdicts, lines: names.map((m) => repoStateLine(m, verdicts[m])) };
@@ -13692,7 +13738,8 @@ export class Daemon {
                   visibility,
                   ci,
                 );
-          return this.withRepoCheck(again.wave.wave, reply, repo?.facts ?? null, check);
+          const adopted = await this.adoptWaveClone(again.wave, visibility, reply);
+          return this.withRepoCheck(again.wave.wave, adopted, repo?.facts ?? null, check);
         }),
       ),
     };
@@ -13840,6 +13887,54 @@ export class Daemon {
     await this.append(wave, { type: "ci_mode_detected", data: { ...data } });
     if (unknown === true)
       await this.append(wave, { type: "alarm_raised", data: { alarm: "ci_mode_unknown" } });
+  }
+
+  /**
+   * A submitted wave's clone joins the registry (#616, D2): a wave whose `repo:` is a path on a
+   * clone of a repository config names (`github.slug` from the visibility read, else the clone's
+   * `origin`), where the supervisor's machine holds no clone of it by config, adopts the clone's
+   * root there (`fleet.repos`, `repo_added { by: "wave <id>" }`, then its local run), with a note
+   * on the reply. A repository config does not name is left out (D6); a clone config already
+   * gives the supervisor elsewhere is only logged. Inside the queue, after the submit committed;
+   * a daemon that spawns no agents reads nothing of the repository at submit, so adopts nothing.
+   */
+  private async adoptWaveClone(
+    wave: Wave,
+    visibility: VisibilityFacts | null,
+    reply: Reply,
+  ): Promise<Reply> {
+    if (reply.ok !== true || isSlugRepo(wave) || !this.readsRepo()) return reply;
+    const local = this.config.localName();
+    const cfg = this.config.effective();
+    // Nothing named: no repository is in the registry, so nothing to read either.
+    if (Object.keys(cfg.repos).length === 0 && adoptedMaps(cfg, local).length === 0) return reply;
+    let root: string;
+    try {
+      root = trimPath(await repoRoot(this.host.exec, expandHome(wave.repo)));
+    } catch {
+      return reply;
+    }
+    let slug = visibility?.github?.slug;
+    if (slug === undefined) {
+      const probe = await probeLocalClone(this.host.exec, root).catch(() => null);
+      slug = probe?.slug;
+    }
+    const key = slug !== undefined ? namedSlug(cfg, local, slug) : undefined;
+    if (key === undefined) return reply;
+    const held = cloneFor(cfg, local, local, key, { home: homedir() });
+    if (held !== undefined) {
+      if (trimPath(resolve(held)) !== root)
+        this.log(`${key}: the wave runs from ${root}, the registry has ${held}`);
+      return reply;
+    }
+    const r = await this.applyRepoAdd(key, [local], { [local]: root }, `wave ${wave.wave}`);
+    if (typeof r === "string") {
+      this.log(`wave ${wave.wave}: ${key} not adopted: ${r}`);
+      return reply;
+    }
+    const note = `adopted ${root} as ${local}'s clone of ${r.slug}`;
+    this.log(`wave ${wave.wave}: ${note}`);
+    return { ...reply, notes: [...(reply.notes ?? []), note] };
   }
 
   /** Journal a wave version's visibility, and the alarm when it could not be read. */

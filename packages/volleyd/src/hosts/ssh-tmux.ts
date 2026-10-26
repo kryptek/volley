@@ -149,6 +149,8 @@ export function resolveRemoteHost(
               },
             },
           },
+          // A paired host's own spec: no machine in it is the supervisor's.
+          null,
           name,
           repo.slug,
           repo,
@@ -270,6 +272,24 @@ export function classifyRevParse(r: ExecResult): CloneProbe | null {
   if (/No such file or directory|Not a directory/.test(r.stderr)) return { state: "missing" };
   if (/not a git repository/.test(r.stderr)) return { state: "not_git" };
   return null;
+}
+
+/**
+ * `probeClone`'s two reads on the supervisor's own machine (#616), through its own exec: the
+ * clone's root (`rev-parse --show-toplevel`), then its origin and the GitHub slug it names.
+ */
+export async function probeLocalClone(exec: ExecFn, path: string): Promise<CloneProbe> {
+  const top = await exec(["git", "-C", path, "rev-parse", "--show-toplevel"]);
+  const found = classifyRevParse(top);
+  if (found === null) throw new Error(firstLine(top.stderr, `git rev-parse exited ${top.code}`));
+  if (found.state !== "found" || found.root === undefined || found.root === "")
+    return found.state === "found" ? { state: "not_git" } : found;
+  const root = found.root;
+  const o = await exec(["git", "-C", root, "remote", "get-url", "origin"]);
+  const origin = o.stdout.trim();
+  if (o.code !== 0 || origin === "") return { state: "no_origin", root };
+  const slug = originToSlug(normalizeOrigin(origin));
+  return { state: "found", root, origin, ...(slug !== undefined ? { slug } : {}) };
 }
 
 /** What a doctor run on a box is asked to do (`RemoteHost.runDoctor`). */

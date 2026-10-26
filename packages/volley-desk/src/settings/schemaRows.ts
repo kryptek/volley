@@ -215,6 +215,8 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
           if (typeof leaf.additionalProperties === "object") {
             // A nested map of per-pool caps (`fleet.fallback.per_machine`): a row per heavy pool.
             const entry = resolve(schema, leaf.additionalProperties);
+            // Any other map (`fleet.repos`' adopted paths, which `repo_add` writes) has no row.
+            if (entry.type !== "integer") return [];
             const last = words.trim().split(" ").at(-1) ?? "";
             return heavyPools.map((pool) => ({
               ...row(

@@ -2,9 +2,9 @@
  * The add-a-repository form (SPEC §4.6.21 `repo_add`) that Settings › Repositories' **Add
  * repository…** sheet and Getting started › Repos share: the slug, checked as it is typed
  * (`owner/name`, never a URL or `.git`), the machines to add it to (every one checked by default:
- * all of them is `machines: all`, so a machine paired later gets it too) and, per paired machine,
- * an optional existing clone to adopt instead of cloning (`paths`; the supervisor's own clone is
- * always the managed one). **Add** sends one `repo_add`; volleyd checks the slug with GitHub (its
+ * all of them is `machines: all`, so a machine paired later gets it too) and, per machine, an
+ * optional existing clone to adopt instead of cloning (`paths`; on the supervisor's own machine
+ * too, #616, where volleyd never clones). **Add** sends one `repo_add`; volleyd checks the slug with GitHub (its
  * refusal is shown as it said it) and answers with the canonical name, handed to `onAdded`. The
  * form's terminal twin (`volley repo add …`) is shown under it.
  *
@@ -87,7 +87,7 @@ export function addBlocker(form: AddForm): string | null {
   if (form.machines.length === 0) return "Pick at least one machine";
   for (const m of form.machines) {
     const a = form.adopt[m];
-    if (m === form.localName || !a?.on) continue;
+    if (!a?.on) continue;
     const path = a.path.trim();
     if (path === "") return `Enter the clone's path on ${m}`;
     const wrong = pathProblem(path);
@@ -170,7 +170,7 @@ export interface AddRepoFormProps {
   ops: PeerOps;
   /** Every machine, the supervisor's own first (`allMachines`). */
   machines: readonly string[];
-  /** The supervisor's own machine: no existing-clone choice there. */
+  /** The supervisor's own machine (marked `this one`). */
   localName: string | null | undefined;
   /** volleyd added it: its answer, and the machines picked. */
   onAdded(added: RepoAdded, picked: string[]): void;
@@ -195,7 +195,7 @@ export function AddRepoForm({
   /** The machines unticked: one that is listed later (the config landing) starts ticked. */
   const [dropped, setDropped] = useState<ReadonlySet<string>>(() => new Set());
   const picked = new Set(machines.filter((m) => !dropped.has(m)));
-  /** Per paired machine: adopt an existing clone, and its path. */
+  /** Per machine: adopt an existing clone, and its path. */
   const [adopt, setAdopt] = useState<Record<string, { on: boolean; path: string }>>({});
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -214,7 +214,7 @@ export function AddRepoForm({
   // Every ticked clone's path that could be one, checked on its machine.
   const wanted = Object.fromEntries(
     chosen.flatMap((m) => {
-      const p = adopt[m]?.on && m !== localName ? adopt[m]?.path.trim() : undefined;
+      const p = adopt[m]?.on ? adopt[m]?.path.trim() : undefined;
       return p && pathProblem(p) === null ? [[m, p]] : [];
     }),
   );
@@ -276,7 +276,6 @@ export function AddRepoForm({
         <legend className="s-hint">{machinesLabel}</legend>
         {machines.map((m) => {
           const a = adopt[m] ?? { on: false, path: "" };
-          const paired = m !== localName;
           const bad = a.on ? pathProblem(a.path) : null;
           const check = checks[m];
           const checked = check !== undefined && check.path === a.path.trim() ? check : undefined;
@@ -286,8 +285,8 @@ export function AddRepoForm({
                 <input type="checkbox" checked={picked.has(m)} onChange={() => toggle(m)} />
                 {m}
               </label>
-              {!paired && <span className="chip chip--mine">this one</span>}
-              {paired && picked.has(m) && (
+              {m === localName && <span className="chip chip--mine">this one</span>}
+              {picked.has(m) && (
                 <label className="s-hint">
                   <input
                     type="checkbox"
@@ -298,7 +297,7 @@ export function AddRepoForm({
                   use an existing clone
                 </label>
               )}
-              {paired && picked.has(m) && a.on && (
+              {picked.has(m) && a.on && (
                 <>
                   <input
                     className="recessed mono"

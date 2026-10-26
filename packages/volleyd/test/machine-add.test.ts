@@ -486,7 +486,17 @@ describe("machine_add (the admin op, its rows on the reply topic)", () => {
       expect(text).not.toContain(secret);
     // The pairing code volleyd minted reached the box, and no row shows it.
     expect(text).toContain("joined with <code>");
-    expect(text).not.toMatch(/[A-Z0-9]{4}-[A-Z0-9]{4}/);
+    // The codes themselves, as the box received them: a pattern match would hit the random
+    // salts and hashes of the pairing-code store.
+    const codes = s.box.calls.flatMap((c) => {
+      const m = /volley peer join '([^']+)'/.exec(c.input ?? "");
+      return m?.[1] === undefined ? [] : [m[1]];
+    });
+    expect(codes.length).toBeGreaterThan(0);
+    for (const code of codes) {
+      expect(code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+      expect(text).not.toContain(code);
+    }
   });
 
   it("a refusal before anything runs is answered, not journaled", async () => {

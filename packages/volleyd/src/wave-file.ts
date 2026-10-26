@@ -172,7 +172,7 @@ export function resolveWaveRepo(
 ): Wave {
   if (!isSlug(wave.repo)) return wave;
   const slug = wave.repo;
-  const clone = cloneFor(cfg, local, slug, { home });
+  const clone = cloneFor(cfg, local, local, slug, { home });
   if (clone !== undefined) return { ...wave, repo: clone };
   const holders = holdersOf(cfg, local, slug).filter((m) => m !== local);
   if (holders.length === 0) {

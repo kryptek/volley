@@ -87,7 +87,10 @@ describe("schemaRows", () => {
           Object.entries(o).flatMap(([k, v]) =>
             v.properties
               ? Object.entries(flat(v.properties as Record<string, JsonSchema>, `${pre}${k}.`))
-              : v.type === "array"
+              : v.type === "array" ||
+                  // A map of paths (`fleet.repos`) has no row; one of integers a row per pool.
+                  (v.additionalProperties &&
+                    (v.additionalProperties as JsonSchema).type !== "integer")
                 ? []
                 : v.additionalProperties
                   ? heavyPools.map((pool) => [

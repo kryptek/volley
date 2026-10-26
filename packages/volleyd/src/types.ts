@@ -299,6 +299,11 @@ export interface FleetConfig {
   fallback: FallbackProfile;
   /** Where managed clones live on each machine (`<repo_root>/<owner>/<name>`; `~` is its home). */
   repo_root: string;
+  /**
+   * The supervisor's own adopted clones, `owner/name` → absolute path (#616): `hosts.<name>.repos`
+   * for its own machine, used in place of the managed path.
+   */
+  repos?: Record<string, string>;
 }
 
 /** Config `repos.<owner/name>`: the machines holding a clone (`all`: every machine). */
