@@ -11,6 +11,7 @@ import {
 import type { Answer } from "../../src/commands/peer";
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
+import { openUrl } from "../../src/open-url";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { tempDir } from "../helpers/tmp";
 
@@ -73,6 +74,10 @@ function deps(answer: (op: string) => Answer | number = () => ({ ok: true, resul
   };
   return { d, asked, opened };
 }
+
+it("the real opener is the shared one in src/open-url.ts", () => {
+  expect(realCoordinatorDeps().open).toBe(openUrl);
+});
 
 async function run(argv: string[], d: CoordinatorDeps) {
   const io = makeBufferIO();

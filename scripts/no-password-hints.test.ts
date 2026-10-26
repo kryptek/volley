@@ -29,6 +29,8 @@ const READER_FUNCTIONS: Record<string, string> = {
 const ALLOWED: Record<string, string> = {
   // Setup hands the admin login it already holds to the one child command it runs.
   "packages/volley-cli/src/setup/first-wave.ts": "an env handed to a child process, not a message",
+  // The Claude Code step finds a login in an old MCP registration's env to move it out (#614).
+  "packages/volley-cli/src/setup/claude-code.ts": "reads a registration's env keys, not a message",
 };
 
 function files(dir: string): string[] {
