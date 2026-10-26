@@ -107,7 +107,9 @@ export async function readRepoFacts(
       (b.value as { protected?: unknown }).protected === true;
     if (isProtected) {
       const p = await ghApiRead(exec, where, `branches/${branch}/protection`);
-      classic = "value" in p ? protectionReviews(p.value) : undefined;
+      // A branch only rulesets protect is `protected` too, and its `/protection` is a 404: no
+      // classic reviews. Only a failed read (a non-admin's 403) leaves them unknown.
+      classic = "value" in p ? protectionReviews(p.value) : "missing" in p ? 0 : undefined;
     }
   }
   const ruleReviews = rulesetReviews(rules);
@@ -244,6 +246,10 @@ const RECORD_FIXES: Record<string, (slug: string) => string> = {
   "repo.fetch": (slug) => `volley repo check ${slug} --fix`,
 };
 
+/** The supervisor's own clone is the owner's checkout: `--fix` never touches it (D5). */
+const OWN_FIX =
+  "volley peer doctor --repo <the clone> --fix, on this machine (volleyd never fixes its own clone)";
+
 /** One machine's answer for a repository (`repo_check`'s `machines.<name>`). */
 export interface MachineBlock {
   checks: RepoCheck[];
@@ -271,7 +277,7 @@ export function machineBlock(
   checks: (MachineCheck & { fix?: string })[] | undefined,
   machine: { ready: boolean; reasons: string[] },
   verdict: RepoVerdict | undefined,
-  from: { from: "doctor" | "record"; note?: string },
+  from: { from: "doctor" | "record"; note?: string; own?: boolean },
 ): MachineBlock {
   const all: (MachineCheck & { fix?: string })[] = checks ?? record?.checks ?? [];
   const tagged = all.some((c) => c.repo !== undefined && sameSlug(c.repo, slug));
@@ -282,7 +288,9 @@ export function machineBlock(
     return MACHINE_LINES.includes(c.id) || (!c.ok && c.severity === "block");
   });
   const lines: RepoCheck[] = picked.map((c) => {
-    const fix = c.fix ?? (!c.ok ? RECORD_FIXES[c.id]?.(slug) : undefined);
+    const recordFix =
+      from.own === true && c.id.startsWith("repo.") ? OWN_FIX : RECORD_FIXES[c.id]?.(slug);
+    const fix = c.fix ?? (!c.ok ? recordFix : undefined);
     return {
       id: c.id,
       ok: c.ok,

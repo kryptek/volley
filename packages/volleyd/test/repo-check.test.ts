@@ -94,6 +94,24 @@ describe("readRepoFacts", () => {
     expect(factsUnknown(f)).toBe(true);
   });
 
+  it("a branch only rulesets protect (protected: true, /protection 404): reviews read from the rules", async () => {
+    const fake = github()
+      .on(api(`rules/branches/${B}`), {
+        stdout: JSON.stringify([
+          { type: "pull_request", parameters: { required_approving_review_count: 1 } },
+        ]),
+      })
+      .on(api(`branches/${B}`), { stdout: JSON.stringify({ protected: true, protection: {} }) })
+      .on(api(`branches/${B}/protection`), {
+        code: 1,
+        stderr: "gh: Branch not protected (HTTP 404)\n",
+      });
+    const f = await readRepoCheck(fake.exec, SLUG, B);
+    expect(f.reviews_readable).toBe(true);
+    expect(f.required_reviews).toBe(1);
+    expect(factsUnknown(f)).toBe(false);
+  });
+
   it("a branch GitHub answers 404 for is not on origin; its CI mode is not read (never none from it)", async () => {
     const fake = github().on(api(`branches/${B}`), notFound);
     const f = await readRepoCheck(fake.exec, SLUG, B);
@@ -281,6 +299,38 @@ describe("machineBlock and the closing line", () => {
     expect(b).toMatchObject({ ready: false, state: "none", checks: [] });
     expect(closingLine({ "box-a": b })).toBe(
       "not ready for a wave on box-a (no machine record from box-a yet: is its service running?).",
+    );
+  });
+
+  it("the supervisor's own machine is never fixed: its failing clone lines name the doctor to run there", () => {
+    const failing = [
+      {
+        id: "repo.fetch",
+        ok: false,
+        severity: "block" as const,
+        repo: SLUG,
+        detail: "fetch failed",
+      },
+    ];
+    const peerBlock = machineBlock(
+      SLUG,
+      record(failing),
+      undefined,
+      { ready: true, reasons: [] },
+      undefined,
+      { from: "record" },
+    );
+    expect(peerBlock.checks[0]?.fix).toBe(`volley repo check ${SLUG} --fix`);
+    const own = machineBlock(
+      SLUG,
+      record(failing),
+      undefined,
+      { ready: true, reasons: [] },
+      undefined,
+      { from: "doctor", own: true },
+    );
+    expect(own.checks[0]?.fix).toBe(
+      "volley peer doctor --repo <the clone> --fix, on this machine (volleyd never fixes its own clone)",
     );
   });
 });

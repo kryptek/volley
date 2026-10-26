@@ -331,6 +331,10 @@ function pushCheck(f: Facts, r: RepoFacts): Check {
   };
 }
 
+/** `p` as one shell word: as is when it is plain, else single-quoted (a fix's command is pasted). */
+const shellArg = (p: string): string =>
+  /^[\w./~@:+,=-]+$/.test(p) ? p : `'${p.replaceAll("'", "'\\''")}'`;
+
 /**
  * `repo.worktrees` (#610): the directory volleyd cuts this repository's worktrees under exists and
  * is writable, or its nearest existing ancestor is. Its fix (`mkdir -p`) is safe: `--fix` applies it.
@@ -351,7 +355,7 @@ function worktreesCheck(r: RepoFacts): Check {
     severity: "block",
     detail: `cannot write ${root} (nor create it): volleyd cuts ${r.slug}'s worktrees there`,
     fix: {
-      command: `mkdir -p ${root}`,
+      command: `mkdir -p ${shellArg(root)}`,
       steps: [],
       apply: [{ what: `create ${root}`, run: () => mkdirSync(root, { recursive: true }) }],
     },

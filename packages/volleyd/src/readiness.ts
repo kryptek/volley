@@ -18,9 +18,10 @@ import type { LocalAgentsMode } from "./types";
  * `ready` is false on a failing `block` check, a volley version other than the supervisor's, a
  * `claude` or `bun` the PATH probe did not find (the supervisor's own probe decides: the doctor's
  * `claude_on_path` / `bun_on_path` only estimate the non-interactive ssh PATH), GitHub without
- * push access, git without a commit identity or Claude signed out. A repository is judged on its own (`repos`, #436): a clone
- * that is missing, fails a per-repository check or lacks a tool its repository needs blocks that
- * repository only, never the machine; placement skips the machine for that repository's waves.
+ * push access, git without a commit identity or Claude signed out. A repository is judged on its
+ * own (`repos`, #436): a clone that is missing, fails a per-repository check or lacks a tool its
+ * repository needs blocks that repository only, never the machine; placement skips the machine
+ * for that repository's waves.
  * `eligible` / `ineligible_reason` are placement's own machine
  * filter (`machineIneligible`): ready, not draining, under `max_agents`, the machine's own
  * admission open, load per core, memory, disk and usage within the supervisor's thresholds. So a

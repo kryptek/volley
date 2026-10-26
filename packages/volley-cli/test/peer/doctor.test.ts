@@ -1450,6 +1450,20 @@ describe("volley peer doctor: many repositories (#435)", () => {
       expect(c?.detail).toContain(join(m.root, "work", ".volley-worktrees"));
     });
 
+    it("repo.worktrees' fix quotes a root with a space, so it can be pasted", async () => {
+      const m = machine();
+      const adopted = join(m.root, "my work", "a");
+      addClone(m, adopted, { origin: "https://github.com/a/a" });
+      const root = join(m.root, "my work", ".volley-worktrees");
+      const writable = (p: string) => existsSync(p) && p.startsWith(root);
+      const io = makeBufferIO();
+      await doctor(io, m.deps({ writable }), { repos: { "a/a": adopted }, json: true });
+      const failed = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(failed?.fix).toBe(`mkdir -p '${root}'`);
+    });
+
     it("the closing line names git.identity while it fails", async () => {
       const m = machine({ gitIdentity: null });
       const r = await runRepos(m, {});

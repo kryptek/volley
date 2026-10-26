@@ -8008,7 +8008,9 @@ export class Daemon {
     if (p.machines !== undefined) {
       const asked = this.requestMachines(p.machines);
       if ("error" in asked) return { ok: false, error: asked.error };
-      names = this.namedMachines(asked.machines);
+      // `machines` narrows the holders (SPEC §4.6.21): a machine that holds no clone is not asked.
+      const named = this.namedMachines(asked.machines);
+      names = names.filter((m) => named.includes(m));
     }
     // In repo_status' order: the own machine, then each configured host.
     const order = this.allMachines();
@@ -8030,12 +8032,17 @@ export class Daemon {
           run.checks,
           { ready: r.ready, reasons: r.reasons },
           r.repo,
-          { from: run.from, ...(run.note !== undefined ? { note: run.note } : {}) },
+          {
+            from: run.from,
+            ...(run.note !== undefined ? { note: run.note } : {}),
+            ...(m === local ? { own: true } : {}),
+          },
         );
       }
       return out;
     });
-    const machines = blocks ?? {};
+    if (blocks === undefined) return { ok: false, error: "daemon stopping" };
+    const machines = blocks;
     return {
       ok: true,
       result: {
