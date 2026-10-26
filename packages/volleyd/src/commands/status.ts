@@ -371,7 +371,9 @@ export function formatMergeQueue(q: NonNullable<WaveState["merge_queue"]>): stri
  * `ci: none (no workflows: the two reviewers and the gate are the check)`, `ci: workflows (3)` or
  * `ci: required (build, test)`: the repository's CI as read for this version (SPEC §4.6.8).
  */
-export function formatCiMode(s: WaveState): string {
+export function formatCiMode(
+  s: Pick<WaveState, "ci_mode" | "ci_required_checks" | "ci_workflows">,
+): string {
   if (s.ci_mode === "none")
     return "ci: none (no workflows: the two reviewers and the gate are the check)";
   if (s.ci_mode === "required")

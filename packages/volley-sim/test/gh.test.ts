@@ -71,6 +71,19 @@ describe("gh api (volleyd's reads)", () => {
     expect(json(gh(["api", "repos/{owner}/{repo}/rules/branches/release/w1"]))).toEqual([]);
   });
 
+  it("repo_check's reads (#610): ADMIN on repo view, no classic protection (404)", () => {
+    const v = gh(["repo", "view", "--json", "nameWithOwner,viewerPermission"]);
+    expect(v.code).toBe(0);
+    expect(json(v).viewerPermission).toBe("ADMIN");
+    const p = gh(["api", "repos/{owner}/{repo}/branches/release/w1/protection"]);
+    expect(p.code).not.toBe(0);
+    expect(p.stderr).toContain("(HTTP 404)");
+    expect(json(gh(["api", "repos/{owner}/{repo}/branches/release/w1"]))).toEqual({
+      name: "release/w1",
+      protected: false,
+    });
+  });
+
   it("tags: `git/matching-refs/tags/<prefix> --paginate --slurp` pages, `git/tags/<sha>` the tagged commit", () => {
     const head = git(work, "rev-parse", "HEAD");
     git(work, "tag", "v1.0.0");

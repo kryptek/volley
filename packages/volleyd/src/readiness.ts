@@ -18,9 +18,10 @@ import type { LocalAgentsMode } from "./types";
  * `ready` is false on a failing `block` check, a volley version other than the supervisor's, a
  * `claude` or `bun` the PATH probe did not find (the supervisor's own probe decides: the doctor's
  * `claude_on_path` / `bun_on_path` only estimate the non-interactive ssh PATH), GitHub without
- * push access or Claude signed out. A repository is judged on its own (`repos`, #436): a clone
- * that is missing, fails a per-repository check or lacks a tool its repository needs blocks that
- * repository only, never the machine; placement skips the machine for that repository's waves.
+ * push access, git without a commit identity or Claude signed out. A repository is judged on its
+ * own (`repos`, #436): a clone that is missing, fails a per-repository check or lacks a tool its
+ * repository needs blocks that repository only, never the machine; placement skips the machine
+ * for that repository's waves.
  * `eligible` / `ineligible_reason` are placement's own machine
  * filter (`machineIneligible`): ready, not draining, under `max_agents`, the machine's own
  * admission open, load per core, memory, disk and usage within the supervisor's thresholds. So a
@@ -364,6 +365,10 @@ function blockers(i: ReadinessInput): string[] {
   else out.push(...doctorReasons(r, i));
   out.push(...pathReasons(i.probe, i.local, i.probeError));
   if (doctored) out.push(...authReasons(r, i));
+  // A warn check (it never holds up a join), but an agent's first commit dies without it (#610).
+  if (doctored && r.checks?.some((c) => c.id === "git.identity" && !c.ok)) {
+    out.push(`git: no commit identity on ${i.name} (volley setup --peer --step signin)`);
+  }
   return out;
 }
 

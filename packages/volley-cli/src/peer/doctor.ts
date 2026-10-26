@@ -1,12 +1,20 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  constants,
+  accessSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { BrokerAuth } from "volley-mcp/config";
 import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
-import { managedClonePath, originToSlug, sameSlug } from "volleyd/repos";
+import { managedClonePath, managedWorktreeRoot, originToSlug, sameSlug } from "volleyd/repos";
 import { volleydHome } from "../auth/context";
 import type { PeerExec } from "../commands/peer";
 import { EXIT, type ExitCode } from "../exit-codes";
@@ -112,13 +120,15 @@ const FIXABLE: string[] = [
   "repo.canonical",
   ...PROFILE_CHECKS,
   "claude.profiles",
+  "repo.worktrees",
 ];
 
 /**
  * Warn checks that do not hold up a join but that the supervisor's readiness still needs (SPEC
- * §4.6.15: GitHub may push and Claude is signed in): the human output says so.
+ * §4.6.15: GitHub may push, git has a commit identity and Claude is signed in): the human output
+ * says so.
  */
-const NEEDED_FOR_READY = ["gh.auth", "claude.signin"];
+const NEEDED_FOR_READY = ["gh.auth", "git.identity", "claude.signin"];
 
 /**
  * In `node_modules`: the sha256 of the `bun.lock` the doctor last installed from. `bun install
@@ -179,6 +189,11 @@ export interface RepoFacts {
   clean: boolean;
   /** Its toolchain (requirements.ts), or why its requirements file is invalid. */
   requirements: Requirements | { error: string };
+  /** The signed-in GitHub user's `viewerPermission` on it (`WRITE`…); null: not read. */
+  permission: string | null;
+  /** Where volleyd cuts its worktrees here, and whether it (or its nearest ancestor) is writable. */
+  worktreeRoot: string;
+  worktreeWritable: boolean;
 }
 
 export interface Memory {
@@ -353,6 +368,8 @@ export interface DoctorDeps {
   claudeRoot?: string;
   /** The reach probes (supervisor/probes.ts) for `DoctorOptions.reach`; unset, nothing is probed. */
   reach?: ReachProbes;
+  /** Whether this process may write `path` (an existing one). Unset: `fs.accessSync(…, W_OK)`. */
+  writable?: (path: string) => boolean;
   /** This machine's interfaces (`network.private`'s manual address). Unset: `os.networkInterfaces`. */
   interfaces?: () => Record<
     string,
@@ -650,43 +667,70 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   const configured = Object.entries(opts.repos ?? {}).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
   );
-  const slug =
-    configured.length > 0 ? (configured[0]?.[0] ?? null) : githubSlug(origin ?? expected);
-  const permission =
-    signedIn && ghBin !== null && slug !== null
-      ? ghPermission(
-          (
-            await sh([
-              ghBin,
-              "repo",
-              "view",
-              slug,
-              "--json",
-              "viewerPermission",
-              "--jq",
-              ".viewerPermission",
-            ])
-          ).stdout,
-        )
-      : null;
-
-  // Each repository: its clone, GitHub's canonical names when its remote names another (D6:
-  // one `gh repo view` per slug per run), its branch state (D7) and its toolchain.
-  const canonicals = new Map<string, string | null>();
-  const canonicalOf = async (s: string): Promise<string | null> => {
+  // Each repository as GitHub reports it to this machine's user: its canonical name (D6) and the
+  // user's permission on it (repo.push), one `gh repo view` per slug per run.
+  const views = new Map<string, { name: string | null; permission: string | null }>();
+  const viewOf = async (s: string) => {
     const key = s.toLowerCase();
-    if (!canonicals.has(key)) {
+    let v = views.get(key);
+    if (v === undefined) {
       const r =
         signedIn && ghBin !== null
           ? await sh(
-              [ghBin, "repo", "view", s, "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+              [ghBin, "repo", "view", s, "--json", "nameWithOwner,viewerPermission"],
               DOCTOR_DEFAULTS.gh_view_timeout_ms,
             )
           : null;
-      canonicals.set(key, r !== null && r.code === 0 ? canonicalSlug(r.stdout) : null);
+      let parsed: { nameWithOwner?: unknown; viewerPermission?: unknown } = {};
+      try {
+        if (r !== null && r.code === 0) parsed = JSON.parse(r.stdout.trim()) ?? {};
+      } catch {}
+      v = {
+        name: typeof parsed.nameWithOwner === "string" ? canonicalSlug(parsed.nameWithOwner) : null,
+        permission:
+          typeof parsed.viewerPermission === "string"
+            ? ghPermission(parsed.viewerPermission)
+            : null,
+      };
+      views.set(key, v);
     }
-    return canonicals.get(key) ?? null;
+    return v;
   };
+  const canonicalOf = async (s: string) => (await viewOf(s)).name;
+  const first = configured[0]?.[0];
+  const slug = first ?? githubSlug(origin ?? expected);
+  const permission =
+    first !== undefined
+      ? (await viewOf(first)).permission
+      : signedIn && ghBin !== null && slug !== null
+        ? ghPermission(
+            (
+              await sh([
+                ghBin,
+                "repo",
+                "view",
+                slug,
+                "--json",
+                "viewerPermission",
+                "--jq",
+                ".viewerPermission",
+              ])
+            ).stdout,
+          )
+        : null;
+
+  // Each repository: its clone, GitHub's canonical names when its remote names another (D6), its
+  // branch state (D7), its toolchain, push access and worktree root.
+  const writable =
+    deps.writable ??
+    ((p: string) => {
+      try {
+        accessSync(p, constants.W_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
   const managedRoot = CONFIG_DEFAULTS.fleet.repo_root;
   const repos: RepoFacts[] = [];
   for (const [repoSlug, repoPath] of configured) {
@@ -718,6 +762,14 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
         requirements = { error: e instanceof Error ? e.message : String(e) };
       }
     }
+    // volleyd's worktree root for it: a configured repository's (managed or adopted) is always
+    // under ~/.volley/worktrees (hosts/ssh-tmux.ts); only the legacy clone keeps them beside it.
+    const wtRoot = managedWorktreeRoot(deps.home, repoSlug);
+    const near = nearestExisting(wtRoot);
+    let nearDir = false;
+    try {
+      nearDir = statSync(near).isDirectory();
+    } catch {}
     repos.push({
       slug: repoSlug,
       path: at,
@@ -728,6 +780,9 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       defaultBranch,
       clean,
       requirements,
+      permission: (await viewOf(repoSlug)).permission,
+      worktreeRoot: wtRoot,
+      worktreeWritable: nearDir && writable(near),
     });
   }
   // The tools a repository needs beyond the doctor's own: only those, each probed once.

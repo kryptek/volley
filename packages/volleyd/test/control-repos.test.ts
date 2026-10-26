@@ -741,3 +741,112 @@ describe("a profile signed in later (claude_signin_done)", () => {
     }
   });
 });
+
+describe("repo_check (#610)", () => {
+  /** a/a added and ready on both machines; its workflows readable. */
+  async function added(): Promise<void> {
+    await setup();
+    f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {
+      stdout: JSON.stringify({ workflows: [{ id: 1, state: "active" }] }),
+    });
+    expect(await f.adminOp({ op: "repo_add", slug: SLUG })).toMatchObject({ ok: true });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready" && (await repoState(LOCAL)) === "ready";
+    });
+  }
+
+  it("repo_add's result carries the repository half as checks (repo.exists, ci.mode), and still ci.workflows", async () => {
+    await added();
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(r?.result).toMatchObject({
+      ci: { workflows: 1 },
+      checks: [
+        { id: "repo.exists", ok: true, severity: "block", detail: `GitHub knows it as ${SLUG}` },
+        { id: "ci.mode", ok: true, severity: "warn", detail: "workflows (1)" },
+      ],
+    });
+  });
+
+  it("a read on the mailbox: the repository lines, one block per holder from a fresh doctor (no fix), ready_on", async () => {
+    await added();
+    const runs = theBox().doctorRuns.length;
+    const r = await f.client.request("repo_check", { slug: SLUG }, { timeoutMs: 20_000 });
+    expect(r.ok).toBe(true);
+    const res = r.result as {
+      repository: { id: string }[];
+      machines: Record<string, { from: string; ready: boolean; checks: { id: string }[] }>;
+      ready_on: string[];
+      summary: string;
+    };
+    expect(res.repository.map((c) => c.id)).toEqual(["repo.exists", "ci.mode"]);
+    expect(Object.keys(res.machines)).toEqual([LOCAL, PEER]);
+    expect(res.machines[PEER]).toMatchObject({ from: "doctor", ready: true });
+    expect(theBox().doctorRuns.slice(runs)).toEqual([{ fix: false }]);
+    expect(res.ready_on).toEqual([LOCAL, PEER]);
+    expect(res.summary).toBe(`ready for a wave on: ${LOCAL}, ${PEER}.`);
+  });
+
+  it("a box whose doctor is busy is judged from its last record, saying so", async () => {
+    await added();
+    let release!: () => void;
+    const busy = new Promise<void>((r) => {
+      release = r;
+    });
+    theBox().answers.doctor = async () => {
+      await busy;
+      return reportWith([clone(SLUG, BOX_CLONE)]);
+    };
+    const before = theBox().doctorRuns.length;
+    const repair = f.adminOp({ op: "peer_doctor", name: PEER });
+    // Repair's run is in progress (the box's doctor has been called) before the check asks.
+    await eventually(async () => theBox().doctorRuns.length > before);
+    const r = await f.client.request("repo_check", { slug: SLUG }, { timeoutMs: 20_000 });
+    release();
+    await repair;
+    expect((r.result as { machines: Record<string, unknown> }).machines[PEER]).toMatchObject({
+      from: "record",
+      note: "a doctor run is in progress",
+    });
+  });
+
+  it("fix: true is refused on the mailbox; an admin's runs the box's doctor with --fix and the repository added", async () => {
+    await added();
+    const refused = await f.client.request("repo_check", { slug: SLUG, fix: true });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("only on volley/_system/auth/ops/");
+    const runs = theBox().doctorRuns.length;
+    const r = await f.adminOp({ op: "repo_check", slug: SLUG, fix: true });
+    expect(r?.ok).toBe(true);
+    expect(theBox().doctorRuns.slice(runs)).toEqual([{ fix: true, repos_add: [SLUG] }]);
+  });
+
+  it("--machine naming a box that holds no clone says so, rather than dropping it silently", async () => {
+    await added();
+    const r = await f.client.request(
+      "repo_check",
+      { slug: "b/b", machines: [PEER] },
+      { timeoutMs: 20_000 },
+    );
+    const res = r.result as { machines: object; summary: string };
+    expect(Object.keys(res.machines)).toEqual([]);
+    expect(res.summary).toContain(`${PEER} holds no clone of b/b`);
+    expect(res.summary).toContain(`volley repo add b/b --machine ${PEER}`);
+  });
+
+  it("--machine narrows; a malformed slug or branch is refused", async () => {
+    await added();
+    const r = await f.client.request(
+      "repo_check",
+      { slug: SLUG, machines: [PEER] },
+      { timeoutMs: 20_000 },
+    );
+    expect(Object.keys((r.result as { machines: object }).machines)).toEqual([PEER]);
+    expect((await f.client.request("repo_check", { slug: "nope" })).error).toBe(
+      "slug must be a GitHub <owner/name>",
+    );
+    expect(
+      (await f.client.request("repo_check", { slug: SLUG, release_branch: "--x" })).error,
+    ).toBe("release_branch must be a branch name");
+  });
+});

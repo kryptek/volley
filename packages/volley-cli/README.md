@@ -552,9 +552,11 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `repo.clone`, `repo.origin` | block | per repository in `peer.json`'s `repos` (each check names it: `repo.clone (b/b)`), else `--repo` (default `peer.json`'s legacy `repo`): a git clone whose `origin`, normalised to `<host>/<path>`, is the repository's (`github.com/<owner>/<name>`, or `--origin`'s) |
 | `repo.canonical` | warn | a repository's remote names its old owner or name: GitHub (`gh repo view <slug> --json nameWithOwner`) reports the same repository for both; `--fix` repoints `origin` |
 | `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, no askpass, `ssh -o BatchMode=yes`) |
+| `repo.push` | block, for that repository only | this machine's `gh` may push to the repository: `gh repo view <slug> --json nameWithOwner,viewerPermission` (the canonical read, one per repository per run) is WRITE, MAINTAIN or ADMIN; without gh signed in it fails with `gh.auth`'s fix |
+| `repo.worktrees` | block, for that repository only | the folder volleyd cuts the repository's worktrees under (`~/.volley/worktrees/<owner>/<name>` for a managed clone, `<clone>/../.volley-worktrees` for an adopted one) is writable, or its nearest existing ancestor is; `--fix` creates it (`mkdir -p`) |
 | `tool.<name>` (a repository's), `repo.requirements` | block, for that repository only | a tool the repository needs (its manifests and `.volley/requirements.yaml`; the volleyd README's "Repository toolchains") is installed and at least its minimum version; the file is valid |
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
-| `git.identity` | warn | `git var GIT_COMMITTER_IDENT` succeeds in the home (`git commits as <name> <<email>>`): without an identity an agent's first commit there fails with "Author identity unknown"; the fix is `volley setup --peer --step signin` |
+| `git.identity` | warn | `git var GIT_COMMITTER_IDENT` succeeds in the home (`git commits as <name> <<email>>`): without an identity an agent's first commit there fails with "Author identity unknown"; the fix is `volley setup --peer --step signin`. A warn (a join is not held up), but readiness needs it: the closing line names it while it fails |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`); while signed in, `auth.claude_email` / `auth.claude_org` are the login's identity from `~/.claude.json`'s `oauthAccount.emailAddress` / `organizationName` (the only two fields of it the doctor reports; identity, never a credential) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
 | `skills` | warn | `~/.claude/skills/volley` and `~/.claude/skills/volley-issues` link to this checkout's `packages/volley-skill` and `packages/volley-issues` (sharing `skills: copy`: they are there, copied or not; `own`: left as is) |
@@ -707,13 +709,32 @@ The repositories the supervisor's machines work on (SPEC §4.6.21), by GitHub `o
 `add` and `remove` go on the sender's account-op topic: the coordinator login is enough (on the
 supervisor's machine `volley` finds it itself, no flag; `volley auth status` shows it), and so is
 an admin account's. Adopting an existing clone with `--path` stays an admin's (it also trusts
-that folder). `list` and `status` are reads any login may make.
+that folder). `list`, `status` and `check` are reads any login may make (`check --fix` is an
+admin's).
 
 ```sh
 volley repo add example-org/widgets                       # every machine
 #   Added example-org/widgets (private) to control, box-a.
-#   CI: none — no GitHub Actions workflows; in a wave the two reviewers and the gate are the check
+#   ✓ repo.exists: GitHub knows it as example-org/widgets
+#   ✓ ci.mode: none (no workflows: the two reviewers and the gate are the check)
+#   Follow it with: volley repo check example-org/widgets
 volley repo add example-org/widgets --machine box-a --path box-a=/srv/widgets --wait
+volley repo check example-org/widgets --release-branch release/2026-10-26-x
+#   example-org/widgets (private)
+#   ✓ repo.exists: GitHub knows it as example-org/widgets
+#   ✓ branch.release: release/2026-10-26-x exists on origin
+#   ! branch.protection: release/2026-10-26-x requires 1 approving review: GitHub will refuse volleyd's merge: auto
+#       fix: set merge: manual in the wave file, or drop the rule for this branch
+#   ✓ ci.mode: workflows (3)
+#
+#   box-a (doctor 40 s ago)
+#   ✓ repo.clone: clone at /path/to/home/.volley/repos/example-org/widgets
+#   ✓ repo.push: octocat has WRITE access to example-org/widgets
+#   ! git.identity: git has no commit identity (user.name/user.email): an agent's first commit here fails with "Author identity unknown"
+#       fix: volley setup --peer --step signin
+#   ✓ repo.worktrees: /path/to/home/.volley/worktrees/example-org/widgets is writable
+#
+#   not ready for a wave on box-a (git.identity); ready on control.
 volley repo status example-org/widgets
 #   control: ready (/path/to/home/.volley/repos/example-org/widgets)
 #   box-a: cloning
@@ -733,11 +754,12 @@ volley repo add example-org/demo --for-wave w1            # for wave w1 only: it
   never cloned for you: clone it at the printed path (`gh repo clone <owner/name> <path>`) and
   add it again. A machine that is down, or whose ssh fails, stays `blocked` with the reason and
   is retried when it is back (or after a Repair). `--wait` asks `repo_status` until every machine
-  is `ready` or `blocked` (`--wait-timeout <s>`, default 900): exit 0 when all are ready, 1 when one
-  is blocked, 124 on the timeout. After `Added …` it prints the repository's GitHub Actions
-  workflows as volleyd read them: `CI: <n> workflow(s)`, or `CI: none — …` for a repository with
-  none, whose waves verify heads without CI (volleyd's `ci_mode: none`); nothing when they could
-  not be read. `--for-wave <wave>` sends `wave` with `repo_add`, which makes the registration
+  is `ready` or `blocked` (`--wait-timeout <s>`, default 900), then asks `repo_check` once and
+  ends on its machine blocks and closing line: exit 0 when all are ready, 1 when one is blocked,
+  124 on the timeout. After `Added …` it prints the repository's lines as
+  volleyd read them on GitHub (`repo.exists`, and `ci.mode`: `none (…)` for a repository with no
+  workflows, whose waves verify heads without CI, volleyd's `ci_mode: none`); an older volleyd's
+  answer prints `CI: <n> workflow(s)` instead. `--for-wave <wave>` sends `wave` with `repo_add`, which makes the registration
   that wave's: when volleyd cleans the wave up, it removes the registration from every machine,
   along with the clones it made for it (only a clone with nothing unpushed). Without the flag the
   registration is yours, and cleanup only names it (`volley repo remove …`). `volley setup`'s
@@ -746,7 +768,25 @@ volley repo add example-org/demo --for-wave w1            # for wave w1 only: it
   repository's config and from each paired machine's `peer.json`. No clone is ever deleted: the
   answer lists each one's path.
 - `status [<owner/name>] [--json]`: one line per machine, `<machine>: <state> (<why or path>)`,
-  `state` being `ready`, `cloning`, `blocked` or `absent` — the same lines the Desk shows.
+  `state` being `ready`, `cloning`, `blocked` or `absent` — the same lines the Desk shows. A cheap
+  read of what readiness says now; `check` is the one that goes and looks.
+- `check <owner/name> [--release-branch <b>] [--machine <name>]... [--fix] [--json]` (#610):
+  whether the repository can run a wave, on every machine that holds it (`--machine` narrows).
+  First the repository on GitHub, read once on the supervisor: `repo.exists`, with
+  `--release-branch` `branch.release` (on origin) and `branch.protection` (its required checks,
+  and `!` when a rule requires approving reviews, which `merge: auto` cannot satisfy), then
+  `ci.mode`. Then one block per machine from its doctor run fresh for the answer (`<machine>
+  (doctor 40 s ago)`; a machine whose doctor is busy, or that is down, shows its last report and
+  says so): its clone, origin, push access (`repo.push`), worktree root (`repo.worktrees`), the
+  repository's tools, git identity and Claude trust, the fix under each failing line, as `volley
+  peer doctor` prints them. It ends on `ready for a wave on: <machines>.` or `not ready for a wave
+  on <machine> (<why>); ready on <machines>.`; exit 0 when every machine asked is ready, 1
+  otherwise. `--fix` (an admin's) runs each paired machine's doctor with its safe fixes and the
+  repository added (a missing clone is cloned, a worktree root created) and prints the final
+  table; a GitHub sign-in, a git identity, a tool or a branch rule stays yours to fix (its command
+  is printed), and the supervisor's own machine is never changed. It waits up to 300 s for the
+  answer (900 with `--fix`; `--timeout` overrides). A wave volleyd would refuse for one of these
+  reasons is refused at `volleyd run` with the same fix (the volleyd README's "Repositories").
 - `list [--json]`: each configured repository, its machines and adopted paths.
 
 Connection flags as `volley peer`'s (`--broker-url`, `--namespace`, `--username`,

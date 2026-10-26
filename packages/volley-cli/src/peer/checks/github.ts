@@ -8,7 +8,7 @@ import { binOf } from "./tools";
  * and git has a commit identity here (`git.identity`).
  */
 
-const PUSH = new Set(["WRITE", "MAINTAIN", "ADMIN"]);
+export const PUSH = new Set(["WRITE", "MAINTAIN", "ADMIN"]);
 
 /** A GitHub login: letters, digits and dashes, at most 39 (never a token's underscore). */
 export const ghUser = (out: string): string | null => {
@@ -74,7 +74,7 @@ export function githubChecks(f: Facts): Check[] {
   return [...ghChecks(f), gitIdentityCheck(f)];
 }
 
-function ghChecks(f: Facts): Check[] {
+export function ghChecks(f: Facts): Check[] {
   const g = f.github;
   const who = g.user ?? "the signed-in GitHub user";
   const check = (ok: boolean, detail: string, fix?: string): Check => ({
