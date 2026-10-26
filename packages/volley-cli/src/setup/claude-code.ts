@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
+import { readCredentials } from "../auth/context";
+import { type Account, readAccounts } from "../commands/auth-accounts";
 import {
   type SkillFact,
   VOLLEY_SKILLS,
@@ -19,8 +21,9 @@ import type { SetupContext, StepPlan } from "./step";
  * default) and kept in setup.json; the volley MCP server registered at user scope with
  * non-secret env only (its login comes from `coordinator.json` in the auth dir it names); the
  * three Volley skills linked through their installers; the Volley hooks installed. An MCP entry
- * that carries settings of the person's own (a password, another agent id) is left alone and the
- * command that replaces it is printed. `--broker-url` re-points the registration and the hooks.
+ * that carries a broker login only is re-registered without it, once the login is in the auth
+ * dir; one with settings of the person's own (a custom key, another agent id) is left alone and
+ * the command that replaces it is printed. `--broker-url` re-points the registration and the hooks.
  */
 
 /** The MCP env keys setup's registration sets: any other is the person's own. */
@@ -31,6 +34,51 @@ export const MCP_ENV_KEYS = [
   "VOLLEY_BROKER_URL",
   "VOLLEY_AUTH_DIR",
 ] as const;
+
+/**
+ * The broker-login keys an entry carries (#614): `VOLLEY_AUTH_USERNAME`, `VOLLEY_AUTH_PASSWORD`,
+ * and a `VOLLEY_BROKER_URL` with `user:password@` in it. Names only, never a value.
+ */
+export function loginKeys(env: Record<string, unknown>): string[] {
+  const keys = ["VOLLEY_AUTH_USERNAME", "VOLLEY_AUTH_PASSWORD"].filter((k) => k in env);
+  const url = env.VOLLEY_BROKER_URL;
+  if (typeof url === "string" && withoutLogin(url).dropped) keys.push("VOLLEY_BROKER_URL");
+  return keys.sort();
+}
+
+/** The keys of the person's own: outside `MCP_ENV_KEYS` and not a login, or another agent id. */
+export function ownKeys(env: Record<string, unknown>): string[] {
+  const login = loginKeys(env);
+  const theirs = Object.keys(env).filter(
+    (k) => !(MCP_ENV_KEYS as readonly string[]).includes(k) && !login.includes(k),
+  );
+  const ownId = typeof env.VOLLEY_AGENT_ID === "string" && env.VOLLEY_AGENT_ID !== "coordinator";
+  return [...theirs, ...(ownId ? ["VOLLEY_AGENT_ID"] : [])].sort();
+}
+
+/** The username an entry's login names (its `VOLLEY_AUTH_USERNAME`, else its URL's user). */
+function loginUser(env: Record<string, unknown>): string | null {
+  if (typeof env.VOLLEY_AUTH_USERNAME === "string") return env.VOLLEY_AUTH_USERNAME;
+  const url = env.VOLLEY_BROKER_URL;
+  const m = typeof url === "string" ? /^[a-z]+:\/\/([^/:@]*)(?::[^/@]*)?@/i.exec(url) : null;
+  return m?.[1] !== undefined && m[1] !== "" ? decodeURIComponent(m[1]) : null;
+}
+
+function hasCoordinatorLogin(path: string): boolean {
+  try {
+    return readCredentials(path) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function readAccountsQuietly(dir: string): Account[] {
+  try {
+    return readAccounts(dir);
+  } catch {
+    return [];
+  }
+}
 
 export const MCP_GET = ["claude", "mcp", "get", "volley"] as const;
 export const MCP_REMOVE = ["claude", "mcp", "remove", "-s", "user", "volley"] as const;
@@ -196,18 +244,55 @@ export async function planClaudeCode(ctx: SetupContext): Promise<StepPlan> {
         string,
         unknown
       >;
-      const theirs = Object.keys(env).filter(
-        (k) => !(MCP_ENV_KEYS as readonly string[]).includes(k),
+      const login = loginKeys(env);
+      const own = ownKeys(env);
+      const loginNames = login.map((k) =>
+        k === "VOLLEY_BROKER_URL" ? "VOLLEY_BROKER_URL (user:password@)" : k,
       );
-      const ownId =
-        typeof env.VOLLEY_AGENT_ID === "string" && env.VOLLEY_AGENT_ID !== "coordinator";
-      if (theirs.length > 0 || ownId) {
-        // The person's own settings (a password, say): never rewritten here; their names only.
-        const own = [...theirs, ...(ownId ? ["VOLLEY_AGENT_ID"] : [])].sort();
+      if (own.length > 0) {
+        // The person's own settings: never rewritten here; their names only (a login among them
+        // too: setup does not guess what a custom key is for).
+        const named = [...own, ...login].sort();
         plan.found.push(
-          `The volley MCP server has settings of its own (${own.join(", ")}): left as is. To register it the way setup does (its login from the auth dir, no password in ~/.claude.json): ${[...MCP_REMOVE].map(sq).join(" ")} && ${add.map(sq).join(" ")}`,
+          `The volley MCP server has settings of its own (${named.join(", ")}): left as is. To register it the way setup does (its login from the auth dir, no password in ~/.claude.json): ${[...MCP_REMOVE].map(sq).join(" ")} && ${add.map(sq).join(" ")}`,
         );
-        rows.push(`MCP: volley has settings of its own (${own.join(", ")}): left as is`);
+        rows.push(`MCP: volley has settings of its own (${named.join(", ")}): left as is`);
+      } else if (login.length > 0) {
+        // A broker login in ~/.claude.json: moved to the store, as any other change (#614).
+        const coordinatorFile = join(ctx.auth.dir, "coordinator.json");
+        const carries = `MCP: volley carries a broker login in ~/.claude.json (${loginNames.join(", ")})`;
+        if (!hasCoordinatorLogin(coordinatorFile)) {
+          plan.found.push(
+            `The volley MCP server (${loginNames.join(", ")}) carries a broker login; run volley setup --step accounts first, then this step moves it`,
+          );
+          rows.push(`${carries}: to move once the accounts step has run`);
+        } else {
+          rows.push(`${carries}: to move`);
+          const was = loginUser(env);
+          const other = was !== null && was !== "coordinator" ? was : null;
+          const rotate =
+            other !== null && readAccountsQuietly(ctx.auth.dir).some((a) => a.name === other);
+          plan.changes.push({
+            summary: `Move the broker login out of ~/.claude.json (${loginNames.join(", ")}): re-register the volley MCP server with its login from ${coordinatorFile}${other !== null ? `; the session will log in as coordinator (it was ${other})` : ""}`,
+            detail: `Runs \`${MCP_REMOVE.join(" ")}\`, then \`claude mcp add-json -s user volley …\` with env ${Object.entries(
+              want.env,
+            )
+              .map(([k, v]) => `${k}=${v}`)
+              .join(" ")}.`,
+            apply: async () => {
+              await must(ctx, MCP_REMOVE);
+              await must(ctx, add);
+              return [
+                `The volley MCP server runs ${want.args[1]} at ${want.env.VOLLEY_BROKER_URL}, its login from ${coordinatorFile} (restart Claude Code sessions to pick it up).`,
+                ...(rotate
+                  ? [
+                      `The old login is still ${other}'s password on the broker: volley auth rotate ${other} retires it.`,
+                    ]
+                  : []),
+              ];
+            },
+          });
+        }
       } else {
         const args = Array.isArray(entry.args) ? entry.args : [];
         const runs =

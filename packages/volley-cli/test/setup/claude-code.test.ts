@@ -1,4 +1,5 @@
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { writeSecret } from "../../src/auth/context";
 import { setup } from "../../src/commands/setup";
 import { makeBufferIO } from "../../src/io";
 import {
@@ -17,7 +19,7 @@ import {
   planClaudeCode,
 } from "../../src/setup/claude-code";
 import { readSetupInstall } from "../../src/setup/journal";
-import { setupFence } from "../../src/setup/step";
+import { type Change as StepChange, setupFence } from "../../src/setup/step";
 import { type FakeDynsec, startFakeDynsec } from "../helpers/fake-dynsec";
 import { type FakeMachine, NOW, fakeMachine } from "../helpers/setup-machine";
 import { tempDir } from "../helpers/tmp";
@@ -42,6 +44,14 @@ describe("the Claude Code step", () => {
     const plan = await planClaudeCode(m.ctx);
     for (const c of plan.changes) await c.apply();
     return { plan, problems: (await plan.verify?.()) ?? [] };
+  };
+  const MARKER = "MARKER-pw-0badf00d";
+  const seedCoordinatorLogin = () => {
+    mkdirSync(m.layout.authDir, { recursive: true });
+    writeSecret(
+      join(m.layout.authDir, "coordinator.json"),
+      JSON.stringify({ username: "coordinator", password: "store-pw" }),
+    );
   };
   const run = async (argv: string[]) => {
     const io = makeBufferIO({ now: () => new Date(NOW) });
@@ -80,16 +90,159 @@ describe("the Claude Code step", () => {
     const own = {
       command: "bun",
       args: ["run", entry()],
-      env: { VOLLEY_AGENT_ID: "coordinator", VOLLEY_AUTH_PASSWORD: "hunter2-secret" },
+      env: { VOLLEY_AGENT_ID: "coordinator", FOO: "hunter2-secret" },
     };
     writeFileSync(m.claudeJson, JSON.stringify({ mcpServers: { volley: own } }));
     const plan = await planClaudeCode(m.ctx);
     expect(plan.changes.some((c) => c.summary.includes("MCP"))).toBe(false);
     const note = plan.found.find((f) => f.includes("settings of its own")) as string;
-    expect(note).toContain("VOLLEY_AUTH_PASSWORD");
+    expect(note).toContain("FOO");
     expect(note).toContain(MCP_REMOVE.join(" "));
     expect(JSON.stringify(plan)).not.toContain("hunter2");
     expect(volleyEntry()).toEqual(own);
+  });
+
+  it("own keys mixed with a login: still left as is, both keys named, no value", async () => {
+    seedCoordinatorLogin();
+    const own = {
+      command: "bun",
+      args: ["run", entry()],
+      env: { VOLLEY_AGENT_ID: "coordinator", FOO: "bar", VOLLEY_AUTH_PASSWORD: MARKER },
+    };
+    writeFileSync(m.claudeJson, JSON.stringify({ mcpServers: { volley: own } }));
+    const plan = await planClaudeCode(m.ctx);
+    expect(plan.changes.some((c) => c.summary.includes("MCP"))).toBe(false);
+    const note = plan.found.find((f) => f.includes("settings of its own")) as string;
+    expect(note).toContain("FOO");
+    expect(note).toContain("VOLLEY_AUTH_PASSWORD");
+    expect(plan.row).toContain(
+      "MCP: volley has settings of its own (FOO, VOLLEY_AUTH_PASSWORD): left as is",
+    );
+    expect(JSON.stringify(plan)).not.toContain(MARKER);
+    expect(volleyEntry()).toEqual(own);
+  });
+
+  describe("a registration that carries a broker login (#614)", () => {
+    const loginEntry = (env: Record<string, string>) => ({
+      command: "bun",
+      args: ["run", entry()],
+      env: { VOLLEY_AGENT_ID: "coordinator", ...env },
+    });
+    const seed = (env: Record<string, string>) =>
+      writeFileSync(m.claudeJson, JSON.stringify({ mcpServers: { volley: loginEntry(env) } }));
+    const mcpChange = <T extends { summary: string }>(plan: { changes: T[] }) =>
+      plan.changes.find((c) => c.summary.startsWith("Move the broker login out of"));
+
+    it("plans the move, applies setup's registration, and never shows the password", async () => {
+      seedCoordinatorLogin();
+      m.ctx.yes = true;
+      await applyAll();
+      seed({ VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: MARKER });
+      m.execCalls.length = 0;
+      const plan = await planClaudeCode(m.ctx);
+      const change = mcpChange(plan);
+      expect(change?.summary).toBe(
+        `Move the broker login out of ~/.claude.json (VOLLEY_AUTH_PASSWORD, VOLLEY_AUTH_USERNAME): re-register the volley MCP server with its login from ${join(m.layout.authDir, "coordinator.json")}`,
+      );
+      expect(plan.changes).toHaveLength(1);
+      expect(plan.row).toContain(
+        "MCP: volley carries a broker login in ~/.claude.json (VOLLEY_AUTH_PASSWORD, VOLLEY_AUTH_USERNAME): to move",
+      );
+      expect(JSON.stringify(plan)).not.toContain(MARKER);
+      const lines = await (change as StepChange).apply();
+      expect(lines.join("\n")).not.toContain(MARKER);
+      const mcp = m.execCalls.filter((a) => a[0] === "claude" && a[1] === "mcp");
+      expect(mcp.map((a) => a.slice(0, 3).join(" "))).toEqual([
+        "claude mcp remove",
+        "claude mcp add-json",
+      ]);
+      expect(mcp[0]).toEqual([...MCP_REMOVE]);
+      expect(JSON.stringify(m.execCalls)).not.toContain(MARKER);
+      expect(m.execCalls.some((a) => a[0] === "claude" && a[2] === "get")).toBe(false);
+      const env = (volleyEntry() as { env: Record<string, string> }).env;
+      expect(env).toEqual({
+        VOLLEY_AGENT_ID: "coordinator",
+        VOLLEY_COORDINATOR: "coord-studio",
+        VOLLEY_NAMESPACE: "default",
+        VOLLEY_BROKER_URL: m.ctx.tcpUrl,
+        VOLLEY_AUTH_DIR: m.ctx.auth.dir,
+      });
+      expect((await planClaudeCode(m.ctx)).changes).toEqual([]);
+    });
+
+    it("an account's login: names it, and how to retire its password", async () => {
+      seedCoordinatorLogin();
+      writeFileSync(
+        join(m.layout.authDir, "accounts.json"),
+        JSON.stringify({
+          accounts: [{ name: "admin-1", role: "admin", kind: "human", created: NOW }],
+        }),
+      );
+      m.ctx.yes = true;
+      await applyAll();
+      seed({ VOLLEY_AUTH_USERNAME: "admin-1", VOLLEY_AUTH_PASSWORD: MARKER });
+      const plan = await planClaudeCode(m.ctx);
+      const change = mcpChange(plan);
+      expect(change?.summary).toContain("the session will log in as coordinator (it was admin-1)");
+      const lines = await (change as StepChange).apply();
+      expect(lines.join("\n")).toContain(
+        "The old login is still admin-1's password on the broker: volley auth rotate admin-1 retires it.",
+      );
+      expect(JSON.stringify(plan) + lines.join("\n")).not.toContain(MARKER);
+    });
+
+    it("a login in VOLLEY_BROKER_URL: the key is named as user:password@, the value never", async () => {
+      seedCoordinatorLogin();
+      m.ctx.yes = true;
+      await applyAll();
+      seed({
+        VOLLEY_COORDINATOR: "coord-studio",
+        VOLLEY_NAMESPACE: "default",
+        VOLLEY_AUTH_DIR: m.ctx.auth.dir,
+        VOLLEY_BROKER_URL: `mqtt://coordinator:${MARKER}@127.0.0.1:1883`,
+      });
+      const plan = await planClaudeCode(m.ctx);
+      const change = mcpChange(plan);
+      expect(change?.summary).toContain("VOLLEY_BROKER_URL (user:password@)");
+      expect(change?.summary).not.toContain("it was");
+      expect(JSON.stringify(plan)).not.toContain(MARKER);
+      await (change as StepChange).apply();
+      expect(JSON.stringify(volleyEntry())).not.toContain(MARKER);
+    });
+
+    it("no coordinator login in the auth dir yet: no change, the accounts step named", async () => {
+      seed({ VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: MARKER });
+      const plan = await planClaudeCode(m.ctx);
+      expect(mcpChange(plan)).toBeUndefined();
+      expect(plan.changes.some((c) => c.summary.includes("MCP"))).toBe(false);
+      expect(plan.found.join("\n")).toContain(
+        "carries a broker login; run volley setup --step accounts first, then this step moves it",
+      );
+      expect(plan.row).toContain(
+        "MCP: volley carries a broker login in ~/.claude.json (VOLLEY_AUTH_PASSWORD, VOLLEY_AUTH_USERNAME): to move once the accounts step has run",
+      );
+      expect(JSON.stringify(plan)).not.toContain(MARKER);
+    });
+
+    it("--check shows the row and exits non-zero; --yes moves it without a question; setup.log never holds the password", async () => {
+      seedCoordinatorLogin();
+      m.ctx.yes = true;
+      await applyAll();
+      seed({ VOLLEY_AUTH_USERNAME: "coordinator", VOLLEY_AUTH_PASSWORD: MARKER });
+      const check = await run(["--check", "--step", "claude-code"]);
+      expect(check.code).not.toBe(0);
+      expect(check.stdout).toContain("carries a broker login in ~/.claude.json");
+      expect(check.stdout + check.stderr).not.toContain(MARKER);
+      m.questions.length = 0;
+      const apply = await run(["--yes", "--step", "claude-code"]);
+      expect(apply.code).toBe(0);
+      expect(m.questions).toEqual([]);
+      expect(apply.stdout + apply.stderr).not.toContain(MARKER);
+      expect(JSON.stringify(volleyEntry())).not.toContain(MARKER);
+      const log = join(m.ctx.volleydHome, "setup.log");
+      expect(existsSync(log)).toBe(true);
+      expect(readFileSync(log, "utf-8")).not.toContain(MARKER);
+    });
   });
 
   it("--broker-url rewrites VOLLEY_BROKER_URL in an existing entry and in the hooks", async () => {
