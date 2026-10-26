@@ -63,18 +63,26 @@ export function trimToLimit(g: Gathered, render: (g: Gathered) => string, max: n
     ["journal", "journal events"],
   ] as const) {
     const of = sections.filter((s) => s.kind === kind);
-    const kept = new Map(of.map((s) => [s, s.body.split("\n")]));
-    const dropped = new Map(of.map((s) => [s, 0]));
-    // Round-robin, oldest line first, so every section keeps its newest lines.
-    while (text.length > max && [...kept.values()].some((ls) => ls.length > 0)) {
-      for (const [s, ls] of kept) {
-        if (ls.length === 0) continue;
-        ls.shift();
-        dropped.set(s, (dropped.get(s) ?? 0) + 1);
-        s.body = [`… ${dropped.get(s)} ${noun} dropped`, ...ls].join("\n");
+    const lines = new Map(of.map((s) => [s, s.body.split("\n")]));
+    // `k` rounds of one line per section, oldest first, so every section keeps its newest lines.
+    const drop = (k: number) => {
+      for (const [s, ls] of lines) {
+        const n = Math.min(k, ls.length);
+        if (n > 0) s.body = [`… ${n} ${noun} dropped`, ...ls.slice(n)].join("\n");
+        else s.body = ls.join("\n");
       }
-      text = render(trimmed);
+      return render(trimmed);
+    };
+    // The fewest rounds that fit, found by bisection: each render redacts the whole report.
+    const most = Math.max(0, ...[...lines.values()].map((ls) => ls.length));
+    let lo = 0;
+    let hi = most;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (drop(mid).length <= max) hi = mid;
+      else lo = mid + 1;
     }
+    text = drop(lo);
     if (text.length <= max) return text;
   }
   const note = "\n… the report was cut here: it was longer than GitHub takes\n";

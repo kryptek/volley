@@ -26,7 +26,10 @@ function machine(opts: { tty?: boolean; answers?: (string | null)[]; ghSignedIn?
     `${Array.from({ length: 20 }, (_, i) => `log ${i}`).join("\n")}\n`,
   );
   if (opts.ghSignedIn === true) {
-    m.execs.set("gh auth status", ok("✓ Logged in to github.com account canary-gh (keyring)\n"));
+    m.execs.set(
+      "gh auth status --active",
+      ok("✓ Logged in to github.com account canary-gh (keyring)\n"),
+    );
   }
   const asked: string[] = [];
   const opened: string[] = [];
@@ -128,6 +131,42 @@ describe("volley bug", () => {
     expect(r.stdout.startsWith(body)).toBe(true);
     expect(r.stdout).toContain("https://github.com/kryptek/volley/issues/999");
     expect(opened).toEqual([]);
+  });
+
+  it("TTY answering y when gh issue create fails: the error redacted, the report saved, exit ERROR", async () => {
+    const { m, run, cwd, opened } = machine({ tty: true, answers: ["y"], ghSignedIn: true });
+    let bodyDir = "";
+    m.onExec = (argv) => {
+      if (argv[0] !== "gh" || argv[1] !== "issue") return undefined;
+      bodyDir = join(argv[argv.indexOf("--body-file") + 1] as string, "..");
+      return { code: 1, stdout: "", stderr: "HTTP 403 for canaryuser on canaryorg/canaryrepo\n" };
+    };
+    const r = await run(["-m", "it broke"]);
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.stderr).toContain("`gh issue create` failed (exit 1)");
+    expect(r.stderr).not.toContain("canaryuser");
+    expect(r.stderr).not.toContain("canaryorg/canaryrepo");
+    expect(existsSync(join(cwd, `volley-bug-${STAMP}.md`))).toBe(true);
+    expect(bodyDir).not.toBe("");
+    expect(existsSync(bodyDir)).toBe(false);
+    expect(opened).toEqual([]);
+  });
+
+  it("the title and the body number repositories with one map", async () => {
+    const { m, run } = machine({ tty: true, answers: ["y"], ghSignedIn: true });
+    m.onExec = (argv) =>
+      argv[0] === "gh" && argv[1] === "issue" ? ok("https://github.com/x/y/issues/1\n") : undefined;
+    m.write(
+      join(m.vhome, "waves", "wave-a", "journal.jsonl"),
+      `${JSON.stringify({ seq: 1, repo: "otherorg/otherrepo" })}\n${JSON.stringify({ seq: 2, repo: "canaryorg/canaryrepo" })}\n`,
+    );
+    const r = await run(["-m", "canaryorg/canaryrepo works, otherorg/otherrepo fails"]);
+    expect(r.code).toBe(EXIT.OK);
+    const create = m.calls.find((a) => a[0] === "gh" && a[1] === "issue") as string[];
+    const title = create[create.indexOf("--title") + 1] as string;
+    const what = /## What happened\n\n(.*)\n/.exec(r.stdout)?.[1];
+    expect(title).toMatch(/^bug: \[repo-\d\] works, \[repo-\d\] fails$/);
+    expect(title).toBe(`bug: ${what}`);
   });
 
   it("TTY answering y without gh: the file is written and the bug form opened, under 6 000 characters", async () => {

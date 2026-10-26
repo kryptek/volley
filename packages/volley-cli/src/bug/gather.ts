@@ -227,7 +227,11 @@ export async function gatherReport(
   toolLines.push(
     `checkout: ${method}${described !== null ? ` (${described})` : describe !== null ? ` ${na(why(describe))}` : ""}`,
   );
-  const gh = await run(deps, ["gh", "auth", "status"]);
+  // The active account's sign-in: a stale second account makes plain `gh auth status` exit 1.
+  // A gh older than `--active` refuses the flag, and answers the plain question instead.
+  let gh = await run(deps, ["gh", "auth", "status", "--active"]);
+  if (gh.code !== 0 && /unknown flag/.test(gh.stderr))
+    gh = await run(deps, ["gh", "auth", "status"]);
   const ghLogin = /account (\S+)/.exec(`${gh.stdout}\n${gh.stderr}`)?.[1] ?? null;
   const ghSignedIn = gh.code === 0;
   toolLines.push(`gh sign-in: ${ghSignedIn ? "signed in" : "not signed in"}`);

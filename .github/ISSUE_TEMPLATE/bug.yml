@@ -25,4 +25,3 @@ body:
     attributes:
       label: Report
       description: The output of `volley bug` (or the volley-bug-….md file it saved).
-      render: markdown

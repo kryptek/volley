@@ -72,6 +72,24 @@ describe("gatherReport", () => {
     expect(g.header).toContain("bun 1.3.2");
   });
 
+  it("gh's sign-in is the active account's; a gh without --active falls back to plain status", async () => {
+    const m = bugMachine(tempDir("volley-bug-g-"));
+    m.execs.set("gh auth status --active", ok("✓ Logged in to github.com account canary-gh\n"));
+    m.execs.set("gh auth status", { code: 1, stdout: "", stderr: "X a stale second account\n" });
+    expect((await gatherReport(m.deps, OPTS)).ghSignedIn).toBe(true);
+
+    const old = bugMachine(tempDir("volley-bug-g-"));
+    old.execs.set("gh auth status --active", {
+      code: 1,
+      stdout: "",
+      stderr: "unknown flag: --active\n",
+    });
+    old.execs.set("gh auth status", ok("✓ Logged in to github.com account canary-gh\n"));
+    const g = await gatherReport(old.deps, OPTS);
+    expect(g.ghSignedIn).toBe(true);
+    expect(g.identity.ghLogin).toBe("canary-gh");
+  });
+
   it("volleyd status exiting 69 keeps the diagnosis as the section", async () => {
     const m = bugMachine(tempDir("volley-bug-g-"));
     m.execs.set("volleyd status --json", {
@@ -205,7 +223,10 @@ describe("the canary: a seeded home, gathered and redacted, leaks nothing", () =
       `canaryuser started on canary-host.example.lan; login ?code=CANARYSECRET&state=x\npassword: CANARY-PASSWORD\nBearer CANARYSECRET\n${join(home, "x")}\n`,
     );
     m.write(join(home, ".volley", "peer.log"), "peer canary-gh pushed to canaryorg/canaryrepo\n");
-    m.execs.set("gh auth status", ok("✓ Logged in to github.com account canary-gh (keyring)\n"));
+    m.execs.set(
+      "gh auth status --active",
+      ok("✓ Logged in to github.com account canary-gh (keyring)\n"),
+    );
     m.execs.set("git config --get user.name", ok("Canary Person\n"));
     m.execs.set(
       "volley peer doctor --json",

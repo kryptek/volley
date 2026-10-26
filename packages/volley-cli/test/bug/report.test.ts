@@ -85,6 +85,25 @@ describe("trimToLimit", () => {
     expect(text).toContain("bun: 1.3.2");
   });
 
+  it("renders a logarithmic number of times, not once per dropped line", () => {
+    const g = gathered([
+      { id: "journal", title: "Journal", kind: "journal", body: lines(20, 110, "event") },
+      ...["a", "b", "c", "d"].map(
+        (t): Section => ({ id: `log-${t}`, title: t, kind: "log", body: lines(2000, 110, t) }),
+      ),
+    ]);
+    let renders = 0;
+    const counted = (x: Gathered) => {
+      renders++;
+      return render(x);
+    };
+    const text = trimToLimit(g, counted, BUG_DEFAULTS.body_max);
+    expect(text.length).toBeLessThanOrEqual(BUG_DEFAULTS.body_max);
+    expect(text).toContain("a 1999 ");
+    expect(text).toMatch(/… \d+ log lines dropped/);
+    expect(renders).toBeLessThan(60);
+  });
+
   it("a report within the limit is left as it is", () => {
     const g = gathered([{ id: "tools", title: "Tools", kind: "info", body: "bun: 1.3.2" }]);
     expect(trimToLimit(g, render, BUG_DEFAULTS.body_max)).toBe(render(g));

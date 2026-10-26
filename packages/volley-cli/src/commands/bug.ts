@@ -138,11 +138,28 @@ export async function runBug({ argv, io }: BugArgs, deps: BugCommandDeps): Promi
   });
   const id = identityOf({ ...deps, volleydHome: volleydHome(deps.env, deps.home), ...g.identity });
   const redact = (s: string) => redactReport(s, id, { keepRepos });
+  // The title and the browser page's fields are redacted in the report's own pass, so a
+  // `[repo-1]` names the same repository everywhere.
+  const SEP = "\n\u0000\n";
+  const extras = [
+    titleOf({ message, firstFailure: g.firstFailure, version: g.version }),
+    message,
+    g.header,
+    ...g.failures,
+  ];
+  let redactedExtras = extras;
   const report = trimToLimit(
     g,
-    (x) => redact(renderReport(x, { message, keepRepos })),
+    (x) => {
+      const parts = redact([...extras, renderReport(x, { message, keepRepos })].join(SEP)).split(
+        SEP,
+      );
+      redactedExtras = parts.slice(0, extras.length);
+      return parts.slice(extras.length).join(SEP);
+    },
     BUG_DEFAULTS.body_max,
   );
+  const [title = "", redactedMessage = "", header = "", ...failures] = redactedExtras;
   io.stdout(report.endsWith("\n") ? report : `${report}\n`);
 
   const defaultPath = join(deps.cwd, `volley-bug-${stamp(deps.now())}.md`);
@@ -177,7 +194,6 @@ export async function runBug({ argv, io }: BugArgs, deps: BugCommandDeps): Promi
   const answer = (await deps.ask("Open a GitHub issue with exactly this text? [y/N] ")) ?? "";
   if (!/^y(es)?$/i.test(answer.trim())) return saved(defaultPath);
 
-  const title = redact(titleOf({ message, firstFailure: g.firstFailure, version: g.version }));
   if (g.ghSignedIn) {
     const dir = mkdtempSync(join(tmpdir(), "volley-bug-"));
     try {
@@ -215,9 +231,9 @@ export async function runBug({ argv, io }: BugArgs, deps: BugCommandDeps): Promi
   if (!save(defaultPath)) return EXIT.ERROR;
   const url = newIssueUrl({
     title,
-    message: redact(message),
-    header: redact(g.header),
-    failures: g.failures.map(redact),
+    message: redactedMessage,
+    header,
+    failures,
     file: defaultPath.split("/").pop() as string,
   });
   const opened = await deps.open(url);
