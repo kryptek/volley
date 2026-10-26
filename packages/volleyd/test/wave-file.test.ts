@@ -554,8 +554,11 @@ describe("resolveWaveRepo: a wave file's repo: may be an owner/name slug (D9)", 
     );
   });
 
-  it("an adopted clone of the slug on the supervisor's machine wins", () => {
-    const adopted = { ...cfg, hosts: { control: { repos: { "example-org/widgets": "/src/w" } } } };
+  it("an adopted clone of the slug on the supervisor's machine (fleet.repos) wins (#616)", () => {
+    const adopted = {
+      ...cfg,
+      fleet: { ...cfg.fleet, repos: { "example-org/widgets": "/src/w" } },
+    };
     expect(
       resolveWaveRepo(wave("example-org/widgets"), adopted, "control", "/path/to/home").repo,
     ).toBe("/src/w");

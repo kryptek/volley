@@ -33,9 +33,9 @@ const HELP = `Usage:
   volley repo add <owner/name> [--machine <name>]... [--path <name>=<abs path>]... [--wait]
                  [--for-wave <wave>]
                                      Add a repository to every machine (or these): each paired
-                                     machine clones it (or adopts the clone at --path) and
-                                     trusts it; --wait follows each machine until it is ready
-                                     or blocked
+                                     machine clones it (or adopts the clone at --path, on the
+                                     supervisor's machine too) and trusts it; --wait follows
+                                     each machine until it is ready or blocked
   volley repo list [--json]          The configured repositories and their machines
   volley repo remove <owner/name> [--machine <name>]...
                                      Remove it from every machine (or these); clones are kept
@@ -50,7 +50,9 @@ const HELP = `Usage:
 
 Options:
   --machine <name>     A machine by name (repeatable; default: all of them)
-  --path <name>=<abs>  add: adopt the existing clone at <abs> on paired machine <name>
+  --path <name>=<abs>  add: adopt the existing clone at <abs> on any machine <name>, the
+                       supervisor's own included (a clone a wave already runs from there is
+                       adopted without it)
   --wait               add: wait until every machine is ready or blocked (exit 1 if one is blocked)
   --wait-timeout <s>   add --wait: how long to wait (default ${REPO_DEFAULTS.wait_timeout_s})
   --for-wave <wave>    add: the registration is for that wave only; cleaning the wave up removes

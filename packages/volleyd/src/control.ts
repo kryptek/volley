@@ -144,6 +144,8 @@ export interface ControlResponse {
   rejected?: PathError[];
   /** Advisory lines for the caller to print (e.g. `run`'s overlap warnings). */
   warnings?: string[];
+  /** run: what the submit did besides (`adopted <root> as <machine>'s clone of <slug>`, #616). */
+  notes?: string[];
   /** run: what the repository check found without refusing (SPEC §4.6.21), one line each. */
   repo_check?: { lines: string[] };
   /** run (a new version of a submitted wave) and diff: the structural plan change. */

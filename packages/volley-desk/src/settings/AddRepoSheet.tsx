@@ -1,6 +1,6 @@
 /**
  * Settings › Repositories' **Add repository…** (SPEC §4.6.21 `repo_add`): the shared form
- * (`AddRepoForm`: the slug, the machines, an existing clone to adopt per paired machine, checked
+ * (`AddRepoForm`: the slug, the machines, an existing clone to adopt per machine, checked
  * with `repo_probe`) in a sheet. Once volleyd has added it, each machine's progress follows its
  * readiness verdict (`cloning…`, `ready`, `blocked: <why>`) until every one is ready or blocked,
  * when **Done** closes; a blocked chip's **Why** opens its whole reason.
@@ -17,7 +17,7 @@ export interface AddRepoSheetProps {
   ops: PeerOps;
   /** Every machine, the supervisor's own first (`allMachines`). */
   machines: readonly string[];
-  /** The supervisor's own machine: no existing-clone choice there. */
+  /** The supervisor's own machine (marked `this one`). */
   localName: string | null | undefined;
   /** volleyd's verdicts, by machine: the progress of each machine's clone. */
   readiness: Record<string, ReadinessPayload>;

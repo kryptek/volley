@@ -86,6 +86,39 @@ describe("volley repo: arguments", () => {
     );
   });
 
+  it("add --path for the supervisor's machine is sent as its path; list prints it (#616)", async () => {
+    const { deps, asked } = fakeDeps((op) =>
+      op === "repo_list"
+        ? {
+            ok: true,
+            result: {
+              repos: [{ slug: "a/a", machines: ["box", "hub"], paths: { hub: "/src/a" } }],
+            },
+          }
+        : {
+            ok: true,
+            result: {
+              slug: "a/a",
+              visibility: "public",
+              machines: ["hub"],
+              status: ["hub: ready (/src/a, adopted from wave w1)"],
+            },
+          },
+    );
+    const r = await run(["add", "a/a", "--machine", "hub", "--path", "hub=/src/a"], deps);
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(asked[0]?.fields).toEqual({ slug: "a/a", machines: ["hub"], paths: { hub: "/src/a" } });
+    expect(r.stdout).toContain("  hub: ready (/src/a, adopted from wave w1)\n");
+    expect((await run(["list"], deps)).stdout).toBe("a/a  box, hub  adopted: hub=/src/a\n");
+  });
+
+  it("the help says --path adopts on any machine, the supervisor's included (#616)", async () => {
+    const r = await run(["--help"], fakeDeps(() => ({ ok: true })).deps);
+    expect(r.stdout).toContain("on any machine <name>, the\n");
+    expect(r.stdout).toContain("supervisor's own included");
+    expect(r.stdout).not.toContain("on paired machine <name>");
+  });
+
   it("prints the repository's CI after Added: none, or its workflows; nothing when unread (#602)", async () => {
     const answer = (ci?: { workflows: number }) =>
       fakeDeps(() => ({

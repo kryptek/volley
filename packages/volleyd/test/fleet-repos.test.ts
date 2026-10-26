@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { realRepoDeps, runRepo } from "volley-cli/commands/repo";
@@ -10,6 +10,7 @@ import { eventually } from "./helpers/broker-wait";
 import { NS } from "./helpers/daemon-env";
 import { GREEN_DOCTOR } from "./helpers/fake-host";
 import { type Fleet, LOCAL, PEER, VERSION, makeFleet } from "./helpers/fleet-env";
+import { runCli } from "./helpers/run-cli";
 import { tempDir } from "./helpers/tmp";
 
 /**
@@ -72,8 +73,9 @@ async function setup(o: { legacy?: boolean } = {}): Promise<void> {
   f = await makeFleet({
     repoRoot,
     ...(o.legacy === true ? {} : { boxRepo: null }),
+    // The own doctor finds each clone it runs on (a/a's managed one, the checkout of b/b).
     localDoctor: (repo) =>
-      repo === localA ? { ...GREEN_DOCTOR, repo: { path: repo, exists: true } } : GREEN_DOCTOR,
+      repo !== null ? { ...GREEN_DOCTOR, repo: { path: repo, exists: true } } : GREEN_DOCTOR,
   });
   live = true;
   f.exec
@@ -171,7 +173,8 @@ describe("two repositories on a supervisor and one paired box (#439)", () => {
     await f.submit("wb", "placement: auto\n", "  T1: { issue: 42 }\n");
     const b = await placed("wb");
     expect(b.placement).toMatchObject({ host: PEER, by: "auto" });
-    // Its checkout is the supervisor's (the wave runs from it), not a b/b machine's clone.
+    // Its checkout is the supervisor's (the wave runs from it), not yet a b/b machine's clone at
+    // its own admission (the submit adopts it right after, #616: a later wave sees it).
     expect(b.placement?.candidates.find((c) => c.host === LOCAL)?.line).toBe(
       `ineligible: no ready clone of ${B} (blocked: ${B} is not assigned to ${LOCAL}: add it (Settings → Repositories, or volley repo add ${B} --machine ${LOCAL}))`,
     );
@@ -372,5 +375,186 @@ describe("a legacy hosts.box.repo (D10) and a local → auto resubmit (D11)", ()
         .map((e) => e.data.host),
     ).toEqual([PEER]);
     expect(theBox().spec.repo).toBe(BOX_A);
+  });
+});
+
+describe("the supervisor's own clones join the repository registry (#616)", () => {
+  const waveYaml = (wave: string, head = "placement: local\n") =>
+    `wave: ${wave}\nrepo: ${f.repo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement]\n${head}tasks:\n  T1: { issue: 42 }\n`;
+  const sys = (type: string) => f.system().filter((e) => e.type === type);
+  /** `fleet.repos` as the retained effective config says it. */
+  const fleetRepos = async () =>
+    (
+      (await f.env.retained("volley/_waves/_config")) as {
+        payload?: { fleet?: { repos?: Record<string, string> } };
+      } | null
+    )?.payload?.fleet?.repos;
+
+  /** The fleet, its sessions held: a wave's agent launches but never publishes (no race at close). */
+  async function start(): Promise<void> {
+    await setup();
+    f.holdSessions(true);
+  }
+
+  /** b/b held by the box only (config names it), its clone ready there. */
+  async function boxHoldsB(): Promise<void> {
+    theBox().answers.doctor = report([clone(B, BOX_B)]);
+    expect(await f.adminOp({ op: "repo_add", slug: B, machines: [PEER] })).toMatchObject({
+      ok: true,
+    });
+    await f.tick(29_500);
+    await f.beat({ repos: [clone(B, BOX_B)] });
+  }
+
+  it("a submit from a clone of a registered repository adopts it: config, journal, note, list, readiness, placement: auto", async () => {
+    await start();
+    await boxHoldsB();
+    const before = sys("config_changed").length;
+    const r = await f.client.request("run", { wave_yaml: waveYaml("wb") });
+    expect(r.error).toBeUndefined();
+    const note = `adopted ${f.repo} as ${LOCAL}'s clone of ${B}`;
+    expect((r as { notes?: string[] }).notes).toEqual([note]);
+    expect(await fleetRepos()).toEqual({ [B]: f.repo });
+    expect(sys("config_changed")).toHaveLength(before + 1);
+    expect(sys("repo_added").at(-1)?.data).toEqual({
+      by: "wave wb",
+      slug: B,
+      machines: [LOCAL],
+      paths: { [LOCAL]: f.repo },
+    });
+    await eventually(async () => {
+      await f.tick(0);
+      return sys("repo_clone_run").some((e) => e.data.machine === LOCAL);
+    });
+    expect(sys("repo_clone_run").find((e) => e.data.machine === LOCAL)?.data).toMatchObject({
+      machine: LOCAL,
+      slug: B,
+      ok: true,
+      cloned: false,
+      path: f.repo,
+    });
+    const list = (await f.client.request("repo_list", {})).result as {
+      repos: { slug: string; paths?: Record<string, string> }[];
+    };
+    expect(list.repos.find((x) => x.slug === B)?.paths).toEqual({ [LOCAL]: f.repo });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(LOCAL, B)) === "ready";
+    });
+    const reasons = JSON.stringify((await f.verdict(LOCAL))?.reasons ?? []);
+    expect(reasons).not.toContain("is not assigned");
+
+    // A later wave with placement: auto has the supervisor's machine among its candidates.
+    await f.submit("wb2", "placement: auto\n", "  T1: { issue: 42 }\n");
+    const t = await placed("wb2");
+    expect(t.placement?.candidates.find((c) => c.host === LOCAL)?.score).not.toBeNull();
+
+    // A new version of the same wave (and the other wave) changes nothing.
+    const after = sys("config_changed").length;
+    const again = await f.client.request("run", {
+      wave_yaml: `${waveYaml("wb")}  T2: { issue: 43 }\n`,
+    });
+    expect(again.error).toBeUndefined();
+    expect((again as { notes?: string[] }).notes).toBeUndefined();
+    expect(sys("config_changed")).toHaveLength(after);
+  });
+
+  it("volleyd run prints the note", async () => {
+    await start();
+    await boxHoldsB();
+    const file = join(f.env.home, "wb.yaml");
+    writeFileSync(file, waveYaml("wb"));
+    const r = await runCli(["run", file], f.env.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`note: adopted ${f.repo} as ${LOCAL}'s clone of ${B}\n`);
+  });
+
+  it("a clone of a repository config does not name is not registered (D6)", async () => {
+    await start();
+    const before = sys("config_changed").length;
+    const r = await f.client.request("run", { wave_yaml: waveYaml("wb") });
+    expect(r.error).toBeUndefined();
+    expect((r as { notes?: string[] }).notes).toBeUndefined();
+    expect(sys("config_changed")).toHaveLength(before);
+    expect(sys("repo_added")).toEqual([]);
+    expect(await fleetRepos()).toBeUndefined();
+  });
+
+  it("the supervisor already holding a managed clone is left alone", async () => {
+    await start();
+    theBox().answers.doctor = report([clone(B, BOX_B)]);
+    await f.adminOp({ op: "repo_add", slug: B, machines: [LOCAL, PEER] });
+    const before = sys("config_changed").length;
+    const r = await f.client.request("run", { wave_yaml: waveYaml("wb") });
+    expect(r.error).toBeUndefined();
+    expect((r as { notes?: string[] }).notes).toBeUndefined();
+    expect(sys("config_changed")).toHaveLength(before);
+    expect(await fleetRepos()).toBeUndefined();
+  });
+
+  it("gh failing: the clone's origin names the repository", async () => {
+    await start();
+    await boxHoldsB();
+    f.exec
+      .on(["gh", "repo", "view", "--json"], { code: 1, stderr: "gh: not logged in\n" })
+      .on(["git", "-C", f.repo, "remote", "get-url", "origin"], {
+        stdout: "git@github.com:b/b.git\n",
+      });
+    const r = await f.client.request("run", { wave_yaml: waveYaml("wb") });
+    expect(r.error).toBeUndefined();
+    expect(await fleetRepos()).toEqual({ [B]: f.repo });
+  });
+
+  it("no gh and no origin: nothing is adopted", async () => {
+    await start();
+    await boxHoldsB();
+    f.exec.on(["gh", "repo", "view", "--json"], { code: 1, stderr: "gh: not logged in\n" });
+    const r = await f.client.request("run", { wave_yaml: waveYaml("wb") });
+    expect(r.error).toBeUndefined();
+    expect(await fleetRepos()).toBeUndefined();
+  });
+
+  it("repo_add adopts the clone a known wave runs from; paths, repo_probe and repo_remove take the supervisor's machine", async () => {
+    await start();
+    // The wave first (b/b not named yet: nothing adopted), then the add.
+    expect((await f.client.request("run", { wave_yaml: waveYaml("wb") })).error).toBeUndefined();
+    expect(await fleetRepos()).toBeUndefined();
+    theBox().answers.doctor = report([clone(B, BOX_B)]);
+    const added = (await f.adminOp({ op: "repo_add", slug: B })) as {
+      ok: boolean;
+      result: { status: string[] };
+    };
+    expect(added.ok).toBe(true);
+    expect(added.result.status).toContain(`${LOCAL}: ready (${f.repo}, adopted from wave wb)`);
+    expect(await fleetRepos()).toEqual({ [B]: f.repo });
+
+    // repo_probe on the supervisor's machine reads the clone here.
+    f.exec.on(["git", "-C", f.repo, "remote", "get-url", "origin"], {
+      stdout: "https://github.com/b/b.git\n",
+    });
+    expect(await f.adminOp({ op: "repo_probe", machine: LOCAL, path: f.repo })).toMatchObject({
+      ok: true,
+      result: {
+        machine: LOCAL,
+        path: f.repo,
+        state: "found",
+        root: f.repo,
+        origin: "https://github.com/b/b.git",
+        slug: B,
+      },
+    });
+
+    // repo_remove drops fleet.repos and deletes nothing.
+    const removed = await f.adminOp({ op: "repo_remove", slug: B, machines: [LOCAL] });
+    expect(removed).toMatchObject({ ok: true, result: { clones: { [LOCAL]: f.repo } } });
+    expect(await fleetRepos()).toBeUndefined();
+
+    // --path for the supervisor's machine is accepted.
+    const mine = join(f.env.home, "mine-b");
+    f.exec.on(["git", "-C", mine, "rev-parse", "--show-toplevel"], { stdout: `${mine}\n` });
+    expect(
+      await f.adminOp({ op: "repo_add", slug: B, machines: [LOCAL], paths: { [LOCAL]: mine } }),
+    ).toMatchObject({ ok: true });
+    expect(await fleetRepos()).toEqual({ [B]: mine });
   });
 });

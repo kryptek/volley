@@ -1,7 +1,7 @@
 /**
  * The repositories the supervisor's machines work on, as Settings › Repositories, the machine
  * cards and Repair read them (SPEC §4.6.21), pure. Config names them (`repos.<owner/name>.machines`:
- * `all` or a list, and `hosts.<m>.repos` for an adopted clone); each machine's record reports its
+ * `all` or a list, and `hosts.<m>.repos` / `fleet.repos` for an adopted clone); each machine's record reports its
  * clones (`repos[]`, with the toolchain they lack); volleyd's readiness verdict says where each
  * stands there (`repos.<owner/name>`). Slugs compare case-insensitively, as GitHub's do.
  */
@@ -45,11 +45,27 @@ export function allMachines(config: ConfigPayload | null): string[] {
   return local ? [local, ...hosts] : hosts;
 }
 
-/** Every repository config names, its own `repos` first, then those only adopted on a host. */
+/**
+ * Each machine's adopted clones: the supervisor's own (`fleet.repos`, under `fleet.local_name`,
+ * #616), then each host's `hosts.<m>.repos`.
+ */
+function adoptedMaps(config: ConfigPayload | null): [string, Record<string, string>][] {
+  const local = config?.fleet?.local_name ?? null;
+  const own: [string, Record<string, string>][] =
+    local && config?.fleet?.repos !== undefined ? [[local, config.fleet.repos]] : [];
+  return [
+    ...own,
+    ...Object.entries(config?.hosts ?? {}).flatMap(([m, h]): [string, Record<string, string>][] =>
+      h.repos !== undefined && m !== local ? [[m, h.repos]] : [],
+    ),
+  ];
+}
+
+/** Every repository config names, its own `repos` first, then those only adopted on a machine. */
 export function configuredRepos(config: ConfigPayload | null): string[] {
   const out = Object.keys(config?.repos ?? {});
-  for (const h of Object.values(config?.hosts ?? {})) {
-    for (const s of Object.keys(h.repos ?? {})) {
+  for (const [, map] of adoptedMaps(config)) {
+    for (const s of Object.keys(map)) {
       if (!out.some((o) => sameSlug(o, s))) out.push(s);
     }
   }
@@ -61,8 +77,8 @@ export function assignedMachines(config: ConfigPayload | null, slug: string): st
   const every = allMachines(config);
   const named = bySlug(config?.repos, slug)?.machines;
   const out = named === "all" ? [...every] : [...(named ?? [])];
-  for (const [m, h] of Object.entries(config?.hosts ?? {})) {
-    if (bySlug(h.repos, slug) !== undefined && !out.includes(m)) out.push(m);
+  for (const [m, map] of adoptedMaps(config)) {
+    if (bySlug(map, slug) !== undefined && !out.includes(m)) out.push(m);
   }
   return out;
 }

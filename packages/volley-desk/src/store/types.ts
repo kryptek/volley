@@ -527,6 +527,8 @@ export interface Tunables {
     local_name?: string | null;
     /** Where managed clones live on every machine (`~` is that machine's home). */
     repo_root?: string;
+    /** The supervisor's own adopted clones, `owner/name` → absolute path (#616). */
+    repos?: Record<string, string>;
     local_agents?: LocalAgentsMode | null;
     fallback?: { max_agents?: number; per_machine?: Record<string, number> };
   };

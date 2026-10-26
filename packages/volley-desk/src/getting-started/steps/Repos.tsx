@@ -8,11 +8,11 @@
  *
  * Add a repo has two tabs, both ending in one `repo_add` (§4.6.21): **From GitHub** is Settings ›
  * Repositories' form (`AddRepoForm`: an `owner/name` and the machines to clone it on), and **A
- * folder on a computer** is a paired machine and a folder there, read with `repo_probe` as it is
- * typed (the debounced `useCloneProbes`): a clone of a GitHub repository fills the slug, and no
- * folder, not a git clone or no origin keeps Add off. The supervisor's own machine cannot be
- * probed (volleyd refuses it), so its clones stay a path in the wave file. Each repository added is
- * listed under the form with what GitHub said of it, and goes into the summary's `repos`.
+ * folder on a computer** is a machine (the supervisor's own first, then each paired one) and a
+ * folder there, read with `repo_probe` as it is typed (the debounced `useCloneProbes`): a clone of
+ * a GitHub repository fills the slug, and no folder, not a git clone or no origin keeps Add off.
+ * Each repository added is listed under the form with what GitHub said of it, and goes into the
+ * summary's `repos`.
  */
 import "../../styles/agent.css";
 import { useEffect, useId, useMemo, useState } from "react";
@@ -65,7 +65,6 @@ export function Repos(p: StepProps) {
   const local = ctx.state.config?.fleet?.local_name ?? record?.name ?? null;
   const every = allMachines(ctx.state.config);
   const machines = every.length > 0 ? every : local ? [local] : [];
-  const paired = machines.filter((m) => m !== local);
   const [tab, setTab] = useState<Tab>("github");
   /** What GitHub said of each repository added here, by slug. */
   const [found, setFound] = useState<Record<string, string>>({});
@@ -109,7 +108,7 @@ export function Repos(p: StepProps) {
               onAdded={added}
             />
           ) : (
-            <FolderForm key={round} ops={ops} paired={paired} local={local} onAdded={added} />
+            <FolderForm key={round} ops={ops} machines={machines} local={local} onAdded={added} />
           )}
         </div>
         {listed.length > 0 && (
@@ -167,21 +166,22 @@ function GitHubCard({ record, name }: { record: MachinePayload | undefined; name
   );
 }
 
-/** A folder on a paired machine: probed as it is typed, the slug filled from its origin. */
+/** A folder on a machine: probed as it is typed, the slug filled from its origin. */
 function FolderForm({
   ops,
-  paired,
+  machines,
   local,
   onAdded,
 }: {
   ops: PeerOps;
-  paired: readonly string[];
+  /** Every machine, the supervisor's own first (#616: its clones are adopted the same way). */
+  machines: readonly string[];
   local: string | null;
   onAdded(r: RepoAdded): void;
 }) {
   const [picked, setMachine] = useState("");
   // The machines can land after the step mounts: until one is picked, the select's first option.
-  const machine = paired.includes(picked) ? picked : (paired[0] ?? "");
+  const machine = machines.includes(picked) ? picked : (machines[0] ?? "");
   const [path, setPath] = useState("");
   const [slug, setSlug] = useState("");
   /** The slug came from the folder's origin, not from the person. */
@@ -202,7 +202,7 @@ function FolderForm({
   }, [fromOrigin, slug, filled]);
   const noOrigin =
     r?.ok && r.state === "no_origin" ? `${folder} on ${machine} has no origin remote` : null;
-  const blocker = paired.includes(machine)
+  const blocker = machines.includes(machine)
     ? (addBlocker({
         slug,
         machines: [machine],
@@ -211,18 +211,11 @@ function FolderForm({
         checks,
       }) ?? noOrigin)
     : "Pick a computer";
-  const note = local
-    ? `${local}'s own clones are added by path in the wave file, as today.`
-    : "The supervisor's own clones are added by path in the wave file, as today.";
-
-  if (paired.length === 0) {
+  if (machines.length === 0) {
     return (
-      <>
-        <p className="dim">
-          No computer is paired yet: pair one in Your machines, or add the repo From GitHub.
-        </p>
-        <p className="s-hint">{note}</p>
-      </>
+      <p className="dim">
+        No computer is known yet: pair one in Your machines, or add the repo From GitHub.
+      </p>
     );
   }
 
@@ -248,9 +241,9 @@ function FolderForm({
             value={machine}
             onChange={(e) => setMachine(e.target.value)}
           >
-            {paired.map((m) => (
+            {machines.map((m) => (
               <option key={m} value={m}>
-                {m}
+                {m === local ? `${m} (this one)` : m}
               </option>
             ))}
           </select>
@@ -293,7 +286,6 @@ function FolderForm({
           {error}
         </p>
       )}
-      <p className="s-hint">{note}</p>
       <div className="ny-actions">
         <button
           type="button"

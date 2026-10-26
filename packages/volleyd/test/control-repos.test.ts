@@ -260,7 +260,7 @@ describe("repo_add (admin)", () => {
     expect(trusts).toHaveLength(2);
   });
 
-  it("refuses a slug gh does not know, a malformed one, an unknown machine and a path for the own machine, before anything changes", async () => {
+  it("refuses a slug gh does not know, a malformed one, an unknown machine and a relative path for the own machine, before anything changes", async () => {
     await setup();
     expect(await f.adminOp({ op: "repo_add", slug: "no/such" })).toMatchObject({
       ok: false,
@@ -274,9 +274,10 @@ describe("repo_add (admin)", () => {
       ok: false,
       error: expect.stringContaining('no machine named "nope"'),
     });
+    // The supervisor's own machine adopts by path too (#616), an absolute one.
     expect(
-      await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [LOCAL]: "/srv/a" } }),
-    ).toMatchObject({ ok: false, error: expect.stringContaining("supervisor's own machine") });
+      await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [LOCAL]: "srv/a" } }),
+    ).toMatchObject({ ok: false, error: `paths.${LOCAL} must be an absolute path` });
     expect(systemTypes("repo_added")).toEqual([]);
     expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
   });
@@ -637,13 +638,13 @@ describe("repo_probe (admin)", () => {
     expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
   });
 
-  it("refuses the supervisor's own machine, an unknown host and a path that is not absolute", async () => {
+  it("refuses an unknown host and a path that is not absolute, on the supervisor's own machine too", async () => {
     await setup();
     const probe = (machine: string, path: unknown) =>
       f.adminOp({ op: "repo_probe", machine, path });
-    expect(await probe(LOCAL, "/srv/a")).toMatchObject({
+    expect(await probe(LOCAL, "srv/a")).toMatchObject({
       ok: false,
-      error: `${LOCAL} is the supervisor's own machine: its clone is the managed one`,
+      error: "path must be an absolute path",
     });
     expect(await probe("nope", "/srv/a")).toMatchObject({
       ok: false,

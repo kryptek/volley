@@ -75,7 +75,7 @@ volley --help
 | `volley claude` | Claude account profiles on volleyd: `add <label>` (a profile and its sign-in URL), `signin`, `list` (one block per account, by e-mail: masked unless `--show-email`, its machines, the ones it is `not on:`, and freshest usage; `--json` for the raw answer), `list` also marks `next pick` on each login volleyd's next spawn would run under, `sync` (sharing + MCP servers), `balance [--model <m>] [--machine <name>]` (per machine, the signed-in accounts in volleyd's balance order (the room that expires first, under `claude.balance.cap_pct`) with their 5-hour, 7-day and Fable figures, the window that binds each and when it resets (`5h 18% left in 52m`, `(12% after 3 in flight)` beside it when agents are in flight on the account, `5h unused` or `7d 68% left` when no reset is known, or `over cap`), and the agents in flight on each, an arrow `← fable, opus` on each family's next pick; e-mails masked unless `--show-email`, `--json` for volleyd's answer), `move <agent-id> <acct>` (restart an agent under another account with a resume note). See the volleyd README's "Claude accounts". |
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service), `cleanup` (what the supervisor runs on a paired machine to clean a wave up). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley machine` | `add <user@host>`: make a bare box a ready paired machine from the supervisor's, over ssh (install in peer mode, pair, sign in, doctor). See [`volley machine add`](#volley-machine-add) below. |
-| `volley repo`   | The repositories volleyd's machines work on: `add <owner/name>` (each paired machine clones it, or adopts `--path`, and trusts it; `--wait` follows them), `remove` (clones kept), `list`, `status`. See [`volley repo`](#volley-repo) below. |
+| `volley repo`   | The repositories volleyd's machines work on: `add <owner/name>` (each paired machine clones it, or adopts `--path` on any machine, and trusts it; `--wait` follows them), `remove` (clones kept), `list`, `status`. See [`volley repo`](#volley-repo) below. |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs); `volley desk install`, `uninstall` and `check` install it as a service on its own. See [`volley desk serve`](#volley-desk-serve) below. |
 | `volley broker` | A broker move's machine-side steps (volleyd runs them over ssh): `receive <bundle>` (set this machine's mosquitto up with the moved broker's logins), `probe`, `tunnel` (the supervisor's own tunnel to it). See [Moving the broker](#moving-the-broker-volley-broker) below. |
@@ -739,6 +739,7 @@ volley repo status example-org/widgets
 #   control: ready (/path/to/home/.volley/repos/example-org/widgets)
 #   box-a: cloning
 volley repo list [--json]
+#   example-org/widgets  box-a, control  adopted: control=/path/to/widgets
 volley repo remove example-org/widgets --machine box-a    # its clone is kept; the path is printed
 volley repo add example-org/demo --for-wave w1            # for wave w1 only: its cleanup removes it
 ```
@@ -751,8 +752,12 @@ volley repo add example-org/demo --for-wave w1            # for wave w1 only: it
   `https://github.com/<owner>/<name>.git` (`--path` adopts an existing clone there instead); once
   the clone exists volleyd trusts it in the machine's default Claude profile and every signed-in
   one, so its agents never stop on the folder-trust question. The supervisor's own machine is
-  never cloned for you: clone it at the printed path (`gh repo clone <owner/name> <path>`) and
-  add it again. A machine that is down, or whose ssh fails, stays `blocked` with the reason and
+  never cloned for you: without `--path` for it, the clone a wave you submitted already runs from
+  there is adopted (`control: ready (<root>, adopted from wave <id>)`), else clone it at the
+  printed path (`gh repo clone <owner/name> <path>`) and add it again. `--path <name>=<abs>`
+  adopts on any machine, the supervisor's own included (its `fleet.repos`). Submitting a wave
+  from a clone of a repository already in the list adopts that clone by itself (`volleyd run`
+  prints `note: adopted …`). A machine that is down, or whose ssh fails, stays `blocked` with the reason and
   is retried when it is back (or after a Repair). `--wait` asks `repo_status` until every machine
   is `ready` or `blocked` (`--wait-timeout <s>`, default 900), then asks `repo_check` once and
   ends on its machine blocks and closing line: exit 0 when all are ready, 1 when one is blocked,
@@ -765,7 +770,8 @@ volley repo add example-org/demo --for-wave w1            # for wave w1 only: it
   registration is yours, and cleanup only names it (`volley repo remove …`). `volley setup`'s
   test wave registers its scratch repository this way (`--for-wave hello-<4>`).
 - `remove <owner/name> [--machine <name>]...`: drops the machines (default: all) from the
-  repository's config and from each paired machine's `peer.json`. No clone is ever deleted: the
+  repository's config (an adopted path with them, the supervisor's too) and from each paired
+  machine's `peer.json`. No clone is ever deleted: the
   answer lists each one's path.
 - `status [<owner/name>] [--json]`: one line per machine, `<machine>: <state> (<why or path>)`,
   `state` being `ready`, `cloning`, `blocked` or `absent` — the same lines the Desk shows. A cheap

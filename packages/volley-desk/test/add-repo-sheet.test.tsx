@@ -101,8 +101,8 @@ describe("Add repository sheet", () => {
     const { ops } = setup({ ops: fakePeerOps({ repoAdd: added(["hub", "box-a"]) }) });
     type(APP);
     fireEvent.click(sheet().getByRole("checkbox", { name: "box-b" }));
-    // The supervisor's own clone is the managed one: no existing-clone choice there.
-    expect(sheet().queryByRole("checkbox", { name: "Use an existing clone on hub" })).toBeNull();
+    // The supervisor's own machine adopts an existing clone too (#616).
+    expect(sheet().getByRole("checkbox", { name: "Use an existing clone on hub" })).toBeVisible();
     fireEvent.click(sheet().getByRole("checkbox", { name: "Use an existing clone on box-a" }));
     const path = sheet().getByRole("textbox", { name: "Existing clone on box-a" });
     fireEvent.change(path, { target: { value: "relative/app" } });
@@ -233,6 +233,30 @@ describe("Add repository sheet", () => {
     expect(sheet().getByText("Clone of example-org/example-repo")).toBeInTheDocument();
     expect(addButton()).toBeEnabled();
     expect(reason()).toBeNull();
+  });
+
+  it("the supervisor's own machine adopts an existing clone too, probed like a paired one (#616)", async () => {
+    vi.useFakeTimers();
+    const repoProbe = probing({
+      ok: true,
+      state: "found",
+      root: REPO,
+      origin: "https://github.com/example-org/example-repo.git",
+      slug: "example-org/example-repo",
+    });
+    const repoAdd = added(["hub", "box-a", "box-b"]);
+    setup({ ops: fakePeerOps({ repoProbe, repoAdd }) });
+    tickClone("hub");
+    typePath(REPO, "hub");
+    await settle();
+    expect(repoProbe).toHaveBeenCalledWith("hub", REPO);
+    expect(slug()).toHaveValue("example-org/example-repo");
+    expect(addButton()).toBeEnabled();
+    await submit();
+    expect(repoAdd).toHaveBeenCalledWith("example-org/example-repo", {
+      machines: "all",
+      paths: { hub: REPO },
+    });
   });
 
   it("never overwrites an owner/name the person typed: a different clone blocks Add instead", async () => {

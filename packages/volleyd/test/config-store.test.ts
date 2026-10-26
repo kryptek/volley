@@ -883,3 +883,52 @@ describe("resolveLocalTerminal (fleet.local_terminal)", () => {
     expect(bad.applied).toBe(false);
   });
 });
+
+describe("ConfigStore.setRepo: the supervisor's own adopted clones (#616)", () => {
+  const YAML =
+    "fleet:\n  local_name: hub\nrepos:\n  example-org/widgets:\n    machines: [box-a]\nhosts:\n  box-a:\n    target: dev@box-a\n    volley_dir: /opt/volley\n";
+  const journaled = () =>
+    readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl")).filter(
+      (e) => e.type === "config_changed",
+    );
+
+  it("writes fleet.repos for the local name, journaled as one config_changed", () => {
+    writeFileSync(join(home, "config.yaml"), YAML);
+    const c = open();
+    const r = c.setRepo("example-org/widgets", ["box-a", "hub"], { hub: "/src/widgets" }, "w");
+    expect(r.applied).toBe(true);
+    expect(c.effective().fleet.repos).toEqual({ "example-org/widgets": "/src/widgets" });
+    expect(c.effective().repos["example-org/widgets"]?.machines).toEqual(["box-a", "hub"]);
+    const evs = journaled();
+    expect(evs).toHaveLength(1);
+    expect(evs[0]?.data).toMatchObject({
+      by: "w",
+      patch: {
+        repos: { "example-org/widgets": { machines: ["box-a", "hub"] } },
+        fleet: { repos: { "example-org/widgets": "/src/widgets" } },
+      },
+      previous: { fleet: { repos: { "example-org/widgets": null } } },
+    });
+    // config.yaml keeps the other fleet keys.
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).toContain("local_name: hub");
+    expect(open().effective().fleet.repos).toEqual({ "example-org/widgets": "/src/widgets" });
+  });
+
+  it("null drops it", () => {
+    writeFileSync(join(home, "config.yaml"), YAML);
+    const c = open();
+    c.setRepo("example-org/widgets", ["box-a", "hub"], { hub: "/src/widgets" }, "w");
+    const r = c.setRepo("Example-Org/Widgets", ["box-a"], { hub: null }, "owner");
+    expect(r.applied).toBe(true);
+    expect(c.effective().fleet.repos ?? {}).toEqual({});
+    expect(c.effective().fleet.local_name).toBe("hub");
+  });
+
+  it("a relative path is rejected at fleet.repos.<slug>", () => {
+    writeFileSync(join(home, "config.yaml"), YAML);
+    const c = open();
+    const r = c.setRepo("example-org/widgets", ["hub"], { hub: "src/widgets" }, "w");
+    expect(r.applied).toBe(false);
+    expect(r.rejected.map((e) => e.path)).toContain("fleet.repos.example-org/widgets");
+  });
+});
