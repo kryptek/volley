@@ -13,6 +13,7 @@
     "./auth/roles": "./src/auth/roles.ts",
     "./auth/config": "./src/auth/config.ts",
     "./auth/context": "./src/auth/context.ts",
+    "./auth/login": "./src/auth/login.ts",
     "./commands/auth": "./src/commands/auth.ts",
     "./commands/desk-serve": "./src/commands/desk-serve.ts",
     "./commands/repo": "./src/commands/repo.ts",

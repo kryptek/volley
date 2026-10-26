@@ -47,10 +47,9 @@ export interface BrokerConnectOptions {
 /** CONNACK codes meaning "credentials refused": MQTT 3.1.1 (4, 5) and MQTT 5 (134, 135). */
 const AUTH_REFUSED_CODES = new Set([4, 5, 134, 135]);
 
-/** Printed with every AUTH_FAILED — points at where credentials come from. */
+/** Printed with every AUTH_FAILED — points at the command that says which login was used. */
 export const AUTH_HINT =
-  "Hint: create broker identities with `volley auth init`, then set VOLLEY_AUTH_USERNAME / " +
-  "VOLLEY_AUTH_PASSWORD (or the `broker` block in .volley/agent.json).";
+  "Hint: run `volley auth status` to see which login this shell uses and why.";
 
 function authFailed(url: string, username: string | undefined): VolleyError {
   const who =

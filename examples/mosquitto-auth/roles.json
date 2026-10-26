@@ -86,6 +86,12 @@
           "acltype": "publishClientSend",
           "topic": "volley/_system/registry/+",
           "allow": true
+        },
+        {
+          "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/auth/ops/%u",
+          "allow": true
         }
       ]
     },

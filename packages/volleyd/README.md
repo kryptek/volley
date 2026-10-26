@@ -3306,6 +3306,10 @@ VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
   volley machine add dev@box-a       # install, pair, sign in, doctor; prints the readiness row
 ```
 
+The admin's password goes in `VOLLEY_AUTH_PASSWORD` for that one command, never a shell profile
+(`volley auth status` shows which login a shell would use otherwise; the coordinator login is
+refused at once for pairing).
+
 It installs this machine's key on the box (one interactive ssh: the prompt is ssh's), installs
 Volley there in peer mode at this machine's release tag (`install.sh --peer`: no broker, no Desk),
 runs `volley setup --peer` (the sign-ins, the Claude profile, the terminal, `volley peer run` as
@@ -3327,6 +3331,8 @@ waiting out `--timeout`):
 VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
   volley peer invite               # Pairing code: ABCD-EFGH (single use, 10 minutes)
 ```
+
+As above: the admin's password in `VOLLEY_AUTH_PASSWORD` for that one command, never a profile.
 
 On the new machine (bun, claude, gh, git, tmux and a volley checkout already there; key-based
 ssh to the daemon's machine):
@@ -3358,8 +3364,9 @@ ssh session (what an agent session gets there; if not, the join stops before the
 names what is missing and prints the line to add, with the directories this shell finds them in:
 `~/.zshenv` for zsh, the top of `~/.bashrc` for bash), and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
-ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json` from
-`VOLLEY_AUTH_DIR`, else from the auth dir `volley setup` recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+ssh `PATH`; it signs in by the login ladder (`VOLLEY_AUTH_*`, the coordinator's
+`coordinator.json` from `VOLLEY_AUTH_DIR`, the saved login), else from the auth dir `volley setup`
+recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
 account named after the machine (`--name`, default its short hostname) and adds
 `hosts.<name>`:
 
@@ -3639,9 +3646,17 @@ a Repair the box's PATH is probed again on the next re-compute. Repair runs the 
 the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
 `volley`), fix the PATH first, or Repair answers only `volley: command not found`.
 
-**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, `repo_check`, SPEC §4.6.21).** Admin ops
+**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, `repo_check`, SPEC §4.6.21).** Ops
 on the account-op topic beside `peer_doctor` (`repo_list`, `repo_status` and `repo_check` without
-`fix` are also answered on the mailbox); `volley repo` sends them.
+`fix` are also answered on the mailbox); `volley repo` sends them. An admin account may send them,
+and so may the fixed `coordinator` identity on its own `ops/coordinator` (the broker lets only that
+login write it, as `ops/desk` names the Desk) for every one but `repo_check`: the wave owner adds
+the repository a wave is about with the login the CLIs find on their own, `volley repo add
+<owner/name>`, no flag and no admin account. From `coordinator`, `repo_add { paths }` (adopting a
+clone, which also trusts its folder) is refused (`adopting a clone at a path (--path) is an
+admin's; add by slug to clone fresh`), and so is every other op on that topic (`… needs the admin
+role`): `repo_check { fix: true }`, pairing, `machine_add`, `peer_doctor`, `archive`, the account,
+setup, role and coordinator ops.
 
 - `repo_add { slug, machines?, paths? }` runs `gh repo view <slug> --json
   nameWithOwner,url,visibility` on the supervisor (refused with gh's reason; the canonical

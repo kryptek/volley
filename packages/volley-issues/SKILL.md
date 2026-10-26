@@ -25,7 +25,7 @@ Before invoking `/volley-issues`:
 
    `VOLLEY_AGENT_ID` is a **prefix**: `vol_register` appends a fresh `-XXXX` (4 characters from `[a-z0-9]`), so this coordinator's agent_id is `coordinator-XXXX` (the suffix changes on each MCP restart) and two sessions sharing the registration get different ids. To discover it, call `vol_register` (its response includes `agent_id`) or `vol_list_agents` and look for the entry whose `capabilities` include `coordinator`.
 
-   **No broker password in the shell.** On the supervisor's machine `volley wait`, `volley sub` and the `volleyd` commands find the coordinator's login on their own (the macOS keychain, then `coordinator.json`), so nothing needs exporting. Elsewhere, or for `mosquitto_pub`, export `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` yourself; without a login every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one).
+   **No broker password in the shell.** On the supervisor's machine `volley wait`, `volley sub`, `volley repo add|remove` and the `volleyd` commands find the coordinator's login on their own (the auth dir `VOLLEY_AUTH_DIR` names, the macOS keychain, then `coordinator.json`), so nothing is exported, read out of a file or passed inline. `volley auth status` prints which login this shell uses, where it came from and whether the broker accepts it — never the password. `VOLLEY_AUTH_*` is for another machine's broker only. Without a login every `volley wait` / `volley sub` exits `1` with `AUTH_FAILED` at once (which looks like a wake but is not one): run `volley auth status`.
 
 3. **gh + claude on PATH, and cmux for the legacy path.** Run `command -v gh claude` and confirm both resolve. If either is missing, the one command installs it (setup's Sign-ins step signs both in). The volleyd path starts agents in cmux or tmux, whichever `volley setup` chose; the legacy path launches cmux workspaces itself, so it needs `command -v cmux` too (cmux install instructions live in the `cmux` repo).
 
@@ -244,7 +244,7 @@ Each decision is a needs-you inbox item and rings the owner's phone once. Answer
 volley sub --pattern "volley/_waves/$WAVE/digest" --max-messages 1 --timeout 14400 &
 ```
 
-On the wake, `volleyd digest "$WAVE"` prints it: `## Shipped` (each merged task and PR), `## Autopilot handled` (decisions answered, flakes fixed, conflicts resolved, retries, merges), `## Waiting for you` (open decisions, the release train) and `## Failed`. Relay it to the user, help them answer what waits (above), and either leave again or re-arm the sub for the next digest. Each digest also sends one push (a `progress` envelope of type `digest` on volleyd's own topic, which `volley notify` rings for), so a user away from the terminal hears it anyway. `volley wait` is not the tool for this: it watches one agent's `status` channel, not volleyd's `progress`. Exit `124` is the fallback wake (re-arm, or check `volleyd status "$WAVE"`); exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake.
+On the wake, `volleyd digest "$WAVE"` prints it: `## Shipped` (each merged task and PR), `## Autopilot handled` (decisions answered, flakes fixed, conflicts resolved, retries, merges), `## Waiting for you` (open decisions, the release train) and `## Failed`. Relay it to the user, help them answer what waits (above), and either leave again or re-arm the sub for the next digest. Each digest also sends one push (a `progress` envelope of type `digest` on volleyd's own topic, which `volley notify` rings for), so a user away from the terminal hears it anyway. `volley wait` is not the tool for this: it watches one agent's `status` channel, not volleyd's `progress`. Exit `124` is the fallback wake (re-arm, or check `volleyd status "$WAVE"`); exit `1` is an error (broker down, or `AUTH_FAILED`: `volley auth status` says why the shell has no login), not a wake.
 
 When the digest reports the wave complete (or `volleyd status "$WAVE"` shows every task `done` or `cancelled`), go to Step 6; with a release playbook the release already went out on the owner's `release_go`, without one the release branch's merge to main follows **Release branch merge**.
 
@@ -300,7 +300,7 @@ After acting on everything printed, advance the cursor to the last `seq` you han
 volleyd ack "$WAVE" --cursor coordinator --seq <last-seq>
 ```
 
-`volley sub` exit `124` is the fallback wake: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
+`volley sub` exit `124` is the fallback wake: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: `volley auth status` says why the shell has no login), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
 
 ## Legacy path
 
@@ -517,7 +517,7 @@ bun run packages/volley-cli/src/cli.ts wait \
   --timeout 14400 &
 ```
 
-An exit code `1` from `volley wait` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`, see Prerequisites), **not** a terminal wake. Query the agent's status before treating it as finished, and fix the credentials before re-backgrounding the wait.
+An exit code `1` from `volley wait` is an error (broker down, or `AUTH_FAILED`: run `volley auth status`, see Prerequisites), **not** a terminal wake. Query the agent's status before treating it as finished, and fix the credentials before re-backgrounding the wait.
 
 Background-and-detach (`&`) is the entire mechanism. Each background bash exits the moment its agent's retained `status` topic flips to a terminal value. **The Claude Code harness task-notification fires on the bash exit**, which is what wakes the coordinator — same way an interactive subprocess completion surfaces. There is no polling: the wakeup is driven by the broker's retained-message delivery to the `volley wait` subscription.
 
@@ -631,13 +631,11 @@ cmux close-workspace --workspace <ref>
 **MANDATORY: once an agent's work is complete, clear its retained MQTT records.** "Complete" means its terminal status has been processed: PR filed or merged, review read, fixup retired. Do this at every retire step, and sweep once more at wave or release cleanup:
 
 ```bash
-# Clear every retained record of one finished dispatched agent.
-for t in "volley/_system/registry/<agent-id>" volley/<ns>/<agent-id>/{status,result,mailbox,capability}; do
-  mosquitto_pub -u "$VOLLEY_AUTH_USERNAME" -P "$VOLLEY_AUTH_PASSWORD" -t "$t" -n -r
-done
+# Clear every retained record of one finished dispatched agent, as the login `volley auth status` shows.
+volley pub --clear --namespace <ns> --agent-id <agent-id>
 ```
 
-(`-n` sends an empty payload and `-r` retains it; per MQTT semantics, an empty retained payload clears the slot.)
+(It publishes an empty retained payload on the agent's registry entry and its status, progress, result, capability, screen and usage topics; per MQTT semantics, an empty retained payload clears the slot. On the volleyd path there is nothing to do: volleyd clears these itself when it retires an agent.)
 
 Rules:
 - Clear only agents whose latest status is `done`/`failed`/`blocked`/`reaped`. Never clear a `registered` or `working` agent, or the coordinator.

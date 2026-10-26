@@ -32,9 +32,10 @@ import { type Sharing, parseSharing } from "volleyd/claude/sharing";
 import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
 import { isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
 import pkg from "../../package.json";
-import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { parsePositiveInt, resolveBrokerUrl, resolveNamespace } from "../args";
 import { volleydHome } from "../auth/context";
 import { withSetupAuthDir } from "../auth/coordinator-login";
+import { resolveLogin } from "../auth/login";
 import { DYNSEC_ADMIN_USER, FIXED_IDENTITIES } from "../auth/roles";
 import { connectToSupervisor, reportDaemonSilent } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
@@ -181,9 +182,9 @@ doctor options:
 Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
-  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; list and redeem: else
-                       coordinator.json in VOLLEY_AUTH_DIR or the auth dir \`volley setup\`
-                       recorded). invite and remove need an admin account.
+  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; else the login \`volley auth
+                       status\` shows; list and redeem: else coordinator.json in the auth dir
+                       \`volley setup\` recorded). invite and remove need an admin account.
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
   --timeout <seconds>  How long to wait for volleyd's answer (default 30)
 `;
@@ -613,7 +614,9 @@ export interface AskFlags {
 
 /**
  * `ask` for any command (`cmd`: its name in messages, e.g. `volley repo add`): `volley peer`'s,
- * and `volley repo`'s admin ops (SPEC §4.6.21).
+ * and `volley repo`'s ops on the account-op topic (SPEC §4.6.21). `admin`: false (volleyd's
+ * mailbox), true or "admin" (an admin account's op), "repo" (a repository op: the coordinator
+ * login or an admin's).
  */
 export async function askVolleyd(
   cmd: string,
@@ -622,9 +625,11 @@ export async function askVolleyd(
   v: AskFlags,
   env: Record<string, string | undefined>,
   io: IO,
-  admin = false,
-  adminOnly = ADMIN_ONLY,
+  admin: boolean | RefusalKind = false,
+  adminOnly?: string,
 ): Promise<Answer | ExitCode> {
+  const kind: RefusalKind | null = admin === false ? null : admin === "repo" ? "repo" : "admin";
+  const only = adminOnly ?? (kind === "repo" ? REPO_ONLY : ADMIN_ONLY);
   let timeoutMs: number;
   let namespace: string;
   let auth: BrokerAuth | null;
@@ -636,20 +641,24 @@ export async function askVolleyd(
     io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.USAGE;
   }
+  const brokerUrl = resolveBrokerUrl(v["broker-url"], env);
   try {
-    // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env: the coordinator's file serves, from
-    // the auth dir `volley setup` recorded when VOLLEY_AUTH_DIR does not name one.
-    auth = resolveAuth({ username: v.username, password: v.password }, env);
-    if (!admin) auth ??= readCoordinatorAuth(withSetupAuthDir(env));
+    auth = resolveLogin({
+      flags: { username: v.username, password: v.password },
+      env,
+      brokerUrl,
+    }).auth;
+    // Over ssh (redeem) there is rarely a VOLLEY_AUTH_* env, or a saved login turned on: the
+    // coordinator's file serves, from the auth dir `volley setup` recorded.
+    if (kind === null) auth ??= readCoordinatorAuth(withSetupAuthDir(env));
   } catch (e) {
     io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
-  if (admin) {
-    const refused = adminRefusal(cmd, auth, env, io, adminOnly);
+  if (kind !== null) {
+    const refused = adminRefusal(cmd, auth, env, io, only, kind);
     if (refused !== null) return refused;
   }
-  const brokerUrl = resolveBrokerUrl(v["broker-url"], env);
   const reach = { command: cmd, json: v.json === true, env };
   const broker = await connectToSupervisor(brokerUrl, io, auth, reach);
   if (typeof broker === "number") return broker;
@@ -659,12 +668,12 @@ export async function askVolleyd(
       return reportDaemonSilent(io, brokerUrl, namespace, reach);
     }
     const answer =
-      admin && auth !== null
+      kind !== null && auth !== null
         ? await adminRequest(broker, auth.username, op, fields, timeoutMs)
         : await request(broker, namespace, op, fields, timeoutMs);
     if (answer === null) {
-      // The broker drops an account-op request from any login but an admin's, silently.
-      const why = admin ? ` (${adminOnly}; is ${auth?.username} one?)` : "";
+      // The broker drops an account-op request from a login it does not grant, silently.
+      const why = kind !== null ? ` (${only}; is ${auth?.username} one?)` : "";
       io.stderr(`${cmd}: volleyd did not answer within ${timeoutMs / 1000} s${why}\n`);
       return EXIT.TIMEOUT;
     }
@@ -722,11 +731,23 @@ async function request(
 }
 
 const ADMIN_ONLY = "pairing codes and unpairing are admin ops (an admin account's login)";
+const REPO_ONLY =
+  "adding and removing repositories needs the coordinator login or an admin account's";
+
+/** What an op on the account-op topic needs: an admin account, or (repositories) the coordinator too. */
+export type RefusalKind = "admin" | "repo";
+
+/** Where every refusal points: the command that says which login this shell uses, and why. */
+const STATUS_HINT = "run `volley auth status` to see which login this shell uses and why";
+
+/** An admin op's refusal also says how to proceed: an admin's login, named on the command line. */
+const ADMIN_HINT = `${STATUS_HINT}, or pass --username <admin>`;
 
 /**
- * An admin op's refusal before any connection (exit 2, said on stderr): no login, or one this
- * machine's records say is not an admin. The broker drops a non-admin's op without a word, so
- * this refuses at once instead of waiting out the timeout. Null when the op may go ahead.
+ * An account-op topic op's refusal before any connection (exit 2, said on stderr): no login, or
+ * one this machine's records say may not send it (`localRefusal`). The broker drops such an op
+ * without a word, so this refuses at once instead of waiting out the timeout. Null when the op
+ * may go ahead. Never names an environment variable: the login comes from the ladder.
  */
 export function adminRefusal(
   cmd: string,
@@ -734,31 +755,32 @@ export function adminRefusal(
   env: Record<string, string | undefined>,
   io: IO,
   adminOnly = ADMIN_ONLY,
+  kind: RefusalKind = "admin",
 ): ExitCode | null {
+  const hint = kind === "admin" ? ADMIN_HINT : STATUS_HINT;
   if (auth === null) {
-    io.stderr(
-      `${cmd}: ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
-    );
+    io.stderr(`${cmd}: ${adminOnly}, and this shell has no broker login: ${hint}\n`);
     return EXIT.USAGE;
   }
-  const notAdmin = localNotAdmin(auth.username, env);
-  if (notAdmin !== null) {
-    io.stderr(
-      `${cmd}: ${notAdmin}; ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
-    );
+  const refused = localRefusal(kind, auth.username, env);
+  if (refused !== null) {
+    io.stderr(`${cmd}: ${refused}; ${adminOnly}: ${hint}\n`);
     return EXIT.USAGE;
   }
   return null;
 }
 
 /**
- * Why `username` is not an admin account by this machine's own records (a fixed identity, or an
- * account of another role in the auth dir's accounts.json), or null when they do not say.
+ * Why `username` may not send a `kind` op by this machine's own records (a fixed identity, or an
+ * account of another role in the auth dir's accounts.json), or null when they do not say. The
+ * fixed `coordinator` identity may send the repository ops (SPEC §4.6.21).
  */
-export function localNotAdmin(
+export function localRefusal(
+  kind: RefusalKind,
   username: string,
   env: Record<string, string | undefined>,
 ): string | null {
+  if (kind === "repo" && username === "coordinator") return null;
   if (
     (FIXED_IDENTITIES as readonly string[]).includes(username) ||
     username === DYNSEC_ADMIN_USER

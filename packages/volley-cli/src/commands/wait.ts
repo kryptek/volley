@@ -4,6 +4,7 @@ import { parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic, isValidAgentId } from "volley-mcp/topics";
 import {
+  argumentExit,
   parseCsv,
   parsePositiveInt,
   resolveAuth,
@@ -82,7 +83,7 @@ export async function wait({ argv, env, io }: WaitArgs): Promise<ExitCode> {
     timeoutSec = parsePositiveInt(parsed.values.timeout as string, "--timeout");
   } catch (e) {
     io.stderr(`volley wait: ${e instanceof Error ? e.message : String(e)}\n`);
-    return EXIT.USAGE;
+    return argumentExit(e);
   }
   if (terminalStates.length === 0) {
     io.stderr("volley wait: --terminal-states must list at least one state\n");

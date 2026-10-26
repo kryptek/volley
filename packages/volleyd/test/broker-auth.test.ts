@@ -108,9 +108,11 @@ describe("daemonAuth: volleyd's broker credentials", () => {
 
   it("refuses a malformed file instead of connecting anonymously", () => {
     writeBrokerFile("{not json");
-    expect(() => daemonAuth(home, {})).toThrow(/broker\.json: malformed/);
+    expect(() => daemonAuth(home, {})).toThrow(
+      /broker\.json: not a JSON object with a string username and password/,
+    );
     writeBrokerFile(JSON.stringify({ username: "", password: "x" }));
-    expect(() => daemonAuth(home, {})).toThrow(/non-empty string username/);
+    expect(() => daemonAuth(home, {})).toThrow(/not a JSON object with a string username/);
   });
 
   it("falls back to VOLLEY_AUTH_*, else anonymous (null)", () => {
@@ -210,17 +212,52 @@ describe("control clients on the supervisor machine (volleyd config get, status,
     coordinatorFile: readSavedCoordinatorFile,
   };
   let dirs = 0;
-  /** An auth dir holding the coordinator.json `volley setup` writes. */
+  /**
+   * An auth dir holding the coordinator.json `volley setup` writes, found the way an operator's
+   * shell finds it: through the dir `$VOLLEYD_HOME/setup.json` records (no VOLLEY_AUTH_DIR).
+   */
   const saved = () => {
-    const authDir = join(home, `auth-${dirs++}`);
+    const authDir = join(home, `auth-${dirs}`);
+    const vhome = join(home, `volleyd-${dirs++}`);
     mkdirSync(authDir);
+    mkdirSync(vhome);
     writeFileSync(
       join(authDir, "coordinator.json"),
       JSON.stringify({ username: "coordinator", password: "saved-pw" }),
       { mode: 0o600 },
     );
-    return { VOLLEY_AUTH_DIR: authDir };
+    writeFileSync(
+      join(vhome, "setup.json"),
+      JSON.stringify({
+        layout: "etc",
+        config: "/path/to/mosquitto.conf",
+        state_file: "/path/to/dynamic-security.json",
+        auth_dir: authDir,
+      }),
+    );
+    return { VOLLEYD_HOME: vhome };
   };
+
+  it("VOLLEY_AUTH_DIR names the coordinator role's login: taken before the stores, for any broker (#613)", () => {
+    const authDir = join(home, "role-auth");
+    mkdirSync(authDir);
+    writeFileSync(
+      join(authDir, "coordinator.json"),
+      JSON.stringify({ username: "coordinator", password: "role-pw" }),
+      { mode: 0o600 },
+    );
+    const coordinatorEnv = {
+      VOLLEY_AGENT_ID: "coordinator",
+      VOLLEY_AUTH_DIR: authDir,
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_HOOKS_DIR: "/path/to/volley-hooks",
+    };
+    // No saved login turned on, and the role's env would refuse it: the auth dir step serves.
+    expect(controlAuth(coordinatorEnv, home, "mqtt://127.0.0.1:1883")?.password).toBe("role-pw");
+    // A dispatched agent's env never reads it.
+    const { VOLLEY_HOOKS_COORDINATOR: _, ...agent } = coordinatorEnv;
+    expect(controlAuth(agent, home, "mqtt://127.0.0.1:1883")).toBeNull();
+  });
 
   it("use the coordinator login setup saved when nothing else names one", () => {
     expect(controlAuth(saved(), home, "mqtt://localhost:1883", linux)).toEqual({
@@ -261,6 +298,47 @@ describe("control clients on the supervisor machine (volleyd config get, status,
       expect(resolveControlTarget({}, { ...env, VOLLEY_HOOKS_DIR: "/x" }, home).auth).toBeNull();
     } finally {
       useSavedLogin(null);
+    }
+  });
+});
+
+describe("a damaged credentials file is reported by path, never by content (#613)", () => {
+  const MARKER = "hunter2-marker-d00d";
+  const DAMAGED: [string, string, number][] = [
+    ["only the marker", MARKER, 0o600],
+    ["the marker unquoted", `{"username":"volleyd","password":${MARKER}}`, 0o600],
+    ["truncated inside the password", `{"username":"volleyd","password":"${MARKER}`, 0o600],
+    ["0644 holding the marker", JSON.stringify({ username: "volleyd", password: MARKER }), 0o644],
+  ];
+  const messageOf = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (e) {
+      return (e as Error).message;
+    }
+    throw new Error("expected a throw");
+  };
+
+  it.each(DAMAGED)("broker.json, dynsec-admin.json, controlAuth: %s", (_what, text, mode) => {
+    for (const [file, read] of [
+      [BROKER_FILE, () => daemonAuth(home, {})],
+      [ADMIN_FILE, () => daemonAdminAuth(home, {})],
+    ] as const) {
+      const path = join(home, file);
+      writeFileSync(path, text, { mode });
+      chmodSync(path, mode);
+      const m = messageOf(read);
+      expect(m).toContain(path);
+      expect(m).not.toContain(MARKER);
+    }
+    // A control client's coordinator.json (the auth dir step), the marker as its content.
+    const authDir = tempDir("volleyd-damaged-");
+    const path = join(authDir, "coordinator.json");
+    writeFileSync(path, text.replace("volleyd", "coordinator"), { mode });
+    if (mode === 0o600) {
+      const m = messageOf(() => controlAuth({ VOLLEY_AUTH_DIR: authDir }, home));
+      expect(m).toContain(path);
+      expect(m).not.toContain(MARKER);
     }
   });
 });

@@ -4,7 +4,13 @@ import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
-import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import {
+  argumentExit,
+  parsePositiveInt,
+  resolveAuth,
+  resolveBrokerUrl,
+  resolveNamespace,
+} from "../args";
 import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -82,7 +88,7 @@ export async function list({ argv, env, io }: ListArgs): Promise<ExitCode> {
       : resolveNamespace(parsed.values.namespace as string | undefined, env);
   } catch (e) {
     io.stderr(`volley list: ${e instanceof Error ? e.message : String(e)}\n`);
-    return EXIT.USAGE;
+    return argumentExit(e);
   }
 
   const broker = await connectToSupervisor(brokerUrl, io, auth, {

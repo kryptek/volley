@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { useSavedLogin } from "../../src/auth/coordinator-login";
 import type { Answer } from "../../src/commands/peer";
 import { type RepoDeps, realRepoDeps, runRepo } from "../../src/commands/repo";
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
+import { tempDir } from "../helpers/tmp";
 
 /** `volley repo` (SPEC §4.6.21): the verbs over a fake volleyd answer, then one real round-trip. */
 
@@ -13,7 +15,7 @@ interface Asked {
   cmd: string;
   op: string;
   fields: Record<string, unknown>;
-  admin: boolean;
+  admin: boolean | string;
 }
 
 /** Deps whose `ask` answers from `answer` (in order, the last repeating) and records each op. */
@@ -56,7 +58,7 @@ const status = (states: Record<string, string>) => ({
 });
 
 describe("volley repo: arguments", () => {
-  it("add sends repo_add as an admin op with the slug, machines and adopted paths", async () => {
+  it("add with --path sends repo_add as an admin op with the slug, machines and adopted paths", async () => {
     const { deps, asked } = fakeDeps(() => ({
       ok: true,
       result: {
@@ -76,7 +78,7 @@ describe("volley repo: arguments", () => {
         cmd: "volley repo add",
         op: "repo_add",
         fields: { slug: "a/a", machines: ["box"], paths: { box: "/srv/a" } },
-        admin: true,
+        admin: "admin",
       },
     ]);
     expect(r.stdout).toBe(
@@ -136,6 +138,8 @@ describe("volley repo: arguments", () => {
       { slug: "a/a", wave: "hello-ab12" },
       { slug: "a/a" },
     ]);
+    // By slug: a repository op, which the coordinator login may send too (#613).
+    expect(asked.map((a) => a.admin)).toEqual(["repo", "repo"]);
   });
 
   it("refuses a --for-wave that is no wave id, and --for-wave on another verb", async () => {
@@ -186,7 +190,7 @@ describe("volley repo: arguments", () => {
     }));
     const r = await run(["remove", "a/a"], deps);
     expect(r.exitCode).toBe(EXIT.OK);
-    expect(asked[0]).toMatchObject({ op: "repo_remove", fields: { slug: "a/a" }, admin: true });
+    expect(asked[0]).toMatchObject({ op: "repo_remove", fields: { slug: "a/a" }, admin: "repo" });
     expect(r.stdout).toBe(
       "Removed a/a from control, box, b2.\nClones kept (delete them by hand if you no longer want them):\n  box: /srv/a\n  b2: /srv/b2/a\n  b2: b2 is down: not told\n",
     );
@@ -510,5 +514,106 @@ describe("volley repo over the broker", () => {
     expect(code).toBe(EXIT.OK);
     expect(topics).toEqual(["volley/_system/auth/ops/admin-1"]);
     expect(io.readStdout()).toContain("Added a/a to box.");
+  });
+
+  describe("with the coordinator login `volley setup` saved, no VOLLEY_AUTH_* (#613)", () => {
+    const cwd = process.cwd();
+    let plain: string;
+    beforeEach(() => {
+      // A plain directory: no agent identity file above it (this repo may run inside a worktree).
+      plain = tempDir("volley-repo-coord-");
+      process.chdir(plain);
+      useSavedLogin({
+        platform: "linux",
+        keychain: () => null,
+        coordinatorFile: () => ({ username: "coordinator", password: "c-pw" }),
+      });
+    });
+    afterEach(() => {
+      useSavedLogin(null);
+      process.chdir(cwd);
+    });
+
+    /** A volleyd answering every account op, recording the topics it was asked on. */
+    const answering = async () => {
+      const b = new VolleyBroker();
+      await b.connect({ url: tb.url, agentId: "volleyd" });
+      const envelope = (channel: string, type: string, payload: unknown, cid?: string) =>
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "volleyd",
+            parentId: null,
+            channel,
+            type,
+            payload,
+            ...(cid !== undefined ? { correlationId: cid } : {}),
+          }),
+        );
+      await b.publish("volley/test/volleyd/status", envelope("status", "working", {}), {
+        qos: 1,
+        retain: true,
+      });
+      const topics: string[] = [];
+      await b.subscribeStream("volley/_system/auth/ops/+", ({ topic, payload }) => {
+        const q = parseEnvelope(payload);
+        if (q?.type !== "query" || q.correlation_id === null) return;
+        topics.push(topic);
+        const p = q.payload as Record<string, unknown>;
+        void b.publish(
+          `volley/_system/auth/replies/${q.correlation_id}`,
+          envelope(
+            "_system/auth",
+            "ack",
+            {
+              text: "ACKED",
+              acked_type: "query",
+              op: p.op,
+              ok: true,
+              result: { slug: p.slug, machines: ["box"], status: [] },
+            },
+            q.correlation_id,
+          ),
+          { qos: 1, retain: false },
+        );
+      });
+      return { b, topics };
+    };
+
+    it("add by slug goes out on ops/coordinator and prints Added", async () => {
+      const { b, topics } = await answering();
+      const io = makeBufferIO();
+      const code = await runRepo(
+        {
+          argv: ["add", "a/a"],
+          env: { VOLLEY_BROKER_URL: tb.url, VOLLEY_NAMESPACE: "test", HOME: plain },
+          io,
+        },
+        realRepoDeps(),
+      );
+      await b.disconnect();
+      expect(io.readStderr()).toBe("");
+      expect(code).toBe(EXIT.OK);
+      expect(topics).toEqual(["volley/_system/auth/ops/coordinator"]);
+      expect(io.readStdout()).toContain("Added a/a to box.");
+    });
+
+    it("add --path is refused at once: adopting a clone is an admin's", async () => {
+      const { b, topics } = await answering();
+      const io = makeBufferIO();
+      const code = await runRepo(
+        {
+          argv: ["add", "a/a", "--machine", "box", "--path", "box=/srv/a"],
+          env: { VOLLEY_BROKER_URL: tb.url, VOLLEY_NAMESPACE: "test", HOME: plain },
+          io,
+        },
+        realRepoDeps(),
+      );
+      await b.disconnect();
+      expect(code).toBe(EXIT.USAGE);
+      expect(io.readStderr()).toContain("coordinator is a fixed identity");
+      expect(io.readStderr()).toContain("adopting a clone at a path (--path) is an admin's");
+      expect(io.readStderr()).not.toContain("VOLLEY_AUTH_PASSWORD");
+      expect(topics).toEqual([]);
+    });
   });
 });

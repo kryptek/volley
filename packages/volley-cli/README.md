@@ -329,6 +329,8 @@ Exit codes: `0` clean SIGINT/SIGTERM, `1` broker error, `2` invalid usage.
 The reference broker ([`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md)) is **mosquitto 2.1 or newer** with the Dynamic Security plugin: it refuses anonymous clients and authorises every login through eight shared roles. `volley auth` creates and deletes logins over the broker's control topic with the admin login in `<dir>/admin.json`; there is no password file, no ACL file and no reload. Every verb refuses a broker older than 2.1 (`BROKER_TOO_OLD`, with the brew / snap / container install instructions).
 
 ```sh
+volley auth status [--json]               # the login this shell's commands use, its source, and
+                                          # whether the broker accepts it; never a password
 volley auth init                          # broker config (backed up) + state file + admin login, then,
                                           # once the broker runs it: the shared roles and the fixed
                                           # identities, printing their passwords ONCE. Rerunnable.
@@ -351,11 +353,22 @@ volley auth signin-link --role steer --label "Owner's phone"   # one-time sign-i
 echo "$TOKEN" | volley auth redeem --label "Desk on mac" --json  # what volleyd runs on redemption
 ```
 
+- **`status [--json]`** needs no admin login and no auth dir. It finds the login exactly as every other command would (the ladder under "Credentials resolve as", below), connects once and prints:
+
+  ```text
+  login:   coordinator (fixed identity)
+  source:  keychain (volley-broker)
+  broker:  mqtt://127.0.0.1:1883 · accepted
+  not used: flags (no --username) · … · coordinator.json (keychain answered first)
+  ```
+
+  `login` is the username and what this machine knows of it: `fixed identity` for `volleyd`, `desk` and `coordinator`, the role from the auth dir's `accounts.json` (`admin account`, `steer account`), else `account; role not known here`. `source` names the step, and the file for a file step. The broker answers `accepted` (exit 0), `refused` (exit 1) or `unreachable` (exit 69, with the usual diagnosis). No login at all prints why each step was not taken and exits 1. `--json` prints `{ username, kind, role?, source, path?, broker: { url, result }, skipped }`. The password is never in either form, whatever the source.
+
 - **`init`** detects the install (`--layout brew-arm64|brew-intel|snap|etc|container`; the snap first on Linux) and writes its config: the plugin before any listener, `per_listener_settings false`, `allow_anonymous false`, `set_tcp_nodelay true`, `max_queued_messages 10000`, TCP 1883 and WebSocket 9001 on 127.0.0.1. The WebSocket listener on 9001 keeps the bind it has: one `volley setup --lan` opened to the LAN stays open (with no 9001 listener to read, the `lan` choice `$VOLLEYD_HOME/setup.json` recorded decides), so a signed-in phone is not cut off. Only 9001's bind is kept: another WebSocket listener (say 8080) is dropped, never lending 9001 its bind, and the diff names it as removed. Before it rewrites an existing config it prints the unified diff, naming each listener change on its own line. It refuses an existing config with `per_listener_settings true` or the plugin loaded twice, naming the trap. `--no-config` leaves the config to you, `--config` / `--state-file` choose other paths, `--restart` runs the layout's restart command and carries on instead of asking you to restart and rerun.
 - **Fixed identities** `volleyd`, `desk` and `coordinator` are created once; a rerun keeps their passwords, `--force` rotates them. `--coordinator-file` writes `<dir>/coordinator.json` (mode 0600; the coordinator's hooks read it when `VOLLEY_AUTH_*` is unset); `--volleyd-file` writes `$VOLLEYD_HOME/broker.json` and `$VOLLEYD_HOME/dynsec-admin.json` (0600), volleyd's login and the admin login it mints agents with; under sudo they go to the invoking user's home, owned by that user.
 - **Agent logins** hold the `agent` role alone: their own channels and registry entry (`%u`), lease requests, and acks to `volleyd` and the Desk. Nothing is granted per agent, so there is no `--ack-to` and no `grant`: an agent's ack to a random-suffixed coordinator is dropped by the broker. `add-agent` refuses the fixed identities, the admin, 8-hex-digit ids (token logins) and ids the roles' namespace wildcard would carry into reserved topics (`registry`, `leases`, `health`, `federation`, `machines`, `auth`, and the channel names). `rm-agent` deletes only agent logins. Deleting a login disconnects the agent without its will: volleyd publishes its `reaped` status itself.
 - **Roles** of accounts: `admin` (a coordinator's writes plus account ops on `volley/_system/auth/ops/<name>`), `steer` (write mailboxes, plus its own `volley/_system/auth/ops/<name>` for the Desk's Needs-you answers), `watch` (no writes beyond the `account` role's own-identity ones), `supervisor` (read/write everything like `volleyd`, except the account-op and answer topics under `volley/_system/auth/`), `peer` (a paired machine: `volley/_system/machines/<name>[/#]`, which the `account` role already grants). Every account holds the shared `account` role (read `volley/#`; write its own `%u` channels, registry entry, lease requests and machine record) plus its role's. The registry is `accounts.json` (name, role, kind, created, label); `--kind` is `human` \| `device` \| `machine` \| `service` (default from the role).
-- **`add --for-wave <wave>`** makes an account for one wave only. Instead of creating the login here, it sends volleyd the `account_create` admin op with `wave: "<wave>"` (an admin login in `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`, as `volley repo add` needs). volleyd creates the account, journals `account_created { …, wave }`, and revokes it when it cleans that wave up. The password comes back sealed to a throwaway key and is printed once, the same way as a local `add` (`--json` adds `wave`). The wave id is `[a-z0-9][a-z0-9_-]{0,62}`. Without the flag the account is yours, and cleanup never touches it.
+- **`add --for-wave <wave>`** makes an account for one wave only. Instead of creating the login here, it sends volleyd the `account_create` admin op with `wave: "<wave>"` (an admin account's login: its password in `VOLLEY_AUTH_PASSWORD` for that one command, never a shell profile). volleyd creates the account, journals `account_created { …, wave }`, and revokes it when it cleans that wave up. The password comes back sealed to a throwaway key and is printed once, the same way as a local `add` (`--json` adds `wave`). The wave id is `[a-z0-9][a-z0-9_-]{0,62}`. Without the flag the account is yours, and cleanup never touches it.
 - **`signin-link`** prints the ready-to-open link, `http://<desk host>:<desk port>/#signin=<token>` on the LAN address `volley setup` recorded in `$VOLLEYD_HOME/setup.json` (without a record: `localhost:5199`, with a note to use this machine's address), and its QR code, like setup's phone step. `--json` prints only `{token, username, expires_at}`.
 - **One-time tokens** (`token`, `signin-link`) are stored only as a sha256 hash in `tokens.json`. Each is also the password of a temporary login named by the token id, holding the `token` role: it may only write `volley-auth/redeem/<id>` and read `volley-auth/redeem/<id>/reply`, so the Desk can redeem it through volleyd (SPEC §4.6.10) while the broker keeps refusing anonymous clients. `redeem` reads the token from stdin, burns it and creates an account with the token's role (refusing, token unburned, if that `<role>-<id>` name is taken; `add` reserves that shape). The login outlives the redemption by about a minute so the redeeming client, still connected as it, gets its answer; the next account command after that, or after the token expires, deletes it (volleyd runs `volley auth list` every minute for this). `accounts.json` and `tokens.json` are replaced by rename, never rewritten in place.
 
@@ -693,8 +706,11 @@ macOS: free + inactive + speculative + purgeable pages).
 ## `volley repo`
 
 The repositories the supervisor's machines work on (SPEC §4.6.21), by GitHub `owner/name`.
-`add` and `remove` are admin ops (an admin account's login, as `volley peer invite`); `list`,
-`status` and `check` are reads any login may make (`check --fix` is an admin's).
+`add` and `remove` go on the sender's account-op topic: the coordinator login is enough (on the
+supervisor's machine `volley` finds it itself, no flag; `volley auth status` shows it), and so is
+an admin account's. Adopting an existing clone with `--path` stays an admin's (it also trusts
+that folder). `list`, `status` and `check` are reads any login may make (`check --fix` is an
+admin's).
 
 ```sh
 volley repo add example-org/widgets                       # every machine
@@ -808,9 +824,10 @@ volley role move desk       --to <machine> [--port 5199] [--dry-run] [--yes]
 volley role rollback <move_id>
 ```
 
-Admin ops, sent as `volley peer invite` sends its own (an admin login: `--username <admin>`,
-password in `VOLLEY_AUTH_PASSWORD`; a login this machine's account registry says is not an admin
-is refused before anything connects). `move` asks volleyd for a plan (`role_plan`) and prints its
+Admin ops, sent as `volley peer invite` sends its own (an admin login: `--username <admin>`, its
+password in `VOLLEY_AUTH_PASSWORD` for that one command, never a shell profile; a login this
+machine's records say is not an admin, the coordinator's included, is refused before anything
+connects, pointing at `volley auth status`). `move` asks volleyd for a plan (`role_plan`) and prints its
 sheet — the same text the Desk shows: the steps with the machine each runs on, what blocks the
 move and how to fix it, the commands only a terminal can run, and what changes afterwards:
 
@@ -1060,9 +1077,10 @@ js-suite  3/4 held  max 2 per machine (box-a 3, laptop 1)  1 queued
   credentials mistake surfaces instead of silently defeating the pool.
 - **Credentials**: `--username`/`--password`, else `<--project-dir or cwd>/.volley/agent.json`'s
   `broker` block, else `VOLLEY_AUTH_*`. With `--coordinator` (what the coordinator-mode hook passes)
-  it resolves them as the coordinator hooks do: `VOLLEY_AUTH_*`, else
-  `$VOLLEY_AUTH_DIR/coordinator.json` (from `volley auth init --coordinator-file`), and never reads
-  an identity file. A malformed `coordinator.json` is an error, not an anonymous connect.
+  it climbs the login ladder without the identity file step (`VOLLEY_AUTH_*`, the auth dir's
+  `coordinator.json`, the saved login), then, as the coordinator hooks do, `coordinator.json` in
+  the default auth dir; it never reads an identity file. A malformed `coordinator.json` is an
+  error naming the file, not an anonymous connect.
 - The [volley-hooks](../volley-hooks/README.md) PreToolUse lease hook wraps matching `Bash`
   commands in `volley lease run` automatically.
 
@@ -1155,9 +1173,20 @@ These work on every subcommand and respect env vars as fallbacks:
 | `--help` | — | — |
 | `--version` | — | prints version |
 
-Credentials resolve as: flags, then the `broker` block of `./.volley/agent.json` (an agent's assigned identity), then `VOLLEY_AUTH_*`, then, for a broker on this machine (`localhost`, `127.x`, `::1`), the coordinator login `volley setup` saved: the macOS keychain item `volley-broker`, then `coordinator.json` in the auth dir (`VOLLEY_AUTH_DIR`, else the one `$VOLLEYD_HOME/setup.json` records, else `<mosquitto config dir>/volley`). That last step is for the operator only, never an agent: not when `VOLLEY_AGENT_ID` or `VOLLEY_HOOKS_DIR` (set for every agent volleyd launches) is set, nor below a directory holding `.volley/agent.json`; an agent uses only the login minted for it. `VOLLEY_NO_SAVED_LOGIN=1` turns it off (the test suites set it). `volley lease --coordinator` and `volley peer` keep their own `coordinator.json` lookup. `--username` without `--password` takes the password from `VOLLEY_AUTH_PASSWORD`. Prefer the env var over `--password`: argv is visible in `ps`.
+Credentials resolve as one ladder, the same for every `volley` and `volleyd` command (`auth/login.ts`); the first step that names a login wins, and `volley auth status` prints which one did and why the others did not:
 
-**Shell sessions on the supervisor machine need nothing exported.** A Claude Code MCP registration's `env` block reaches only the MCP server, not the session's Bash tool; on the machine `volley setup` ran on, `volley wait` / `volley sub` / `volleyd config get` find the saved coordinator login on their own. On another machine (or for a remote broker, where the saved login is never sent), export `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`; without a login they exit `1` with `AUTH_FAILED` immediately. A refused login exits `1` with `AUTH_FAILED` and a `volley auth init` hint.
+1. **flags**: `--username`, with `--password` or `VOLLEY_AUTH_PASSWORD`;
+2. **identity file**: the `broker` block of `./.volley/agent.json` (an agent's assigned identity);
+3. **env**: `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`;
+4. **auth dir**: `$VOLLEY_AUTH_DIR/coordinator.json` when the environment names a dir (the MCP server's rule: the volleyd-run coordinator's session logs in this way);
+5. **keychain**: the macOS keychain item `volley-broker` (`volley` only; volleyd starts no child process, and reads the next step, the same login);
+6. **coordinator.json**: in the auth dir `$VOLLEYD_HOME/setup.json` records, else `<mosquitto config dir>/volley`.
+
+Steps 4 to 6 are the store `volley setup` fills, for the operator only, never an agent: not when `VOLLEY_AGENT_ID` or `VOLLEY_HOOKS_DIR` (set for every agent volleyd launches) is set, nor below a directory holding `.volley/agent.json`; an agent uses only the login minted for it. The one exception is the coordinator role's session (`VOLLEY_HOOKS_COORDINATOR=1`, which volleyd never sets for an agent), which takes step 4 when no identity file is above it. Steps 5 and 6 are only for a broker on this machine (`localhost`, `127.x`, `::1`). `VOLLEY_NO_SAVED_LOGIN=1` turns steps 4 to 6 off (the test suites set it). `volley lease --coordinator` skips step 2. Prefer `VOLLEY_AUTH_PASSWORD` over `--password`: argv is visible in `ps`.
+
+A damaged credentials file (`coordinator.json`, `admin.json`, an identity file's `broker` block) is an error naming the file and nothing of its content: `<path>: not a JSON object with a string username and password`, or `<path>: cannot read (<errno>)`. The command exits `1`.
+
+**Shell sessions on the supervisor machine need nothing exported.** A Claude Code MCP registration's `env` block reaches only the MCP server, not the session's Bash tool; on the machine `volley setup` ran on, `volley wait` / `volley sub` / `volley repo add` / `volleyd resolve` find the coordinator login on their own. `VOLLEY_AUTH_*` is for another machine's broker (where the saved login is never sent); without a login the commands exit `1` with `AUTH_FAILED` immediately, and a refused login exits `1` with `AUTH_FAILED` and the hint to run `volley auth status`.
 
 ---
 

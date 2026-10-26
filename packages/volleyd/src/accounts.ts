@@ -224,6 +224,47 @@ export function deskRefusal(accounts: Account[], sender: string): string | undef
   return undefined;
 }
 
+/**
+ * The repository ops (SPEC §4.6.21) the fixed `coordinator` identity may send on its own
+ * account-op topic: the wave owner adds the repository a wave is about without an admin account.
+ */
+export const COORDINATOR_REPO_OPS: ReadonlySet<string> = new Set([
+  "repo_add",
+  "repo_remove",
+  "repo_list",
+  "repo_status",
+  "repo_probe",
+]);
+
+/**
+ * Why the fixed `coordinator` identity may not send `op` (with payload `p`) on its account-op
+ * topic, or undefined when it may; undefined too for any other sender, whose op takes the admin
+ * check (`adminRefusal`). Trusting the literal name is safe as for `desk` (`deskRefusal`): the
+ * broker ACL (`%u`) lets only the `coordinator` login write `ops/coordinator`. Adopting a clone at
+ * a path (`repo_add { paths }`) also trusts that folder on the machine: it stays an admin's.
+ */
+export function coordinatorRepoRefusal(sender: string, op: string, p: Fields): string | undefined {
+  if (sender !== "coordinator") return undefined;
+  if (!COORDINATOR_REPO_OPS.has(op)) {
+    return `"coordinator" is a fixed identity that may send only the repository ops here; ${op} needs the admin role`;
+  }
+  if (op === "repo_add" && adoptsPaths(p.paths)) {
+    return "adopting a clone at a path (--path) is an admin's; add by slug to clone fresh";
+  }
+  return undefined;
+}
+
+/** Whether `paths` names any clone to adopt (anything but absent or an empty object). */
+function adoptsPaths(paths: unknown): boolean {
+  if (paths === undefined) return false;
+  return !(
+    typeof paths === "object" &&
+    paths !== null &&
+    !Array.isArray(paths) &&
+    Object.keys(paths).length === 0
+  );
+}
+
 /** An answer on the account-op reply topic. */
 export const authReply = reply;
 

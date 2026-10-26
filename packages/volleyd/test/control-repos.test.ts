@@ -104,6 +104,39 @@ const repoState = async (machine: string, slug = SLUG) =>
   (await f.verdict(machine))?.repos[slug]?.state;
 const systemTypes = (type: string) => f.system().filter((e) => e.type === type);
 
+describe("the coordinator's repository ops on ops/coordinator (#613)", () => {
+  it("repo_add by slug and repo_remove go through, journaled by coordinator", async () => {
+    await setup();
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG }, "coordinator");
+    expect(r).toMatchObject({ ok: true });
+    expect(systemTypes("repo_added").map((e) => e.data)).toEqual([
+      { by: "coordinator", slug: SLUG, machines: "all" },
+    ]);
+    expect((await f.adminOp({ op: "repo_list" }, "coordinator"))?.ok).toBe(true);
+    expect((await f.adminOp({ op: "repo_status" }, "coordinator"))?.ok).toBe(true);
+    const removed = await f.adminOp({ op: "repo_remove", slug: SLUG }, "coordinator");
+    expect(removed).toMatchObject({ ok: true });
+  });
+
+  it("repo_add with paths, pairing and archive are refused; an admin keeps every op", async () => {
+    await setup();
+    const adopt = await f.adminOp(
+      { op: "repo_add", slug: SLUG, paths: { [PEER]: BOX_CLONE } },
+      "coordinator",
+    );
+    expect(adopt).toMatchObject({ ok: false });
+    expect(adopt?.error).toContain("adopting a clone at a path (--path) is an admin's");
+    for (const op of ["peer_invite", "machine_add", "archive"]) {
+      const r = await f.adminOp({ op, for: "box-z", wave: "w-x" }, "coordinator");
+      expect(r).toMatchObject({ ok: false });
+      expect(r?.error).toMatch(/needs the admin role/);
+    }
+    expect(systemTypes("repo_added")).toEqual([]);
+    const admin = await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [PEER]: BOX_CLONE } });
+    expect(admin).toMatchObject({ ok: true });
+  });
+});
+
 describe("repo_add (admin)", () => {
   it("journals the wave a registration was made for; an id that is no wave id is refused (#612 D5)", async () => {
     await setup();

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { type BrokerAuth, readCoordinatorAuth } from "volley-mcp/config";
+import { type BrokerAuth, coordinatorAuthPath, readCoordinatorAuth } from "volley-mcp/config";
 import { readSetupInstall } from "../setup/journal";
 import { volleydHome } from "./context";
 
@@ -40,6 +40,8 @@ export interface SavedLoginDeps {
   keychain: () => string | null;
   /** The auth dir's `coordinator.json` login, or null. */
   coordinatorFile: (env: Record<string, string | undefined>) => BrokerAuth | null;
+  /** Where `coordinatorFile` looks, for messages (absent: not known). */
+  coordinatorPath?: (env: Record<string, string | undefined>) => string | null;
 }
 
 /**
@@ -81,7 +83,13 @@ export const realSavedLoginDeps: SavedLoginDeps = {
     return pw === "" ? null : pw;
   },
   coordinatorFile: readSavedCoordinatorFile,
+  coordinatorPath: savedCoordinatorPath,
 };
+
+/** Where `readSavedCoordinatorFile` looks: the auth dir setup used's coordinator.json. */
+export function savedCoordinatorPath(env: Record<string, string | undefined>): string | null {
+  return coordinatorAuthPath(withSetupAuthDir(env));
+}
 
 /**
  * coordinator.json only, never the keychain: for `volleyd`'s entry point, which starts no child
@@ -91,6 +99,7 @@ export const fileSavedLoginDeps: SavedLoginDeps = {
   platform: process.platform,
   keychain: () => null,
   coordinatorFile: readSavedCoordinatorFile,
+  coordinatorPath: savedCoordinatorPath,
 };
 
 /** This process's sources: none until a real CLI entry point opts in. */
@@ -124,16 +133,91 @@ export function isLocalBroker(url: string): boolean {
  * launch, the owner's own tooling), `VOLLEY_HOOKS_DIR` (every agent volleyd launches), or a
  * `.volley/agent.json` in `cwd` or any directory above it (an agent's worktree, from a
  * subdirectory too).
+ *
+ * `coordinatorRole`: the volleyd-run coordinator's session (`VOLLEY_HOOKS_COORDINATOR=1`, which
+ * volleyd never sets for an agent) is no agent, whatever else its env names, unless an identity
+ * file sits above `cwd`. Only the auth dir step (login.ts) asks with it.
  */
-export function agentContext(env: Record<string, string | undefined>, cwd: string): string | null {
-  for (const k of ["VOLLEY_AGENT_ID", "VOLLEY_HOOKS_DIR"]) {
-    if (env[k] !== undefined && env[k] !== "") return `${k} is set`;
+export function agentContext(
+  env: Record<string, string | undefined>,
+  cwd: string,
+  o: { coordinatorRole?: boolean } = {},
+): string | null {
+  const coordinator = o.coordinatorRole === true && env.VOLLEY_HOOKS_COORDINATOR === "1";
+  if (!coordinator) {
+    for (const k of ["VOLLEY_AGENT_ID", "VOLLEY_HOOKS_DIR"]) {
+      if (env[k] !== undefined && env[k] !== "") return `${k} is set`;
+    }
   }
   for (let d = resolve(cwd); ; d = dirname(d)) {
     const f = join(d, ".volley", "agent.json");
     if (existsSync(f)) return `${f} exists`;
     if (dirname(d) === d) return null;
   }
+}
+
+/** The saved login's steps, as login.ts reports them: the login, where it came from, why not. */
+export interface SavedLoginResult {
+  auth: BrokerAuth | null;
+  source: "keychain" | "coordinator_file" | null;
+  /** The file the login came from (`coordinator_file`). */
+  path?: string;
+  /** One plain reason per step not taken; never a value. */
+  skipped: string[];
+}
+
+/**
+ * The keychain and coordinator.json steps, each with the reason it was not taken: off in this
+ * process, opted out (`VOLLEY_NO_SAVED_LOGIN`), another machine's broker, an agent, or nothing
+ * saved. `fileStep: false` leaves the file step out (the auth dir step read that file already).
+ */
+export function savedLoginSteps(
+  env: Record<string, string | undefined>,
+  brokerUrl: string | undefined,
+  cwd: string = process.cwd(),
+  deps: SavedLoginDeps | null = source,
+  o: { fileStep?: boolean } = {},
+): SavedLoginResult {
+  const fileStep = o.fileStep !== false;
+  const none = (why: string): SavedLoginResult => ({
+    auth: null,
+    source: null,
+    skipped: [`keychain (${why})`, ...(fileStep ? [`coordinator.json (${why})`] : [])],
+  });
+  if (deps === null) return none("the saved login is off in this process");
+  if (env.VOLLEY_NO_SAVED_LOGIN !== undefined && env.VOLLEY_NO_SAVED_LOGIN !== "") {
+    return none("VOLLEY_NO_SAVED_LOGIN is set");
+  }
+  if (brokerUrl === undefined) return none("no broker URL given");
+  if (!isLocalBroker(brokerUrl)) return none(`broker ${brokerUrl} is not on this machine`);
+  const agent = agentContext(env, cwd);
+  if (agent !== null) return none(`agent context: ${agent}`);
+  const skipped: string[] = [];
+  if (deps.platform === "darwin") {
+    const password = deps.keychain();
+    if (password !== null) {
+      return {
+        auth: { username: "coordinator", password },
+        source: "keychain",
+        skipped: fileStep ? ["coordinator.json (keychain answered first)"] : [],
+      };
+    }
+    skipped.push(`keychain (no keychain item ${KEYCHAIN_SERVICE}/coordinator)`);
+  } else {
+    skipped.push("keychain (not macOS)");
+  }
+  if (!fileStep) return { auth: null, source: null, skipped };
+  const path = deps.coordinatorPath?.(env) ?? null;
+  const auth = deps.coordinatorFile(env);
+  if (auth !== null) {
+    return { auth, source: "coordinator_file", ...(path !== null ? { path } : {}), skipped };
+  }
+  skipped.push(
+    path !== null
+      ? `coordinator.json (none readable at ${path})`
+      : "coordinator.json (no auth dir found)",
+  );
+  return { auth: null, source: null, skipped };
 }
 
 /**
@@ -146,15 +230,7 @@ export function savedCoordinatorLogin(
   cwd: string = process.cwd(),
   deps: SavedLoginDeps | null = source,
 ): BrokerAuth | null {
-  if (deps === null) return null;
-  if (env.VOLLEY_NO_SAVED_LOGIN !== undefined && env.VOLLEY_NO_SAVED_LOGIN !== "") return null;
-  if (!isLocalBroker(brokerUrl)) return null;
-  if (agentContext(env, cwd) !== null) return null;
-  if (deps.platform === "darwin") {
-    const password = deps.keychain();
-    if (password !== null) return { username: "coordinator", password };
-  }
-  return deps.coordinatorFile(env);
+  return savedLoginSteps(env, brokerUrl, cwd, deps).auth;
 }
 
 /**

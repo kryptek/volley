@@ -5,12 +5,13 @@ import { join } from "node:path";
 import type { Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import type { VolleyBroker } from "volley-mcp/broker";
-import { type BrokerAuth, authFromEnv, loadConfig, readCoordinatorAuth } from "volley-mcp/config";
+import { type BrokerAuth, loadConfig, readCoordinatorAuth } from "volley-mcp/config";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { VolleyError } from "volley-mcp/errors";
 import { isValidAgentId } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
+import { resolveLogin } from "../auth/login";
 import { connectAsClient, connectToSupervisor, openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -84,9 +85,9 @@ Options:
   --lease-id <id>        Lease id (default: <holder>.<random>)
   --timeout <seconds>    Give up waiting after N seconds (exit 124); default: wait as long as it takes
   --project-dir <dir>    Where .volley/agent.json is (identity + broker credentials); default: cwd
-  --coordinator          Connect with the coordinator's credentials: VOLLEY_AUTH_*, else
-                         $VOLLEY_AUTH_DIR/coordinator.json (never .volley/agent.json). The
-                         coordinator hooks pass it.
+  --coordinator          Connect with the coordinator's login: the ladder \`volley auth status\`
+                         shows, without .volley/agent.json (VOLLEY_AUTH_*, the auth dir's
+                         coordinator.json, the saved login). The coordinator hooks pass it.
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --username <user>      Broker username (env: VOLLEY_AUTH_USERNAME)
   --password <pw>        Broker password (env: VOLLEY_AUTH_PASSWORD)
@@ -240,7 +241,12 @@ function resolve(
     brokerUrl: resolveBrokerUrl(str(values["broker-url"]), env),
     auth:
       values.coordinator === true && values.username === undefined
-        ? coordinatorAuth(values.password, env)
+        ? coordinatorAuth(
+            values.password,
+            env,
+            dir,
+            resolveBrokerUrl(str(values["broker-url"]), env),
+          )
         : resolveAuth(
             { username: str(values.username), password: str(values.password) },
             env,
@@ -252,15 +258,20 @@ function resolve(
 }
 
 /**
- * `--coordinator` credentials, resolved as the coordinator hooks resolve theirs: `VOLLEY_AUTH_*`,
- * else `coordinator.json`. A malformed file throws (a usage error) instead of going anonymous.
+ * `--coordinator` credentials, by the login ladder (auth/login.ts) without its identity file
+ * step: `VOLLEY_AUTH_*`, the auth dir's `coordinator.json`, the saved login; else, as the
+ * coordinator hooks do, `coordinator.json` in the default auth dir. A malformed file throws (a
+ * usage error) instead of going anonymous.
  */
 function coordinatorAuth(
   password: string | boolean | undefined,
   env: Record<string, string | undefined>,
+  dir: string,
+  brokerUrl: string,
 ): BrokerAuth | null {
   if (password !== undefined) throw new Error("--password requires --username");
-  return authFromEnv(env) ?? readCoordinatorAuth(env);
+  const login = resolveLogin({ env, cwd: dir, brokerUrl, identityFile: false });
+  return login.auth ?? readCoordinatorAuth(env);
 }
 
 /** The agent id from `<dir>/.volley/agent.json`, or undefined when there is no such file. */

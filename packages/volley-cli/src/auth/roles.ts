@@ -98,7 +98,10 @@ export const ROLE_ACLS: Record<VolleyRole, readonly RoleAcl[]> = {
   volleyd: [send("volley/#"), read("volley/#"), send("volley-auth/#"), read("volley-auth/#")],
   // A coordinator session runs its own MCP server whose agent id is random-suffixed
   // (`coordinator-ab12`), so `%u` cannot pin it: it is operator-level (README, "Identities").
-  coordinator: operator,
+  // Its own account-op topic (its username is the fixed `coordinator`, so `%u` names the sender,
+  // as it names `desk`) carries the repository ops, the only ops volleyd answers it there
+  // (SPEC §4.6.21): the wave owner adds a wave's repository without an admin account.
+  coordinator: [...operator, send("volley/_system/auth/ops/%u")],
   // Browser clients (volley dash, the Desk) and `steer` accounts: steer any agent and send control
   // requests (config_set included) to the daemon's mailbox. The Desk's resume probe subscribes to
   // a topic named by its own client id (nothing publishes there), granted here with `%c` so it
