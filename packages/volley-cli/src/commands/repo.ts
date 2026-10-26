@@ -4,13 +4,17 @@ import { isSlug } from "volleyd/repos";
 import { parsePositiveInt } from "../args";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { type Answer, askVolleyd } from "./peer";
+import { type Answer, type RefusalKind, askVolleyd } from "./peer";
 
 /**
  * `volley repo`: the repositories the supervisor's machines work on (SPEC §4.6.21). `add` and
- * `remove` are admin ops (sent on the admin's account-op topic, like `volley peer invite`);
- * `list` and `status` are reads any login may make.
+ * `remove` go on the sender's account-op topic: the coordinator login's or an admin's (adopting a
+ * clone with `--path` stays an admin's); `list` and `status` are reads any login may make.
  */
+
+/** `add --path`: adopting a clone at a path also trusts that folder, so it stays an admin's. */
+const PATH_ADMIN_ONLY =
+  "adopting a clone at a path (--path) is an admin's; add by slug to clone fresh";
 
 export const REPO_DEFAULTS = {
   /** `add --wait`: the longest wait for every machine to settle (a clone can take minutes). */
@@ -43,7 +47,8 @@ Options:
   --json               list, status: the answer as JSON
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
-  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME); add and remove need an admin
+  --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; else the login \`volley auth
+                       status\` shows); add and remove: the coordinator login or an admin
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
   --timeout <seconds>  How long to wait for each answer (default 30)
 `;
@@ -92,7 +97,8 @@ export interface RepoDeps {
     v: Values,
     env: Record<string, string | undefined>,
     io: IO,
-    admin: boolean,
+    admin: boolean | RefusalKind,
+    adminOnly?: string,
   ) => Promise<Answer | ExitCode>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -192,7 +198,17 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
         ...(Object.keys(paths).length > 0 ? { paths } : {}),
         ...(wave !== undefined ? { wave } : {}),
       };
-      const a = await deps.ask("volley repo add", "repo_add", fields, v, env, io, true);
+      const adopting = Object.keys(paths).length > 0;
+      const a = await deps.ask(
+        "volley repo add",
+        "repo_add",
+        fields,
+        v,
+        env,
+        io,
+        adopting ? "admin" : "repo",
+        ...(adopting ? [PATH_ADMIN_ONLY] : []),
+      );
       if (typeof a === "number") return a;
       const r = (a.result ?? {}) as {
         slug?: string;
@@ -231,7 +247,7 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
         v,
         env,
         io,
-        true,
+        "repo",
       );
       if (typeof a === "number") return a;
       const r = (a.result ?? {}) as {

@@ -117,9 +117,10 @@ Two things are yours:
 **Your coordinator name** is saved in `~/.volley/volleyd/setup.json`: `volleyd run` without
 `--owner` owns a wave by it, and the MCP server registers your session with it
 (`VOLLEY_COORDINATOR`), so your waves stay yours across session restarts. A shell on this machine
-needs nothing exported: `volley wait`, `volley sub` and `volleyd` find the coordinator login
-setup saved. On another machine, or for a remote broker, export `VOLLEY_AUTH_USERNAME` and
-`VOLLEY_AUTH_PASSWORD` in that shell.
+needs nothing exported: `volley wait`, `volley sub`, `volley repo add` and `volleyd` find the
+coordinator login setup saved, and `volley auth status` shows which login a shell uses, where it
+came from and whether the broker accepts it (never the password). `VOLLEY_AUTH_USERNAME` /
+`VOLLEY_AUTH_PASSWORD` are for another machine's broker only.
 
 ## Flags
 

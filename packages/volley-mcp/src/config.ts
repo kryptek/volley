@@ -72,11 +72,13 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
   const path = join(cwd, ".volley", "agent.json");
   if (!existsSync(path)) return null;
 
+  // Never the parser's message: it quotes the file, and the file may hold a broker password.
+  const text = readSecretText(path);
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, "utf-8"));
-  } catch (e) {
-    throw new Error(`${path}: malformed identity file — ${(e as Error).message}`);
+    raw = JSON.parse(text);
+  } catch {
+    throw new CredentialsFileError(`${path}: malformed identity file (not valid JSON)`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error(`${path}: identity file must be a JSON object`);
@@ -129,20 +131,13 @@ function readAssignedIdentity(cwd: string): AssignedIdentity | null {
     identity.claudeAccount = file.claude_account;
   }
   if (file.broker !== undefined) {
-    const broker = file.broker as Record<string, unknown> | null;
-    if (
-      typeof broker !== "object" ||
-      broker === null ||
-      Array.isArray(broker) ||
-      typeof broker.username !== "string" ||
-      broker.username.length === 0 ||
-      typeof broker.password !== "string"
-    ) {
-      throw new Error(
+    const broker = credentialsOf(file.broker);
+    if (broker === null) {
+      throw new CredentialsFileError(
         `${path}: broker must be an object with a non-empty string username and a string password`,
       );
     }
-    identity.auth = { username: broker.username, password: broker.password };
+    identity.auth = broker;
   }
   return identity;
 }
@@ -172,34 +167,74 @@ export function coordinatorAuthPath(env: Record<string, string | undefined>): st
 
 /**
  * The coordinator's credentials from `coordinatorAuthPath(env)`, or null when there is no such
- * file. An unreadable or malformed file throws (never a silent anonymous connect).
+ * file. An unreadable or malformed file throws (never a silent anonymous connect), naming the
+ * path and never a byte of the file.
  */
 export function readCoordinatorAuth(env: Record<string, string | undefined>): BrokerAuth | null {
   const path = coordinatorAuthPath(env);
   if (path === null || !existsSync(path)) return null;
-  let text: string;
-  try {
-    text = readFileSync(path, "utf-8");
-  } catch (e) {
-    throw new Error(`${path}: cannot read coordinator credentials — ${(e as Error).message}`);
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e) {
-    throw new Error(`${path}: malformed coordinator credentials — ${(e as Error).message}`);
-  }
-  const c = raw as { username?: unknown; password?: unknown } | null;
+  return parseCredentialsFile(path, readSecretText(path));
+}
+
+/** `{username, password}` when `v` is an object with a non-empty string username and a string password. */
+function credentialsOf(v: unknown): { username: string; password: string } | null {
+  const c = v as { username?: unknown; password?: unknown } | null;
   if (
     typeof c !== "object" ||
     c === null ||
+    Array.isArray(c) ||
     typeof c.username !== "string" ||
     c.username === "" ||
     typeof c.password !== "string"
   ) {
-    throw new Error(`${path}: must hold a non-empty string username and a string password`);
+    return null;
   }
   return { username: c.username, password: c.password };
+}
+
+/**
+ * A credentials file's `{username, password}` (coordinator.json, broker.json, admin.json, …). A
+ * damaged one throws a fixed sentence naming `path`: never the JSON parser's message, which quotes
+ * the text it failed on, and so a fragment of the password.
+ */
+export function parseCredentialsFile(
+  path: string,
+  text: string,
+): { username: string; password: string } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    raw = null;
+  }
+  const c = credentialsOf(raw);
+  if (c === null) {
+    throw new CredentialsFileError(
+      `${path}: not a JSON object with a string username and password`,
+    );
+  }
+  return c;
+}
+
+/**
+ * A credentials file that cannot be used (damaged, unreadable): its message names the path and
+ * never a byte of the file. A CLI reports it as an error (exit 1), not a usage mistake.
+ */
+export class CredentialsFileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CredentialsFileError";
+  }
+}
+
+/** A file that may hold a secret, as text; unreadable: `cannot read` and the errno code only. */
+export function readSecretText(path: string): string {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code ?? "unknown error";
+    throw new CredentialsFileError(`${path}: cannot read (${code})`);
+  }
 }
 
 /**

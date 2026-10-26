@@ -51,6 +51,7 @@ import {
   adminRefusal,
   authReply,
   authReplyTopic,
+  coordinatorRepoRefusal,
   deskRefusal,
   isValidCorrelationId,
   listAccounts,
@@ -12837,7 +12838,9 @@ export class Daemon {
 
   /**
    * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
-   * names: the account ops' admin check, then peers.ts (which journals them itself).
+   * names: the account ops' admin check, then peers.ts (which journals them itself). The fixed
+   * `coordinator` identity (no account entry, so no lookup) may send the repository ops instead
+   * (`coordinatorRepoRefusal`, SPEC §4.6.21); every other op of its is refused.
    */
   private async peerAdminOp(
     exec: ExecFn,
@@ -12846,8 +12849,13 @@ export class Daemon {
     progress: (row: Record<string, unknown>) => void,
   ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
-    const accounts = await listAccounts(exec);
-    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    let why: string | undefined;
+    if (sender === "coordinator") {
+      why = coordinatorRepoRefusal(sender, op, p);
+    } else {
+      const accounts = await listAccounts(exec);
+      why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    }
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
     if (op === "machine_add") return this.machineAddOp(p, sender, progress);
     if (op === "peer_doctor") return this.peerDoctor(p, sender);

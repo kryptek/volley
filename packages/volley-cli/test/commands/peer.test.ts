@@ -29,7 +29,7 @@ import {
   currentUser,
   defaultName,
   hostKeyHint,
-  localNotAdmin,
+  localRefusal,
   machineEnvelope,
   machineTopic,
   peerDoctorStamp,
@@ -1242,8 +1242,24 @@ describe("volley peer on the supervisor's machine", () => {
       const r = await run(argv, deps(fakeExec(() => ({})).exec));
       expect(r.exitCode).toBe(2);
       expect(r.stderr).toContain("admin");
-      expect(r.stderr).toContain("VOLLEY_AUTH_USERNAME");
+      // The refusal points at the command that says which login is in use, never at the env.
+      expect(r.stderr).toContain("volley auth status");
+      expect(r.stderr).not.toContain("VOLLEY_AUTH_PASSWORD");
+      expect(r.stderr).not.toContain("--password");
+      expect(r.stderr).not.toContain("c-pw");
     }
+  });
+
+  it("invite as the coordinator login is refused locally: a fixed identity, not an admin (#613)", async () => {
+    const r = await run(["invite"], deps(fakeExec(() => ({})).exec), {
+      VOLLEY_AUTH_USERNAME: "coordinator",
+      VOLLEY_AUTH_PASSWORD: "c-pw",
+    });
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toContain("coordinator is a fixed identity, not an admin account");
+    expect(r.stderr).toContain("volley auth status");
+    expect(r.stderr).not.toContain("VOLLEY_AUTH_PASSWORD");
+    expect(r.stderr).not.toContain("--password");
   });
 
   it("invite with a login this machine knows is not an admin refuses at once, without asking volleyd", async () => {
@@ -1266,10 +1282,14 @@ describe("volley peer on the supervisor's machine", () => {
     expect(r.stderr).not.toContain("did not answer");
     expect(Date.now() - started).toBeLessThan(2_000);
     const env = { VOLLEY_AUTH_DIR: home };
-    expect(localNotAdmin("coordinator", env)).toContain("fixed identity");
-    expect(localNotAdmin("boss", env)).toBeNull();
+    expect(localRefusal("admin", "coordinator", env)).toContain("fixed identity");
+    expect(localRefusal("admin", "boss", env)).toBeNull();
     // Not in this machine's registry (another install's admin): volleyd decides.
-    expect(localNotAdmin("someone-else", env)).toBeNull();
+    expect(localRefusal("admin", "someone-else", env)).toBeNull();
+    // The repository ops: the coordinator login too, never another fixed identity or role.
+    expect(localRefusal("repo", "coordinator", env)).toBeNull();
+    expect(localRefusal("repo", "desk", env)).toContain("fixed identity");
+    expect(localRefusal("repo", "steer-1", env)).toContain("steer account");
   });
 
   it("an unanswered admin op (the broker drops a non-admin's request) says it needs an admin", async () => {

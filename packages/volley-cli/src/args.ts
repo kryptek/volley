@@ -1,6 +1,8 @@
-import { type BrokerAuth, resolveBrokerAuth } from "volley-mcp/config";
+import { type BrokerAuth, CredentialsFileError } from "volley-mcp/config";
 import { isValidNamespace } from "volley-mcp/topics";
-import { type SavedLoginDeps, savedCoordinatorLogin } from "./auth/coordinator-login";
+import type { SavedLoginDeps } from "./auth/coordinator-login";
+import { resolveLogin } from "./auth/login";
+import { EXIT, type ExitCode } from "./exit-codes";
 
 export interface ParsedGlobal {
   subcommand: string | null;
@@ -132,11 +134,11 @@ export function resolveNamespace(
 }
 
 /**
- * Broker credentials: `--username`/`--password` flags win, then the `broker` block of
- * `<cwd>/.volley/agent.json`, then `VOLLEY_AUTH_USERNAME`/`VOLLEY_AUTH_PASSWORD`, then (given
- * `brokerUrl`, a broker on this machine, an operator not an agent, and the fallback turned on by
- * the entry point) the coordinator login `volley setup` saved; null means anonymous. Flags pass straight through so the caller can override an identity file; a
- * `--username` without `--password` takes the password from `VOLLEY_AUTH_PASSWORD`.
+ * Broker credentials, by the one login ladder (auth/login.ts `resolveLogin`): `--username` (with
+ * `--password` or VOLLEY_AUTH_PASSWORD), the identity file's `broker` block, VOLLEY_AUTH_*, the
+ * auth dir VOLLEY_AUTH_DIR names, then (given `brokerUrl`, a broker on this machine, an operator
+ * not an agent, and the saved login turned on by the entry point) the login `volley setup` saved;
+ * null means anonymous. `volley auth status` prints which step answered.
  */
 export function resolveAuth(
   flags: { username?: string | undefined; password?: string | undefined },
@@ -145,16 +147,10 @@ export function resolveAuth(
   brokerUrl?: string,
   saved?: SavedLoginDeps,
 ): BrokerAuth | null {
-  if (flags.username !== undefined) {
-    // `--username` + VOLLEY_AUTH_PASSWORD is the documented way to keep the password off argv.
-    const password = flags.password ?? env.VOLLEY_AUTH_PASSWORD;
-    return password !== undefined
-      ? { username: flags.username, password }
-      : { username: flags.username };
-  }
-  if (flags.password !== undefined) throw new Error("--password requires --username");
-  return (
-    resolveBrokerAuth(env, cwd) ??
-    (brokerUrl !== undefined ? savedCoordinatorLogin(env, brokerUrl, cwd, saved) : null)
-  );
+  return resolveLogin({ flags, env, cwd, brokerUrl, saved }).auth;
+}
+
+/** The exit for an error while reading arguments: 1 for an unusable credentials file, else 2. */
+export function argumentExit(e: unknown): ExitCode {
+  return e instanceof CredentialsFileError ? EXIT.ERROR : EXIT.USAGE;
 }

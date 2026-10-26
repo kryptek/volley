@@ -7,6 +7,7 @@ import {
   SIGNIN_ROLES,
   accountOp,
   authOpsTopic,
+  coordinatorRepoRefusal,
   deskBase,
   deskRefusal,
   isValidLabel,
@@ -198,6 +199,45 @@ describe("shared with volley-cli's auth-roles.ts", () => {
     expect(tokenRedeemTopic("0000abcd")).toBe("volley-auth/redeem/0000abcd");
     expect(tokenReplyTopic("0000abcd")).toBe("volley-auth/redeem/0000abcd/reply");
     expect(cli.authOpsTopic("admin-1")).toBe(authOpsTopic("admin-1"));
+  });
+});
+
+describe("coordinatorRepoRefusal (the coordinator's repository ops, SPEC §4.6.21, #613)", () => {
+  it("the coordinator may send the five repository ops", () => {
+    for (const op of ["repo_add", "repo_remove", "repo_list", "repo_status", "repo_probe"]) {
+      expect(coordinatorRepoRefusal("coordinator", op, { op, slug: "a/a" })).toBeUndefined();
+    }
+    // An empty paths object adopts nothing.
+    expect(
+      coordinatorRepoRefusal("coordinator", "repo_add", { slug: "a/a", paths: {} }),
+    ).toBeUndefined();
+  });
+
+  it("adopting a clone at a path stays an admin's", () => {
+    expect(
+      coordinatorRepoRefusal("coordinator", "repo_add", { slug: "a/a", paths: { box: "/srv/a" } }),
+    ).toBe("adopting a clone at a path (--path) is an admin's; add by slug to clone fresh");
+  });
+
+  it("every other op from the coordinator: the admin refusal", () => {
+    for (const op of [
+      "peer_invite",
+      "peer_remove",
+      "peer_doctor",
+      "peer_retarget",
+      "machine_add",
+      "archive",
+      "coordinator_restart",
+      "account_create",
+    ]) {
+      expect(coordinatorRepoRefusal("coordinator", op, { op })).toMatch(/needs the admin role$/);
+    }
+  });
+
+  it("any other sender: undefined (the admin check decides)", () => {
+    for (const sender of ["admin-1", "desk", "steer-1", "coordinator-ab12"]) {
+      expect(coordinatorRepoRefusal(sender, "peer_invite", {})).toBeUndefined();
+    }
   });
 });
 

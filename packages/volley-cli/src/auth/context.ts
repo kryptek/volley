@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { VolleyBroker } from "volley-mcp/broker";
+import { parseCredentialsFile, readSecretText } from "volley-mcp/config";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type Layout, detectLayout } from "./config";
@@ -196,14 +197,13 @@ export function writeSecret(path: string, text: string): void {
   renameSync(tmp, path);
 }
 
-/** `{username, password}` from a 0600 JSON file, or null when there is none. */
+/**
+ * `{username, password}` from a 0600 JSON file, or null when there is none. A damaged file is
+ * reported by path only (`parseCredentialsFile`), never a byte of it.
+ */
 export function readCredentials(path: string): AdminCredentials | null {
   if (!existsSync(path)) return null;
-  const c = JSON.parse(readFileSync(path, "utf-8")) as Partial<AdminCredentials> | null;
-  if (typeof c?.username !== "string" || c.username === "" || typeof c.password !== "string") {
-    throw new Error(`${path}: must hold a non-empty string username and a string password`);
-  }
-  return { username: c.username, password: c.password };
+  return parseCredentialsFile(path, readSecretText(path));
 }
 
 /** Everything one `volley auth` run shares. */

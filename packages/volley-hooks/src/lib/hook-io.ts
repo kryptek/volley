@@ -245,9 +245,10 @@ export function reportAuthFailed(
     }
   }
   const coordinator = unusable?.stateDir === undefined && t?.mode === "coordinator";
+  // Never an environment variable to set: `volley auth status` says which login is used and why.
   const hint = coordinator
-    ? "set VOLLEY_AUTH_*, or write $VOLLEY_AUTH_DIR/coordinator.json with `volley auth init --coordinator-file`"
-    : "run volley auth add-agent, or check the .volley/agent.json broker block / VOLLEY_AUTH_*";
+    ? "run `volley auth status` to see which login this session uses and why (`volley setup` writes $VOLLEY_AUTH_DIR/coordinator.json)"
+    : "run volley auth add-agent, or check the .volley/agent.json broker block (`volley auth status` shows which login is used)";
   const what =
     unusable !== null
       ? unusable.message
