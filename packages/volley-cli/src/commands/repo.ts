@@ -4,12 +4,14 @@ import { isSlug } from "volleyd/repos";
 import { parsePositiveInt } from "../args";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { renderHuman } from "../peer/doctor";
 import { type Answer, type RefusalKind, askVolleyd } from "./peer";
 
 /**
  * `volley repo`: the repositories the supervisor's machines work on (SPEC §4.6.21). `add` and
  * `remove` go on the sender's account-op topic: the coordinator login's or an admin's (adopting a
- * clone with `--path` stays an admin's); `list` and `status` are reads any login may make.
+ * clone with `--path` stays an admin's); `list`, `status` and `check` are reads any login may make
+ * (`check --fix` is an admin's).
  */
 
 /** `add --path`: adopting a clone at a path also trusts that folder, so it stays an admin's. */
@@ -21,6 +23,10 @@ export const REPO_DEFAULTS = {
   wait_timeout_s: 900,
   /** `add --wait`: how often `repo_status` is asked. */
   poll_ms: 2000,
+  /** `check`: how long to wait for the answer (each machine's doctor runs first). */
+  check_timeout_s: 300,
+  /** `check --fix`: the same, a clone included. */
+  check_fix_timeout_s: 900,
 } as const;
 
 const HELP = `Usage:
@@ -35,6 +41,12 @@ const HELP = `Usage:
                                      Remove it from every machine (or these); clones are kept
   volley repo status [<owner/name>] [--json]
                                      Where each repository stands on each machine
+  volley repo check <owner/name> [--release-branch <b>] [--machine <name>]... [--fix] [--json]
+                                     Whether it can run a wave, on every machine that holds it:
+                                     the repository on GitHub, then each machine's fresh doctor
+                                     (clone, push access, git identity, worktree root,
+                                     toolchain, trust), one line per check with the fix;
+                                     exit 1 unless every machine asked is ready
 
 Options:
   --machine <name>     A machine by name (repeatable; default: all of them)
@@ -44,13 +56,16 @@ Options:
   --for-wave <wave>    add: the registration is for that wave only; cleaning the wave up removes
                        it (and the clones volleyd made for it); without it the repository is
                        yours and cleanup never removes it
-  --json               list, status: the answer as JSON
+  --release-branch <b> check: also check the wave's release branch (on origin, its review rules)
+  --fix                check: apply the safe fixes on each paired machine (an admin op)
+  --json               list, status, check: the answer as JSON
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>     volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
   --username <user>    Broker username (env: VOLLEY_AUTH_USERNAME; else the login \`volley auth
                        status\` shows); add and remove: the coordinator login or an admin
   --password <pw>      Broker password (env: VOLLEY_AUTH_PASSWORD)
-  --timeout <seconds>  How long to wait for each answer (default 30)
+  --timeout <seconds>  How long to wait for each answer (default 30; check ${REPO_DEFAULTS.check_timeout_s},
+                       check --fix ${REPO_DEFAULTS.check_fix_timeout_s})
 `;
 
 const OPTIONS = {
@@ -59,6 +74,8 @@ const OPTIONS = {
   wait: { type: "boolean" },
   "wait-timeout": { type: "string" },
   "for-wave": { type: "string" },
+  "release-branch": { type: "string" },
+  fix: { type: "boolean" },
   json: { type: "boolean" },
   timeout: { type: "string" },
   "broker-url": { type: "string" },
@@ -70,12 +87,14 @@ const OPTIONS = {
 
 /** Flags only some verbs take. */
 const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
-  machine: ["add", "remove"],
+  machine: ["add", "remove", "check"],
   path: ["add"],
   wait: ["add"],
   "wait-timeout": ["add"],
   "for-wave": ["add"],
-  json: ["list", "status"],
+  "release-branch": ["check"],
+  fix: ["check"],
+  json: ["list", "status", "check"],
 };
 
 type Values = ReturnType<
@@ -151,7 +170,7 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
     io.stderr(`volley repo ${verb}: ${msg}\n`);
     return EXIT.USAGE;
   };
-  if (!["add", "list", "remove", "status"].includes(verb)) {
+  if (!["add", "list", "remove", "status", "check"].includes(verb)) {
     io.stderr(`volley repo: unknown verb '${verb}'\n\n${HELP}`);
     return EXIT.USAGE;
   }
@@ -217,14 +236,16 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
         machines?: string[];
         status?: string[];
         ci?: { workflows?: number };
+        checks?: CheckLine[];
       };
       const added = r.slug ?? slug;
       io.stdout(
         `Added ${added}${r.visibility !== undefined ? ` (${r.visibility})` : ""} to ${(r.machines ?? []).join(", ")}.\n`,
       );
-      // Its GitHub Actions workflows, when volleyd read them (SPEC §4.6.8's CI mode, at a wave).
+      // The repository half of `check` (#610); an older volleyd's workflows count instead.
       const workflows = r.ci?.workflows;
-      if (workflows === 0)
+      if (r.checks !== undefined) io.stdout(renderHuman(r.checks));
+      else if (workflows === 0)
         io.stdout(
           "CI: none — no GitHub Actions workflows; in a wave the two reviewers and the gate are the check\n",
         );
@@ -232,10 +253,69 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
         io.stdout(`CI: ${workflows} workflow${workflows === 1 ? "" : "s"}\n`);
       if (v.wait !== true) {
         for (const l of r.status ?? []) io.stdout(`  ${l}\n`);
-        io.stdout(`Follow it with: volley repo status ${added}\n`);
+        io.stdout(`Follow it with: volley repo check ${added}\n`);
         return EXIT.OK;
       }
-      return waitSettled(added, v, env, io, deps, waitMs);
+      const settled = await waitSettled(added, v, env, io, deps, waitMs);
+      if (settled !== EXIT.OK && settled !== EXIT.ERROR) return settled;
+      // Every machine settled: end on whether a wave can run, and where (D6).
+      const c = await deps.ask(
+        "volley repo add",
+        "repo_check",
+        { slug: added },
+        { ...v, timeout: v.timeout ?? String(REPO_DEFAULTS.check_timeout_s) },
+        env,
+        io,
+        false,
+      );
+      if (typeof c === "number") return settled;
+      const answer = asCheck(c.result);
+      if (answer === null) return settled;
+      io.stdout(`\n${renderMachines(answer, deps.now())}`);
+      // The wait's verdict stands (a repository a machine cannot use ended it `blocked` already).
+      return settled;
+    }
+    case "check": {
+      const slug = slugArg(true);
+      if (typeof slug !== "string") return slug ?? EXIT.USAGE;
+      const fix = v.fix === true;
+      const branch = v["release-branch"];
+      if (branch !== undefined && (branch === "" || branch.startsWith("-")))
+        return usage(`--release-branch "${branch}" is not a branch name`);
+      const timeout =
+        v.timeout ??
+        String(fix ? REPO_DEFAULTS.check_fix_timeout_s : REPO_DEFAULTS.check_timeout_s);
+      const a = await deps.ask(
+        "volley repo check",
+        "repo_check",
+        {
+          slug,
+          ...(branch !== undefined ? { release_branch: branch } : {}),
+          ...machines,
+          ...(fix ? { fix: true } : {}),
+        },
+        { ...v, timeout },
+        env,
+        io,
+        fix,
+      );
+      if (typeof a === "number") return a;
+      const answer = asCheck(a.result);
+      if (answer === null) {
+        io.stderr(
+          "volley repo check: volleyd's answer has no check (is it older than this CLI?)\n",
+        );
+        return EXIT.ERROR;
+      }
+      if (v.json === true) {
+        io.stdout(`${JSON.stringify(a.result, null, 2)}\n`);
+        return checkExit(answer);
+      }
+      const head = `${answer.slug}${answer.visibility !== undefined ? ` (${answer.visibility})` : ""}`;
+      io.stdout(
+        `${head}\n${renderHuman(answer.repository)}\n${renderMachines(answer, deps.now())}`,
+      );
+      return checkExit(answer);
     }
     case "remove": {
       const slug = slugArg(true);
@@ -315,6 +395,85 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
       return EXIT.OK;
     }
   }
+}
+
+/** One check line as volleyd sends it (the doctor's report shape). */
+interface CheckLine {
+  id: string;
+  ok: boolean;
+  severity: "block" | "warn";
+  detail: string;
+  repo?: string;
+  fix?: string;
+}
+
+/** One machine's block of a `repo_check` answer. */
+interface CheckBlock {
+  checks: CheckLine[];
+  ready: boolean;
+  state: string;
+  reasons: string[];
+  from: "doctor" | "record";
+  doctor_at: string | null;
+  note?: string;
+}
+
+/** `repo_check`'s answer (SPEC §4.6.21). */
+interface CheckAnswer {
+  slug: string;
+  visibility?: string;
+  repository: CheckLine[];
+  machines: Record<string, CheckBlock>;
+  ready_on: string[];
+  summary: string;
+}
+
+/** A `repo_check` result, or null when it is not one (an older volleyd's answer). */
+function asCheck(v: unknown): CheckAnswer | null {
+  const r = v as Partial<CheckAnswer> | undefined;
+  return r !== undefined &&
+    Array.isArray(r.repository) &&
+    typeof r.machines === "object" &&
+    r.machines !== null &&
+    typeof r.summary === "string"
+    ? (r as CheckAnswer)
+    : null;
+}
+
+/** OK when the repository passes its block lines and every machine asked is ready. */
+function checkExit(a: CheckAnswer): ExitCode {
+  const names = Object.keys(a.machines);
+  const repoOk = a.repository.every((c) => c.ok || c.severity !== "block");
+  return repoOk && names.length > 0 && names.every((n) => a.machines[n]?.ready === true)
+    ? EXIT.OK
+    : EXIT.ERROR;
+}
+
+function ago(iso: string, now: number): string {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (s < 120) return `${s} s ago`;
+  const min = Math.floor(s / 60);
+  return min < 120 ? `${min} min ago` : `${Math.floor(min / 60)} h ago`;
+}
+
+/** Each machine's block (its header, its lines without the repository each one names), then the closing line. */
+function renderMachines(a: CheckAnswer, now: number): string {
+  const out: string[] = [];
+  for (const [name, b] of Object.entries(a.machines)) {
+    const when =
+      b.doctor_at === null
+        ? "no machine record"
+        : b.from === "doctor"
+          ? `doctor ${ago(b.doctor_at, now)}`
+          : `last report ${ago(b.doctor_at, now)}`;
+    const head = `${name} (${when}${b.note !== undefined ? `; ${b.note}` : ""})\n`;
+    const lines = renderHuman(b.checks.map(({ repo: _repo, ...c }) => c));
+    // Not ready and no failing line says why: readiness' own reasons (no record, the PATH probe).
+    const failing = b.checks.some((c) => !c.ok);
+    const why = !b.ready && !failing ? b.reasons.map((r) => `  ${r}\n`).join("") : "";
+    out.push(`${head}${lines}${why}`);
+  }
+  return `${out.join("\n")}\n${a.summary}\n`;
 }
 
 function printStatus(r: RepoStatus, io: IO): void {

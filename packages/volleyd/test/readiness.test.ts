@@ -252,6 +252,31 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     expect(r.repos["someone/fork"]).toMatchObject({ state: "ready", path: "/srv/repo" });
   });
 
+  it("#610: no git commit identity is not ready, naming the fix (a warn check, yet readiness needs it)", () => {
+    const checks = [
+      { id: "repo.clone", ok: true, severity: "block" as const, detail: "clone at /srv/repo" },
+      {
+        id: "git.identity",
+        ok: false,
+        severity: "warn" as const,
+        detail: "git has no commit identity (user.name/user.email)",
+      },
+    ];
+    const r = readiness(input({ record: record({ checks }) }));
+    expect(r.ready).toBe(false);
+    expect(r.reasons).toEqual([
+      "git: no commit identity on box-a (volley setup --peer --step signin)",
+    ]);
+    const ok = readiness(
+      input({
+        record: record({
+          checks: [{ id: "git.identity", ok: true, severity: "warn", detail: "git commits as x" }],
+        }),
+      }),
+    );
+    expect(ok.ready).toBe(true);
+  });
+
   it("carries requirements (bun, sharing), heavy and usage through", () => {
     const r = readiness(
       input({
@@ -391,6 +416,38 @@ describe("readiness per (machine, repository) (#436)", () => {
       state: "blocked",
       reasons: ["repo.fetch: git fetch failed", "node older than required (needed by a/a)"],
     });
+  });
+
+  it("#610: a failing repo.push or repo.worktrees blocks that repository only; the machine stays ready", () => {
+    const rec = many(
+      [repo("a/a"), repo("b/b")],
+      [
+        {
+          id: "repo.push",
+          ok: false,
+          severity: "block",
+          repo: "a/a",
+          detail: "octocat cannot push to a/a (permission READ)",
+        },
+        {
+          id: "repo.worktrees",
+          ok: false,
+          severity: "block",
+          repo: "b/b",
+          detail: "cannot write /path/to/wt (nor create it)",
+        },
+      ],
+    );
+    const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b"]) }));
+    expect(r.repos["a/a"]).toMatchObject({
+      state: "blocked",
+      reasons: ["repo.push: octocat cannot push to a/a (permission READ)"],
+    });
+    expect(r.repos["b/b"]).toMatchObject({
+      state: "blocked",
+      reasons: ["repo.worktrees: cannot write /path/to/wt (nor create it)"],
+    });
+    expect(r.ready).toBe(true);
   });
 
   it("an older peer's legacy repo maps to its slug through its origin", () => {

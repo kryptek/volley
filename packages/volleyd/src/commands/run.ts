@@ -120,6 +120,8 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     }
     const state = res.result as WaveState;
     const warnings = (res.warnings ?? []).map((w) => `warning: ${w}\n`).join("");
+    // What the repository check found without refusing (SPEC §4.6.21): under the placement line.
+    const checked = (res.repo_check?.lines ?? []).map((l) => `repo check: ${l}\n`).join("");
     // Where its auto tasks would go if admitted now (the daemon places each at admission). A later
     // version without placement: keeps the wave's own, which this parse cannot know: no preview.
     const preview = places(wave) && (res.plan === undefined || placementFromFile);
@@ -139,12 +141,12 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
         : planLines(wave, await waveTree(state.repo, wave.release_branch));
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
-      io.stderr(warnings);
+      io.stderr(`${warnings}${checked}`);
     } else if (res.plan !== undefined) {
       // A later version without placement: keeps the wave's own (SPEC §4.6.15): no default line.
       const placed = placementFromFile ? placementLine : "";
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${repoLine}${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${plan}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${repoLine}${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${checked}${plan}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = fromSetup
@@ -153,7 +155,7 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
           ? " (auto)"
           : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${repoLine}${warnings}${playbookLine}${placementLine}${placement}${plan}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${repoLine}${warnings}${playbookLine}${placementLine}${placement}${checked}${plan}${formatWave(state)}`,
       );
     }
     return EXIT.OK;

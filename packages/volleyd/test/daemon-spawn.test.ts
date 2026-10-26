@@ -826,13 +826,16 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         payload: { tasks: TaskState[] };
       }
     ).payload;
-  const submit = async (wave: string, head: string, tasks: string, at = repo) => {
+  const runFile = async (wave: string, head: string, tasks: string, at = repo) => {
     const file = join(env.home, `${wave}.yaml`);
     writeFileSync(
       file,
       `wave: ${wave}\nrepo: ${at}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\n${head}tasks:\n${tasks}`,
     );
-    const r = await runCli(["run", file], env.env);
+    return runCli(["run", file], env.env);
+  };
+  const submit = async (wave: string, head: string, tasks: string, at = repo) => {
+    const r = await runFile(wave, head, tasks, at);
     expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     return r.stdout;
@@ -1229,31 +1232,16 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       });
     });
 
-    it("a box without a clone of the wave's slug is skipped by placement, with the reason", async () => {
+    it("a box without a clone of the wave's slug: a wave only it could run is refused at submit, with the fix (#610)", async () => {
       localClaude = false;
       await setup({ repos: true });
       await beat({ repos: (boxRepos ?? []).filter((r) => r.slug === "a/a") });
-      const out = await submit("w2", "", "  T1: { issue: 42, host: auto }\n", repo2);
-      // run's preview judges the box from its record: no verdict judges b/b before it runs.
-      expect(out).toContain(
-        "T1 → waiting (no eligible machine: box: no ready clone of b/b (absent: no clone of b/b on box))",
+      const r = await runFile("w2", "", "  T1: { issue: 42, host: auto }\n", repo2);
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stderr).toContain(
+        "repo: no machine that could run this wave is ready for b/b: box: absent (no clone of b/b on box); fix: volley repo check b/b --fix, or volley repo add b/b --machine box",
       );
-      await tick();
-      await eventually(async () => {
-        await tick(0);
-        return (await verdict("box"))?.payload.repos["b/b"] !== undefined;
-      });
-      expect((await verdict("box"))?.payload).toMatchObject({
-        ready: true,
-        eligible: true,
-        repos: { "b/b": { state: "absent", reasons: ["no clone of b/b on box"] } },
-      });
-      await tick();
-      const t1 = (await state("w2")).tasks.find((t) => t.id === "T1");
-      expect(t1?.why_waiting).toBe(
-        "no eligible machine: box: no ready clone of b/b (absent: no clone of b/b on box)",
-      );
-      expect(journal("w2").some((e) => e.type === "task_placed")).toBe(false);
+      expect(existsSync(join(env.home, "waves", "w2", "journal.jsonl"))).toBe(false);
     });
 
     it("remote_repo_missing names the slug and the two ways to add it; add runs repo_add for that machine, then retries", async () => {
@@ -1454,7 +1442,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       expect((await state("w1")).tasks.find((t) => t.id === "T1")?.placement?.host).toBe("box");
     });
 
-    it("nowhere else to go, or pinned by the wave file: remote_repo_missing opens as before", async () => {
+    it("nowhere else to go: remote_repo_missing opens as before; pinned by the wave file to a box with no clone: refused at submit (#610)", async () => {
       localClaude = false;
       await setup({
         repos: true,
@@ -1464,7 +1452,12 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         },
       });
       await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n");
-      await submit("w2", "", "  T1: { issue: 42, host: box }\n");
+      // Its probe found no clone at the spawn path: admission refuses the pinned wave, naming it.
+      const pinned = await runFile("w2", "", "  T1: { issue: 42, host: box }\n");
+      expect(pinned.exitCode).not.toBe(0);
+      expect(pinned.stderr).toMatch(
+        /repo: a task is pinned to box, which is not ready for a\/a: box: blocked \(no clone at .+ on dev@box/,
+      );
       await tick();
       const opened = (wave: string) =>
         journal(wave).find(
@@ -1472,17 +1465,10 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         );
       await eventually(async () => {
         await tick(0);
-        return opened("w1") !== undefined && opened("w2") !== undefined;
+        return opened("w1") !== undefined;
       });
       expect(opened("w1")?.data.question).toMatch(/; no other machine can take it now \(.+\)\?$/);
-      expect(opened("w2")?.data.question).toBe(
-        "Needs you: box has no clone of a/a. Add it to box (Settings → Repositories, or volley repo add a/a --machine box)?",
-      );
       expect(journal("w1").some((e) => e.type === "task_placed" && e.data.by === "fallback")).toBe(
-        false,
-      );
-      // Pinned by the wave file: placed there once, never moved.
-      expect(journal("w2").some((e) => e.type === "task_placed" && e.data.by !== "wave_file")).toBe(
         false,
       );
     });

@@ -216,6 +216,8 @@ function repoJson(r: Repo): Json {
     isPrivate: r.visibility !== "PUBLIC",
     defaultBranchRef: { name: r.defaultBranch },
     sshUrl: `git@github.com:${r.slug}.git`,
+    // The sim user owns every repository: the doctor's repo.push passes (#610).
+    viewerPermission: "ADMIN",
   };
 }
 
@@ -435,6 +437,9 @@ const COMMANDS: Record<string, Spec> = {
                 ],
               },
         );
+      // No classic protection (repo_check's review read, #610): gh's 404, as GitHub answers it.
+      if (/^repos\/[^/]+\/[^/]+\/branches\/.+\/protection$/.test(endpoint))
+        return fail("gh: Branch not protected (HTTP 404)\n");
       const branch = /^repos\/[^/]+\/[^/]+\/branches\/(.+)$/.exec(endpoint);
       if (branch !== null) return reply({ name: branch[1], protected: false });
       if (/^repos\/[^/]+\/[^/]+\/rules\/branches\/.+$/.test(endpoint)) return reply([]);
