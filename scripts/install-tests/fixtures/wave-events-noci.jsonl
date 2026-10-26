@@ -1,0 +1,7 @@
+{"seq":1,"type":"wave_submitted","data":{"wave":"hello-noci"}}
+{"seq":2,"type":"ci_mode_detected","data":{"mode":"none","workflows":0,"required_checks":[],"source":"gh"}}
+{"seq":3,"type":"task_admitted","task":"T1","data":{"task":"T1"}}
+{"seq":4,"type":"agent_spawned","task":"T1","data":{"task":"T1","role":"implementer"}}
+{"seq":5,"type":"stage_entered","task":"T1","data":{"task":"T1","stage":"done"}}
+{"seq":6,"type":"decision_opened","data":{"kind":"wave_complete","task":null}}
+{"seq":7,"type":"wave_complete","data":{"done":["T1"],"cancelled":[]}}

@@ -38,6 +38,14 @@ describe("role definitions", () => {
     });
   });
 
+  it("the coordinator sends on its own account-op topic: the repository ops (#613)", () => {
+    expect(ROLE_ACLS.coordinator).toContainEqual({
+      acltype: "publishClientSend",
+      topic: "volley/_system/auth/ops/%u",
+      allow: true,
+    });
+  });
+
   it("examples/mosquitto-auth/roles.json is these definitions", async () => {
     const { readFileSync } = await import("node:fs");
     const file = new URL("../../../../examples/mosquitto-auth/roles.json", import.meta.url);
@@ -130,9 +138,12 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish("steer-test", "volley/_system/auth/ops/admin-test")).toBe(false);
     expect(fake.canPublish("desk", "volley/_system/auth/ops/desk")).toBe(true);
     expect(fake.canPublish("desk", "volley/_system/auth/ops/steer-test")).toBe(false);
-    for (const u of ["watch-test", "peer-test", "coordinator", X]) {
+    for (const u of ["watch-test", "peer-test", X]) {
       expect(fake.canPublish(u, `volley/_system/auth/ops/${u}`)).toBe(false);
     }
+    // The coordinator writes its own (volleyd answers only the repository ops there), no other.
+    expect(fake.canPublish("coordinator", "volley/_system/auth/ops/coordinator")).toBe(true);
+    expect(fake.canPublish("coordinator", "volley/_system/auth/ops/admin-test")).toBe(false);
     expect(fake.canPublish("supervisor-test", "volley/_system/auth/ops/supervisor-test")).toBe(
       false,
     );

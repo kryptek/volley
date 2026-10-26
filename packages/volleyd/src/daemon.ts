@@ -51,10 +51,12 @@ import {
   adminRefusal,
   authReply,
   authReplyTopic,
+  coordinatorRepoRefusal,
   deskRefusal,
   isValidCorrelationId,
   listAccounts,
   redeemToken,
+  revokeAccount,
   tokenReplyTopic,
 } from "./accounts";
 import { type ActivityEvidence, newestWrite } from "./activity-evidence";
@@ -147,14 +149,16 @@ import {
   runIssueActions,
   taskIssues,
 } from "./autopilot/issues";
+import { mergeRelease } from "./autopilot/merge";
 import {
   DEFAULT_PLAYBOOK,
   PlaybookError,
   type PlaybookStage,
   type WavePlaybook,
-  allVerified,
+  nextVersion,
   playbookPath,
-  releaseGoInput,
+  releaseDate,
+  substituteStage,
   wavePlaybook,
 } from "./autopilot/playbook";
 import {
@@ -168,9 +172,11 @@ import {
   RELEASE_TASK,
   ReleaseTrain,
   STAGE_STEER_REASON,
+  type ShipTarget,
   releaseView,
   releaseWaveTask,
   renderStageMd,
+  shipTarget,
   stageOf,
 } from "./autopilot/release-train";
 import {
@@ -184,7 +190,7 @@ import {
   requestOf,
 } from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
-import { type CiModeResult, readCiFacts, resolveCiMode } from "./ci-mode";
+import { type CiModeResult, resolveCiMode } from "./ci-mode";
 import { InFlightLedger } from "./claude/in-flight";
 import { lastAccountMove, moveAgentAccount, moveRespawn } from "./claude/move";
 import {
@@ -238,6 +244,16 @@ import {
   waveAccount,
   waveAccountMoves,
 } from "./claude/usage";
+import {
+  type CleanupRun,
+  type LedgerOptions,
+  cleanedEvent,
+  summaryLine as cleanupSummary,
+  keptUnreachable,
+  ledgerOf,
+  runCleanup,
+  withTaskRuns,
+} from "./commands/cleanup";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { ConfigStore, resolveLocalTerminal } from "./config-store";
 import {
@@ -318,12 +334,14 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import {
+  type ReleaseToken,
   SERVICE_LABEL,
   TMUX_SIZE,
   isRepoAdd,
   isRepoAddPath,
   mintConsentToken,
   mintModelSwitchToken,
+  mintReleaseToken,
   mintWakeToken,
 } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
@@ -333,11 +351,13 @@ import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import { LocalTmuxHost } from "./hosts/local-tmux";
 import {
+  type CloneProbe,
   type RemoteHost,
   type RemoteHostSpec,
   type RepoRemoteHost,
   type SlugTarget,
   SshTmuxHost,
+  probeLocalClone,
   resolveRemoteHost,
   sessionName,
 } from "./hosts/ssh-tmux";
@@ -349,6 +369,7 @@ import {
   tunnelKey,
 } from "./hosts/tunnel";
 import { type AgentCredentials, type CredentialStore, agentIdFor } from "./identity";
+import { makeBufferIO } from "./io";
 import { Journal, WaveLog, writeFileAtomic } from "./journal";
 import {
   HOLDER_GONE,
@@ -428,25 +449,47 @@ import {
   readiness,
   readinessKey,
   readinessTopic,
+  repoVerdictFromRecord,
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
+import {
+  type Candidate,
+  type MachineBlock,
+  type Refusal,
+  type RepoFacts,
+  admissionRefusals,
+  closingLine,
+  factsUnknown,
+  lacksIdentity,
+  machineBlock,
+  readRepoCheck,
+  readRepoFacts,
+  repositoryChecks,
+} from "./repo-check";
 import { readRepoView, readSlugView, viewFromSlug } from "./repo-visibility";
 import {
   type AddStep,
+  type MachineFacts,
   type RepoMachines,
   addPlan,
+  adoptedMaps,
+  adoptedPath,
   assignedSlugs,
   cloneFor,
   ghRepoContext,
+  holdersOf,
   homeFromClones,
   isSlug,
   legacyOrigin,
+  managedClonePath,
+  namedSlug,
   pendingRepoRuns,
   remoteRepoRoot,
   repoStateLine,
   reportedClone,
   sameSlug,
   slugKey,
+  trimPath,
   unassignedSlugs,
   waveSlug,
   withMachines,
@@ -861,6 +904,8 @@ interface SpawnPipelineOptions {
   start?: SpawnStart;
   /** The release role's playbook stage (SPEC §4.6.19): spawned under the `_release` pseudo task. */
   stage?: PlaybookStage;
+  /** A ship stage's target (SPEC §4.6.19): its brief reads the facts at the merge commit. */
+  ship?: ShipTarget;
   files?: Record<string, string>;
   /** A merge-mode rebase step (`branch_update: merge`): the role gets the merge brief. */
   branch_update?: "merge";
@@ -969,6 +1014,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "repo_list",
   "repo_status",
   "repo_probe",
+  "repo_check",
   // An admin archives any ended wave (SPEC §4.6.20), whoever owns it.
   "archive",
 ]);
@@ -1377,12 +1423,25 @@ export class Daemon {
   ]);
   /** Archived waves (archive.ts): out of the live set, kept for `status --all` and the index. */
   private readonly archived = new Map<WaveId, WaveLog>();
+  /** Waves whose cleanup runs now (SPEC §4.6.26): one run per wave at a time. */
+  private readonly cleaning = new Set<WaveId>();
+  /**
+   * Per wave, what the auto-cleanup did (read from the journal once): the tasks it cleaned, and
+   * whether the whole-wave pass ran since the wave ended. `retryAt`: a run that kept an
+   * unreachable machine's items runs again after it.
+   */
+  private readonly cleanupDone = new Map<
+    WaveId,
+    { tasks: Set<string>; whole: boolean; retryAt: number }
+  >();
   /** When each legacy ended wave ended, read once from its journal (records before `ended_at`). */
   private readonly legacyEndedAt = new Map<WaveId, string | null>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
   /** The last "release playbook not run" reason logged per wave, so a tick does not repeat it. */
   private readonly playbookNotRun = new Map<WaveId, string>();
+  /** Ship stages whose default branch is being fetched before their spawn (`<wave>/_release/release`). */
+  private readonly shipFetching = new Set<string>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
   private readonly issueFiles = new Map<WaveId, Record<TaskId, string[]>>();
   private readonly config: ConfigStore;
@@ -1674,10 +1733,30 @@ export class Daemon {
   private readonly afterDoctor = new Map<string, Set<string>>();
   /** repo_add's runs and sign-in trust writes in flight (`stop` waits for them). */
   private readonly repoWork = new Set<Promise<void>>();
-  /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
+  /**
+   * Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name, with what
+   * the clone probe found at each wanted repository's spawn path (`spawnPaths`, by slug) in the
+   * same pass (#608).
+   */
   private readonly probes = new Map<
     string,
-    { path: PathProbe | null; error?: string; at: number; running: boolean }
+    {
+      path: PathProbe | null;
+      error?: string;
+      at: number;
+      running: boolean;
+      clones?: Record<string, CloneProbe | { error: string }>;
+      spawnPaths?: Record<string, string>;
+    }
+  >();
+  /**
+   * The (machine, repository) pairs a spawn found no clone at (`REMOTE_REPO_MISSING`, #608): the
+   * repository is `blocked` there with `why` until a probe finds the clone at `path` (the spawn
+   * path it failed at) or the spawn path changes.
+   */
+  private readonly spawnBlocked = new Map<
+    string,
+    Map<string, { why: string; at: number; path: string }>
   >();
   /** Each machine's verdict as last published (`key`: readinessKey) and when. */
   private readonly published = new Map<string, { key: string; at: number }>();
@@ -3289,8 +3368,9 @@ export class Daemon {
       await this.holdPass(wave);
       await this.churnPass(wave);
       await this.completeIfSettled(wave);
-      await this.releaseGoIfVerified(wave);
+      await this.releaseAdvance(wave);
     }
+    this.cleanupPass();
     await this.archivePass();
     let live = this.ceilingCount().live;
     for (const [wave, log] of this.waves) {
@@ -3353,7 +3433,6 @@ export class Daemon {
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
-      for (const wave of this.waves.keys()) await this.releaseAdvance(wave);
       for (const wave of this.waves.keys()) {
         if (this.waves.get(wave)?.record.state?.status !== "running") {
           // A wave that does not tick never ends its merge turn: it gives the branch up.
@@ -3680,8 +3759,18 @@ export class Daemon {
     });
   }
 
-  /** Journal an owner's re-placement (`by: decision`, `from` the machine it leaves). */
-  private async rePlace(wave: WaveId, task: TaskId, p: Placement, from: string): Promise<void> {
+  /**
+   * Journal a re-placement, `from` the machine it leaves: an owner's (`by: decision`), or the
+   * supervisor's off a machine that could not spawn it (`by: fallback`, with `why`).
+   */
+  private async rePlace(
+    wave: WaveId,
+    task: TaskId,
+    p: Placement,
+    from: string,
+    by: "decision" | "fallback" = "decision",
+    why?: string,
+  ): Promise<void> {
     await this.append(wave, {
       type: "task_placed",
       task,
@@ -3690,8 +3779,9 @@ export class Daemon {
         host: p.host,
         score: p.score,
         candidates: p.candidates,
-        by: "decision",
+        by,
         from,
+        ...(why !== undefined ? { why: clipText(why, 200) } : {}),
         ...(p.local ? { local: true } : {}),
       },
     });
@@ -4204,6 +4294,10 @@ export class Daemon {
     const train = this.releasePlaybook(wave);
     if (typeof train === "object" && train !== null) {
       const { path, sha256, playbook } = train;
+      // The release's version, day and default branch (read-only); held when a playbook that
+      // needs them cannot have them yet (the next tick reads again).
+      const release = await this.releaseVersion(wave, playbook.stages);
+      if (release === null) return;
       // The release PR's Closes lines (#416): the done tasks' issues, as the digest lists them.
       const { closes } = digestOf(
         this.journalEvents(wave),
@@ -4213,9 +4307,17 @@ export class Daemon {
       );
       await this.append(wave, {
         type: "release_started",
-        data: { done, cancelled, closes, playbook: { path, sha256, stages: playbook.stages } },
+        data: {
+          done,
+          cancelled,
+          closes,
+          ...release,
+          playbook: { path, sha256, stages: playbook.stages },
+        },
       });
-      this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
+      this.log(
+        `wave ${wave} releasing${release.version !== undefined ? ` v${release.version}` : ""}: ${playbook.stages.map((s) => s.name).join(", ")}`,
+      );
       await this.releaseAdvance(wave);
       return;
     }
@@ -4261,41 +4363,95 @@ export class Daemon {
   }
 
   /**
-   * Once every stage of a releasing wave is verified, ask the owner `release_go` (owner-only,
-   * wave-level), unless one is open already. After a `hold` it is asked again (`class: held`), so
-   * the Desk keeps showing it.
+   * The release's version, day and default branch at `release_started` (SPEC §4.6.19), read-only:
+   * the newest `v*` tag bumped by the release branch's change fragments (`nextVersion`; the wave
+   * file's `release_version:` overrides), the supervisor's UTC day, and the repository's default
+   * branch. What cannot be read is left out, unless the playbook needs it (a variable, the
+   * release PR or a ship stage): then null, logged once, and the next tick reads again.
    */
-  private async releaseGoIfVerified(wave: WaveId): Promise<void> {
-    const log = this.waves.get(wave);
-    const state = log?.record.state;
-    if (log === undefined || state?.status !== "releasing" || state.release === undefined) return;
-    if (!allVerified(state.release)) return;
-    if (openDecisions(log.record).some((d) => d.kind === "release_go")) return;
-    const asked = Object.values(log.record.decisions).filter((d) => d.kind === "release_go");
-    // Answered go, but release_done was not journaled (it failed): journal it now.
-    const go = asked.find((d) => d.resolved?.answer.trim().toLowerCase() === "go");
-    if (go?.resolved !== undefined) {
-      await this.append(wave, {
-        type: "release_done",
-        data: { by: go.resolved.by, decision_id: go.decision_id },
-      });
-      return;
-    }
-    const evidence = new Map<string, string>();
-    for (const e of log.journal.readAll()) {
-      if (e.type === "release_stage_verified" && typeof e.data.evidence === "string")
-        evidence.set(String(e.data.stage), e.data.evidence);
-    }
-    const { input, stages } = releaseGoInput(wave, state.release, evidence);
-    const id =
-      asked.length === 0
-        ? waveDecisionId("release_go", wave)
-        : waveDecisionId("release_go", wave, String(asked.length));
-    await this.openDecisionNow(
-      wave,
-      { ...input, id },
-      { stages, ...(asked.length > 0 ? { class: "held" } : {}) },
+  private async releaseVersion(
+    wave: WaveId,
+    stages: readonly PlaybookStage[],
+  ): Promise<{ version?: string; date: string; default_branch?: string } | null> {
+    const rec = this.waves.get(wave)?.record;
+    const plan = rec?.wave;
+    if (plan == null || rec?.state == null) return null;
+    const needs =
+      /\{\{/.test(JSON.stringify(stages)) ||
+      stages.some((s) => s.phase === "ship" || s.verify?.release_pr === true);
+    const gh = this.ghFor(plan.repo);
+    const io: ExecFn = (argv, opts = {}) =>
+      gh.exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, cwd: gh.cwd, ...opts });
+    const problems: string[] = [];
+    const repoView = await io(["gh", "repo", "view", "--json", "defaultBranchRef"]).catch(
+      () => null,
     );
+    let defaultBranch: string | undefined;
+    try {
+      const name = (JSON.parse(repoView?.stdout ?? "") as { defaultBranchRef?: { name?: unknown } })
+        .defaultBranchRef?.name;
+      if (repoView?.code === 0 && typeof name === "string" && name !== "") defaultBranch = name;
+    } catch {}
+    if (defaultBranch === undefined) problems.push("the default branch (gh repo view)");
+    const tagsR = await io([
+      "gh",
+      "api",
+      "repos/{owner}/{repo}/git/matching-refs/tags/v",
+      "--paginate",
+      "--slurp",
+    ]).catch(() => null);
+    let tags: string[] | undefined;
+    try {
+      const pages: unknown = tagsR?.code === 0 ? JSON.parse(tagsR.stdout) : undefined;
+      if (Array.isArray(pages))
+        tags = (pages.flat() as { ref?: unknown }[])
+          .map((r) => r?.ref)
+          .filter((r): r is string => typeof r === "string");
+    } catch {}
+    if (tags === undefined) problems.push("the tags (gh api matching-refs)");
+    let fragments: string[] | undefined;
+    if (gh.clone) {
+      const git = lockFetches(this.host.exec, LOCAL_HOST, gh.cwd);
+      await git(["git", "-C", gh.cwd, "fetch", "--quiet", "origin", rec.state.release_branch], {
+        timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms,
+      }).catch(() => null);
+      const ls = await this.host
+        .exec(
+          [
+            "git",
+            "-C",
+            gh.cwd,
+            "ls-tree",
+            "--name-only",
+            `refs/remotes/origin/${rec.state.release_branch}`,
+            "changes/",
+          ],
+          { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms },
+        )
+        .catch(() => null);
+      if (ls?.code === 0) fragments = ls.stdout.split("\n").filter((l) => l.trim() !== "");
+    }
+    if (fragments === undefined) problems.push("the change fragments (git ls-tree)");
+    const date = releaseDate(this.now());
+    const next =
+      tags === undefined || (fragments === undefined && plan.release_version === undefined)
+        ? null
+        : nextVersion(tags, fragments ?? [], plan.release_version);
+    if (next !== null && "error" in next) problems.push(next.error);
+    const version = next !== null && "version" in next ? next.version : undefined;
+    if (needs && (version === undefined || defaultBranch === undefined)) {
+      const msg = `release not started: cannot resolve ${problems.join(", ")}`;
+      if (this.playbookNotRun.get(wave) !== msg) {
+        this.playbookNotRun.set(wave, msg);
+        this.log(`wave ${wave}: ${msg}`);
+      }
+      return null;
+    }
+    return {
+      ...(version !== undefined ? { version } : {}),
+      date,
+      ...(defaultBranch !== undefined ? { default_branch: defaultBranch } : {}),
+    };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -4385,7 +4541,14 @@ export class Daemon {
       return this.legacyEndedAt.get(wave) ?? null;
     });
     const verdict = archivable(facts, this.now(), this.config.effective(wave));
-    if (verdict.ok) await this.archiveWave(wave, DAEMON_AGENT_ID, verdict.reason);
+    if (!verdict.ok) return;
+    // The last cleanup pass comes first (SPEC §4.6.26): archived on a tick after it ran.
+    if (this.config.effective(wave).cleanup_on_end && !this.cleanedWhole(wave)) {
+      // A run that kept an unreachable machine's items waits out its retry, as cleanupPass does.
+      if (this.cleanupState(wave).retryAt <= this.time.now()) this.startCleanup(wave);
+      return;
+    }
+    await this.archiveWave(wave, DAEMON_AGENT_ID, verdict.reason);
   }
 
   /** The tick's auto-archive pass over every live wave. */
@@ -4423,9 +4586,276 @@ export class Daemon {
         },
       };
     }
-    const r = await this.archiveWave(wave, by, reason);
-    if ("error" in r) return { ok: false, error: r.error };
-    return { ok: true, result: { wave, status: "archived", closed: r.closed } };
+    const busy = archiveRefusal(log.record) ?? this.archiveBusy(wave);
+    if (busy !== null) return { ok: false, error: busy };
+    // One last cleanup pass beside the queue (SPEC §4.6.26), then the archive; the answer
+    // repeats what cleanup kept.
+    const archiveNow = async (): Promise<Reply> => {
+      const r = await this.enqueue(() => this.archiveWave(wave, by, reason));
+      if (r === undefined || "error" in r)
+        return { ok: false, error: r?.error ?? "archive failed" };
+      const kept = this.archived.get(wave)?.record.state?.cleanup?.kept ?? [];
+      return { ok: true, result: { wave, status: "archived", closed: r.closed, kept } };
+    };
+    if (!this.config.effective(wave).cleanup_on_end || this.cleaning.has(wave))
+      return { ok: true, defer: archiveNow() };
+    this.cleaning.add(wave);
+    const done = this.cleanNow(wave, { by, dry: false })
+      .catch((e: unknown) => this.log(`cleanup ${wave}: ${String(e)}`))
+      .finally(() => this.cleaning.delete(wave));
+    return { ok: true, defer: this.track(done.then(archiveNow)) };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Wave cleanup (commands/cleanup.ts, SPEC §4.6.26): everything Volley made for a wave goes,
+  // on every machine; what it keeps is named. Runs beside the serial queue (ssh steps).
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Can a registration or account be made for `id` (`--for-wave`)? A wave id that is live or not
+   * submitted yet; never an archived wave's, which no cleanup runs for again.
+   */
+  private isWaveFor(id: string): boolean {
+    return /^[a-z0-9][a-z0-9_-]{0,62}$/.test(id) && !this.archived.has(id);
+  }
+
+  /** What the auto-cleanup has done for `wave`, read from its journal the first time. */
+  private cleanupState(wave: WaveId): { tasks: Set<string>; whole: boolean; retryAt: number } {
+    let st = this.cleanupDone.get(wave);
+    if (st !== undefined) return st;
+    st = { tasks: new Set(), whole: false, retryAt: 0 };
+    const log = this.waves.get(wave);
+    for (const e of log?.journal.readAll() ?? []) {
+      if (resetsWholeCleanup(e)) st.whole = false;
+      const task = reopenedTask(e);
+      if (task !== undefined) st.tasks.delete(task);
+      if (e.type !== "wave_cleaned" || e.data.dry_run === true) continue;
+      const unreachable = keptUnreachable(e.data.kept);
+      if (typeof e.data.task === "string") {
+        if (!unreachable) st.tasks.add(e.data.task);
+      } else if (!unreachable) st.whole = true;
+    }
+    this.cleanupDone.set(wave, st);
+    return st;
+  }
+
+  /**
+   * Keep the cached cleanup state true to the journal: a wave that resumes or ends again needs
+   * its whole-wave pass again, and a task that leaves done or cancelled its own pass when it ends.
+   */
+  private noteCleanupReset(wave: WaveId, e: JournalEvent): void {
+    const st = this.cleanupDone.get(wave);
+    if (st === undefined) return;
+    if (resetsWholeCleanup(e)) st.whole = false;
+    const task = reopenedTask(e);
+    if (task !== undefined) st.tasks.delete(task);
+  }
+
+  /** Has the whole-wave pass run since `wave` ended (and reached every machine)? */
+  private cleanedWhole(wave: WaveId): boolean {
+    return this.cleanupState(wave).whole;
+  }
+
+  /**
+   * The tick's auto-cleanup (`cleanup_on_end`, SPEC §4.6.26): a task's items once it is done or
+   * cancelled and no agent of it is live; the whole wave's once it ended and none is. A run that
+   * kept an unreachable machine's items runs again later; a task held unfinished (merge_ready)
+   * is cleaned when it ends, by nobody.
+   */
+  private cleanupPass(): void {
+    if (!this.running) return;
+    for (const [wave, log] of this.waves) {
+      if (!this.config.effective(wave).cleanup_on_end || this.cleaning.has(wave)) continue;
+      const state = log.record.state;
+      if (state == null) continue;
+      const st = this.cleanupState(wave);
+      if (st.retryAt > this.time.now()) continue;
+      const ended = state.status === "complete" || state.status === "stopped";
+      if (ended && !st.whole && this.archiveBusy(wave) === null) {
+        this.startCleanup(wave);
+        continue;
+      }
+      const live = new Set(
+        [...this.supervised.values()].filter((a) => a.wave === wave).map((a) => a.task),
+      );
+      const task = state.tasks.find(
+        (t) =>
+          (t.stage === "done" || t.stage === "cancelled") && !st.tasks.has(t.id) && !live.has(t.id),
+      );
+      if (task !== undefined) this.startCleanup(wave, task.id);
+    }
+  }
+
+  /** Start one auto-cleanup run of `wave` (or of one task) beside the queue. */
+  private startCleanup(wave: WaveId, task?: string): void {
+    if (this.cleaning.has(wave)) return;
+    this.cleaning.add(wave);
+    void this.track(
+      this.cleanNow(wave, {
+        by: DAEMON_AGENT_ID,
+        dry: false,
+        ...(task !== undefined ? { task } : {}),
+      })
+        .then((run) => {
+          const st = this.cleanupState(wave);
+          if (run === null) return;
+          if (keptUnreachable(run.kept)) {
+            st.retryAt = this.time.now() + DAEMON_DEFAULTS.cleanup_retry_ms;
+            return;
+          }
+          if (task !== undefined) st.tasks.add(task);
+          else st.whole = true;
+        })
+        .catch((e: unknown) =>
+          this.log(`cleanup ${wave}: ${e instanceof Error ? e.message : String(e)}`),
+        )
+        .finally(() => this.cleaning.delete(wave)),
+    );
+  }
+
+  /**
+   * Clean `wave` (or one task of it) now, beside the queue: the ledger, the run, `wave_cleaned`.
+   * A whole-wave run's counts include the task runs since the last whole-wave run, so the state's
+   * summary sums the wave up. Returns the run, or null for an unknown wave.
+   */
+  private async cleanNow(
+    wave: WaveId,
+    o: {
+      by: string;
+      dry: boolean;
+      task?: string;
+      force?: boolean;
+      all?: boolean;
+      lines?: string[];
+    },
+  ): Promise<CleanupRun | null> {
+    const log = this.waves.get(wave) ?? this.archived.get(wave);
+    const state = log?.record.state;
+    if (log === undefined || state == null) return null;
+    const events = log.journal.readAll();
+    const eff = this.config.effective(wave);
+    const localName = this.config.localName();
+    const ledgerOpts: LedgerOptions = {
+      ...(o.task !== undefined ? { task: o.task } : {}),
+      ...(o.all === true ? { all: true } : {}),
+    };
+    const ledger = ledgerOf(
+      {
+        state,
+        events,
+        system: this.system.readAll(),
+        otherWaves: [...this.waves]
+          .filter(([w]) => w !== wave)
+          .map(([w, l]) => ({ wave: w, repo: l.record.wave?.repo ?? "" })),
+        clones: { repo_root: eff.fleet.repo_root, localName, localHome: homedir() },
+        ...(isSlug(state.repo)
+          ? { localRepo: managedClonePath(eff.fleet.repo_root, state.repo, homedir()) }
+          : {}),
+      },
+      ledgerOpts,
+    );
+    const io = makeBufferIO();
+    const run = await runCleanup(
+      wave,
+      ledger,
+      {
+        exec: this.host.exec,
+        ...(o.dry ? {} : { consent: mintConsentToken(`volleyd cleanup ${wave} --yes`) }),
+        ...(o.force === true ? { force: true } : {}),
+        hosts: eff.hosts,
+        localName,
+        deleteBranchAtMerge: eff.autopilot.delete_branch === true,
+        revokeLogin: (agentId, task) =>
+          reapAndRevoke(
+            agentId,
+            this.agentNamespace(wave, agentId),
+            this.reapDeps((ev) => this.enqueue(() => this.append(wave, ev))),
+            task,
+          ),
+        removeRepo: (slug, machines) => this.removeRepoFor(slug, machines),
+        revokeAccount: async (name) => {
+          const why = await revokeAccount(this.host.exec, name);
+          if (why === null)
+            await this.enqueue(() =>
+              this.appendSystem({ type: "account_revoked", data: { by: DAEMON_AGENT_ID, name } }),
+            );
+          return why;
+        },
+        journalSystem: (ev) => this.enqueue(() => this.appendSystem(ev)),
+        remoteHost: (r) => {
+          const h = eff.hosts[r.host];
+          return this.remoteBySpec({
+            name: r.host,
+            target: r.target,
+            repo: r.repo,
+            worktree_root: r.worktree_root,
+            volley_dir: h?.volley_dir ?? "",
+            tunnel: {
+              remote_port: h?.tunnel?.remote_port ?? REMOTE_HOST_DEFAULTS.remote_port,
+              supervise: h?.tunnel?.supervise ?? false,
+            },
+          });
+        },
+      },
+      io,
+    );
+    o.lines?.push(
+      ...io
+        .readStdout()
+        .split("\n")
+        .filter((l: string) => l !== ""),
+    );
+    for (const l of io.readStderr().split("\n")) if (l !== "") this.log(`cleanup ${wave}: ${l}`);
+    // A whole-wave run sums up the task runs since the last whole-wave one.
+    const total = o.task === undefined && !o.dry ? withTaskRuns(run, events) : run;
+    const summary =
+      total === run
+        ? run.summary
+        : cleanupSummary(wave, total.removed, run.kept.length, {
+            worktrees_on: total.worktrees_on,
+          });
+    await this.enqueue(() =>
+      this.append(wave, cleanedEvent(o.by, { ...total, summary }, o.dry, o.task)),
+    );
+    if (!o.dry) this.log(`cleanup ${wave}${o.task !== undefined ? ` ${o.task}` : ""}: ${summary}`);
+    return { ...total, summary };
+  }
+
+  /** `repo_remove` of a wave-owned registration (SPEC §4.6.26): null, or why not. */
+  private async removeRepoFor(slug: string, machines?: string[]): Promise<string | null> {
+    const out = await this.enqueue(async () =>
+      this.repoRemove({ slug, ...(machines !== undefined ? { machines } : {}) }, DAEMON_AGENT_ID),
+    );
+    if (out === undefined) return "repo_remove failed";
+    const answer = "later" in out ? await out.later() : out;
+    const r = answer.reply as { ok?: boolean; error?: string };
+    return r.ok === true ? null : (r.error ?? "repo_remove refused");
+  }
+
+  /** `cleanup { wave, dry_run, force, all }` (the owner): the run beside the queue, its lines. */
+  private cleanupOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    const log = this.waves.get(wave) ?? this.archived.get(wave);
+    if (log === undefined) return { ok: false, error: `unknown wave '${wave}'` };
+    const refused = guardMutation(log.record.state as WaveState, by, "cleanup");
+    if (refused !== null) return { ok: false, error: refused };
+    if (this.cleaning.has(wave))
+      return { ok: false, error: `wave '${wave}' is being cleaned now; try again shortly` };
+    this.cleaning.add(wave);
+    const lines: string[] = [];
+    const run = this.cleanNow(wave, {
+      by,
+      dry: p.dry_run !== false,
+      force: p.force === true,
+      all: p.all === true,
+      lines,
+    }).finally(() => this.cleaning.delete(wave));
+    return {
+      ok: true,
+      defer: this.track(
+        run.then((r) => ({ ok: true, result: { wave, lines, failed: r?.failed ?? 0 } })),
+      ),
+    };
   }
 
   /** An archived wave as `status --all` shows it: its last state, and when, by whom and why. */
@@ -4724,6 +5154,18 @@ export class Daemon {
     for (const a of this.supervised.values()) {
       if (a.wave === wave && a.task === task && a.role === role) return;
     }
+    // No clone where the spawn ran (#608): a task the supervisor placed goes elsewhere if it can;
+    // else (or pinned there) the owner is asked.
+    let away: Placement | undefined;
+    if (e instanceof SpawnError && e.code === "REMOTE_REPO_MISSING") {
+      const d = e.detail as { host: string; target: string; repo: string; slug?: string };
+      const why = e.message.startsWith(`${e.code}: `)
+        ? e.message.slice(e.code.length + 2)
+        : e.message;
+      const r = this.repoMissingAway(wave, task, d.host, why);
+      if (r !== null && "host" in r) away = r;
+      else await this.openRepoMissing(wave, task, d, r?.why);
+    }
     const eff = this.config.effective(wave);
     // Failures count per spawn: this role's, for the agent attempt it is trying to launch.
     // A failure that burned its attempt's identity moved the next one on: still the same run.
@@ -4748,7 +5190,12 @@ export class Daemon {
     const full = e instanceof Error ? e.message : String(e);
     // A SpawnError's message starts with its code, which is journaled beside it.
     const message = full.startsWith(`${code}: `) ? full.slice(code.length + 2) : full;
-    const nextRetryAt = stopped ? null : new Date(until).toISOString();
+    const nextRetryAt =
+      away !== undefined
+        ? new Date(this.now()).toISOString()
+        : stopped
+          ? null
+          : new Date(until).toISOString();
     await this.append(wave, {
       type: "spawn_failed",
       task,
@@ -4761,6 +5208,14 @@ export class Daemon {
         next_retry_at: nextRetryAt,
       },
     });
+    if (away !== undefined) {
+      // Its next spawn goes where it now is (rePlace clears the back-off): no decision.
+      const from = (e as SpawnError).detail.host as string;
+      this.log(`spawn ${key} failed (${code}): placed on ${away.host} instead of ${from}`);
+      await this.rePlace(wave, task, away, from, "fallback", message);
+      void this.enqueue(() => this.publishState(wave));
+      return;
+    }
     this.log(
       `spawn ${key} failed (${code}), attempt ${n}: ${stopped ? "retries stopped" : `retry in ${wait / 1000}s`}`,
     );
@@ -5487,26 +5942,75 @@ export class Daemon {
     if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
     const eff = this.config.effective(wave);
     const slug = this.slugOf(wave);
-    const record = this.machines.record(t.host);
-    // The box's managed root: never the supervisor's absolute repo_root (#596).
-    const root = remoteRepoRoot(eff.fleet.repo_root);
     const target: SlugTarget | "legacy" =
       slug === undefined
         ? "legacy"
-        : {
-            slug,
-            repos: eff.repos,
-            repo_root: root,
-            // A managed clone's home-relative path, from the clones the machine reports (#436).
-            home: homeFromClones(root, record?.repos),
-            // Where the machine itself reports its clone (#596).
-            clone: reportedClone(record, slug),
-            origin: legacyOrigin(record?.repo, t.host_spec?.repo ?? eff.hosts[t.host]?.repo),
-          };
+        : (() => {
+            const c = this.cloneFacts(t.host, slug, eff, t.host_spec?.repo);
+            return { slug, repos: eff.repos, repo_root: c.root, ...c.facts };
+          })();
     // The spec carries its clone, so the host built from it is one repository's.
     return this.remoteBySpec(
       resolveRemoteHost(t.host, t.host_spec, eff.hosts, target),
     ) as RepoRemoteHost;
+  }
+
+  /**
+   * What resolving peer `name`'s clone of `slug` reads beside the config (#608): the managed
+   * root a paired machine keeps (never the supervisor's absolute repo_root, #596), the home its
+   * managed clones tell (#436), the clone its record reports (#596) and its legacy clone's
+   * origin (`legacy`: an inline host's `repo`, else its config's). `remoteHost` spawns in what
+   * they resolve to; readiness compares the record with it and probes it (`spawnPath`).
+   */
+  private cloneFacts(
+    name: string,
+    slug: string,
+    eff: Tunables,
+    legacy?: string,
+  ): { root: string; facts: MachineFacts } {
+    const record = this.machines.record(name);
+    const root = remoteRepoRoot(eff.fleet.repo_root);
+    return {
+      root,
+      facts: {
+        home: homeFromClones(root, record?.repos),
+        clone: reportedClone(record, slug),
+        origin: legacyOrigin(record?.repo, legacy ?? eff.hosts[name]?.repo),
+      },
+    };
+  }
+
+  /** The path a spawn of `slug` on peer `name` would use (`cloneFacts`); undefined: none. */
+  private spawnPath(name: string, slug: string, eff: Tunables): string | undefined {
+    const { root, facts } = this.cloneFacts(name, slug, eff);
+    return cloneFor(
+      { repos: eff.repos, fleet: { repo_root: root }, hosts: eff.hosts },
+      this.config.localName(),
+      name,
+      slug,
+      facts,
+    );
+  }
+
+  /** Every running wave's repository, then every one config gives `name`: readiness judges these. */
+  private wantedSlugs(name: string, cfg: Tunables): string[] {
+    const waves = this.waveSlugs();
+    return [
+      ...waves,
+      ...assignedSlugs(cfg, this.config.localName(), name).filter(
+        (s) => !waves.some((w) => sameSlug(w, s)),
+      ),
+    ];
+  }
+
+  /** Each wanted repository's spawn path on peer `name`, where it resolves to one. */
+  private spawnPaths(name: string, cfg: Tunables): Record<string, string> {
+    return Object.fromEntries(
+      this.wantedSlugs(name, cfg).flatMap((slug) => {
+        const path = this.spawnPath(name, slug, cfg);
+        return path === undefined ? [] : [[slug, path]];
+      }),
+    );
   }
 
   /**
@@ -6001,8 +6505,8 @@ export class Daemon {
     const cfg = isLocal
       ? eff
       : { ...eff, fleet: { ...eff.fleet, repo_root: remoteRepoRoot(eff.fleet.repo_root) } };
-    return assignedSlugs(eff, machine).flatMap((slug) => {
-      const path = cloneFor(cfg, machine, slug, {
+    return assignedSlugs(eff, this.config.localName(), machine).flatMap((slug) => {
+      const path = cloneFor(cfg, this.config.localName(), machine, slug, {
         home,
         ...(isLocal ? {} : { clone: reportedClone(record, slug) }),
       });
@@ -6326,6 +6830,22 @@ export class Daemon {
     const records = accountRecords(this.usage);
     const record = isLocal ? this.ownRecord : this.machines.record(name);
     const waves = this.waveSlugs();
+    const spawn = isLocal ? {} : this.spawnPaths(name, cfg);
+    // A spawn that found no clone stands while its spawn path does (a repo_add's run wins).
+    const blocked = [...(this.spawnBlocked.get(name) ?? [])].filter(
+      ([slug, b]) => spawn[slug] === b.path,
+    );
+    const runs = {
+      ...Object.fromEntries(
+        blocked.map(([slug, b]) => [slug, { state: "blocked" as const, reasons: [b.why] }]),
+      ),
+      ...Object.fromEntries(this.repoRuns.get(name) ?? []),
+    };
+    const probed = Object.entries(probe?.clones ?? {}).flatMap(([slug, c]) =>
+      "error" in c || probe?.spawnPaths?.[slug] !== spawn[slug]
+        ? []
+        : [[slug, { ...c, at: probe?.at }]],
+    );
     // Its best candidate (the balancing rule's pick there), so one fresh login keeps it eligible;
     // a config default that pins an account here is that account.
     const pin = cfg.claude.default_account;
@@ -6354,18 +6874,16 @@ export class Daemon {
       hostVersion: this.version,
       // Every running wave's repository, beside every one the machine reports (#436).
       repos: {
-        wanted: [
-          ...waves,
-          ...assignedSlugs(cfg, name).filter((s) => !waves.some((w) => sameSlug(w, s))),
-        ],
+        wanted: this.wantedSlugs(name, cfg),
         records: record?.repos,
         ...(record?.repo !== undefined ? { legacy: record.repo } : {}),
-        ...(this.repoRuns.has(name)
-          ? { runs: Object.fromEntries(this.repoRuns.get(name) ?? []) }
-          : {}),
+        ...(Object.keys(runs).length > 0 ? { runs } : {}),
+        // A peer's spawn path, against its record and as probed there (#608).
+        ...(Object.keys(spawn).length > 0 ? { spawn } : {}),
+        ...(probed.length > 0 ? { probed: Object.fromEntries(probed) } : {}),
         // The own doctor reports every running wave's clone; a repository config gives only to
         // other machines is checked out here for the supervisor, not for agents (#439).
-        ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, waves) } : {}),
+        ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, name, waves) } : {}),
       },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
@@ -6482,8 +7000,8 @@ export class Daemon {
   private ownAssignedClones(): { slug: string; dir: string }[] {
     const local = this.config.localName();
     const cfg = this.config.effective();
-    return assignedSlugs(cfg, local).flatMap((slug) => {
-      const path = cloneFor(cfg, local, slug, { home: homedir() });
+    return assignedSlugs(cfg, local, local).flatMap((slug) => {
+      const path = cloneFor(cfg, local, local, slug, { home: homedir() });
       return path !== undefined ? [{ slug, dir: resolve(path) }] : [];
     });
   }
@@ -6525,37 +7043,76 @@ export class Daemon {
   }
 
   /**
-   * The PATH probe of a peer whose record is up, at most every `path_probe_interval_ms`: run
-   * beside the queue (it is an ssh round-trip), then re-compute that machine's verdict.
+   * The PATH probe of a peer whose record is up, at most every `path_probe_interval_ms` (at once
+   * when a wanted repository's spawn path changed), and in the same pass a clone probe at each
+   * spawn path (#608): run beside the queue (ssh round-trips), then re-compute that machine's
+   * verdict. A clone found where a spawn found none lifts that block.
    */
   private maybeProbe(name: string): void {
     if (this.machines.record(name)?.tunnel !== "up") return;
     const prior = this.probes.get(name);
     const at = this.now();
+    const spawnPaths = this.spawnPaths(name, this.config.effective());
+    const moved = JSON.stringify(spawnPaths) !== JSON.stringify(prior?.spawnPaths ?? {});
     if (
       prior !== undefined &&
-      (prior.running || at - prior.at < DAEMON_DEFAULTS.path_probe_interval_ms)
+      (prior.running || (!moved && at - prior.at < DAEMON_DEFAULTS.path_probe_interval_ms))
     ) {
       return;
     }
     const host = this.remoteFor(name);
     if (typeof host === "string") {
-      this.probes.set(name, { path: null, error: host, at, running: false });
+      this.probes.set(name, { path: null, error: host, at, running: false, spawnPaths });
       return;
     }
-    this.probes.set(name, { path: prior?.path ?? null, at, running: true });
+    this.probes.set(name, {
+      path: prior?.path ?? null,
+      at,
+      running: true,
+      ...(prior?.clones !== undefined && !moved ? { clones: prior.clones } : {}),
+      spawnPaths,
+    });
+    const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+    const timeoutMs = DAEMON_DEFAULTS.path_probe_timeout_ms;
     void Promise.resolve()
-      .then(() => host.probePath())
-      .then(
-        (path) => ({ path }),
-        (e: unknown) => ({ path: null, error: e instanceof Error ? e.message : String(e) }),
+      .then(() =>
+        Promise.all([
+          host.probePath().then(
+            (path) => ({ path }),
+            (e: unknown) => ({ path: null, error: message(e) }),
+          ),
+          Promise.all(
+            Object.entries(spawnPaths).map(([slug, path]) =>
+              host.probeClone(path, { timeoutMs }).then(
+                (c): [string, CloneProbe | { error: string }] => [slug, c],
+                (e: unknown): [string, CloneProbe | { error: string }] => [
+                  slug,
+                  { error: message(e) },
+                ],
+              ),
+            ),
+          ),
+        ]),
       )
-      .then(async (r) => {
+      .then(async ([r, found]) => {
         if (!this.running) return;
         await this.enqueue(async () => {
           // A removed host (or a newer probe) is not overwritten by this one.
           if (this.probes.get(name)?.at !== at) return;
-          this.probes.set(name, { ...r, at, running: false });
+          const clones = Object.fromEntries(found);
+          this.probes.set(name, { ...r, at, running: false, clones, spawnPaths });
+          const blocked = this.spawnBlocked.get(name);
+          for (const [slug, c] of found) {
+            const b = blocked?.get(slug);
+            if (b === undefined || b.path !== spawnPaths[slug]) continue;
+            if (
+              "state" in c &&
+              c.state === "found" &&
+              (c.slug === undefined || sameSlug(c.slug, slug))
+            )
+              blocked?.delete(slug);
+          }
+          if (blocked?.size === 0) this.spawnBlocked.delete(name);
           await this.publishReadiness(name);
         });
       });
@@ -6787,12 +7344,15 @@ export class Daemon {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw))
       return refuse("paths must be an object of machine: absolute path");
     const paths = raw as Record<string, unknown>;
+    // Made for one wave (`volley repo add --for-wave`, SPEC §4.6.26): that wave's cleanup removes
+    // it. The wave may not be submitted yet (setup's first wave registers its repository first).
+    const wave = p.wave;
+    if (wave !== undefined && (typeof wave !== "string" || !this.isWaveFor(wave)))
+      return refuse("wave: not a wave id, or an archived wave's");
     const local = this.config.localName();
     const hosts = this.config.effective().hosts;
     for (const [m, path] of Object.entries(paths)) {
-      if (m === local)
-        return refuse(`${m} is the supervisor's own machine: its clone is the managed one`);
-      if (!Object.hasOwn(hosts, m)) return refuse(`no configured host named "${m}"`);
+      if (m !== local && !Object.hasOwn(hosts, m)) return refuse(`no configured host named "${m}"`);
       if (!this.namedMachines(machines).includes(m))
         return refuse(`paths names ${m}, which machines does not`);
       if (typeof path !== "string" || !isRepoAdd(`${slug}=${path}`))
@@ -6802,17 +7362,48 @@ export class Daemon {
       later: async () => {
         const view = await readSlugView(this.host.exec, slug);
         if (typeof view === "string") return refuse(view);
+        const given = paths as Record<string, string>;
+        // The supervisor's machine without a path: the clone a wave already runs from (D3). Never
+        // for the coordinator: adopting trusts that folder, an admin's (coordinatorRepoRefusal).
+        const known =
+          sender !== "coordinator" &&
+          this.namedMachines(machines).includes(local) &&
+          !Object.hasOwn(given, local)
+            ? await this.knownWaveClone(view.slug)
+            : null;
         const r = await this.enqueue(() =>
-          this.applyRepoAdd(view.slug, machines, paths as Record<string, string>, sender),
+          this.applyRepoAdd(
+            view.slug,
+            machines,
+            known !== null ? { ...given, [local]: known.root } : given,
+            sender,
+            typeof wave === "string" ? wave : undefined,
+          ),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
-        // Its workflows (no release branch yet to read required checks on): absent if unreadable.
-        const facts = await readCiFacts(this.host.exec, { slug: view.slug }, null);
-        const ci = facts !== null ? { ci: { workflows: facts.workflows } } : {};
+        if (known !== null)
+          r.status = r.status.map((line) =>
+            line.startsWith(`${local}: `)
+              ? `${local}: ready (${known.root}, adopted from wave ${known.wave})`
+              : line,
+          );
+        // The repository half of repo_check (no release branch yet): `repo.exists`, `ci.mode`;
+        // `ci: { workflows }` kept one release for older clients (absent if unreadable).
+        const facts = {
+          ...(await readRepoFacts(this.host.exec, { slug: view.slug }, view.slug, null)),
+          view,
+        };
+        const ci = facts.ci !== null ? { ci: { workflows: facts.ci.workflows } } : {};
         return {
           reply: authReply("repo_add", {
             ok: true,
-            result: { ...r, url: view.url, visibility: view.visibility, ...ci },
+            result: {
+              ...r,
+              url: view.url,
+              visibility: view.visibility,
+              ...ci,
+              checks: repositoryChecks(facts),
+            },
           }),
         };
       },
@@ -6820,27 +7411,52 @@ export class Daemon {
   }
 
   /**
-   * `repo_probe { machine, path }` (admin): what is at `path` on a paired machine — its clone's
-   * root and origin (`probeClone`), so the Desk can say before an add whether an adopted clone is
-   * the repository being added. A reading: nothing is journaled and no config changes. Its ssh
-   * round-trip is awaited outside the queue.
+   * The clone a wave on a path of `slug` runs from, for a `repo_add` that gives the supervisor's
+   * machine no path (#616, D3): the wave's `repo:` path whose `github.slug` is `slug`, at its
+   * root (the last such wave in `this.waves`, which after a restart is load order, not submit
+   * order); null when the supervisor already holds one by config, or no wave does.
+   */
+  private async knownWaveClone(slug: string): Promise<{ root: string; wave: string } | null> {
+    const local = this.config.localName();
+    if (cloneFor(this.config.effective(), local, local, slug, { home: homedir() }) !== undefined)
+      return null;
+    for (const [id, l] of [...this.waves].reverse()) {
+      const repo = l.record.wave?.repo;
+      const known = l.record.state?.github?.slug;
+      if (typeof repo !== "string" || isSlug(repo) || known === undefined) continue;
+      if (!sameSlug(known, slug)) continue;
+      try {
+        return { root: trimPath(await repoRoot(this.host.exec, expandHome(repo))), wave: id };
+      } catch {}
+    }
+    return null;
+  }
+
+  /**
+   * `repo_probe { machine, path }` (admin): what is at `path` on a machine — its clone's root and
+   * origin (`probeClone`; on the supervisor's own machine the same two reads through its exec,
+   * #616), so the Desk can say before an add whether an adopted clone is the repository being
+   * added. A reading: nothing is journaled and no config changes. Its ssh round-trip is awaited
+   * outside the queue.
    */
   private repoProbe(p: Record<string, unknown>): AuthOutcome | DeferredAuth {
     const refuse = (error: string) => ({ reply: authReply("repo_probe", { ok: false, error }) });
     const { machine, path } = p;
     if (typeof machine !== "string" || machine === "") return refuse("machine must be a host name");
-    if (machine === this.config.localName())
-      return refuse(`${machine} is the supervisor's own machine: its clone is the managed one`);
-    if (!Object.hasOwn(this.config.effective().hosts, machine))
+    const isLocal = machine === this.config.localName();
+    if (!isLocal && !Object.hasOwn(this.config.effective().hosts, machine))
       return refuse(`no configured host named "${machine}"`);
     if (typeof path !== "string" || !isRepoAddPath(path))
       return refuse("path must be an absolute path");
-    const host = this.remoteFor(machine);
+    const host = isLocal ? null : this.remoteFor(machine);
     if (typeof host === "string") return refuse(host);
     return {
       later: async () => {
         try {
-          const found = await host.probeClone(path);
+          const found =
+            host === null
+              ? await probeLocalClone(this.host.exec, path)
+              : await host.probeClone(path);
           return {
             reply: authReply("repo_probe", { ok: true, result: { machine, path, ...found } }),
           };
@@ -6860,16 +7476,15 @@ export class Daemon {
     machines: RepoMachines,
     paths: Record<string, string>,
     by: string,
+    wave?: string,
   ): Promise<{ slug: string; machines: string[]; status: string[] } | string> {
     const cfg = this.config.effective();
     const key = slugKey(cfg.repos, slug);
     const current = key !== undefined ? cfg.repos[key]?.machines : undefined;
     const next = withMachines(current, machines);
+    const local = this.config.localName();
     const changed = Object.fromEntries(
-      Object.entries(paths).filter(([m, path]) => {
-        const adopted = cfg.hosts[m]?.repos;
-        return adopted?.[slugKey(adopted, slug) ?? slug] !== path;
-      }),
+      Object.entries(paths).filter(([m, path]) => adoptedPath(cfg, local, m, slug) !== path),
     );
     if (JSON.stringify(next) !== JSON.stringify(current) || Object.keys(changed).length > 0) {
       const r = this.config.setRepo(key ?? slug, next, changed, by);
@@ -6880,7 +7495,13 @@ export class Daemon {
     const spelled = slugKey(this.config.effective().repos, slug) ?? slug;
     await this.appendSystem({
       type: "repo_added",
-      data: { by, slug: spelled, machines, ...(Object.keys(paths).length > 0 ? { paths } : {}) },
+      data: {
+        by,
+        slug: spelled,
+        machines,
+        ...(Object.keys(paths).length > 0 ? { paths } : {}),
+        ...(wave !== undefined ? { wave } : {}),
+      },
     });
     const names = this.namedMachines(machines);
     for (const m of names) {
@@ -7133,7 +7754,9 @@ export class Daemon {
 
   /** Whether config still assigns `slug` to `machine` (a repo_remove since ends its run). */
   private assigned(machine: string, slug: string): boolean {
-    return assignedSlugs(this.config.effective(), machine).some((s) => sameSlug(s, slug));
+    return assignedSlugs(this.config.effective(), this.config.localName(), machine).some((s) =>
+      sameSlug(s, slug),
+    );
   }
 
   /** Set (null: clear) machine's run of `slug` as readiness shows it. */
@@ -7185,7 +7808,7 @@ export class Daemon {
       dir = remote !== null ? (a.dir ?? null) : profileDir(root, id);
       if (dir === null) return;
     }
-    const slugs = assignedSlugs(this.config.effective(), machine);
+    const slugs = assignedSlugs(this.config.effective(), this.config.localName(), machine);
     if (slugs.length === 0) return;
     const run = this.trustRepos(machine, slugs, dir, id).catch((e: unknown) =>
       this.log(`trust after sign-in ${acct}: ${e instanceof Error ? e.message : String(e)}`),
@@ -7246,18 +7869,15 @@ export class Daemon {
     if ("error" in asked) return refuse(asked.error);
     const { machines } = asked;
     const cfg = this.config.effective();
-    const key =
-      slugKey(cfg.repos, slug) ??
-      Object.values(cfg.hosts)
-        .map((h) => slugKey(h.repos, slug))
-        .find((k) => k !== undefined);
+    const local = this.config.localName();
+    const key = namedSlug(cfg, local, slug);
     if (key === undefined) return refuse(`${slug} is not a configured repository`);
     const names = this.namedMachines(machines);
     // Each clone as it is now (the path stays on disk), before config forgets it.
     const clones = Object.fromEntries(
       names.flatMap((m) => {
         const path = this.repoStep(m, key).path;
-        return path !== undefined && assignedSlugs(cfg, m).some((s) => sameSlug(s, key))
+        return path !== undefined && assignedSlugs(cfg, local, m).some((s) => sameSlug(s, key))
           ? [[m, path]]
           : [];
       }),
@@ -7268,7 +7888,7 @@ export class Daemon {
       this.allMachines(),
     );
     const drops = Object.fromEntries(
-      names.filter((m) => slugKey(cfg.hosts[m]?.repos, key) !== undefined).map((m) => [m, null]),
+      names.filter((m) => adoptedPath(cfg, local, m, key) !== undefined).map((m) => [m, null]),
     );
     const r = this.config.setRepo(key, next, drops, sender);
     if (!r.applied)
@@ -7276,7 +7896,7 @@ export class Daemon {
         `repos.${key} not changed: ${r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ")}`,
       );
     for (const m of names) this.setRepoRun(m, key, null);
-    const remote = names.filter((m) => m !== this.config.localName() && Object.hasOwn(clones, m));
+    const remote = names.filter((m) => m !== local && Object.hasOwn(clones, m));
     return {
       later: async () => {
         const boxes: Record<string, string> = {};
@@ -7316,19 +7936,22 @@ export class Daemon {
     }
   }
 
-  /** `repo_list`: each configured repository, its machines and adopted paths. */
+  /**
+   * `repo_list`: each configured repository, its machines and adopted paths (the supervisor's own
+   * under its name, #616).
+   */
   private repoList(): { ok: true; result: { repos: Record<string, unknown>[] } } {
     const cfg = this.config.effective();
+    const adoptions = adoptedMaps(cfg, this.config.localName());
     const slugs = Object.keys(cfg.repos);
-    for (const h of Object.values(cfg.hosts)) {
-      for (const s of Object.keys(h.repos ?? {}))
-        if (!slugs.some((o) => sameSlug(o, s))) slugs.push(s);
+    for (const [, map] of adoptions) {
+      for (const s of Object.keys(map)) if (!slugs.some((o) => sameSlug(o, s))) slugs.push(s);
     }
     const repos = slugs.sort().map((slug) => {
       const adopted = Object.fromEntries(
-        Object.entries(cfg.hosts).flatMap(([m, h]) => {
-          const k = slugKey(h.repos, slug);
-          return k !== undefined ? [[m, h.repos?.[k] as string]] : [];
+        adoptions.flatMap(([m, map]) => {
+          const k = slugKey(map, slug);
+          return k !== undefined ? [[m, map[k] as string]] : [];
         }),
       );
       return {
@@ -7355,7 +7978,7 @@ export class Daemon {
     const cfg = this.config.effective();
     const repos = slugs.map((slug) => {
       const names = this.allMachines().filter((m) =>
-        assignedSlugs(cfg, m).some((s) => sameSlug(s, slug)),
+        assignedSlugs(cfg, this.config.localName(), m).some((s) => sameSlug(s, slug)),
       );
       const verdicts = this.repoVerdicts(slug, names);
       return { slug, machines: verdicts, lines: names.map((m) => repoStateLine(m, verdicts[m])) };
@@ -7375,6 +7998,164 @@ export class Daemon {
       if (k !== undefined) out[m] = v.repos[k] as RepoVerdict;
     }
     return out;
+  }
+
+  /** A machine's last record: the supervisor's own, or a paired machine's. */
+  private recordOfMachine(name: string): MachineRecord | undefined {
+    return name === this.config.localName() ? this.ownRecord : this.machines.record(name);
+  }
+
+  /** `slug` on machine `name` as readiness judges it now: the machine, and its clone there. */
+  private readinessFor(
+    name: string,
+    slug: string,
+  ): { ready: boolean; reasons: string[]; repo: RepoVerdict | undefined } {
+    const cfg = this.config.effective();
+    const isLocal = name === this.config.localName();
+    const { verdict } = this.machineState(
+      name,
+      isLocal,
+      cfg,
+      this.requirementsExtra(),
+      cfg,
+      this.pressure(GLOBAL),
+    );
+    const k = Object.keys(verdict.repos).find((s) => sameSlug(s, slug));
+    const repo =
+      k !== undefined
+        ? verdict.repos[k]
+        : repoVerdictFromRecord(name, this.recordOfMachine(name), slug);
+    return { ready: verdict.ready, reasons: verdict.reasons, repo };
+  }
+
+  /**
+   * `repo_check { slug, release_branch?, machines?, fix? }` (SPEC §4.6.21, #610): is the
+   * repository ready to run a wave, on every machine that could run it? The repository half is
+   * read on the supervisor with read-only `gh`; the machine half runs each holder's doctor fresh
+   * (a paired machine's over Repair's channel, the own one's `runLocalDoctor`), concurrently,
+   * and judges the repository there as readiness does. A machine whose doctor is busy, or that is
+   * down, is judged from its last record. `fix: true` (`admin` only) runs each paired machine's
+   * doctor with `--fix` and the repository added (its safe fixes: the clone, a repoint, a fetch,
+   * the worktree root); the own machine is never fixed (its clone is the owner's checkout).
+   */
+  private async repoCheck(p: Record<string, unknown>, admin: boolean): Promise<Reply> {
+    const { slug, release_branch: branch } = p;
+    if (typeof slug !== "string" || !isSlug(slug))
+      return { ok: false, error: "slug must be a GitHub <owner/name>" };
+    if (
+      branch !== undefined &&
+      (typeof branch !== "string" || !/^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/.test(branch))
+    )
+      return { ok: false, error: "release_branch must be a branch name" };
+    const fix = p.fix === true;
+    if (fix && !admin) return { ok: false, error: "repo_check with fix: true is an admin op" };
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    let names = holdersOf(cfg, local, slug);
+    // A machine the caller named that holds no clone: not asked, but named in the summary.
+    let bare: string[] = [];
+    if (p.machines !== undefined) {
+      const asked = this.requestMachines(p.machines);
+      if ("error" in asked) return { ok: false, error: asked.error };
+      // `machines` narrows the holders (SPEC §4.6.21): a machine that holds no clone is not asked.
+      const named = this.namedMachines(asked.machines);
+      const holders = names;
+      names = names.filter((m) => named.includes(m));
+      bare = [...new Set(named)].filter((m) => !holders.includes(m));
+    }
+    // In repo_status' order: the own machine, then each configured host.
+    const order = this.allMachines();
+    names = [...new Set(names)].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    const [facts, runs] = await Promise.all([
+      readRepoCheck(this.host.exec, slug, typeof branch === "string" ? branch : null),
+      Promise.all(names.map((m) => this.repoCheckDoctor(m, slug, fix))),
+    ]);
+    const view = facts.view;
+    const canonical = view !== null && typeof view !== "string" ? view.slug : slug;
+    const blocks = await this.enqueue(async () => {
+      const out: Record<string, MachineBlock> = {};
+      for (const [i, m] of names.entries()) {
+        const run = runs[i] ?? { from: "record" as const };
+        const r = this.readinessFor(m, canonical);
+        out[m] = machineBlock(
+          canonical,
+          this.recordOfMachine(m),
+          run.checks,
+          { ready: r.ready, reasons: r.reasons },
+          r.repo,
+          {
+            from: run.from,
+            ...(run.note !== undefined ? { note: run.note } : {}),
+            ...(m === local ? { own: true } : {}),
+          },
+        );
+      }
+      return out;
+    });
+    if (blocks === undefined) return { ok: false, error: "daemon stopping" };
+    const machines = blocks;
+    return {
+      ok: true,
+      result: {
+        slug: canonical,
+        ...(view !== null && typeof view !== "string" ? { visibility: view.visibility } : {}),
+        repository: repositoryChecks(facts),
+        machines,
+        ready_on: names.filter((m) => machines[m]?.ready === true),
+        summary: [
+          closingLine(machines),
+          ...bare.map(
+            (m) => `${m} holds no clone of ${slug}: volley repo add ${slug} --machine ${m}`,
+          ),
+        ].join(" "),
+      },
+    };
+  }
+
+  /**
+   * One machine's doctor for `repo_check`: its fresh report's checks (with fix text), or why its
+   * last record stands (a run in progress, the machine down, no doctor here).
+   */
+  private async repoCheckDoctor(
+    machine: string,
+    slug: string,
+    fix: boolean,
+  ): Promise<{ from: "doctor" | "record"; checks?: DoctorReport["checks"]; note?: string }> {
+    const record = (note: string) => ({ from: "record" as const, note });
+    if (machine === this.config.localName()) {
+      if (this.opts.fleet?.localDoctor === undefined) return record("no doctor run here");
+      if (!this.localDoctorRunning) this.localDoctorRun = this.runLocalDoctor();
+      await this.localDoctorRun;
+      return { from: "doctor" };
+    }
+    if (this.doctoring.has(machine)) return record("a doctor run is in progress");
+    if (this.machines.downSince(machine) !== undefined) return record(`${machine} is down`);
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") return record(host);
+    this.doctoring.add(machine);
+    let r: Awaited<ReturnType<PeerService["runDoctor"]>>;
+    try {
+      const adopted = slugKey(this.config.effective().hosts[machine]?.repos, slug);
+      const path =
+        adopted !== undefined
+          ? this.config.effective().hosts[machine]?.repos?.[adopted]
+          : undefined;
+      r = await this.peers.runDoctor({
+        name: machine,
+        fix,
+        clone: fix,
+        host,
+        ...(fix ? { repos_add: [path !== undefined ? `${slug}=${path}` : slug] } : {}),
+      });
+    } finally {
+      this.doctorDone(machine);
+    }
+    const report = r.report;
+    if (report === undefined) return record(r.error ?? "the doctor run failed");
+    // A fix may have changed the PATH: probe it again (a plain check changed nothing there).
+    if (r.ok && fix) this.probes.delete(machine);
+    await this.enqueue(() => this.foldDoctor(machine, report));
+    return { from: "doctor", checks: report.checks };
   }
 
   /** Each of `names`' line for `slug` (`repoStateLine`). */
@@ -7484,8 +8265,83 @@ export class Daemon {
   }
 
   /**
-   * The remote half of a spawn's setup: the box's clone must exist (else a
-   * `remote_repo_missing` decision), its folder trust is mirrored (trust bits only) for the
+   * A spawn found no clone on machine `d.host` (`REMOTE_REPO_MISSING`): the `remote_repo_missing`
+   * decision, once (through the decision store: retained topic, the Desk, notify; the task
+   * parks). `nowhere`: why no other machine can take the task now, said in the question (#608).
+   */
+  private async openRepoMissing(
+    wave: WaveId,
+    task: TaskId,
+    d: { host: string; target: string; repo: string; slug?: string },
+    nowhere?: string,
+  ): Promise<void> {
+    const log = this.waves.get(wave);
+    if (log === undefined) return;
+    const decisionId = waveDecisionId("remote_repo_missing", wave, `${d.target}:${d.repo}`);
+    if (openDecisionFor(log.record.state?.open_decisions ?? [], decisionId) !== undefined) return;
+    // A repository on GitHub is added by its slug; a legacy clone is cloned by hand.
+    const ask =
+      d.slug !== undefined
+        ? remoteRepoMissing(d.host, d.slug)
+        : {
+            question: `Needs you: no clone of the repo at ${d.repo} on ${d.target}. Clone it there, then retry?`,
+            options: ["retry", "cancel"],
+          };
+    const question =
+      nowhere !== undefined
+        ? `${ask.question.replace(/\?$/, "")}; no other machine can take it now (${clipText(nowhere)})?`
+        : ask.question;
+    await this.openSpawnDecision(wave, {
+      kind: "remote_repo_missing",
+      id: decisionId,
+      task,
+      ...ask,
+      question,
+      pointers: {},
+      data: {
+        host: d.host,
+        target: d.target,
+        repo: d.repo,
+        ...(d.slug !== undefined ? { slug: d.slug } : {}),
+      },
+    });
+  }
+
+  /**
+   * A spawn of `task` found no clone at the spawn path on machine `host` (#608): the pair is
+   * `blocked` in that machine's readiness until a probe finds the clone, and a task the
+   * supervisor placed (not pinned by the wave file) and not yet spawned is placed away from it. Returns the new
+   * placement, why none is eligible (`Unplaced`), or null when the task stays (pinned, or not a
+   * machine and repository the supervisor knows).
+   */
+  private repoMissingAway(
+    wave: WaveId,
+    task: TaskId,
+    host: string,
+    why: string,
+  ): Placement | { why: string } | null {
+    const slug = this.slugOf(wave);
+    const rec = this.waves.get(wave)?.record;
+    if (slug === undefined || rec === undefined || this.isLocalMachine(host)) return null;
+    const path = this.spawnPath(host, slug, this.config.effective(wave));
+    if (path !== undefined) {
+      const blocked = this.spawnBlocked.get(host) ?? new Map();
+      blocked.set(slug, { why, at: this.now(), path });
+      this.spawnBlocked.set(host, blocked);
+      void this.enqueue(() => this.publishReadiness(host));
+    }
+    const t = rec.state?.tasks.find((x) => x.id === task);
+    const by = t?.placement?.by;
+    // A task that already spawned runs every later role on host_actual (§4.6.1): never moved.
+    if (by === undefined || by === "wave_file" || t?.host_actual !== undefined) return null;
+    const p = this.placeAway(wave, task, [host]);
+    if (p === null) return null;
+    return p.host === null ? { why: p.why } : p;
+  }
+
+  /**
+   * The remote half of a spawn's setup: the box's clone must exist (else REMOTE_REPO_MISSING:
+   * `spawnFailed` places the task elsewhere or opens `remote_repo_missing`), its folder trust is mirrored (trust bits only) for the
    * trust check, and spawn runs with the box's repo, worktree root, hooks, broker URL and a lock
    * directory per target (`$VOLLEYD_HOME/hosts/<target>/locks`: the lock is keyed by target and
    * worktree path).
@@ -7516,34 +8372,12 @@ export class Daemon {
       throw err;
     });
     if (!exists) {
-      // Through the decision store: retained topic (the Desk, notify) and the task parks.
-      if (openId === undefined) {
-        // A repository on GitHub is added by its slug; a legacy clone is cloned by hand.
-        const ask =
-          spec.slug !== undefined
-            ? remoteRepoMissing(spec.name, spec.slug)
-            : {
-                question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
-                options: ["retry", "cancel"],
-              };
-        await this.openSpawnDecision(wave, {
-          kind: "remote_repo_missing",
-          id: decisionId,
-          task,
-          ...ask,
-          pointers: {},
-          data: {
-            host: spec.name,
-            target: spec.target,
-            repo: spec.repo,
-            ...(spec.slug !== undefined ? { slug: spec.slug } : {}),
-          },
-        });
-      }
+      // spawnFailed places an auto-placed task elsewhere, else opens remote_repo_missing (#608).
       throw new SpawnError("REMOTE_REPO_MISSING", `no clone at ${spec.repo} on ${spec.target}`, {
         host: spec.name,
         target: spec.target,
         repo: spec.repo,
+        ...(spec.slug !== undefined ? { slug: spec.slug } : {}),
       });
     }
     // The clone appeared while the decision was still open: only a spawn that does not wait for
@@ -8806,6 +9640,7 @@ export class Daemon {
           train: st.release,
           events: log.journal.readAll(),
           decisions: log.record.decisions,
+          spawns: this.opts.spawner !== undefined,
         });
       },
       journal: (ev) => this.append(wave, ev),
@@ -8834,14 +9669,83 @@ export class Daemon {
       },
       now: this.now,
       log: (line) => this.log(line),
+      cwd: () => {
+        const repo = log.record.wave?.repo;
+        return repo == null || isSlug(repo) ? undefined : expandHome(repo);
+      },
+      ciMode: () => log.record.state?.ci_mode,
+      merge: (pr, head) => this.mergeReleasePr(wave, pr, head),
+      merged: (pr) => this.releaseMergedIssues(wave, pr),
     });
     this.releases.set(wave, d);
     return d;
   }
 
+  /**
+   * The owner's `release_go` go (SPEC §4.6.19): squash-merge the release PR at its CI-green head,
+   * deleting the release branch, under a ReleaseToken minted here only, from the journaled
+   * release PR and the go that answered it. The merge commit, or why it did not merge.
+   */
+  private async mergeReleasePr(
+    wave: WaveId,
+    pr: number,
+    head: string,
+  ): Promise<{ sha: string } | { reason: string }> {
+    const log = this.waves.get(wave);
+    const st = log?.record.state;
+    const release = st?.release;
+    const go = Object.values(log?.record.decisions ?? {})
+      .filter((d) => d.kind === "release_go" && d.resolved?.answer.trim().toLowerCase() === "go")
+      .at(-1);
+    if (st == null || release?.pr === undefined || release.default_branch === undefined)
+      return { reason: "no release PR journaled" };
+    if (release.pr.number !== pr || release.pr.head !== head || go === undefined)
+      return { reason: `#${pr} at ${head.slice(0, 7)} is not the release PR the go answered` };
+    let token: ReleaseToken;
+    try {
+      token = mintReleaseToken({
+        wave,
+        pr,
+        head,
+        release_branch: st.release_branch,
+        decision_id: go.decision_id,
+      });
+    } catch (e) {
+      return { reason: e instanceof Error ? e.message : String(e) };
+    }
+    const gh = this.ghFor(log?.record.wave?.repo);
+    const io: ExecFn = (argv, opts = {}) =>
+      gh.exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
+    const out = await mergeRelease(io, token, release.default_branch, gh.cwd);
+    if (!out.ok) return { reason: out.stderr || out.reason };
+    if (out.merge_sha !== null) return { sha: out.merge_sha };
+    // Merged, its commit not read back: read once more (a ship stage runs at it).
+    const view = await io(["gh", "pr", "view", String(pr), "--json", "mergeCommit"], {
+      cwd: gh.cwd,
+    }).catch(() => null);
+    try {
+      const oid = (JSON.parse(view?.stdout ?? "") as { mergeCommit?: { oid?: unknown } })
+        .mergeCommit?.oid;
+      if (typeof oid === "string" && oid !== "") return { sha: oid };
+    } catch {}
+    return { reason: `#${pr} merged, but its merge commit could not be read` };
+  }
+
+  /** The release PR merged: the issue lifecycle's release check now, not on its poll. */
+  private releaseMergedIssues(wave: WaveId, pr: number): void {
+    const gh = this.ghFor(this.waves.get(wave)?.record.wave?.repo);
+    this.releasePolledAt.set(wave, this.now());
+    void this.track(
+      this.verifyIssues(wave, gh, pr)
+        .then(() => undefined)
+        .catch((e: unknown) =>
+          this.log(`${wave}: issues: ${e instanceof Error ? e.message : String(e)}`),
+        ),
+    );
+  }
+
   /** Level-triggered: a releasing wave's train enters its next stage, or retries a held spawn. */
   private async releaseAdvance(wave: WaveId): Promise<void> {
-    if (this.opts.spawner === undefined) return;
     if (this.waves.get(wave)?.record.state?.status !== "releasing") return;
     try {
       await this.releaseFor(wave).handle({ kind: "advance" });
@@ -8975,17 +9879,61 @@ export class Daemon {
     const closes = Array.isArray(started?.data.closes)
       ? (started.data.closes as unknown[]).filter((n): n is number => typeof n === "number")
       : [];
+    // The stage as its agent sees it: `{{version}}` and friends substituted (SPEC §4.6.19).
+    const train = rec.state.release;
+    const vars = {
+      wave,
+      release_branch: rec.state.release_branch,
+      ...(train?.version !== undefined ? { version: train.version } : {}),
+      ...(train?.date !== undefined ? { date: train.date } : {}),
+      ...(train?.default_branch !== undefined ? { default_branch: train.default_branch } : {}),
+      ...(train?.merged_sha !== undefined ? { merged_sha: train.merged_sha } : {}),
+    };
+    const resolved = substituteStage(stage, vars);
+    const ship = train !== undefined ? shipTarget({ train }, stage) : undefined;
+    if (stage.phase === "ship" && ship === undefined) {
+      this.log(`spawn ${key} (${stage.name}): held, the release PR is not merged`);
+      return;
+    }
     const files = {
-      "stage.md": renderStageMd(stage, {
+      "stage.md": renderStageMd(resolved, {
         wave,
         release_branch: rec.state.release_branch,
         attempt,
         closes,
+        ...(ship !== undefined ? { ship } : {}),
       }),
     };
-    void this.startSpawn(wave, RELEASE_TASK, "release", { stage, files }).catch((e: unknown) => {
+    const failed = (e: unknown) =>
       this.log(`spawn ${key} (${stage.name}): ${e instanceof Error ? e.message : String(e)}`);
-    });
+    if (ship === undefined) {
+      void this.startSpawn(wave, RELEASE_TASK, "release", { stage: resolved, files }).catch(failed);
+      return;
+    }
+    // A ship stage runs detached at the merge commit on the default branch (the release branch is
+    // gone): the default branch is fetched first, so the commit is in the clone.
+    if (this.shipFetching.has(key)) return;
+    this.shipFetching.add(key);
+    const repo = expandHome(rec.wave.repo);
+    void (async () => {
+      try {
+        await lockFetches(
+          this.host.exec,
+          LOCAL_HOST,
+          repo,
+        )(["git", "-C", repo, "fetch", "--quiet", "origin", ship.default_branch], {
+          timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms,
+        });
+      } finally {
+        this.shipFetching.delete(key);
+      }
+      await this.startSpawn(wave, RELEASE_TASK, "release", {
+        stage: resolved,
+        ship,
+        files,
+        start: { ref: ship.merged_sha, detach: true },
+      });
+    })().catch(failed);
   }
 
   /**
@@ -9946,7 +10894,11 @@ export class Daemon {
     // Watching first: a heartbeat during the probes is the one heartbeat a restart can know of.
     const watch = await watchAgent(this.broker, ns, id, this.time, this.progressFeed);
     const lockFile = typeof t.spawned.lock === "string" ? t.spawned.lock : undefined;
-    const branchName = typeof t.spawned.branch === "string" ? t.spawned.branch : undefined;
+    // A release stage's agent has no PR of its own to probe (a ship stage's is detached, too).
+    const branchName =
+      typeof t.spawned.branch === "string" && t.task !== RELEASE_TASK
+        ? t.spawned.branch
+        : undefined;
     const role =
       typeof t.spawned.role === "string" && isRole(t.spawned.role) ? t.spawned.role : "implementer";
     let r: Reconciliation;
@@ -10273,6 +11225,7 @@ export class Daemon {
     if (decided !== undefined) this.lastDecided.set(decided, event.seq);
     const published = this.track(this.publishAppended(wave, event));
     this.noteRemediation(wave, event);
+    this.noteCleanupReset(wave, event);
     // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.
     const ended =
       event.type === "wave_stopped"
@@ -10282,9 +11235,13 @@ export class Daemon {
               (event.type === "stage_entered" && event.data.stage === "done"))
           ? [event.task]
           : [];
-    // The last stage of the release train verified: the owner's release_go (SPEC §4.6.19).
-    if (event.type === "release_stage_verified" || event.type === "release_stage_skipped")
-      await this.releaseGoIfVerified(wave);
+    // Past a verified or skipped stage the train advances (release_go included); its own handle,
+    // when it journaled the event, advances to the end itself.
+    if (
+      (event.type === "release_stage_verified" || event.type === "release_stage_skipped") &&
+      !this.releaseFor(wave).busy
+    )
+      await this.releaseAdvance(wave);
     if (event.type === "release_cancelled")
       this.log(
         `wave ${wave}: release train cancelled at ${String(event.data.stage)} by ${String(event.data.by)}`,
@@ -10765,12 +11722,6 @@ export class Daemon {
     if (d.kind === "repo_untrusted" && r.answer.trim().toLowerCase() === "cancel")
       await this.onTrustCancelled(wave, d, r.by);
     if (d.kind === "terminal_status_lost") await this.onTerminalLostResolved(wave, d);
-    if (d.kind === "release_go") {
-      // go: the release is the owner's, and done. Anything else holds it: asked again.
-      if (r.answer.trim().toLowerCase() === "go")
-        await this.append(wave, { type: "release_done", data: { by: r.by, decision_id: id } });
-      else await this.releaseGoIfVerified(wave);
-    }
     if (d.kind === "remote_repo_missing" && d.task !== null) {
       // `add`: the repository is added to that one machine (repo_add's run), then retried.
       const slug = (d as { slug?: unknown }).slug;
@@ -10843,8 +11794,14 @@ export class Daemon {
       }
       // "retry now" on a task: the next tick spawns it.
     }
-    // A release stage's question (stage_go, a failed stage's agent_blocked): the train's answer.
-    if (stageOf(d) !== undefined && this.opts.spawner !== undefined)
+    // A release stage's question (stage_go, a failed stage's agent_blocked), release_go (go:
+    // merge the release PR, then the ship stages; hold: asked again) and a red release PR's
+    // retry / hold: the train's answer (SPEC §4.6.19).
+    if (
+      d.kind === "release_go" ||
+      d.kind === "release_pr_ci_failed" ||
+      (stageOf(d) !== undefined && this.opts.spawner !== undefined)
+    )
       void this.enqueue(() =>
         this.releaseFor(wave).handle({ kind: "decision_resolved", decision: d }),
       );
@@ -12005,6 +12962,7 @@ export class Daemon {
                     payload,
                     lastSeen,
                     new Date(this.startedAt).toISOString(),
+                    (id) => this.isWaveFor(id),
                   );
       }
     } catch (e) {
@@ -12111,7 +13069,9 @@ export class Daemon {
 
   /**
    * `peer_invite` / `peer_remove` (SPEC §4.6.14) from `sender`, the username the account-op topic
-   * names: the account ops' admin check, then peers.ts (which journals them itself).
+   * names: the account ops' admin check, then peers.ts (which journals them itself). The fixed
+   * `coordinator` identity (no account entry, so no lookup) may send the repository ops instead
+   * (`coordinatorRepoRefusal`, SPEC §4.6.21); every other op of its is refused.
    */
   private async peerAdminOp(
     exec: ExecFn,
@@ -12120,8 +13080,13 @@ export class Daemon {
     progress: (row: Record<string, unknown>) => void,
   ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
-    const accounts = await listAccounts(exec);
-    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    let why: string | undefined;
+    if (sender === "coordinator") {
+      why = coordinatorRepoRefusal(sender, op, p);
+    } else {
+      const accounts = await listAccounts(exec);
+      why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    }
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
     if (op === "machine_add") return this.machineAddOp(p, sender, progress);
     if (op === "peer_doctor") return this.peerDoctor(p, sender);
@@ -12131,12 +13096,18 @@ export class Daemon {
     if (op === "repo_list") return { reply: authReply(op, this.repoList()) };
     if (op === "repo_status") return { reply: authReply(op, this.repoStatus(p)) };
     if (op === "repo_probe") return this.repoProbe(p);
+    if (op === "repo_check")
+      return { later: async () => ({ reply: authReply(op, await this.repoCheck(p, true)) }) };
     if (op === "archive") {
       const wave = typeof p.wave === "string" ? p.wave : "";
-      const r = this.archived.has(wave)
+      const r: HandlerResult = this.archived.has(wave)
         ? { ok: false, error: `wave '${wave}' is archived already` }
         : await this.archiveAs(wave, sender, ADMIN_REASON, p.dry_run === true);
-      return { reply: authReply(op, r) };
+      // Its last cleanup pass runs beside the queue: the answer waits for it, outside it.
+      const { defer, ...now } = r;
+      if (defer !== undefined)
+        return { later: async () => ({ reply: authReply(op, await defer) }) };
+      return { reply: authReply(op, now) };
     }
     const r =
       op === "peer_invite"
@@ -12508,6 +13479,8 @@ export class Daemon {
         return this.waveControl(op, p, by);
       case "archive":
         return this.archiveOp(p, by);
+      case "cleanup":
+        return this.cleanupOp(p, by);
       case "steer":
         return this.steer(p, by);
       case "terminal_resize":
@@ -12604,6 +13577,15 @@ export class Daemon {
         return this.repoList();
       case "repo_status":
         return this.repoStatus(p);
+      case "repo_check":
+        // Its doctor runs take an ssh round-trip each: answered off the queue.
+        if (p.fix === true)
+          return {
+            ok: false,
+            error:
+              "repo_check with fix: true is answered only on volley/_system/auth/ops/<your username> (an admin's)",
+          };
+        return { ok: true, defer: this.repoCheck(p, false) };
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -12707,18 +13689,20 @@ export class Daemon {
     // serial queue (control ops and ticks, the kill switch included, keep running), then commit
     // inside it, re-checking what may have changed meanwhile (the kill switch, a racing submit of
     // the same wave id).
+    const visibility = this.repoVisibility(first.wave);
     return {
       ok: true,
       defer: Promise.all([
         this.fetchFootprints(first.wave, fetchFiles, readsTree),
-        this.repoVisibility(first.wave),
-        this.ciMode(first.wave),
-      ]).then(([read, visibility, ci]) =>
+        visibility,
+        this.repoRead(first.wave, visibility),
+      ]).then(([read, visibility, repo]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
+          const ci = repo?.ci ?? null;
           // `ci: none` the release branch's required checks make impossible (SPEC §4.6.8).
           if (ci !== null && "refused" in ci)
             return {
@@ -12726,17 +13710,36 @@ export class Daemon {
               error: ci.refused,
               errors: [{ path: "ci", reason: ci.refused }],
             };
-          if (again.existing !== undefined)
-            return this.resubmit(
-              again.existing,
-              again.wave,
-              text,
-              preface,
-              visibility,
-              read.tree,
-              ci,
-            );
-          return this.commitSubmit(again.wave, again.owner, read, text, preface, visibility, ci);
+          // The repository check (SPEC §4.6.21): refused with the fix, from the retained verdicts.
+          const check = repo?.facts != null ? this.admissionCheck(again.wave, repo.facts) : null;
+          if (check !== null && check.refusals.length > 0)
+            return {
+              ok: false,
+              error: check.refusals.map((r) => `repo: ${r.reason}`).join("\n"),
+              errors: check.refusals,
+            };
+          const reply =
+            again.existing !== undefined
+              ? await this.resubmit(
+                  again.existing,
+                  again.wave,
+                  text,
+                  preface,
+                  visibility,
+                  read.tree,
+                  ci,
+                )
+              : await this.commitSubmit(
+                  again.wave,
+                  again.owner,
+                  read,
+                  text,
+                  preface,
+                  visibility,
+                  ci,
+                );
+          const adopted = await this.adoptWaveClone(again.wave, visibility, reply);
+          return this.withRepoCheck(again.wave.wave, adopted, repo?.facts ?? null, check);
         }),
       ),
     };
@@ -12774,16 +13777,107 @@ export class Daemon {
   }
 
   /**
-   * The wave version's CI mode (SPEC §4.6.8): its `ci:` override over the repository's active
-   * workflows and the release branch's required checks, read with `gh api`; or the refusal of a
-   * `ci: none` those checks make impossible. Null: not read (a daemon without a spawner); the
+   * A submit's repository read (`readRepoFacts`, with `gh api`): the wave version's CI mode (SPEC
+   * §4.6.8, its `ci:` override over the repository's active workflows and the release branch's
+   * required checks; or the refusal of a `ci: none` those checks make impossible) and the
+   * repository half of the admission check (SPEC §4.6.21; null when the repository's name is
+   * not known: a clone gh could not name). Null: not read (a daemon without a spawner); the
    * pipeline then reads `workflows`.
    */
-  private async ciMode(wave: Wave): Promise<CiModeResult | { refused: string } | null> {
+  private async repoRead(
+    wave: Wave,
+    visibility: Promise<VisibilityFacts | null>,
+  ): Promise<{ ci: CiModeResult | { refused: string }; facts: RepoFacts | null } | null> {
     if (!this.readsRepo()) return null;
-    const where = isSlugRepo(wave) ? { slug: wave.repo } : { cwd: expandHome(wave.repo) };
-    const facts = await readCiFacts(this.host.exec, where, wave.release_branch);
-    return resolveCiMode(wave.ci, facts, wave.release_branch);
+    const named = isSlugRepo(wave);
+    const where = named ? { slug: wave.repo } : { cwd: expandHome(wave.repo) };
+    const [facts, v] = await Promise.all([
+      readRepoFacts(this.host.exec, where, named ? wave.repo : "", wave.release_branch),
+      visibility,
+    ]);
+    const slug = named ? wave.repo : v?.github?.slug;
+    return {
+      ci: resolveCiMode(wave.ci, facts.ci, wave.release_branch),
+      facts: slug !== undefined ? { ...facts, slug } : null,
+    };
+  }
+
+  /**
+   * The machines a wave's tasks could run on (its placement's candidates): a `local` task's the
+   * supervisor's own (`local`: it spawns into the wave's clone whatever its verdict says), a
+   * `host: <name>` task's that machine (pinned), an `auto` one's every holder of the repository.
+   */
+  private candidateMachines(
+    wave: Wave,
+    slug: string,
+  ): Map<string, { pinned: boolean; local: boolean }> {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const out = new Map<string, { pinned: boolean; local: boolean }>();
+    for (const t of Object.values(wave.tasks)) {
+      const host = t.host ?? LOCAL_HOST;
+      if (host === LOCAL_HOST) out.set(local, { pinned: false, local: true });
+      else if (host === AUTO_HOST) {
+        for (const m of holdersOf(cfg, local, slug))
+          if (!out.has(m)) out.set(m, { pinned: false, local: false });
+      } else if (out.get(host)?.local !== true) out.set(host, { pinned: true, local: false });
+    }
+    return out;
+  }
+
+  /**
+   * The admission check (D7): the repository's facts and each candidate's retained verdict — what
+   * placement will use, at most a heartbeat old; no doctor runs. A machine not heard from yet, or
+   * not PATH-probed yet since the supervisor started, settles soon: it refuses nothing.
+   */
+  private admissionCheck(wave: Wave, facts: RepoFacts): { refusals: Refusal[]; lines: string[] } {
+    const candidates: Candidate[] = [...this.candidateMachines(wave, facts.slug)].map(
+      ([name, { pinned, local }]) => {
+        const record = this.recordOfMachine(name);
+        const r = this.readinessFor(name, facts.slug);
+        const settling =
+          record === undefined ||
+          (!r.ready && r.reasons.length > 0 && r.reasons.every((x) => /not probed yet/.test(x)));
+        return {
+          name,
+          pinned,
+          local,
+          ready: r.ready,
+          reasons: r.reasons,
+          repo: r.repo,
+          noIdentity: lacksIdentity(record),
+          settling,
+        };
+      },
+    );
+    return admissionRefusals(
+      {
+        slug: facts.slug,
+        release_branch: wave.release_branch,
+        merge: wave.merge ?? (this.config.effective().autopilot.merge as MergeMode),
+        spawnsLocally: spawnsLocally(wave),
+      },
+      facts,
+      candidates,
+    );
+  }
+
+  /**
+   * An admitted submit's reply with what the check found without refusing (`repo_check.lines`,
+   * which `volleyd run` prints), and `repo_check_unknown` journaled when a fact could not be read.
+   */
+  private async withRepoCheck(
+    wave: WaveId,
+    reply: Reply,
+    facts: RepoFacts | null,
+    check: { lines: string[] } | null,
+  ): Promise<Reply> {
+    if (!reply.ok) return reply;
+    if (facts !== null && factsUnknown(facts))
+      await this.append(wave, { type: "alarm_raised", data: { alarm: "repo_check_unknown" } });
+    return check !== null && check.lines.length > 0
+      ? { ...reply, repo_check: { lines: check.lines } }
+      : reply;
   }
 
   /** Journal a wave version's CI mode, and the alarm when the repository could not be read. */
@@ -12793,6 +13887,54 @@ export class Daemon {
     await this.append(wave, { type: "ci_mode_detected", data: { ...data } });
     if (unknown === true)
       await this.append(wave, { type: "alarm_raised", data: { alarm: "ci_mode_unknown" } });
+  }
+
+  /**
+   * A submitted wave's clone joins the registry (#616, D2): a wave whose `repo:` is a path on a
+   * clone of a repository config names (`github.slug` from the visibility read, else the clone's
+   * `origin`), where the supervisor's machine holds no clone of it by config, adopts the clone's
+   * root there (`fleet.repos`, `repo_added { by: "wave <id>" }`, then its local run), with a note
+   * on the reply. A repository config does not name is left out (D6); a clone config already
+   * gives the supervisor elsewhere is only logged. Inside the queue, after the submit committed;
+   * a daemon that spawns no agents reads nothing of the repository at submit, so adopts nothing.
+   */
+  private async adoptWaveClone(
+    wave: Wave,
+    visibility: VisibilityFacts | null,
+    reply: Reply,
+  ): Promise<Reply> {
+    if (reply.ok !== true || isSlugRepo(wave) || !this.readsRepo()) return reply;
+    const local = this.config.localName();
+    const cfg = this.config.effective();
+    // Nothing named: no repository is in the registry, so nothing to read either.
+    if (Object.keys(cfg.repos).length === 0 && adoptedMaps(cfg, local).length === 0) return reply;
+    let root: string;
+    try {
+      root = trimPath(await repoRoot(this.host.exec, expandHome(wave.repo)));
+    } catch {
+      return reply;
+    }
+    let slug = visibility?.github?.slug;
+    if (slug === undefined) {
+      const probe = await probeLocalClone(this.host.exec, root).catch(() => null);
+      slug = probe?.slug;
+    }
+    const key = slug !== undefined ? namedSlug(cfg, local, slug) : undefined;
+    if (key === undefined) return reply;
+    const held = cloneFor(cfg, local, local, key, { home: homedir() });
+    if (held !== undefined) {
+      if (trimPath(resolve(held)) !== root)
+        this.log(`${key}: the wave runs from ${root}, the registry has ${held}`);
+      return reply;
+    }
+    const r = await this.applyRepoAdd(key, [local], { [local]: root }, `wave ${wave.wave}`);
+    if (typeof r === "string") {
+      this.log(`wave ${wave.wave}: ${key} not adopted: ${r}`);
+      return reply;
+    }
+    const note = `adopted ${root} as ${local}'s clone of ${r.slug}`;
+    this.log(`wave ${wave.wave}: ${note}`);
+    return { ...reply, notes: [...(reply.notes ?? []), note] };
   }
 
   /** Journal a wave version's visibility, and the alarm when it could not be read. */
@@ -12923,13 +14065,13 @@ export class Daemon {
   private placementDefaults(wave?: WaveId): PlacementDefaults {
     const rec = wave === undefined ? undefined : this.waves.get(wave)?.record;
     const current = rec?.plan ?? rec?.wave;
-    if (current != null) return { default: current.placement ?? "local", paired: 1, kept: true };
     const cfg = this.config.effective();
     const local = this.config.localName();
-    return {
-      default: cfg.placement.default,
-      paired: Object.keys(cfg.hosts).filter((n) => n !== local).length,
-    };
+    // The names a task's `host:` may give, checked on every version (#608).
+    const pairedNames = Object.keys(cfg.hosts).filter((n) => n !== local);
+    if (current != null)
+      return { default: current.placement ?? "local", paired: 1, kept: true, local, pairedNames };
+    return { default: cfg.placement.default, paired: pairedNames.length, local, pairedNames };
   }
 
   /** Parse a request's `wave_yaml`; a Reply when it is missing or invalid. */
@@ -14856,10 +15998,12 @@ function firstLines(text: string): string {
   return text.trim().split("\n").slice(0, 2).join("\n");
 }
 
-/** A message quoted in a decision question: one line, at most `decision_text_max` characters. */
-function clipText(text: string): string {
+/**
+ * `text` on one line, at most `max` characters: a message quoted in a decision question
+ * (`decision_text_max`), or a schema's `maxLength`.
+ */
+function clipText(text: string, max: number = DAEMON_DEFAULTS.decision_text_max): string {
   const one = text.replace(/\s+/g, " ").trim();
-  const max = DAEMON_DEFAULTS.decision_text_max;
   return one.length > max ? `${one.slice(0, max - 1)}…` : one;
 }
 
@@ -14938,4 +16082,14 @@ function windowShort(window: string | undefined): string {
   if (window === "weekly") return "7d";
   const f = window?.startsWith("model_weekly:") ? window.slice("model_weekly:".length) : "";
   return f !== "" ? `${f.charAt(0).toUpperCase()}${f.slice(1)}` : "window";
+}
+
+/** Does `e` send a wave back to needing its whole-wave cleanup pass (it resumed or ended again)? */
+const resetsWholeCleanup = (e: JournalEvent): boolean =>
+  e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed";
+
+/** The task `e` takes back out of done or cancelled, whose cleanup then runs again when it ends. */
+function reopenedTask(e: JournalEvent): string | undefined {
+  if (e.type !== "stage_entered" || e.task === undefined) return undefined;
+  return e.data.stage === "done" || e.data.stage === "cancelled" ? undefined : e.task;
 }

@@ -456,6 +456,46 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T1?.host).toBe("auto");
   });
 
+  it("a fallback re-placement (#608) carries from and why, and both validate", () => {
+    const fallback: JournalEvent = {
+      seq: 5,
+      at: AT,
+      type: "task_placed",
+      task: "T1",
+      data: {
+        task: "T1",
+        host: "box-b",
+        score: 0.5,
+        candidates,
+        by: "fallback",
+        from: "box-a",
+        why: "no clone at /path/to/home/.volley/repos/a/a on dev@box-a",
+      },
+    };
+    expect(
+      schemaErrors(
+        "wave-event.schema.json",
+        envelope("_waves/events", fallback.type, {
+          wave: "w1",
+          seq: fallback.seq,
+          at: fallback.at,
+          task: fallback.task,
+          data: fallback.data,
+        }),
+      ),
+    ).toEqual([]);
+    const rec = apply(replay([...base, placedA]), fallback);
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.placement).toMatchObject({
+      host: "box-b",
+      by: "fallback",
+      why: "no clone at /path/to/home/.volley/repos/a/a on dev@box-a",
+    });
+    expect(rec.wave?.tasks.T1?.host).toBe("box-b");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+  });
+
   it("a new plan version keeps the placement of a task that is still auto", () => {
     let rec = replay([...base, placedA]);
     const v2 = { ...wave, version: 2 };
@@ -727,6 +767,7 @@ describe("the release train (SPEC §4.6.19)", () => {
     expect(s.status).toBe("releasing");
     expect(s.release).toEqual({
       stage: null,
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "pending" },
         { name: "deploy", state: "pending" },
@@ -755,12 +796,61 @@ describe("the release train (SPEC §4.6.19)", () => {
     expect(done.status).toBe("complete");
     expect(done.release).toEqual({
       stage: null,
+      phase: "prepare",
       stages: [
         { name: "smoke", state: "verified" },
         { name: "deploy", state: "verified" },
       ],
     });
     valid(done);
+  });
+
+  it("release_started's version, release_pr_detected's PR and release_merged's sha fold in", () => {
+    const s = reduce([
+      ...events,
+      ev("release_started", {
+        done: ["T0"],
+        cancelled: [],
+        version: "0.13.3",
+        date: "2026-10-25",
+        default_branch: "main",
+        playbook: {
+          stages: [
+            { name: "pr", brief: "b", run: [], gate: "auto", phase: "prepare" },
+            { name: "tag", brief: "t", run: [], gate: "auto", phase: "ship" },
+          ],
+        },
+      }),
+      ev("release_stage_entered", { stage: "pr" }),
+      ev("release_pr_detected", { pr: 12, head: "d".repeat(40), title: "release: v0.13.3" }),
+      ev("release_stage_verified", { stage: "pr" }),
+    ]);
+    expect(s.release).toEqual({
+      stage: null,
+      phase: "prepare",
+      version: "0.13.3",
+      date: "2026-10-25",
+      default_branch: "main",
+      pr: { number: 12, head: "d".repeat(40), title: "release: v0.13.3" },
+      stages: [
+        { name: "pr", state: "verified" },
+        { name: "tag", state: "pending", phase: "ship" },
+      ],
+    });
+    valid(s);
+    const merged = reduce([
+      ...events,
+      ev("release_started", {
+        done: ["T0"],
+        cancelled: [],
+        version: "0.13.3",
+        playbook: { stages: [{ name: "tag", phase: "ship" }] },
+      }),
+      ev("release_merged", { pr: 12, sha: "e".repeat(40) }),
+    ]);
+    expect(merged.release).toMatchObject({ phase: "ship", merged_sha: "e".repeat(40) });
+    expect(merged.status).toBe("releasing");
+    valid(merged);
   });
 
   it("a paused releasing wave resumes releasing, not running", () => {
@@ -1078,5 +1168,51 @@ describe("the overlap plan (task_queued, wave_planned; SPEC §4.6.22)", () => {
     ]);
     expect(dropped.spec?.tasks.T1).not.toHaveProperty("files");
     expect(dropped.spec?.tasks.T1).not.toHaveProperty("footprint");
+  });
+});
+
+describe("wave_cleaned (#612)", () => {
+  const counts = (o: Partial<Record<string, number>> = {}) => ({
+    worktrees: 0,
+    sessions: 0,
+    processes: 0,
+    branches: 0,
+    logins: 0,
+    repos: 0,
+    accounts: 0,
+    clones: 0,
+    ...o,
+  });
+  const cleaned = (seq: number, data: Record<string, unknown>): JournalEvent => ({
+    seq: events.length + seq,
+    at: `2026-10-25T12:0${seq}:00.000Z`,
+    type: "wave_cleaned",
+    data: { by: "volleyd", kept: [], dry_run: false, ...data },
+  });
+
+  it("folds the last real run into state.cleanup; a later one replaces it; a dry run does not", () => {
+    const kept = [{ kind: "release_branch", host: "local", what: "release/x", why: "3 commits" }];
+    const first = cleaned(1, {
+      removed: counts({ worktrees: 3 }),
+      kept,
+      summary: "cleaned w1: 3 worktrees; kept 1",
+    });
+    const state = reduce([...events, first]);
+    expect(state.cleanup).toEqual({
+      at: first.at,
+      removed: counts({ worktrees: 3 }),
+      kept,
+      summary: "cleaned w1: 3 worktrees; kept 1",
+    });
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    const later = cleaned(2, { removed: counts(), summary: "nothing to clean" });
+    expect(reduce([...events, first, later]).cleanup?.summary).toBe("nothing to clean");
+    const dry = cleaned(3, { removed: counts(), summary: "would clean", dry_run: true });
+    expect(reduce([...events, first, dry]).cleanup?.summary).toBe(
+      "cleaned w1: 3 worktrees; kept 1",
+    );
+    expect(reduce(events).cleanup).toBeUndefined();
   });
 });

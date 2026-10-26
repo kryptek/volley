@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import type { BrokerAuth } from "volley-mcp/config";
 import { parseEnvelope } from "volley-mcp/envelope";
@@ -11,6 +10,7 @@ import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
 import { connectToSupervisor } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { openUrl } from "../open-url";
 import { type Answer, askVolleyd } from "./peer";
 
 /**
@@ -212,17 +212,4 @@ async function readRetained(
   } finally {
     await broker.disconnect();
   }
-}
-
-/** The platform's opener (`open` on macOS, else `xdg-open`), detached: the CLI does not wait. */
-function openUrl(url: string): Promise<boolean> {
-  const opener = process.platform === "darwin" ? "open" : "xdg-open";
-  return new Promise((resolve) => {
-    const child = spawn(opener, [url], { detached: true, stdio: "ignore" });
-    child.once("error", () => resolve(false));
-    child.once("spawn", () => {
-      child.unref();
-      resolve(true);
-    });
-  });
 }

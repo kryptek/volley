@@ -171,6 +171,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
 | `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. For a wave id the daemon already holds, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
 | `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between a submitted wave's current plan and the file, without submitting. |
+| `volleyd add <wave> <issue...> [--after <task,...>] [--file <wave.yaml>] [--by <id>] [--json]` | Add issues to a running wave as new tasks in one command: fetch each issue, derive its task as `wave-from-issues` does, write it into the wave file (default `.volley/waves/<wave>.yaml` under this directory) and submit the next plan version (owner only). See [Plan changes](#plan-changes-versioned-wave-files). |
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. Notes that `volleyd run` needs an owner. |
 | `volleyd status [wave] [--all] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). Archived waves are left out; `--all` lists them too, each with an `archived <at> by <who>: <reason>` line. `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
@@ -195,7 +196,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
 | `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, what the hard ceiling counts (`ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1`), every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
-| `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove retired agents' cmux workspaces and worktrees of tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. Branches are kept. |
+| `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove everything the wave made, on every machine: its retired agents' workspaces or sessions, worktrees, locks and processes (by argv or working directory), its merged agent branches, leftover agent logins, and `--for-wave` registrations, accounts and managed clones; one `kept <kind> <what>: <why>` line per item it keeps, then the summary (`cleaned <wave>: …; kept <k>`), journaled `wave_cleaned`. Only tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. With `cleanup_on_end` on, the daemon runs it itself (see "Retire and cleanup"). |
 
 The mutating commands (`resolve`, `pause`, `resume`, `stop`, `archive`, `steer`, `claim`) act as the caller's
 agent id: `--by <id>`, else `VOLLEY_AGENT_ID`, else the top-level session registered for the
@@ -1087,7 +1088,7 @@ tried in order; the first whose kind and condition match wins):
 
 ```text
 autopilot: on
-  plan_change, repo_untrusted, model_switch, release_go, stage_go · always · escalate owner_only · no budget
+  plan_change, repo_untrusted, model_switch, release_go, stage_go, release_pr_ci_failed · always · escalate owner_only · no budget
     owner_only: autopilot.owner_only: only the owner answers these
   spawn_failed · next_retry_at !== null (the daemon still retries) · retry now · no budget
     spawn_failed/retrying: the daemon retries with backoff; the question is informational
@@ -1224,39 +1225,79 @@ wave state carries `tasks[].synthetic: true` and `tasks[].remediation` (with `te
 
 ### The release train
 
-What turns a merged release branch into a release (the version bump, the changelog, a staging
-deploy, a smoke run, the release notes) differs in every project, so volleyd does not know it: a
-repository tells it, in a **release playbook** at `<repo>/.volley/release.yaml`
+What turns a merged release branch into a release (the version bump, the changelog, the release
+PR, the tag, a deploy) differs in every project, so volleyd does not know it: a repository tells
+it, in a **release playbook** at `<repo>/.volley/release.yaml`
 (`spec/schemas/release-playbook.schema.json`, SPEC §4.6.19). Each stage is generic: a `brief`
-for the agent that runs it, the argv lines it runs (`run`, shown in its brief verbatim), the
-facts volleyd checks afterwards (`verify`) and who lets it start (`gate`):
+for the agent that runs it, the argv lines it runs (`run`, shown in its brief), the facts volleyd
+checks afterwards (`verify`), who lets it start (`gate`) and when it runs (`phase`: `prepare`,
+the default, before the owner's `release_go`; `ship`, after its `go`). This repository's own
+playbook (`.volley/release.yaml`, tracked) is the example:
 
 ```yaml
 version: 1
 stages:
   - name: bump
-    brief: Bump every package to the release version and assemble the changelog from changes/.
+    brief: >-
+      Bump every package to {{version}} and assemble CHANGELOG.md's {{version}} section
+      ({{date}}) from changes/. Then commit everything both commands changed as
+      `release: v{{version}} — <theme>` (<theme>: a few words naming what the section ships) and
+      push it to the release branch: `git push origin HEAD:{{release_branch}}`.
     run:
-      - [bun, run, changelog, --version, 0.5.0, --date, 2026-10-20, --commit]
+      - [bun, scripts/release-version.ts, --set, "{{version}}"]
+      - [bun, run, changelog, --version, "{{version}}", --date, "{{date}}"]
     verify: { commits_on_release: true, files: [CHANGELOG.md] }
-  - name: staging
-    brief: Deploy the release branch to staging and run the smoke checks against it.
+  - name: release-pr
+    brief: >-
+      Open the release PR: `gh pr create --base {{default_branch}} --head {{release_branch}}
+      --label no-changelog --title 'release: v{{version}} — <theme>'` (the theme of the bump
+      commit), its body the changelog section's bullets and then the Closes lines under "Release
+      PR body", each exactly as written. Never merge it: volleyd squash-merges it on the owner's
+      release_go.
+    verify: { release_pr: true }
+  - name: tag
+    phase: ship
+    brief: >-
+      Tag the release's merge commit (your HEAD) with the annotated tag v{{version}} and push the
+      tag, nothing else.
     run:
-      - [make, deploy-staging]
-      - [make, smoke]
-    verify: { result: { smoke: passed } }
-    timeout_s: 1800
-    heavy: staging          # a lease pool the stage holds while it runs
-  - name: notes
-    brief: Draft the release notes from the changelog section and tag the release.
-    gate: owner             # a stage_go decision asks before it runs
-    verify: { tag: "v*" }
+      - [git, tag, -a, "v{{version}}", -m, "v{{version}}"]
+      - [git, push, origin, "v{{version}}"]
+    verify: { tag: "v{{version}}" }
+  - name: deploy
+    phase: ship
+    brief: >-
+      Deploy v{{version}} to the supervisor and its paired machines. Publish your stage result
+      with `deployed: "v{{version}}"` once `volley deploy` exits 0.
+    run:
+      - [volley, deploy, "v{{version}}"]
+    verify: { result: { deployed: "v{{version}}" } }
 ```
 
+- **Variables**: `{{version}}`, `{{date}}`, `{{wave}}`, `{{release_branch}}`,
+  `{{default_branch}}` and, in a ship stage only, `{{merged_sha}}` are substituted in a stage's
+  `brief`, each `run` argv element, `verify.tag` and `verify.result` values, when its brief is
+  rendered and when it is verified. Nothing else is: argv stays shell-free, and an unknown
+  `{{name}}` is a path-qualified `RELEASE_PLAYBOOK_INVALID` (`stages[0].run[1][4]: unknown
+  variable {{ver}}`).
+- **The version**: at `release_started` volleyd reads the newest `v*` tag (`gh api
+  repos/{owner}/{repo}/git/matching-refs/tags/v`; a prerelease is never the base) and the
+  release branch's change fragments (`git ls-tree origin/<release> changes/`): **minor** when
+  any is `*.added.md` or `*.removed.md`, else **patch** (`0.1.0` with no tag), and the default
+  branch (`gh repo view --json defaultBranchRef`). A wave file's `release_version: X.Y.Z`
+  overrides the version (the only way to cut `1.0.0`; refused unless greater than the newest
+  tag). `release_started` journals `{ version, date, default_branch }`, the wave state carries
+  them in `release`, and `volleyd status` prints `release: v0.13.3 · bump running (0/4
+  verified)`. A playbook that needs them and cannot read them yet waits (logged once) and the
+  next tick reads again.
+- **Phases**: prepare stages come first. A ship stage pushes nothing but a tag (no
+  `commits_on_release`), and a playbook with one needs a prepare stage that verifies
+  `release_pr`: the PR volleyd merges on the go.
 - **Where**: `.volley/release.yaml` in the wave's repo; a wave file's `playbook: <path>`
   (relative to `repo`, or absolute) points elsewhere, and `playbook: none` opts the wave out.
-  `volleyd validate` and `volleyd run` print `release playbook: <path> (N stages, M
-  owner-gated)` or `release playbook: none`. A playbook that does not validate (or a configured
+  `volleyd run` prints `release playbook: <path> (N stages, M owner-gated)` or `release
+  playbook: none`; `volleyd validate` counts the phases too (`(4 stages: 2 prepare, 2 ship, 0
+  owner-gated)`), and the `/volley-issues` helper prints the line where the wave is made. A playbook that does not validate (or a configured
   one that does not exist) fails `validate` and refuses the wave at `run` with
   `RELEASE_PLAYBOOK_INVALID` and its path-qualified errors (`stages[1].name: duplicate stage
   'smoke'`).
@@ -1273,13 +1314,28 @@ stages:
   wave is submitted and again when it settles; `release_started` records the path and sha256 of
   the file used. A wave whose repo is not on volleyd's machine has no playbook to read, so it
   completes without a train.
-- **The end is always yours**: once every stage is `verified` (or `skipped`), volleyd opens `release_go`
-  (wave-level, options `go` and `hold`, with each stage's evidence in `stages`). It is
-  owner-only (`autopilot.owner_only`), so it rings. `go` journals `release_done { by,
-  decision_id }` and the wave is `complete`; `hold` (or any other answer) keeps it `releasing`
-  and asks again at once (the new decision carries `class: held`), so a held
-  `release_go` is straight back in the inbox. volleyd never deploys to production
-  on its own: a deploy-shaped stage says `gate: owner`.
+- **One go, and it is always yours**: once every prepare stage is `verified` (or `skipped`) and
+  the release PR's head is CI-green (read as a task PR's head is: `gh api
+  …/actions/runs?head_sha=`, once per `ci_poll_ms` while running, honouring `ci_mode`; a moved
+  head is journaled `release_pr_detected` again), volleyd opens `release_go` (wave-level, options
+  `go` and `hold`, with each stage's evidence in `stages`); its question names the version, the
+  PR and the first bullets of the changelog section on the release branch. It is owner-only
+  (`autopilot.owner_only`), so it rings. A red head opens `release_pr_ci_failed` instead (`retry`
+  reads CI again, `hold` asks again; never answered automatically: it is in
+  `autopilot.owner_only` too). **`go`** squash-merges the release PR at exactly the head
+  `release_go` named (its `head`; a head that moved since, or whose CI then reads red, drops the
+  go as `release_merge_failed` and is asked again), deleting the release branch (`gh pr merge <n> --squash
+  --match-head-commit <sha> --delete-branch`, under a `ReleaseToken` only the go mints; never
+  `--admin`), journals `release_merged { pr, sha }`, closes the wave's issues at once (below),
+  runs the ship stages at the merge commit, and journals `release_done { by, decision_id,
+  version, merged_sha }` after the last one: the wave is `complete` (and later archived under
+  `archive_ended_after_h`). A merge that does not happen journals `release_merge_failed { pr,
+  head, reason }` and asks `release_go` again with the reason. A playbook with no release PR
+  (and so no ship stage) completes on `go` at once, as before. `hold` (or any other answer)
+  keeps it `releasing` and asks again at once (the new decision carries `class: held`), so a
+  held `release_go` is straight back in the inbox. The go is the owner's authority for exactly
+  the ship stages the journaled playbook declares; a ship stage whose deploy is production says
+  `gate: owner` and asks `stage_go` too.
 - **Without a playbook** (or with autopilot off) nothing changes: the wave completes, and its
   `wave_complete` decision is auto-acknowledged under autopilot. A playbook that stopped
   validating since the wave was submitted is not run; the `wave_complete` question says why.
@@ -1294,17 +1350,21 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   launch, registration check, screen tail, liveness) under the pseudo task `_release` (no wave
   file task can be named that). It is `<wave>-release-<stage>-<n>`, on the branch
   `<wave>/release-<stage>-<n>`, in a worktree cut from the **release branch's tip** (a fresh
-  fetch; `require_fresh_base` applies). A stage agent counts toward `hard_ceiling` like a task's,
+  fetch; `require_fresh_base` applies); a ship stage's is **detached at the release's merge
+  commit** (`origin/<default>` fetched first), the release branch being gone. A stage agent
+  still running when volleyd restarts is reconciled and watched again like a task's, so the
+  `deploy` stage can restart volleyd under its own agent and still be verified. A stage agent counts toward `hard_ceiling` like a task's,
   and its spawn waits on the kill switch and the pressure verdict; the spawn budget does not
   apply (a stage runs again only on the owner's `respawn`). `volleyd spawn` refuses the role.
   A spawn that fails backs off and asks `spawn_failed` as a task's does, but wave-level: `retry
   now` spawns at once, `stop task` fails the stage (the `agent_blocked` decision below).
 - **The brief** (`briefs/release.md.tmpl`, and `.volley/stage.md` beside it): the stage's
-  `brief`, its `run` lines verbatim as the commands to run in order (stopping at the first that
-  exits non-zero), the `verify` facts it must leave true, and the result contract. A `heavy`
-  stage's brief says `volley lease acquire --pool <pool>` first. Any push goes to the release
-  branch as a fast-forward, `git push origin HEAD:<release>`: that is the agent's push, never
-  volleyd's.
+  `brief`, its `run` lines (variables substituted) as the commands to run in order (stopping at
+  the first that exits non-zero), the `verify` facts it must leave true, and the result
+  contract. A `heavy` stage's brief says `volley lease acquire --pool <pool>` first. A prepare
+  stage's push goes to the release branch as a fast-forward, `git push origin HEAD:<release>`; a
+  ship stage pushes nothing but its tag. Either is the agent's push, never volleyd's; the
+  release PR is the agent's `gh pr create`, and only its merge is volleyd's.
 - **The result contract**: before its `done` the agent publishes
   `vol_publish(channel="result", type="stage", payload={ stage, commands: [{ argv, code, seconds
   }], notes, artifacts: { tag?, files?, urls? } })` (`review-result.schema.json`).
@@ -1313,9 +1373,12 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   `commits_on_release` (`git fetch` + `rev-parse` + `merge-base --is-ancestor`: the tip moved
   past the stage's start, the recorded `base_sha` (unknown: the fact does not hold), and the
   agent's HEAD is on it);
-  `tag` (`gh api repos/{owner}/{repo}/git/matching-refs/tags/<prefix>`, a GET: a matching tag at
-  the tip); `files` (`git show origin/<release>:<path>` exits 0); `result` (each field with its
-  value). Verified: `$VOLLEYD_HOME/waves/<wave>/release/<stage>.md` and `.json` (the commands
+  `release_pr` (`gh pr list --head <release> --base <default> --state open --json
+  number,headRefOid,title,labels`: exactly one, labelled `no-changelog`, its title starting
+  `release:`; journaled `release_pr_detected { pr, head, title }`); `tag` (`gh api
+  repos/{owner}/{repo}/git/matching-refs/tags/<prefix>`, a GET: a matching tag at the tip; a
+  ship stage's at the merge commit); `files` (`git show origin/<release>:<path>` exits 0; a ship
+  stage's at the merge commit); `result` (each field with its value). Verified: `$VOLLEYD_HOME/waves/<wave>/release/<stage>.md` and `.json` (the commands
   and exit codes, the artifacts, each fact with its evidence line), `release_stage_verified {
   stage, head, evidence }`, the agent retired, and the next stage starts (or `release_go` opens,
   its `stages` pointing at every evidence file).
@@ -1347,7 +1410,8 @@ stays open, saying nothing, until the release PR reaches main. volleyd owns that
   never), `release_started` carries it, and every release stage's `.volley/stage.md` has a
   `## Release PR body` section with one `Closes #N` line per issue, so the release PR body is
   generated, not hand-written.
-- **When the release reaches main**: while the wave is `complete` volleyd looks for the release
+- **When the release reaches main**: volleyd's own merge of the release PR (the release train's
+  go) checks at once, in the same tick. Otherwise, while the wave is `complete` volleyd looks for the release
   branch's merged PR (`gh pr list --head <release> --state merged`, once per
   `release_merge_poll_ms`, 5 minutes, until the wave is archived); `volleyd issues <wave>
   --verify [--pr <n>]` runs the same check now for a release merged by hand (refused unless the
@@ -2229,7 +2293,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
-| `repos`, `hosts.<name>.repos` | spawns and submits after the change ([repositories](#repositories)) | running agents keep the clone and worktree they started in |
+| `repos`, `fleet.repos`, `hosts.<name>.repos` | spawns and submits after the change ([repositories](#repositories)) | running agents keep the clone and worktree they started in |
 | `fleet.repo_root` | spawns and submits after the change ([repositories](#repositories)) | clones already made stay where they are |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
@@ -2883,9 +2947,11 @@ another id (a reused worktree) is ignored.
 **Ending the session.** With `retire_close_session` on (the default) the retire then closes the
 agent's workspace (its cmux workspace, bounded by a 15 s timeout, or its tmux session on an ssh
 host) and, on this machine, stops whatever process still runs under the agent's worktree: a
-closed cmux workspace does not always end its `claude`. A process counts only by its argv (the
-launch script's `--mcp-config=<worktree>/.volley/mcp.json`; volleyd lists processes with the
-fenced `ps -axo pid=,command=` and signals them itself: SIGTERM, a 5 s grace, SIGKILL). It is
+closed cmux workspace does not always end its `claude`. A process counts by its argv (the
+launch script's `--mcp-config=<worktree>/.volley/mcp.json`) or by its working directory (a dev
+server, watcher or REPL the agent started in the worktree: `/proc/<pid>/cwd` on Linux, the fenced
+`lsof -a -d cwd -F pn` on macOS); volleyd lists processes with the fenced `ps -axo pid=,command=`
+and signals them itself: SIGTERM, a 5 s grace, SIGKILL. It is
 journaled `agent_session_closed { agent_id, workspace, how, pids }` (`how`: `close-workspace`,
 `kill-session`, `signal` when only a process was stopped, or `none`) before
 `agent_retired { workspace, workspace_closed }`. An agent retired after a daemon restart has
@@ -2896,14 +2962,46 @@ worktree. A worktree or title another live agent of the wave now holds (a relaun
 worktree) is left alone. With `retire_close_session: false` finished sessions stay open for
 inspection (`workspace_closed: false`; the marker is still written).
 
-Nothing on disk is deleted: `volleyd cleanup <wave>
---yes` closes any workspace a retire could not close, runs `git worktree remove` with the fence's
-consent token (`--force` for dirty worktrees), and stops the retired agents' processes still
-running on this machine: every process whose `--mcp-config=` lies inside the worktree of a
-target whose every agent is retired, never one under any other worktree (an agent not yet
-retired, or one the daemon is launching and has not journaled yet) (`stopped <pid> (<agent
-id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
-deleted. Only tasks that are `done` or `cancelled` are cleaned up: an unfinished task (a
+**Cleanup (SPEC §4.6.26).** A retire deletes nothing on disk; cleanup removes what the wave
+made, on every machine, from one list derived from the journals (the *ledger*: `ledgerOf` in
+`src/commands/cleanup.ts`). Owned items go: the workspaces and sessions a retire could not close,
+the worktrees (`git worktree remove` with the fence's consent token; `--force` for dirty ones),
+their spawn locks, and every process under them by argv or working directory (`stopped <pid>
+(<agent id>)`; never one under a worktree the ledger does not name, such as an agent the daemon
+is launching and has not journaled yet, nor one under a live agent's); each agent branch whose
+PR the journal shows merged (`merged_by_supervisor`, `merged_by_operator`, a train member's, or
+a release stage's `release_stage_verified`) **at the branch's current tip** (`git rev-parse`),
+deleted with `git -C <repo> branch -D <branch>` under a per-branch `BranchDeleteToken` (a commit
+after the merge keeps it: `kept branch <b>: 1 commit after the merged head`; a cancelled or
+failed task's is `unmerged`); the agent logins a crash left (through the delete path above); and
+a registration or account made with `--for-wave <wave>`, with the managed clones volleyd's own
+clone run made for that registration (`repo_clone_run { cloned: true }` at
+`<fleet.repo_root>/<owner>/<name>`). A clone is deleted (`rm -rf` under a per-path
+`CloneRemoveToken`, journaled `repo_clone_removed`) only when its work tree is clean, it has no
+stash and every local branch is pushed (or a branch this run proved merged); otherwise `kept
+clone <path>: 2 unpushed commits on <b>` / `dirty work tree` / `stash`. Borrowed items are kept
+and named: the owner's registration (`kept repo <owner/name>: added by <account> (not for a
+wave) — volley repo remove <owner/name>`, only when no other wave uses it), the release branch
+(`… merged into main — git push origin --delete <b>` when GitHub reads it fully merged, else
+how many commits are not on the default branch), and every human account. The run ends with one
+line, `cleaned <wave>: 3 worktrees (1 on box), 2 sessions, 1 process, 3 branches, 2 logins; kept
+1` (`nothing to clean` when nothing was removed), and journals `wave_cleaned { by, removed, kept,
+summary, dry_run, task? }`; `volleyd status` prints its summary as `cleanup: …` and the Desk shows
+a `cleaned` chip with the kept items. A paired machine that cannot be reached keeps its items
+(`kept … (<machine> unreachable; cleanup runs again next tick)`) and the command still exits 0.
+
+**It runs itself.** With `cleanup_on_end: true` (the default) the daemon cleans a task's items
+on the tick after it is `done` or `cancelled` with no agent of it live (`wave_cleaned { task }`),
+and the whole ledger once the wave is `complete` or `stopped` and none of its agents is live; a
+task held unfinished (`merge_ready`) is cleaned when it ends; a run that kept an unreachable
+machine's items runs again a minute later. Archiving waits for that pass, and `volleyd archive`
+runs one last one and answers with the kept items. `volleyd cleanup <wave> [--yes]` is the
+manual path: with the daemon up it is the daemon's `cleanup` op (the owner only), and while the
+daemon is down it reads `$VOLLEYD_HOME` directly and leaves logins, registrations and accounts
+for the daemon (`kept …: daemon down`). `cleanup_on_end: false` is the old behaviour: nothing is
+cleaned until you run it.
+
+Only tasks that are `done` or `cancelled` are cleaned up: an unfinished task (a
 `merge_ready` task's agents are all retired while its merge waits) prints `skip <task>: <stage>`
 and keeps its worktrees, unless `--all` is given (on an unfinished task that runs on a remote
 host, `--all` leaves its git checks failing: the repo-root fallback below is the supervisor's
@@ -2983,7 +3081,16 @@ hosts:
 tasks:
   T1: { issue: 102, host: box }
   T2: { issue: 103, host: { type: ssh, name: box, tunnel: { remote_port: 2883 } } }
+  T3: { issue: 104, host: macbook-pro }   # the supervisor's own machine, by its name
 ```
+
+A task's `host:` (and `placement_prefer` / `placement_avoid`) may also name the supervisor's own
+machine by the name it publishes everywhere (`fleet.local_name`, else derived from the host name:
+`MacBook-Pro.local` → `macbook-pro`): it is the same as `host: local`. Any other name that is
+neither `local`, `auto`, a `hosts` entry nor an inline host is refused at submit (and by
+`volleyd validate` when `config.yaml` exists), with the names it knows: `tasks.T1.host: unknown
+host "mac": this machine is macbook-pro; paired: box`. `volleyd validate`'s placement line prints
+both names, so there is somewhere to read them from before writing the file.
 
 #### Repositories
 
@@ -2996,6 +3103,8 @@ repos:
   example-org/widgets: { machines: all }        # or a list: [box, mini]
 fleet:
   repo_root: ~/.volley/repos                    # default; ~ is each machine's own home
+  repos:                                        # the supervisor's own adopted clones
+    example-org/widgets: /path/to/widgets       # (a submit from a clone adds it, below)
 hosts:
   box:
     target: dev@box.example
@@ -3027,16 +3136,30 @@ Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (b
 itself.
 
 A wave file's `repo:` may be an `owner/name` too. At submit it becomes the supervisor's own clone
-of it when its machine holds one (its `hosts.<fleet.local_name>.repos` entry, else the managed
-path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
+of it when its machine holds one (its `fleet.repos` entry, else the managed path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
 holds is refused at `repo` (`no clone of <owner/name> on any machine: add it to one (…)`). A
 relative path shaped like `owner/name` is written `./owner/name`. `volleyd validate` gives the
 same verdict offline from `config.yaml`, and it and `volleyd run` print a `repo:` line saying
 which it became.
 
+**A submit adopts the clone it runs from.** A wave whose `repo:` is a path on a clone of a
+repository config names (its `github.slug`, else the clone's `origin`) makes that clone the
+supervisor's own when config gives its machine none: the clone's root goes to
+`fleet.repos.<owner/name>` and the machine to `repos.<owner/name>.machines` (one
+`config_changed`), `repo_added { by: "wave <id>" }` is journaled, the folder is trusted as by
+`volley repo add`, and `volleyd run` prints `note: adopted <root> as <machine>'s clone of
+<owner/name>`. From then on `volley repo list` shows `adopted: <machine>=<root>`, the Desk's
+machine card shows the repository `ready` there and `placement: auto` considers the machine for
+it. A second submit changes nothing; a clone config already gives the supervisor elsewhere is
+left alone (logged: `<owner/name>: the wave runs from <root>, the registry has <path>`); a
+repository config does not name is never registered. `volley repo add` with the supervisor's
+machine and no `--path` for it adopts the clone such a wave runs from the same way
+(`<machine>: ready (<root>, adopted from wave <id>)`; never one the coordinator sends: adopting
+trusts the folder, an admin's), and `--path <machine>=<abs>` adopts any.
+
 **The supervisor's own machine runs a repository's agents only when it is assigned there.** For a
 repository config names (`repos`, or an adopted clone on a host) without assigning it to the
-supervisor's machine, the supervisor's readiness says `blocked (<owner/name> is not assigned to
+supervisor's machine (nor adopting a clone there), the supervisor's readiness says `blocked (<owner/name> is not assigned to
 <machine>: add it (Settings → Repositories, or volley repo add <owner/name> --machine
 <machine>))`, and placement keeps the wave's tasks on the machines it is assigned to. Such a wave
 names the repository by `owner/name`: the wave keeps it (its state's `repo` is the `owner/name`),
@@ -3154,7 +3277,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 | Screen | `tmux capture-pane -p -t =<session>: -S-<lines>`; keys via `tmux send-keys`; screen tails publish `source: "tmux"` |
 | Terminal size | `terminal_resize` (the Desk's Terminal popout) runs `tmux resize-window -t =<session>: -x <cols> -y <rows>`; `reset: true` returns the session to its launch size. A local (cmux) agent's terminal is not resized: the op answers `resized: false`. The size is clamped to 20..500 cells, so a popout shorter than about 21 lines asks for 20 rows and its last lines sit below the fold until scrolled. `resize-window` sets the window's `window-size` to `manual` (tmux ≥ 3.1), so once a popout has resized it the session no longer follows the size of a client attached over ssh |
 | Verify / retire | identical: the hook signals arrive over the tunnel; retire revokes the credentials and clears the topics |
-| Cleanup | `volleyd cleanup --yes` kills the tmux session and runs `git worktree remove` on the box, both with the consent token; its lines end in `on <target>`, and a worktree already gone from the box is reported `gone`, so a re-run is a no-op |
+| Cleanup | `volleyd cleanup --yes` (or the daemon's own pass) checks the box answers, kills the tmux session, reads each agent branch's tip there (`git rev-parse`), stops the processes under its worktrees (`volley peer cleanup --json --worktree <abs>… --yes` in the box's checkout), runs `git worktree remove`, then has the box delete the proven-merged branches and re-check and remove its owned clones (`peer cleanup --repo <abs> --branch <b>… --clone <abs>… --yes`), all with the consent token; its lines end in `on <target>`, a worktree already gone from the box is reported `gone`, so a re-run is a no-op, and an unreachable box keeps its items for the next run |
 
 **Trust on the box.** A remote clone is trusted in the box's own `~/.claude.json`, never the
 daemon machine's, and its `repo_untrusted` decision id is keyed by target, Claude profile and root
@@ -3199,6 +3322,10 @@ VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
   volley machine add dev@box-a       # install, pair, sign in, doctor; prints the readiness row
 ```
 
+The admin's password goes in `VOLLEY_AUTH_PASSWORD` for that one command, never a shell profile
+(`volley auth status` shows which login a shell would use otherwise; the coordinator login is
+refused at once for pairing).
+
 It installs this machine's key on the box (one interactive ssh: the prompt is ssh's), installs
 Volley there in peer mode at this machine's release tag (`install.sh --peer`: no broker, no Desk),
 runs `volley setup --peer` (the sign-ins, the Claude profile, the terminal, `volley peer run` as
@@ -3220,6 +3347,8 @@ waiting out `--timeout`):
 VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
   volley peer invite               # Pairing code: ABCD-EFGH (single use, 10 minutes)
 ```
+
+As above: the admin's password in `VOLLEY_AUTH_PASSWORD` for that one command, never a profile.
 
 On the new machine (bun, claude, gh, git, tmux and a volley checkout already there; key-based
 ssh to the daemon's machine):
@@ -3251,8 +3380,9 @@ ssh session (what an agent session gets there; if not, the join stops before the
 names what is missing and prints the line to add, with the directories this shell finds them in:
 `~/.zshenv` for zsh, the top of `~/.bashrc` for bash), and then runs
 `volley peer redeem` (`--remote-volley <command>` when `volley` is not on that non-interactive
-ssh `PATH`; it signs in with `VOLLEY_AUTH_*`, else the coordinator's `coordinator.json` from
-`VOLLEY_AUTH_DIR`, else from the auth dir `volley setup` recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
+ssh `PATH`; it signs in by the login ladder (`VOLLEY_AUTH_*`, the coordinator's
+`coordinator.json` from `VOLLEY_AUTH_DIR`, the saved login), else from the auth dir `volley setup`
+recorded in `setup.json`). volleyd (`peer_join`) burns the code, creates a `peer`
 account named after the machine (`--name`, default its short hostname) and adds
 `hosts.<name>`:
 
@@ -3433,11 +3563,15 @@ publishes there):
 yet, the tunnel down, no doctor report (`no doctor report: run volley peer doctor`), a failing
 `block` check, a volley version other than volleyd's, `claude` or `bun` missing from the PATH an
 agent gets, GitHub without push access (`gh: no write permission on <owner/name>`, the first
-repository the record reports), or Claude signed out (`claude: not signed in`). A repository is
+repository the record reports), git without a commit identity (`git: no commit identity on
+<machine> (volley setup --peer --step signin)`: the doctor's `git.identity` only warns, but an
+agent's first commit there would die), or Claude signed out (`claude: not signed in`). A repository is
 never a machine blocker: `repos` judges each one on its own, by `owner/name` — every running
 wave's, and every one the machine's record reports (an older peer's single `repo` by its origin's
 slug; one without an origin yet stands for every running wave's). `ready`: its clone exists and
-passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`) or a tool
+passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`; `repo.push:
+…`, the machine's own `gh` may not push to it; `repo.worktrees: …`, its worktree root can be
+neither written nor created) or a tool
 it needs that is missing or too old (`java not installed (needed by owner/name)`, `node older than
 required (needed by owner/name)`); `absent`: no clone (`no clone of owner/name on box-a`);
 `cloning` while a `repo_add` run makes the clone there. On the supervisor's own machine, a running
@@ -3528,15 +3662,25 @@ a Repair the box's PATH is probed again on the next re-compute. Repair runs the 
 the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
 `volley`), fix the PATH first, or Repair answers only `volley: command not found`.
 
-**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, SPEC §4.6.21).** Admin ops
-on the account-op topic beside `peer_doctor` (`repo_list` and `repo_status` are also answered on
-the mailbox); `volley repo` sends them.
+**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, `repo_check`, SPEC §4.6.21).** Ops
+on the account-op topic beside `peer_doctor` (`repo_list`, `repo_status` and `repo_check` without
+`fix` are also answered on the mailbox); `volley repo` sends them. An admin account may send them,
+and so may the fixed `coordinator` identity on its own `ops/coordinator` (the broker lets only that
+login write it, as `ops/desk` names the Desk) for every one but `repo_check`: the wave owner adds
+the repository a wave is about with the login the CLIs find on their own, `volley repo add
+<owner/name>`, no flag and no admin account. From `coordinator`, `repo_add { paths }` (adopting a
+clone, which also trusts its folder) is refused (`adopting a clone at a path (--path) is an
+admin's; add by slug to clone fresh`), and so is every other op on that topic (`… needs the admin
+role`): `repo_check { fix: true }`, pairing, `machine_add`, `peer_doctor`, `archive`, the account,
+setup, role and coordinator ops.
 
 - `repo_add { slug, machines?, paths? }` runs `gh repo view <slug> --json
   nameWithOwner,url,visibility` on the supervisor (refused with gh's reason; the canonical
   `nameWithOwner` is kept), patches `repos.<slug>.machines` (`all` by default) and each adopted
   `hosts.<m>.repos.<slug>` through the config store (`config_changed`; nothing when unchanged),
-  journals `repo_added` and answers with each machine's state line. Each machine's run then goes on
+  journals `repo_added` and answers with each machine's state line and `checks`, the repository
+  half of `repo_check` (`repo.exists`, `ci.mode`; `ci: { workflows }` kept for older clients).
+  Each machine's run then goes on
   in the background: a paired machine's doctor runs with `--repo-add <slug>[=<path>]` (plus
   `--fix --yes --clone` while its record reports no clone, its state `cloning` meanwhile) over
   `RemoteHost.runDoctor`, through the same one-run-per-host gate as Repair; the report is folded
@@ -3563,6 +3707,34 @@ the mailbox); `volley repo` sends them.
 - `repo_list` answers `{ repos: [{ slug, machines, paths? }] }`; `repo_status { slug? }` answers
   `{ repos: [{ slug, machines: { <m>: { state, path?, reasons } }, lines }] }`, the verdict entries
   as readiness judges them now and one `repoStateLine` per machine.
+- `repo_check { slug, release_branch?, machines?, fix? }` (`repo-check.ts`, #610) answers whether
+  the repository can run a wave on each machine that holds it. The repository half is read on the
+  supervisor (`readRepoCheck`: `gh repo view`, then `gh api` GETs of its workflows and, with a
+  release branch, `branches/<b>`, `rules/branches/<b>` and, for a protected branch,
+  `branches/<b>/protection`) as `repo.exists`, `branch.release`, `branch.protection` (its required
+  checks; `!` when a rule requires approving reviews, which `merge: auto` can never satisfy;
+  `reviews: unknown` when classic protection is not readable) and `ci.mode`. The machine half
+  runs each holder's doctor fresh, concurrently (a paired machine's over `PeerService.runDoctor`
+  behind the one-run-per-host gate, the own one's `runLocalDoctor`), folds its report, and filters
+  its checks to the repository's and the machine-level ones (`machineBlock`); a busy or down
+  machine is judged from its last record (`from: "record"`, with a `note`). `fix: true` (admin
+  only) runs each paired machine's doctor with `--fix --yes --repo-add <slug>[=<path>]`; the own
+  machine is never fixed. The answer: `{ slug, visibility?, repository, machines: { <m>: { checks,
+  ready, state, reasons, from, doctor_at, note? } }, ready_on, summary }`.
+- **Admission** (`admissionCheck`, beside the visibility and CI-mode reads of `submit`, every
+  version): the repository half comes from the same `gh api` reads as the CI mode
+  (`readRepoFacts` serves both), the machine half from the retained verdicts placement uses; no
+  doctor runs. The candidates are placement's (`candidateMachines`: a `local` task's own machine,
+  a `host: <m>` task's `m`, an `auto` task's holders). `admissionRefusals` refuses at path `repo`
+  a release branch not on origin for a wave with no local task, no candidate ready (and none
+  `cloning`) for the repository, a task pinned to a machine not ready for it, and `merge: auto`
+  on a branch that requires approving reviews. The own machine takes its local tasks whatever its
+  clone verdict says (`releaseBranchMissing` checks that clone) unless `git.identity` fails; a
+  candidate with no record yet, or not PATH-probed yet, refuses nothing. The rest comes back as
+  `repo_check.lines`, which `volleyd run` prints (`repo check: ! …`); unreadable facts journal
+  `alarm_raised { alarm: "repo_check_unknown" }` (not an unread CI mode, which is
+  `ci_mode_unknown`'s; a classically protected branch's `/protection` is admin-only, so a
+  non-admin owner raises it on every submit there).
 - `repo_probe { machine, path }` reads what is at an adopted clone's path on a paired machine
   before an add (`RemoteHost.probeClone`: `git -C <path> rev-parse --show-toplevel`, then `git -C
   <root> remote get-url origin`, as two scripts) and answers `{ machine, path, state: found |
@@ -3570,6 +3742,16 @@ the mailbox); `volley repo` sends them.
   nothing is journaled and no config changes (the Desk's Add repository sheet checks a path with it).
 - Readiness judges every repository assigned to a machine (not only the running waves'), and a
   `repo_add` run's `cloning` / `blocked` stands in its verdict until the run that settles it.
+- On a paired machine, readiness also checks the path a spawn would use (#608): the clone
+  `remoteHost` resolves from config and the machine's record (`cloneFacts`, the one place both
+  read). A `ready` clone the record reports elsewhere is `blocked` (`the supervisor would spawn in
+  <path> but box reports its clone at <path>`); and with each PATH probe (every
+  `path_probe_interval_ms`, at once when a spawn path changes) the supervisor runs `probeClone` at
+  every wanted repository's spawn path, so a clone missing there (`no clone at <path> on box`) or a
+  clone of another repository (`<path> on box is a clone of <owner/name>`) is `blocked` too. A probe
+  that fails over ssh changes nothing (the machine's PATH probe reason says so). A spawn that found
+  no clone (`REMOTE_REPO_MISSING`) blocks that repository there with its message until a probe
+  finds the clone at that path.
 
 ---
 
@@ -3586,13 +3768,13 @@ machine, a `hosts.<name>`, is configured, and `local` while none is: an owner wh
 machine has it used, and `placement: local` (or `volleyd config set placement.default local`)
 keeps a wave here. volleyd decides it when the wave is first submitted, and the journaled wave
 keeps the hosts it got: a later plan version without `placement:` keeps the wave's placement, so
-pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome:
+pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome, naming this machine and the paired ones (without a `config.yaml`, `validate` knows neither and prints `placement: auto (wave file)` and the like):
 
 ```text
-placement: auto (placement.default; 1 paired machine)
-placement: local (no paired machine)
-placement: local (placement.default)
-placement: auto (wave file)
+placement: auto (placement.default; this machine macbook-pro, 1 paired: box-a)
+placement: local (no paired machine; this machine macbook-pro)
+placement: local (placement.default; this machine macbook-pro, 1 paired: box-a)
+placement: auto (wave file; this machine macbook-pro, 1 paired: box-a)
 ```
 
 **Overloaded while a peer idles.** A running `placement: local` wave on a supervisor whose own
@@ -3617,6 +3799,16 @@ rename), and the reducer folds it into the wave state's `tasks[].placement` and 
 (`tasks[].host`, absent for its own machine). Under `placement: auto`, a task that names its host is journaled `by: "wave_file"`,
 unscored, with that one candidate. `volleyd spawn` refuses a task that is still `auto` (it is
 placed when admitted).
+
+**Falling back off a machine without the clone.** A spawn on a paired machine that finds no clone
+where it runs (`REMOTE_REPO_MISSING`) blocks that repository in the machine's readiness. When
+volleyd chose the machine (`by` `auto`, `decision` or an earlier `fallback`), the task is placed
+again with that machine excluded: `spawn_failed` is journaled, then `task_placed { by: "fallback",
+from: "box-a", why: "no clone at … on dev@box-a" }`, no decision opens, and the next tick spawns it
+where it now is (`volleyd status` shows `on <host> (fallback, …)` and the `why`). With no other
+machine eligible, or a host the wave file named (`by: "wave_file"`), `remote_repo_missing` opens as
+before; in the first case its question ends `; no other machine can take it now (<why>)?`. The
+`placement.by` values are `auto`, `wave_file`, `decision` (an owner's answer) and `fallback`.
 
 **Switching a running wave to placement.** A task that has spawned keeps the host it runs on: a
 plan version that writes another `host:` for it (say `placement: auto` on an in-flight wave) never
@@ -4070,9 +4262,31 @@ answered; re-pointing an issue to yet another issue is a new question with a new
 open decision (answer `withdrawn`), and removing a task withdraws its open issue decision before
 asking to stop it. A version's `config:` block replaces the wave's overrides.
 
+**Adding an issue to a running wave.** `volleyd add <wave> <issue...>` is the one-command form of
+"append a task to the wave file and `volleyd run` it again". Each issue (`602`, `#602`, or an issue
+URL of the wave's repository) is fetched with `gh issue view` (`--repo <owner/name>` when the
+daemon read the repository's GitHub name, else in the wave's `repo:` directory) and becomes a task
+exactly as volley-issues' `wave-from-issues` derives one on day one (the shared code is
+`src/issue-task.ts`): its id is the title's tag, else `i<N>` (a tag an existing task already has
+falls back to `i<N>`, with a warning); its `after:` is its `Depends on:` line mapped to the tasks
+that carry those issues (`issue:` or a bundle's `issues:`), plus `--after`; its `files:` and
+`footprint:` come from its Files list against the release branch's tree (footprints are read on a
+wave's first submit only). Several issues in one call are added together, dependencies between
+them included. Nothing is re-planned: no bundle, chain or `plan:` for the new task. Four things are
+refused before the file is touched, each saying the way out: a wave that is not live (`complete`,
+`stopped`, `releasing`, archived; a `paused` one takes the task, which starts on resume), an issue
+already in the wave, a closed issue, and a dependency outside the wave that is open (one that is
+closed or labelled `merged-to-release` is satisfied and dropped; an open one is added in the same
+call: `volleyd add <wave> 590 602`). The file must be the plan the daemon runs (`volleyd diff`
+reports it unchanged), so that `add` changes one thing: the new task blocks are inserted at the end
+of `tasks:` and every other byte is kept. The file is written, then submitted as `run` submits it
+(owner-gated the same way); a submit the daemon refuses restores the previous bytes, so the file
+never says more than the daemon runs. Commit the edited file with the release.
+
 ```sh
 volleyd diff 2026-10-20-example wave-v2.yaml   # + T6 / - T3 / ~ T2  after +T6; model a -> b
 volleyd run wave-v2.yaml                        # submitted wave 2026-10-20-example plan v2
+volleyd add 2026-10-20-example 602              # + B13 / B13: #602 "B13: …" after [B10]
 ```
 
 ---
@@ -4625,14 +4839,19 @@ verbatim from `src/fence.ts`:
 
 ```
 DENY (never, consent or not):
-  git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force
+  git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force,
+    except exactly `git -C <repo> branch -D <agent branch>` with that branch's BranchDeleteToken
+    (`mintBranchDeleteToken`, minted by `volleyd cleanup` for one agent branch the journal
+    proves merged at its current tip, SPEC §4.6.26)
   gh pr merge (except MERGE below) | gh workflow run | gh repo delete | gh api with any method
     other than GET
   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
     ansible, ansible-playbook, eksctl, doctl, flyctl
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
-    step a ProfileRemoveToken unlocks (below)
+    step a ProfileRemoveToken unlocks (below), and exactly `rm -rf <path>` with that path's
+    CloneRemoveToken (`mintCloneRemoveToken`, minted by `volleyd cleanup` for a managed clone
+    a `repo_clone_run { cloned: true }` of a wave-owned registration recorded, SPEC §4.6.26)
 
 MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -4646,17 +4865,25 @@ MERGE (only with a token, checked by identity like consent tokens; either unlock
       gh pr merge <n> --merge --match-head-commit <sha40>
     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
     heads it contains, read as merged. Never --squash.
-  Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+  - a ReleaseToken (`mintReleaseToken`, minted only by the `release_go` go, from the release PR
+    a prepare stage verified, at its CI-green head; SPEC §4.6.19): exactly
+      gh pr merge <n> --squash --match-head-commit <sha40> --delete-branch
+    with <n> the release PR and <sha40> that head: the release branch is squash-merged into the
+    default branch and deleted. Never --merge, never without --delete-branch.
+  Any may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
   supervisor holds no clone of (#448).
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):
-  git worktree remove · cmux close-workspace
+  git worktree remove · cmux close-workspace · a paired machine's `peer cleanup … --yes`
 
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
-    remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied)
+    remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied) |
+    stash list (exactly) | worktree list --porcelain (exactly) |
+    for-each-ref [--format=…] refs/heads | rev-list --count <range>
+    (the clone checks of `volleyd cleanup`, read-only)
     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
@@ -4711,6 +4938,8 @@ ALLOW (program by bare name only — never a path):
   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
     agent's claude by `process.kill`, never by a spawned `kill`)
+  lsof -a -d cwd -F pn   (exactly, read-only: every process's working directory on macOS, so
+    procs.ts counts a process the agent started in its worktree; Linux reads /proc instead)
   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
     retains no $SYS/broker/version)
   pmset -g batt   (exactly, on macOS: whether this machine has a battery, its record's
@@ -4908,6 +5137,11 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     cli.ts <args>` (remoteVolleyArgv; the host's `volley_dir` exactly), never a `volley` on its
     PATH; VOLLEY below is that prefix:
   VOLLEY peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
+  VOLLEY peer cleanup --json [--worktree <abs under the host's worktree_root>]...
+    [--repo <abs> --branch <agent branch>...] [--clone <abs>]... [--yes] — `volleyd cleanup`
+    on the box (RemoteHost.runCleanup): it stops the processes under each worktree, deletes
+    each named branch, removes each clone after re-checking it; `--yes` is CONSENT, and each
+    `--clone` needs that path's CloneRemoveToken
   VOLLEY peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
     <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no

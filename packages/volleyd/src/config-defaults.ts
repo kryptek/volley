@@ -62,6 +62,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
   retire_close_session: true,
+  cleanup_on_end: true,
   placement: {
     nudge_on_merge: "files",
     // a wave file without placement: (wave-file.ts defaultPlacement)
@@ -87,7 +88,14 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
   autopilot: {
     enabled: true,
-    owner_only: ["plan_change", "repo_untrusted", "model_switch", "release_go", "stage_go"],
+    owner_only: [
+      "plan_change",
+      "repo_untrusted",
+      "model_switch",
+      "release_go",
+      "stage_go",
+      "release_pr_ci_failed",
+    ],
     relaunch_max: 1,
     nudge_max: 1,
     respawn_max: 1,
@@ -338,6 +346,12 @@ export const DAEMON_DEFAULTS = {
   proc_kill_grace_ms: 5_000,
   /** Hard bound on the `ps` that lists processes (procs.ts). */
   ps_timeout_ms: 10_000,
+  /** Hard bound on the `lsof` that reads processes' working directories on macOS (procs.ts). */
+  lsof_timeout_ms: 15_000,
+  /** How long `volleyd cleanup` waits for the daemon's run of it (every machine's steps). */
+  cleanup_op_timeout_ms: 600_000,
+  /** A cleanup run that kept an unreachable machine's items runs again after this long. */
+  cleanup_retry_ms: 60_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
   /**

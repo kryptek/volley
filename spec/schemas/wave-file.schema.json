@@ -58,6 +58,11 @@
       "pattern": "^[^-]",
       "description": "The repository's release playbook (spec section 4.6.19): a path relative to repo, or absolute, or none (the wave has no release train). Absent: .volley/release.yaml in repo, when it exists."
     },
+    "release_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "description": "The release's version X.Y.Z (spec section 4.6.19), instead of the one the supervisor resolves from the newest v* tag and the release branch's change fragments; refused at release_started unless it is greater than the newest tag. The only way to cut 1.0.0."
+    },
     "merge": {
       "enum": ["auto", "manual"],
       "description": "Who merges a gated PR (spec section 4.6.17): auto (the supervisor squash-merges exactly the gated head) or manual (a human merges). Absent: the supervisor's autopilot.merge tunable (default auto)."

@@ -109,6 +109,9 @@
             "release_stage_failed",
             "release_stage_skipped",
             "release_cancelled",
+            "release_pr_detected",
+            "release_merged",
+            "release_merge_failed",
             "release_done",
             "inbox_opened",
             "inbox_answered",
@@ -138,7 +141,9 @@
             "role_move_failed",
             "role_rolled_back",
             "peer_retargeted",
-            "machine_added"
+            "machine_added",
+            "wave_cleaned",
+            "repo_clone_removed"
           ]
         },
         "payload": {
@@ -436,6 +441,9 @@
                       "from": {
                         "$ref": "wave-state.schema.json#/$defs/hostName",
                         "description": "The host the task was placed on before, when it is re-placed."
+                      },
+                      "why": {
+                        "$ref": "wave-state.schema.json#/$defs/placement/properties/why"
                       },
                       "local": {
                         "const": true,
@@ -1642,8 +1650,102 @@
               }
             }
           }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wave_cleaned" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "removed", "kept", "summary", "dry_run"],
+                    "description": "One cleanup run of the wave (spec section 4.6.26): what it removed by kind, each item it kept with the reason, and its summary line. task: the per-task pass cleaned that task only.",
+                    "properties": {
+                      "by": { "type": "string", "minLength": 1 },
+                      "removed": { "$ref": "#/$defs/cleanupCounts" },
+                      "kept": { "type": "array", "items": { "$ref": "#/$defs/cleanupResource" } },
+                      "summary": { "type": "string", "minLength": 1 },
+                      "dry_run": { "type": "boolean" },
+                      "task": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "repo_clone_removed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["machine", "slug", "path", "wave"],
+                    "description": "In _system: cleanup deleted the managed clone volleyd's own clone run made for a wave-owned registration (spec section 4.6.26).",
+                    "properties": {
+                      "machine": { "type": "string", "minLength": 1 },
+                      "slug": { "type": "string", "minLength": 3 },
+                      "path": { "type": "string", "minLength": 1 },
+                      "wave": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     }
-  ]
+  ],
+  "$defs": {
+    "cleanupCounts": {
+      "type": "object",
+      "description": "What one cleanup run removed, by kind.",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "properties": {
+        "worktrees": { "type": "integer", "minimum": 0 },
+        "sessions": { "type": "integer", "minimum": 0 },
+        "processes": { "type": "integer", "minimum": 0 },
+        "branches": { "type": "integer", "minimum": 0 },
+        "logins": { "type": "integer", "minimum": 0 },
+        "repos": { "type": "integer", "minimum": 0 },
+        "accounts": { "type": "integer", "minimum": 0 },
+        "clones": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cleanupResource": {
+      "type": "object",
+      "required": ["kind", "host", "what"],
+      "description": "One thing a wave left: its kind, the machine it is on (local: the supervisor), what it is, and why it was kept (with the command that removes it, if any).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "worktree",
+            "session",
+            "process",
+            "branch",
+            "remote_branch",
+            "release_branch",
+            "login",
+            "lock",
+            "repo",
+            "clone",
+            "account"
+          ]
+        },
+        "host": { "type": "string", "minLength": 1 },
+        "what": { "type": "string", "minLength": 1 },
+        "task": { "type": "string" },
+        "why": { "type": "string" }
+      }
+    }
+  }
 }

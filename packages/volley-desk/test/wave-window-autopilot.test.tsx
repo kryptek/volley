@@ -163,6 +163,47 @@ describe("the release train rows", () => {
     expect(rows[1]).toHaveAttribute("aria-current", "step");
   });
 
+  it("names the version and links the release PR; a ship divider comes before the ship stages", () => {
+    const shipping: WaveStatePayload["release"] = {
+      stage: "tag",
+      phase: "ship",
+      version: "0.13.3",
+      pr: { number: 12, head: "d".repeat(40), title: "release: v0.13.3 — one go" },
+      stages: [
+        { name: "bump", state: "verified" },
+        { name: "release-pr", state: "verified" },
+        { name: "tag", state: "running", phase: "ship" },
+        { name: "deploy", state: "pending", phase: "ship" },
+      ],
+    };
+    renderWave(
+      wave({
+        status: "releasing",
+        release: shipping,
+        merge_queue: undefined,
+        github: {
+          slug: "example-org/example-repo",
+          url: "https://github.com/example-org/example-repo",
+        },
+      }),
+    );
+    expect(screen.getByText("v0.13.3")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "PR #12 on GitHub" })).toHaveAttribute(
+      "href",
+      "https://github.com/example-org/example-repo/pull/12",
+    );
+    const rows = within(screen.getByRole("list", { name: "Release train" })).getAllByRole(
+      "listitem",
+    );
+    expect(rows.map((r) => r.textContent)).toEqual([
+      "bump · verified",
+      "release-pr · verified",
+      "ship",
+      "tag · running",
+      "deploy · pending",
+    ]);
+  });
+
   it("is not shown while the wave is not releasing", () => {
     renderWave(wave({ release }));
     expect(screen.queryByRole("list", { name: "Release train" })).toBeNull();

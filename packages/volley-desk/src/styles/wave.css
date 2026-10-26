@@ -232,6 +232,11 @@ a.dag-issue-link {
   color: var(--mute);
   border-color: rgba(163, 171, 192, 0.4);
 }
+/* The wave was cleaned (SPEC §4.6.26): its title is the summary line. */
+.chip--cleaned {
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
 .chip--noci {
   color: var(--mute);
   border-color: color-mix(in srgb, var(--mute) 45%, transparent);
@@ -336,6 +341,17 @@ a.dag-issue-link {
   margin: 8px 0 0;
   font: 11.5px var(--f-mono);
 }
+/* What cleanup kept, one line each with why (SPEC §4.6.26). */
+.wave-kept {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .wave-train,
 .wave-fixers {
   list-style: none;
@@ -354,6 +370,18 @@ a.dag-issue-link {
 }
 .wave-train .train-failed {
   color: var(--bad-ink);
+}
+.wave-train-head {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.wave-train .train-divider {
+  color: var(--dim);
+  border-top: 1px dashed var(--line);
+  padding-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
 }
 .dag-fixer {
   font-size: 11px;

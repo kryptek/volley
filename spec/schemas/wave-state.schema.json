@@ -138,6 +138,21 @@
               },
               "description": "When, by whom and why the wave was archived (spec section 4.6.20). Only on an archived wave; a supervisor's status listing carries it, the retained topic need not."
             },
+            "cleanup": {
+              "type": "object",
+              "required": ["at", "removed", "kept", "summary"],
+              "properties": {
+                "at": { "type": "string", "format": "date-time" },
+                "removed": { "$ref": "wave-event.schema.json#/$defs/cleanupCounts" },
+                "kept": {
+                  "type": "array",
+                  "items": { "$ref": "wave-event.schema.json#/$defs/cleanupResource" }
+                },
+                "summary": { "type": "string", "minLength": 1 },
+                "task": { "type": "string" }
+              },
+              "description": "The last cleanup run (wave_cleaned, spec section 4.6.26): what it removed by kind, what it kept and why, and its summary line. task: the run cleaned that task only. Absent until the wave was cleaned."
+            },
             "merge_queue": {
               "type": "array",
               "description": "The merge queue (spec section 4.6.17), in merge order: the wave's gated tasks the supervisor merges itself, one per release branch at a time. merging: its merge is running; updating: it is being brought up to date with the release branch before its merge; queued: waiting for its turn; refused: GitHub refused its last merge, and it goes after the tasks still queued. since: when the task entered the queue. Absent while the queue is empty.",
@@ -156,9 +171,24 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["stage", "stages"],
-              "description": "The release train (spec section 4.6.19), from release_started on: the stage running or awaiting its go (null when none is), and every playbook stage in order with its state. Absent for a wave without a train.",
+              "description": "The release train (spec section 4.6.19), from release_started on: the stage running or awaiting its go (null when none is), and every playbook stage in order with its state (a ship stage marked phase ship). version, date and default_branch as release_started resolved them; pr once a prepare stage verified the release PR (release_pr_detected); merged_sha once the supervisor merged it on the owner's go (release_merged), from when phase is ship. Absent for a wave without a train.",
               "properties": {
                 "stage": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "phase": { "enum": ["prepare", "ship"] },
+                "version": { "type": "string", "minLength": 1 },
+                "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+                "default_branch": { "type": "string", "minLength": 1 },
+                "pr": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["number", "head"],
+                  "properties": {
+                    "number": { "type": "integer", "minimum": 1 },
+                    "head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                    "title": { "type": "string" }
+                  }
+                },
+                "merged_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
                 "stages": {
                   "type": "array",
                   "items": {
@@ -167,6 +197,7 @@
                     "required": ["name", "state"],
                     "properties": {
                       "name": { "type": "string" },
+                      "phase": { "const": "ship" },
                       "state": {
                         "enum": [
                           "pending",
@@ -601,8 +632,14 @@
           "description": "The machine the task runs on; the supervisor's own machine under its fleet.local_name."
         },
         "by": {
-          "enum": ["auto", "wave_file", "decision"],
-          "description": "auto: the placement engine chose. wave_file: the wave file named the host. decision: an answered decision (machine_down, a respawn) moved it."
+          "enum": ["auto", "wave_file", "decision", "fallback"],
+          "description": "auto: the placement engine chose. wave_file: the wave file named the host. decision: an answered decision (machine_down, a respawn) moved it. fallback: the supervisor moved it off a machine that could not spawn it."
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Why it was moved (by fallback): what the machine it left said."
         },
         "score": {
           "oneOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }],

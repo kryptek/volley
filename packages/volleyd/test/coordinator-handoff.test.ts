@@ -12,6 +12,10 @@ const base = {
   inbox: [{ id: "d-w1-d-abc", title: "Reviewers disagree · w1/T1" }],
 };
 
+/** The sentence that keeps what a coordinator makes for a wave on that wave's ledger (#612 D5). */
+const FOR_WAVE =
+  "Anything you register or mint for a wave (`volley repo add`, `volley auth add`), pass `--for-wave <wave>`: that wave's cleanup removes it, and without the flag it stays the owner's.";
+
 describe("renderHandoff (SPEC §4.6.25)", () => {
   it("names the role, the machine, the waves and the open items", () => {
     expect(renderHandoff(base)).toBe(
@@ -20,6 +24,7 @@ describe("renderHandoff (SPEC §4.6.25)", () => {
         "Running waves: `w1` (example-org/example-repo, 3/5 tasks done); `w2` (example-org/other, 0/2 tasks done).",
         "Open needs-you items: `d-w1-d-abc` Reviewers disagree · w1/T1.",
         "Use `/volley` and `/volley-issues` as usual.",
+        FOR_WAVE,
       ].join("\n"),
     );
   });
@@ -34,6 +39,7 @@ describe("renderHandoff (SPEC §4.6.25)", () => {
         "Open needs-you items: none.",
         "The previous coordinator session was `coordinator-ab12` (resume it with `/resume coordinator-ab12` if you need the detail).",
         "Use `/volley` and `/volley-issues` as usual.",
+        FOR_WAVE,
       ].join("\n"),
     );
   });

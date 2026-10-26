@@ -390,7 +390,13 @@ async function runFirstWave(
         ? { VOLLEY_AUTH_USERNAME: admin.username, VOLLEY_AUTH_PASSWORD: admin.password }
         : {}),
     };
-    await x([deps.bun, volleyCli(repoRoot), "repo", "add", scratch, "--wait"], { env: adminEnv });
+    // `--for-wave`: the registration is the test wave's, so cleaning hello-<4> up removes it.
+    await x(
+      [deps.bun, volleyCli(repoRoot), "repo", "add", scratch, "--wait", "--for-wave", o.wave],
+      {
+        env: adminEnv,
+      },
+    );
     const status = JSON.parse(
       await x([deps.bun, volleyCli(repoRoot), "repo", "status", scratch, "--json"]),
     ) as { repos?: { machines?: Record<string, { state: string; path?: string }> }[] };

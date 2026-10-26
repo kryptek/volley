@@ -13,6 +13,7 @@ Commands:
   uninstall   Unload and remove the launchd service
   run         Validate a wave file and submit it to the daemon (or a new version of it)
   diff        Show the structural diff between a wave's plan and a wave file
+  add         Add issues to a running wave as new tasks: fetch, derive, write the wave file, submit the next plan version (owner only)
   validate    Validate a wave file locally (no daemon needed)
   status      Show wave state from the daemon
   events      Print journal events after a named cursor
@@ -55,6 +56,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   uninstall: async () => (await import("./commands/install")).uninstall,
   run: async () => (await import("./commands/run")).run,
   diff: async () => (await import("./commands/diff")).diff,
+  add: async () => (await import("./commands/add")).add,
   validate: async () => (await import("./commands/validate")).validate,
   status: async () => (await import("./commands/status")).status,
   events: async () => (await import("./commands/events")).events,

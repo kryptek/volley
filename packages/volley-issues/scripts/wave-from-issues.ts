@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { isReservedChannel } from "volley-mcp/channels";
+import { DEFAULT_PLAYBOOK, formatPlaybook, wavePlaybook } from "volleyd/autopilot/playbook";
 import {
   type Footprint,
   type FootprintOf,
@@ -13,8 +14,12 @@ import {
   footprintSummary,
   treeFromLsTree,
 } from "volleyd/footprint";
+import { type IssueInput, assignTaskIds, parseDependsOn, taskIdFor } from "volleyd/issue-task";
 import { sharedFiles } from "volleyd/overlap";
 import { type PlanTask, explain, isSourceFile, planWave } from "volleyd/overlap-plan";
+
+// The shared derivation (ids, dependencies) lives in volleyd, which `volleyd add` uses too.
+export { type IssueInput, parseDependsOn, taskIdFor };
 
 /** The wave file's `brief_preface:` unless told otherwise (relative to the repo). */
 export const DEFAULT_BRIEF_PREFACE = ".volley/brief-preface.md";
@@ -23,13 +28,6 @@ export const DEFAULT_BRIEF_PREFACE = ".volley/brief-preface.md";
 export const BRIEF_PREFACE_TEMPLATE = fileURLToPath(
   new URL("../templates/brief-preface.md", import.meta.url),
 );
-
-/** One issue as `gh issue view <n> --json number,title,body` prints it. */
-export interface IssueInput {
-  number: number;
-  title: string;
-  body: string;
-}
 
 export interface WaveOptions {
   wave: string;
@@ -56,9 +54,10 @@ export interface WaveOptions {
   branchUpdate?: "merge" | "rebase";
   /**
    * `placement:` pinned for this wave; omitted, the supervisor's `placement.default` decides
-   * (`auto` once a machine is paired).
+   * (`auto` once a machine is paired). `{ host }` pins every task to that machine instead
+   * (`host: <name>`, no `placement:`); `volleyd validate` checks the name, this does not.
    */
-  placement?: "local" | "auto";
+  placement?: "local" | "auto" | { host: string };
   /**
    * The repository tree at the release branch (path → bytes) each issue's Files list resolves
    * against; omitted or null, no entry resolves (footprints `none`, their entries `unresolved`).
@@ -84,161 +83,6 @@ export interface WaveResult {
 
 /** Wave id grammar (SPEC §2.1), the same one the wave-file schema enforces. */
 const WAVE_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
-
-/** Optional markdown emphasis around the label (`**Depends on:**`, `_deps_:`). */
-const EMPH = String.raw`(?:\*\*|__|[*_\`])?`;
-
-/** A `Depends on:` / `deps:` line; group 1 is the text after the label. */
-const DEPENDS_LINE = new RegExp(
-  String.raw`^\s*(?:[-*+]\s+)?${EMPH}\s*(?:depends on|deps)\s*${EMPH}\s*:\s*${EMPH}(.*)$`,
-  "i",
-);
-
-/** A markdown list item; group 1 is its text. */
-const LIST_ITEM = /^\s*[-*+]\s+(.*)$/;
-
-/**
- * An issue reference: a GitHub issue URL (`https://github.com/owner/repo/issues/N`), or `#N`
- * optionally repo-qualified (`owner/repo#N`).
- */
-const ISSUE_REF =
-  /https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+)\b|(?:\b([\w.-]+\/[\w.-]+))?#(\d+)\b/gi;
-
-/** Dependency-line text that declares no dependencies (after parentheticals and punctuation). */
-const NONE = new Set(["none", "n/a", "-", "—"]);
-
-/**
- * A task tag at the start of an issue title (`O0: …`, `T3b — …`, `D10 - …`); group 1 is the tag.
- * Every tag it matches fits the wave-file task-id grammar.
- */
-const TITLE_TAG = /^([A-Z]{1,3}\d{1,3}[a-z]?)\s*[:—–-]/;
-
-/**
- * Product, format and numeronym names that fit the tag grammar but name a subject, not a task
- * (`S3: upload fails`). A title starting with one keeps the `i<N>` fallback id.
- */
-const NOT_TAGS = new Set([
-  "S3",
-  "EC2",
-  "K8s",
-  "MP3",
-  "MP4",
-  "UTF8",
-  "H264",
-  "X11",
-  "V8",
-  "ES5",
-  "ES6",
-  "CSS3",
-  "MD5",
-  "I18n",
-  "L10n",
-  "A11y",
-]);
-
-/** The wave-file task id for an issue: its title's task tag, else `i<number>`. */
-export function taskIdFor(issue: number, title?: string): string {
-  const tag = typeof title === "string" ? TITLE_TAG.exec(title)?.[1] : undefined;
-  return tag !== undefined && !NOT_TAGS.has(tag) ? tag : `i${issue}`;
-}
-
-/**
- * Task ids for a set of issues (unique numbers), never two that differ only in case (volleyd
- * rejects those). Issues whose tags collide, with each other or with a fallback id, fall back
- * to `i<N>`, which is unique, with a warning naming them.
- */
-function assignTaskIds(issues: IssueInput[]): { ids: Map<number, string>; warnings: string[] } {
-  const ids = new Map(issues.map((i) => [i.number, taskIdFor(i.number, i.title)]));
-  const warnings: string[] = [];
-  for (;;) {
-    const owners = new Map<string, number[]>();
-    for (const [n, id] of ids) {
-      const key = id.toLowerCase();
-      owners.set(key, [...(owners.get(key) ?? []), n]);
-    }
-    const clash = [...owners.values()].find((ns) => ns.length > 1);
-    if (clash === undefined) return { ids, warnings };
-    const tagged = clash.filter((n) => ids.get(n) !== `i${n}`);
-    warnings.push(
-      `title tag '${ids.get(tagged[0] ?? 0)}' would name more than one task (${clash.map((n) => `#${n}`).join(", ")}); using ${tagged.map((n) => `i${n}`).join(", ")} instead (give them distinct title tags to keep tag ids)`,
-    );
-    for (const n of tagged) ids.set(n, `i${n}`);
-  }
-}
-
-/**
- * The issues named on the body's dependency lines. `declared: false` means there is no such
- * line at all (as opposed to `Depends on: none`). An empty label reads the list items on the
- * lines that follow. A reference to another repository is an error (a wave's tasks all live in
- * one repository; `repoSlug` names it), and so is any text that is neither a reference nor
- * `none`: a dependency is never silently dropped.
- */
-export function parseDependsOn(
-  body: string,
-  repoSlug?: string,
-): { declared: boolean; refs: number[] } {
-  let declared = false;
-  const refs: number[] = [];
-  const unparseable = (line: string) =>
-    new Error(
-      `unparseable dependency line '${line.trim()}' (write it as 'Depends on: #N, #M' or 'Depends on: none')`,
-    );
-  /** Read the references in `text` (from `line`); anything else on it is an error. */
-  const read = (text: string, line: string) => {
-    let found = 0;
-    for (const [ref, urlRepo, urlN, repo, n] of text.matchAll(ISSUE_REF)) {
-      const slug = urlRepo ?? repo;
-      if (slug !== undefined && slug.toLowerCase() !== repoSlug?.toLowerCase()) {
-        throw new Error(
-          `cross-repository dependency ${ref} is not supported${repoSlug === undefined ? " (pass the repository's owner/repo if it is this one)" : ""}`,
-        );
-      }
-      const num = Number(urlN ?? n);
-      if (!refs.includes(num)) refs.push(num);
-      found++;
-    }
-    const rest = text
-      .replace(ISSUE_REF, " ")
-      .replace(/\([^)]*\)/g, " ")
-      .replace(/\band\b|&/gi, " ")
-      .replace(/[\s,;.*_`]+/g, "");
-    if (rest !== "" || found === 0) throw unparseable(line);
-  };
-  const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i] ?? "";
-    const m = DEPENDS_LINE.exec(raw);
-    if (m === null) continue;
-    declared = true;
-    const text = (m[1] ?? "").trim();
-    const bare = text
-      .replace(/\([^)]*\)/g, "")
-      .replace(/[\s.,;:!*_`]+/g, "")
-      .toLowerCase();
-    if (NONE.has(bare)) continue;
-    if (bare !== "") {
-      read(text, raw);
-      continue;
-    }
-    // Empty label: the references are the list items that follow (blank lines allowed before).
-    let j = i + 1;
-    while (j < lines.length && (lines[j] ?? "").trim() === "") j++;
-    let items = 0;
-    for (; j < lines.length; j++) {
-      const item = LIST_ITEM.exec(lines[j] ?? "");
-      if (item === null) break;
-      read(item[1] ?? "", lines[j] ?? "");
-      items++;
-    }
-    if (items === 0) {
-      throw new Error(
-        `empty dependency line '${raw.trim()}' (list the issues on it or as '- #N' items below it, or write 'none')`,
-      );
-    }
-    i = j - 1;
-  }
-  return { declared, refs };
-}
 
 /** JSON is valid YAML: a JSON string is a double-quoted scalar, a JSON array a flow sequence. */
 const q = (v: unknown) => JSON.stringify(v);
@@ -310,7 +154,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     `brief_preface: ${q(opts.briefPreface ?? DEFAULT_BRIEF_PREFACE)}`,
     `pipeline: ${opts.pipeline !== undefined ? q(opts.pipeline) : "[implement, [spec_review, quality_review], fixup, merge_ready]"}`,
     `merge: ${q(opts.merge ?? "auto")}`,
-    ...(opts.placement !== undefined ? [`placement: ${q(opts.placement)}`] : []),
+    ...(typeof opts.placement === "string" ? [`placement: ${q(opts.placement)}`] : []),
     ...waveConfigLine(opts),
     "tasks:",
   ];
@@ -368,6 +212,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
   ) => {
     lines.push(`  ${t.id}:`, `    issue: ${t.issue}`);
     if (extra.issues !== undefined) lines.push(`    issues: ${q(extra.issues)}`);
+    if (typeof opts.placement === "object") lines.push(`    host: ${q(opts.placement.host)}`);
     if (t.title !== undefined) lines.push(`    title: ${q(t.title)}`);
     if (t.after.length > 0) {
       const chained = extra.chained ?? [];
@@ -463,6 +308,25 @@ export function readRepoTree(repo: string, branch: string, home: string = homedi
 }
 
 /**
+ * The wave's release playbook, said where the wave is made (volleyd README, "The release
+ * train"): `release playbook: .volley/release.yaml (4 stages, 0 owner-gated)`, or that the wave
+ * will complete without a release. Null when `repo` is not a directory on this machine.
+ */
+export function playbookLine(repo: string, home: string = homedir()): string | null {
+  const dir = repo === "~" ? home : repo.startsWith("~/") ? join(home, repo.slice(2)) : repo;
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return null;
+  try {
+    const p = wavePlaybook({ repo: dir });
+    return p === null
+      ? `release playbook: none — the wave will complete without a release; add ${DEFAULT_PLAYBOOK} (volleyd README, "The release train")`
+      : formatPlaybook(DEFAULT_PLAYBOOK, p.playbook);
+  } catch (e) {
+    const why = (e instanceof Error ? e.message : String(e)).replace(/\n\s*/g, "; ");
+    return `release playbook: invalid — ${why}`;
+  }
+}
+
+/**
  * Create the preface at `file` (relative to `repo`, or absolute) from the template when there
  * is none. An existing file is never touched: it is the repo's own rules.
  */
@@ -486,11 +350,15 @@ export function ensureBriefPreface(
   return { path, created: true };
 }
 
+/** A machine name `--placement` pins every task to (a `fleet.local_name` or `hosts.<name>`). */
+const MACHINE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
+
 const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <id> --repo <path>
          --release-branch <branch> --model <model> [--pipeline <json>] [--namespace <ns>]
          [--repo-slug <owner/repo>] [--satisfied <n,n,...>] [--brief-preface <path>]
          [--merge auto|manual] [--autopilot on|off] [--branch-update merge|rebase]
-         [--placement local|auto] [--no-plan | --plan-only] [--verbose] [--out <wave.yaml>]
+         [--placement local|auto|<machine>] [--no-plan | --plan-only] [--verbose]
+         [--out <wave.yaml>]
 
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
@@ -510,7 +378,9 @@ hygiene rules); an existing one is never changed.
 --autopilot writes config: { autopilot: { enabled } } (omitted: the supervisor's setting, on by
 default). --branch-update writes config: { branch_update } (merge is recommended for autopilot
 waves: no force-push). --placement writes placement: to pin where the wave's tasks run (omitted:
-the supervisor's placement.default, auto once a machine is paired). The last lines on stderr are
+the supervisor's placement.default, auto once a machine is paired); a machine name instead pins
+every task to it (host: <machine>; this machine's name is the one volleyd validate's placement
+line prints, and volleyd validate checks it). The last lines on stderr are
 the submit command, owned by the stable coordinator name in VOLLEY_COORDINATOR, and that name.
 Each issue's Files list is resolved against the --repo tree at origin/<release branch> (else
 the local branch; else "no tree: footprints unresolved") into the task's files: and footprint:.
@@ -519,6 +389,9 @@ ones that cannot bundle (an after: marked "# chained by the planner"), and write
 plan:; the plan in words heads the file and stderr, with the footprint counts (--verbose lists
 the entries that matched no path). --no-plan writes footprints only (no bundle, chain or plan);
 --plan-only prints the plan on stdout and writes nothing. Edit the file to plan differently.
+When --repo is on this machine, the line after the footprint counts names its release playbook
+(.volley/release.yaml: its stages and owner-gated ones), or says "release playbook: none": the
+wave will complete without a release.
 `;
 
 function main(argv: string[]): number {
@@ -562,19 +435,33 @@ function main(argv: string[]): number {
     return 2;
   }
   const satisfied = satisfiedRaw.map(Number);
-  const choice = <T extends string>(flag: string, value: string | undefined, allowed: T[]) => {
+  /** `value` when it is one of `allowed`, else what `other` makes of it (a machine name). */
+  const choice = <T extends string, O = never>(
+    flag: string,
+    value: string | undefined,
+    allowed: T[],
+    other?: (s: string) => O | undefined,
+  ): T | O | undefined => {
     if (value === undefined || (allowed as string[]).includes(value)) return value as T | undefined;
-    throw new Error(`--${flag} must be ${allowed.join(" or ")}, got ${value}`);
+    const o = other?.(value);
+    if (o !== undefined) return o;
+    const also = other !== undefined ? ", or a machine name" : "";
+    throw new Error(`--${flag} must be ${allowed.join(" or ")}${also}, got ${value}`);
   };
   let merge: "auto" | "manual" | undefined;
   let autopilot: "on" | "off" | undefined;
   let branchUpdate: "merge" | "rebase" | undefined;
-  let placement: "local" | "auto" | undefined;
+  let placement: "local" | "auto" | { host: string } | undefined;
   try {
     merge = choice("merge", v.merge, ["auto", "manual"]);
     autopilot = choice("autopilot", v.autopilot, ["on", "off"]);
     branchUpdate = choice("branch-update", v["branch-update"], ["merge", "rebase"]);
-    placement = choice("placement", v.placement, ["local", "auto"]);
+    placement = choice<"local" | "auto", { host: string }>(
+      "placement",
+      v.placement,
+      ["local", "auto"],
+      (s) => (MACHINE.test(s) ? { host: s } : undefined),
+    );
   } catch (e) {
     process.stderr.write(`wave-from-issues: ${e instanceof Error ? e.message : String(e)}\n`);
     return 2;
@@ -629,9 +516,11 @@ function main(argv: string[]): number {
     ]
       .map((l) => `${l}\n`)
       .join("");
+    const playbook = playbookLine(repoArg);
+    const playbookText = playbook === null ? "" : `${playbook}\n`;
     if (v["plan-only"] === true) {
       // The explanation only: no wave file, no preface, nothing to submit.
-      process.stderr.write(noTree);
+      process.stderr.write(`${noTree}${playbookText}`);
       process.stdout.write(planBlock);
       return 0;
     }
@@ -646,13 +535,18 @@ function main(argv: string[]): number {
           : `brief preface: ${p.path} (kept)\n`,
       );
     }
+    if (typeof placement === "object") {
+      process.stderr.write(
+        `placement: every task pinned to ${placement.host}; volleyd validate checks the name\n`,
+      );
+    }
     for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
     if (undeclared.length > 0) {
       process.stderr.write(
         `note: no Depends on:/deps: line in ${undeclared.map((n) => `#${n}`).join(", ")}; confirm their order before submitting\n`,
       );
     }
-    process.stderr.write(`${noTree}${planBlock}`);
+    process.stderr.write(`${noTree}${planBlock}${playbookText}`);
     for (const line of submitLines(v.out ?? "<wave.yaml>", process.env.VOLLEY_COORDINATOR)) {
       process.stderr.write(`${line}\n`);
     }

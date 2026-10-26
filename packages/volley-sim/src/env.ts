@@ -28,12 +28,18 @@ export const isSimulated = (env: Env = process.env) => env.VOLLEY_SIMULATED === 
 /** Single-quote for a POSIX shell. */
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/** The simulator's settings `volley sim env` carries on when the caller's environment has them. */
+export const PASSED_ON = ["VOLLEY_SIM_ORIGINS", "VOLLEY_SIM_WORKFLOWS"] as const;
+
 /**
  * The line `volley sim env` prints for `eval "$(volley sim env)"`: the fakes' bin first on PATH,
- * the world's home, and the switch.
+ * the world's home, the switch, and each of `PASSED_ON` that `env` sets.
  */
-export function simEnvLine(home: string, bin: string = SIM_BIN): string {
-  return `export PATH=${shq(bin)}:"$PATH" VOLLEY_SIM_HOME=${shq(home)} VOLLEY_SIMULATED=1`;
+export function simEnvLine(home: string, bin: string = SIM_BIN, env: Env = {}): string {
+  const more = PASSED_ON.filter((k) => env[k] !== undefined && env[k] !== "")
+    .map((k) => ` ${k}=${shq(env[k] as string)}`)
+    .join("");
+  return `export PATH=${shq(bin)}:"$PATH" VOLLEY_SIM_HOME=${shq(home)} VOLLEY_SIMULATED=1${more}`;
 }
 
 /** What `volley sim reset` removes from the home: the world, its lock, the log, the origins. */

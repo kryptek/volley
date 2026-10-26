@@ -132,6 +132,7 @@ describe("runHook: AUTH_FAILED is loud", () => {
 });
 
 describe("runHook: unusable credential files are loud too", () => {
+  const MARKER = "hunter2-marker-c0de";
   const ERROR_LINE = /^volley-hooks Stop: AUTH_FAILED — /;
 
   function coordinatorEnv(authDir: string, stateRoot = makeWorkdir()) {
@@ -169,7 +170,51 @@ describe("runHook: unusable credential files are loud too", () => {
   it("a malformed coordinator.json → exit 1, one stderr line naming the file, hooks-error.json, no cached miss", async () => {
     const authDir = makeWorkdir();
     writeFileSync(join(authDir, "coordinator.json"), "{oops");
-    await expectLoudCoordinator(authDir, /malformed/);
+    await expectLoudCoordinator(authDir, /not a JSON object/);
+  });
+
+  it.each([
+    ["only the marker", MARKER, 0o600],
+    ["the marker unquoted", `{"username":"coordinator","password":${MARKER}}`, 0o600],
+    ["truncated inside the password", `{"username":"coordinator","password":"${MARKER}`, 0o600],
+    ["0644 holding the marker", MARKER, 0o644],
+  ])(
+    "a coordinator.json with %s: stderr and hooks-error.json name the path, never the marker (#613)",
+    async (_what, text, mode) => {
+      const authDir = makeWorkdir();
+      writeFileSync(join(authDir, "coordinator.json"), text, { mode });
+      const dir = makeWorkdir();
+      const env = coordinatorEnv(authDir);
+      const run = await runHook("stop", fixture("stop.json", dir), { cwd: dir, env });
+      expect(run.exitCode).toBe(1);
+      expect(run.stderr).toContain(join(authDir, "coordinator.json"));
+      expect(run.stderr).toContain("volley auth status");
+      expect(run.stderr).not.toContain(MARKER);
+      expect(run.stderr).not.toContain("VOLLEY_AUTH_PASSWORD");
+      const stateDir = coordinatorStateDir(
+        dir,
+        hookEnv(env),
+        "session:7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+      );
+      const err = readFileSync(join(stateDir, "hooks-error.json"), "utf-8");
+      expect(err).toContain("coordinator.json");
+      expect(err).not.toContain(MARKER);
+    },
+  );
+
+  it("an agent.json damaged inside its broker block: the path, never the marker (#613)", async () => {
+    const dir = makeWorkdir();
+    mkdirSync(join(dir, ".volley"));
+    writeFileSync(
+      join(dir, ".volley", "agent.json"),
+      `{"agent_id":"${AGENT}","broker":{"username":"${AGENT}","password":${MARKER}}}`,
+    );
+    const run = await runHook("stop", fixture("stop.json", dir), { cwd: dir });
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain(join(dir, ".volley", "agent.json"));
+    expect(run.stderr).not.toContain(MARKER);
+    const err = readFileSync(join(dir, ".volley", "hooks-error.json"), "utf-8");
+    expect(err).not.toContain(MARKER);
   });
 
   it.skipIf(process.getuid?.() === 0)(

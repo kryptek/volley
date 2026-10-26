@@ -65,6 +65,18 @@ function staleForms(file: string, text: string): string[] {
     at(m.index ?? 0, "brew services start mosquitto (volley setup starts the broker)");
   for (const m of text.matchAll(/example-dispatch/g))
     at(m.index ?? 0, "the example-dispatch namespace (the namespace is default)");
+  // A skill is read by a coordinator session: it never tells it to export a broker password or
+  // pass one inline; the CLIs find the coordinator login themselves (`volley auth status`).
+  if (/(^|\/)SKILL\.md$/.test(file)) {
+    for (const m of text.matchAll(/\$\{?VOLLEY_AUTH_PASSWORD|VOLLEY_AUTH_PASSWORD/g)) {
+      const around = instructionAround(text, m.index ?? 0);
+      if (m[0].startsWith("$") || /\bexport\b|shell profile|\.zshrc|\.bashrc/i.test(around))
+        at(
+          m.index ?? 0,
+          "a skill exporting or expanding VOLLEY_AUTH_PASSWORD (the CLIs find the login: volley auth status)",
+        );
+    }
+  }
   if (!MODEL_IDS_ALLOWED(file)) {
     for (const m of text.matchAll(MODEL_ID))
       at(m.index ?? 0, `model id ${m[0]} (name DEFAULT_MODEL in config-defaults.ts instead)`);
@@ -141,6 +153,19 @@ describe("staleForms", () => {
       "a.md:3: model id claude-sonnet-5 (name DEFAULT_MODEL in config-defaults.ts instead)",
     ]);
     expect(staleForms("a.md", "brew install mosquitto; claude-code; --model opus")).toEqual([]);
+  });
+
+  test("a skill never tells a coordinator to export or expand VOLLEY_AUTH_PASSWORD (#613)", () => {
+    const profile =
+      "Set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD: export them in your shell profile.";
+    expect(staleForms("packages/x/SKILL.md", profile)).toHaveLength(1);
+    const inline =
+      '```sh\nmosquitto_pub -u "$VOLLEY_AUTH_USERNAME" -P "$VOLLEY_AUTH_PASSWORD"\n```';
+    expect(staleForms("packages/x/SKILL.md", inline)).toHaveLength(1);
+    // Naming it for another machine's broker is fine; so is any other doc.
+    const other = "VOLLEY_AUTH_* (VOLLEY_AUTH_PASSWORD) is for another machine's broker only.";
+    expect(staleForms("packages/x/SKILL.md", other)).toEqual([]);
+    expect(staleForms("packages/x/README.md", profile)).toEqual([]);
   });
 
   test("the changelog keeps history; dated records and fixtures keep model ids", () => {

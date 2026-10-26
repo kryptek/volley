@@ -7,6 +7,7 @@ import {
   SIGNIN_ROLES,
   accountOp,
   authOpsTopic,
+  coordinatorRepoRefusal,
   deskBase,
   deskRefusal,
   isValidLabel,
@@ -201,6 +202,45 @@ describe("shared with volley-cli's auth-roles.ts", () => {
   });
 });
 
+describe("coordinatorRepoRefusal (the coordinator's repository ops, SPEC §4.6.21, #613)", () => {
+  it("the coordinator may send the five repository ops", () => {
+    for (const op of ["repo_add", "repo_remove", "repo_list", "repo_status", "repo_probe"]) {
+      expect(coordinatorRepoRefusal("coordinator", op, { op, slug: "a/a" })).toBeUndefined();
+    }
+    // An empty paths object adopts nothing.
+    expect(
+      coordinatorRepoRefusal("coordinator", "repo_add", { slug: "a/a", paths: {} }),
+    ).toBeUndefined();
+  });
+
+  it("adopting a clone at a path stays an admin's", () => {
+    expect(
+      coordinatorRepoRefusal("coordinator", "repo_add", { slug: "a/a", paths: { box: "/srv/a" } }),
+    ).toBe("adopting a clone at a path (--path) is an admin's; add by slug to clone fresh");
+  });
+
+  it("every other op from the coordinator: the admin refusal", () => {
+    for (const op of [
+      "peer_invite",
+      "peer_remove",
+      "peer_doctor",
+      "peer_retarget",
+      "machine_add",
+      "archive",
+      "coordinator_restart",
+      "account_create",
+    ]) {
+      expect(coordinatorRepoRefusal("coordinator", op, { op })).toMatch(/needs the admin role$/);
+    }
+  });
+
+  it("any other sender: undefined (the admin check decides)", () => {
+    for (const sender of ["admin-1", "desk", "steer-1", "coordinator-ab12"]) {
+      expect(coordinatorRepoRefusal(sender, "peer_invite", {})).toBeUndefined();
+    }
+  });
+});
+
 describe("deskRefusal (a Desk login's Needs-you answers, SPEC §4.6.18)", () => {
   const at = "2026-10-19T09:00:00.000Z";
   const accounts: Account[] = ["admin", "steer", "watch", "supervisor", "peer"].map((role) => ({
@@ -228,5 +268,46 @@ describe("deskRefusal (a Desk login's Needs-you answers, SPEC §4.6.18)", () => 
 
   it("covers inbox_answer, resolve, hold and release only", () => {
     expect([...DESK_OPS].sort()).toEqual(["hold", "inbox_answer", "release", "resolve"]);
+  });
+});
+
+describe("account_create { wave } (#612 D5)", () => {
+  const withAdd = () =>
+    auth().on(["volley", "auth", "add"], (argv) => ({
+      stdout: JSON.stringify({ username: argv[3], password: "p", role: "admin" }),
+    }));
+  const isWave = (id: string) => id === "w1";
+
+  it("journals the wave an account was made for, and never passes it to volley auth add", async () => {
+    const exec = withAdd();
+    const r = await accountOp(
+      exec.exec,
+      "admin-1",
+      { op: "account_create", name: "demo-admin", role: "admin", wave: "w1", reply_key: jwk },
+      undefined,
+      undefined,
+      isWave,
+    );
+    expect(r.reply).toMatchObject({ ok: true });
+    expect(r.event).toEqual({
+      type: "account_created",
+      data: { by: "admin-1", name: "demo-admin", role: "admin", wave: "w1" },
+    });
+    expect(exec.argvs(["volley", "auth", "add"]).flat()).not.toContain("--for-wave");
+  });
+
+  it("refuses an id that is no wave id (or an archived wave's), at `wave`", async () => {
+    const exec = withAdd();
+    const r = await accountOp(
+      exec.exec,
+      "admin-1",
+      { op: "account_create", name: "demo-admin", role: "admin", wave: "nope", reply_key: jwk },
+      undefined,
+      undefined,
+      isWave,
+    );
+    expect(r.reply).toMatchObject({ ok: false });
+    expect(r.reply.error).toMatch(/^wave/);
+    expect(exec.argvs(["volley", "auth", "add"])).toEqual([]);
   });
 });

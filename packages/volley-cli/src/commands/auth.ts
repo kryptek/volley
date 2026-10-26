@@ -23,6 +23,7 @@ import {
   RESERVED_ACCOUNT_NAMES,
   accountVerb,
 } from "./auth-accounts";
+import { authStatus } from "./auth-status";
 
 export type { AuthDeps } from "../auth/context";
 export {
@@ -61,6 +62,8 @@ export async function auth(
   { argv, env, io }: AuthArgs,
   deps: AuthDeps = realAuthDeps,
 ): Promise<ExitCode> {
+  // The one verb that needs no admin login, auth dir or layout: routed before all of them.
+  if (argv[0] === "status") return authStatus(argv.slice(1), env, io);
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -84,6 +87,7 @@ export async function auth(
         kind: { type: "string" },
         label: { type: "string" },
         ttl: { type: "string" },
+        "for-wave": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -129,7 +133,7 @@ export async function auth(
     }
   }
   if (!ACCOUNT) {
-    for (const flag of ["role", "kind", "label", "ttl"]) {
+    for (const flag of ["role", "kind", "label", "ttl", "for-wave"]) {
       if (v[flag] !== undefined) {
         io.stderr(`volley auth: --${flag} only applies to the account verbs\n`);
         return EXIT.USAGE;
@@ -159,6 +163,8 @@ export async function auth(
         const s = str(k);
         if (s !== undefined) flags[k] = s;
       }
+      const forWave = str("for-wave");
+      if (forWave !== undefined) flags.forWave = forWave;
       return accountVerb(ctx, verb as AccountVerb, name, flags, (fn) => withAdmin(ctx, fn), [
         ...RESERVED_ACCOUNT_NAMES,
         ...RESERVED_AGENT_IDS,
@@ -260,6 +266,10 @@ Broker logins on mosquitto >= 2.1 with the Dynamic Security plugin
 (examples/mosquitto-auth/). Changes go to the broker over its control topic: no password
 file, no ACL file, no reload. Every verb refuses a broker older than 2.1.
 
+  volley auth status [--json]      The login this shell's commands use: who, its role, which
+                                   source answered (flags, .volley/agent.json, VOLLEY_AUTH_*,
+                                   the auth dir, the keychain, coordinator.json) and whether
+                                   the broker accepts it. Never a password; no admin login.
   volley auth init                 Write the broker config (plugin before the listeners,
                                    per_listener_settings false, nodelay, raised queue; the
                                    WebSocket listener's LAN bind kept; the diff printed first,
@@ -288,7 +298,12 @@ file, no ACL file, no reload. Every verb refuses a broker older than 2.1.
 
 Accounts (registry: <dir>/accounts.json; each account is a login with its role's roles):
   volley auth add <name> --role <admin|steer|watch|supervisor|peer> [--kind <k>]
+                 [--for-wave <wave>]
                                    Create an account; prints its password ONCE (or --json).
+                                   --for-wave: volleyd creates it (account_create, needs an
+                                   admin login: VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD
+                                   for that one command) and revokes it when that wave is
+                                   cleaned up.
   volley auth rotate <name>        New password for an account (disconnects its sessions).
   volley auth revoke <name>        Delete the account and its login.
   volley auth list [--json]        The accounts (never their passwords).
@@ -328,6 +343,9 @@ Options:
   --json          add-agent, list-agents and the account verbs: machine-readable output
   --role <role>   add, signin-link: the account's role
   --kind <kind>   add: human | device | machine | service (default from the role)
+  --for-wave <wave>
+                  add: the account is for that wave only (journaled by volleyd; cleanup of
+                  the wave revokes it)
   --label <text>  signin-link, redeem: the device the account is for (1..64 chars)
   --ttl <s>       token, signin-link: lifetime in seconds (default 600, at most 86400)
   -h, --help      Show this help and exit

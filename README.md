@@ -372,7 +372,7 @@ MQTT's main downside is unfamiliarity in the LLM-tooling crowd. That's a docs pr
 
 ## Contributing
 
-Volley is pre-1.0 and the wire format can still change: open an issue before a large change, so it can be discussed against `spec/SPEC.md` first. Pull requests are welcome; keep `bun run lint`, `bun run typecheck` and `bun run test` green, and follow the scoped Conventional Commits style in `git log`.
+Volley is pre-1.0 and the wire format can still change. Report a bug with `volley bug` on the machine that has it: it gathers and redacts the diagnostics, shows them, and opens the issue on a yes. Open an issue before a large change, so it can be discussed against `spec/SPEC.md` first. Pull requests are welcome; keep `bun run lint`, `bun run typecheck` and `bun run test` green, and follow the scoped Conventional Commits style in `git log`.
 
 ---
 

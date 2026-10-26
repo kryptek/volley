@@ -104,7 +104,54 @@ const repoState = async (machine: string, slug = SLUG) =>
   (await f.verdict(machine))?.repos[slug]?.state;
 const systemTypes = (type: string) => f.system().filter((e) => e.type === type);
 
+describe("the coordinator's repository ops on ops/coordinator (#613)", () => {
+  it("repo_add by slug and repo_remove go through, journaled by coordinator", async () => {
+    await setup();
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG }, "coordinator");
+    expect(r).toMatchObject({ ok: true });
+    expect(systemTypes("repo_added").map((e) => e.data)).toEqual([
+      { by: "coordinator", slug: SLUG, machines: "all" },
+    ]);
+    expect((await f.adminOp({ op: "repo_list" }, "coordinator"))?.ok).toBe(true);
+    expect((await f.adminOp({ op: "repo_status" }, "coordinator"))?.ok).toBe(true);
+    const removed = await f.adminOp({ op: "repo_remove", slug: SLUG }, "coordinator");
+    expect(removed).toMatchObject({ ok: true });
+  });
+
+  it("repo_add with paths, pairing and archive are refused; an admin keeps every op", async () => {
+    await setup();
+    const adopt = await f.adminOp(
+      { op: "repo_add", slug: SLUG, paths: { [PEER]: BOX_CLONE } },
+      "coordinator",
+    );
+    expect(adopt).toMatchObject({ ok: false });
+    expect(adopt?.error).toContain("adopting a clone at a path (--path) is an admin's");
+    for (const op of ["peer_invite", "machine_add", "archive"]) {
+      const r = await f.adminOp({ op, for: "box-z", wave: "w-x" }, "coordinator");
+      expect(r).toMatchObject({ ok: false });
+      expect(r?.error).toMatch(/needs the admin role/);
+    }
+    expect(systemTypes("repo_added")).toEqual([]);
+    const admin = await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [PEER]: BOX_CLONE } });
+    expect(admin).toMatchObject({ ok: true });
+  });
+});
+
 describe("repo_add (admin)", () => {
+  it("journals the wave a registration was made for; an id that is no wave id is refused (#612 D5)", async () => {
+    await setup();
+    const bad = await f.adminOp({ op: "repo_add", slug: SLUG, wave: "Not A Wave" });
+    expect(bad).toMatchObject({ ok: false });
+    expect(bad?.error).toMatch(/^wave/);
+    expect(systemTypes("repo_added")).toEqual([]);
+    // The wave need not be submitted yet: setup's first wave registers its repository first.
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG, wave: "w-demo" });
+    expect(r).toMatchObject({ ok: true });
+    expect(systemTypes("repo_added").map((e) => e.data)).toEqual([
+      { by: "admin-1", slug: SLUG, machines: "all", wave: "w-demo" },
+    ]);
+  });
+
   it("carries the repository's workflows as ci: { workflows } (#602); absent when unreadable", async () => {
     await setup();
     f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {
@@ -213,7 +260,7 @@ describe("repo_add (admin)", () => {
     expect(trusts).toHaveLength(2);
   });
 
-  it("refuses a slug gh does not know, a malformed one, an unknown machine and a path for the own machine, before anything changes", async () => {
+  it("refuses a slug gh does not know, a malformed one, an unknown machine and a relative path for the own machine, before anything changes", async () => {
     await setup();
     expect(await f.adminOp({ op: "repo_add", slug: "no/such" })).toMatchObject({
       ok: false,
@@ -227,9 +274,10 @@ describe("repo_add (admin)", () => {
       ok: false,
       error: expect.stringContaining('no machine named "nope"'),
     });
+    // The supervisor's own machine adopts by path too (#616), an absolute one.
     expect(
-      await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [LOCAL]: "/srv/a" } }),
-    ).toMatchObject({ ok: false, error: expect.stringContaining("supervisor's own machine") });
+      await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [LOCAL]: "srv/a" } }),
+    ).toMatchObject({ ok: false, error: `paths.${LOCAL} must be an absolute path` });
     expect(systemTypes("repo_added")).toEqual([]);
     expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
   });
@@ -590,13 +638,13 @@ describe("repo_probe (admin)", () => {
     expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
   });
 
-  it("refuses the supervisor's own machine, an unknown host and a path that is not absolute", async () => {
+  it("refuses an unknown host and a path that is not absolute, on the supervisor's own machine too", async () => {
     await setup();
     const probe = (machine: string, path: unknown) =>
       f.adminOp({ op: "repo_probe", machine, path });
-    expect(await probe(LOCAL, "/srv/a")).toMatchObject({
+    expect(await probe(LOCAL, "srv/a")).toMatchObject({
       ok: false,
-      error: `${LOCAL} is the supervisor's own machine: its clone is the managed one`,
+      error: "path must be an absolute path",
     });
     expect(await probe("nope", "/srv/a")).toMatchObject({
       ok: false,
@@ -692,5 +740,114 @@ describe("a profile signed in later (claude_signin_done)", () => {
     } finally {
       await client.close();
     }
+  });
+});
+
+describe("repo_check (#610)", () => {
+  /** a/a added and ready on both machines; its workflows readable. */
+  async function added(): Promise<void> {
+    await setup();
+    f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {
+      stdout: JSON.stringify({ workflows: [{ id: 1, state: "active" }] }),
+    });
+    expect(await f.adminOp({ op: "repo_add", slug: SLUG })).toMatchObject({ ok: true });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready" && (await repoState(LOCAL)) === "ready";
+    });
+  }
+
+  it("repo_add's result carries the repository half as checks (repo.exists, ci.mode), and still ci.workflows", async () => {
+    await added();
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(r?.result).toMatchObject({
+      ci: { workflows: 1 },
+      checks: [
+        { id: "repo.exists", ok: true, severity: "block", detail: `GitHub knows it as ${SLUG}` },
+        { id: "ci.mode", ok: true, severity: "warn", detail: "workflows (1)" },
+      ],
+    });
+  });
+
+  it("a read on the mailbox: the repository lines, one block per holder from a fresh doctor (no fix), ready_on", async () => {
+    await added();
+    const runs = theBox().doctorRuns.length;
+    const r = await f.client.request("repo_check", { slug: SLUG }, { timeoutMs: 20_000 });
+    expect(r.ok).toBe(true);
+    const res = r.result as {
+      repository: { id: string }[];
+      machines: Record<string, { from: string; ready: boolean; checks: { id: string }[] }>;
+      ready_on: string[];
+      summary: string;
+    };
+    expect(res.repository.map((c) => c.id)).toEqual(["repo.exists", "ci.mode"]);
+    expect(Object.keys(res.machines)).toEqual([LOCAL, PEER]);
+    expect(res.machines[PEER]).toMatchObject({ from: "doctor", ready: true });
+    expect(theBox().doctorRuns.slice(runs)).toEqual([{ fix: false }]);
+    expect(res.ready_on).toEqual([LOCAL, PEER]);
+    expect(res.summary).toBe(`ready for a wave on: ${LOCAL}, ${PEER}.`);
+  });
+
+  it("a box whose doctor is busy is judged from its last record, saying so", async () => {
+    await added();
+    let release!: () => void;
+    const busy = new Promise<void>((r) => {
+      release = r;
+    });
+    theBox().answers.doctor = async () => {
+      await busy;
+      return reportWith([clone(SLUG, BOX_CLONE)]);
+    };
+    const before = theBox().doctorRuns.length;
+    const repair = f.adminOp({ op: "peer_doctor", name: PEER });
+    // Repair's run is in progress (the box's doctor has been called) before the check asks.
+    await eventually(async () => theBox().doctorRuns.length > before);
+    const r = await f.client.request("repo_check", { slug: SLUG }, { timeoutMs: 20_000 });
+    release();
+    await repair;
+    expect((r.result as { machines: Record<string, unknown> }).machines[PEER]).toMatchObject({
+      from: "record",
+      note: "a doctor run is in progress",
+    });
+  });
+
+  it("fix: true is refused on the mailbox; an admin's runs the box's doctor with --fix and the repository added", async () => {
+    await added();
+    const refused = await f.client.request("repo_check", { slug: SLUG, fix: true });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("only on volley/_system/auth/ops/");
+    const runs = theBox().doctorRuns.length;
+    const r = await f.adminOp({ op: "repo_check", slug: SLUG, fix: true });
+    expect(r?.ok).toBe(true);
+    expect(theBox().doctorRuns.slice(runs)).toEqual([{ fix: true, repos_add: [SLUG] }]);
+  });
+
+  it("--machine naming a box that holds no clone says so, rather than dropping it silently", async () => {
+    await added();
+    const r = await f.client.request(
+      "repo_check",
+      { slug: "b/b", machines: [PEER] },
+      { timeoutMs: 20_000 },
+    );
+    const res = r.result as { machines: object; summary: string };
+    expect(Object.keys(res.machines)).toEqual([]);
+    expect(res.summary).toContain(`${PEER} holds no clone of b/b`);
+    expect(res.summary).toContain(`volley repo add b/b --machine ${PEER}`);
+  });
+
+  it("--machine narrows; a malformed slug or branch is refused", async () => {
+    await added();
+    const r = await f.client.request(
+      "repo_check",
+      { slug: SLUG, machines: [PEER] },
+      { timeoutMs: 20_000 },
+    );
+    expect(Object.keys((r.result as { machines: object }).machines)).toEqual([PEER]);
+    expect((await f.client.request("repo_check", { slug: "nope" })).error).toBe(
+      "slug must be a GitHub <owner/name>",
+    );
+    expect(
+      (await f.client.request("repo_check", { slug: SLUG, release_branch: "--x" })).error,
+    ).toBe("release_branch must be a branch name");
   });
 });

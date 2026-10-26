@@ -720,6 +720,27 @@ describe("fleet.local_agents: the supervisor's own machine as a fallback (SPEC Â
     expect(place(task(), AUTO, snap(laptopWith, peer), FB).host).toBe("box-a");
   });
 
+  it("a peer whose spawn path is not its reported clone opens the laptop, saying why (#608)", () => {
+    const why =
+      "the supervisor would spawn in /sup/repos/a/a but box-a reports its clone at /path/to/home/.volley/repos/a/a";
+    const peer = peerUp({
+      repos: {
+        "a/a": { state: "blocked", path: "/path/to/home/.volley/repos/a/a", reasons: [why] },
+      },
+    });
+    const laptopWith = laptop({
+      repos: { "a/a": { state: "ready", path: "/path/to/a", reasons: [] } },
+    });
+    const r = place(task(), AUTO, snap(laptopWith, peer), { ...FB, waveSlug: "a/a" });
+    expect(r.host).toBe(LOCAL);
+    expect(r.candidates.find((c) => c.host === "box-a")?.line).toBe(
+      `ineligible: no ready clone of a/a (blocked: ${why})`.slice(0, 200),
+    );
+    expect(r.candidates[0]?.line).toMatch(
+      /^local \(fallback: no peer eligible: box-a: no ready clone of a\/a \(blocked: the supervisor would spawn in /,
+    );
+  });
+
   it("the peer full in the tick: the next admission falls back to the laptop", () => {
     const placed = admitN(5, snap(laptop(), peerUp()), FB);
     // box-a's max_agents is 4; the fifth finds no peer eligible.

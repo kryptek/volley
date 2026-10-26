@@ -206,8 +206,10 @@ export function closableAfterRestart(ref: string, session: string): boolean {
  * its worktree lock, journal `agent_retired`. Only this wave's own agents, only terminal (or
  * DAEMON_ENDED) ones. The retired marker is written first, so the agent's hooks stay quiet once
  * its login is gone; then its session is ended (`endSession`, the retire's own consent),
- * journaled `agent_session_closed` before `agent_retired`. The worktree and branch stay: removing
- * them is `volleyd cleanup <wave> --yes`.
+ * journaled `agent_session_closed` before `agent_retired`. The worktree, its branch and anything
+ * else the wave made stay: removing them, on every machine, is wave cleanup (commands/cleanup.ts,
+ * SPEC §4.6.26), which the daemon runs itself once the task ends (`cleanup_on_end`) and
+ * `volleyd cleanup <wave> --yes` runs by hand.
  */
 export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise<void> {
   if (!req.waveAgents.has(req.agentId)) {

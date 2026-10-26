@@ -224,6 +224,47 @@ export function deskRefusal(accounts: Account[], sender: string): string | undef
   return undefined;
 }
 
+/**
+ * The repository ops (SPEC §4.6.21) the fixed `coordinator` identity may send on its own
+ * account-op topic: the wave owner adds the repository a wave is about without an admin account.
+ */
+export const COORDINATOR_REPO_OPS: ReadonlySet<string> = new Set([
+  "repo_add",
+  "repo_remove",
+  "repo_list",
+  "repo_status",
+  "repo_probe",
+]);
+
+/**
+ * Why the fixed `coordinator` identity may not send `op` (with payload `p`) on its account-op
+ * topic, or undefined when it may; undefined too for any other sender, whose op takes the admin
+ * check (`adminRefusal`). Trusting the literal name is safe as for `desk` (`deskRefusal`): the
+ * broker ACL (`%u`) lets only the `coordinator` login write `ops/coordinator`. Adopting a clone at
+ * a path (`repo_add { paths }`) also trusts that folder on the machine: it stays an admin's.
+ */
+export function coordinatorRepoRefusal(sender: string, op: string, p: Fields): string | undefined {
+  if (sender !== "coordinator") return undefined;
+  if (!COORDINATOR_REPO_OPS.has(op)) {
+    return `"coordinator" is a fixed identity that may send only the repository ops here; ${op} needs the admin role`;
+  }
+  if (op === "repo_add" && adoptsPaths(p.paths)) {
+    return "adopting a clone at a path (--path) is an admin's; add by slug to clone fresh";
+  }
+  return undefined;
+}
+
+/** Whether `paths` names any clone to adopt (anything but absent or an empty object). */
+function adoptsPaths(paths: unknown): boolean {
+  if (paths === undefined) return false;
+  return !(
+    typeof paths === "object" &&
+    paths !== null &&
+    !Array.isArray(paths) &&
+    Object.keys(paths).length === 0
+  );
+}
+
 /** An answer on the account-op reply topic. */
 export const authReply = reply;
 
@@ -237,6 +278,8 @@ export async function accountOp(
   p: Fields,
   lastSeen: (name: string) => string | undefined = () => undefined,
   seenSince?: string,
+  /** May an account be made for wave `id` (`account_create { wave }`, SPEC §4.6.26)? Absent: no. */
+  isWave: (id: string) => boolean = () => false,
 ): Promise<AuthOutcome> {
   const op = typeof p.op === "string" ? p.op : "";
   const accounts = await listAccounts(exec);
@@ -282,6 +325,11 @@ export async function accountOp(
     if (p.kind !== undefined && !(ACCOUNT_KINDS as readonly unknown[]).includes(p.kind)) {
       return refuse(op, `kind must be one of ${ACCOUNT_KINDS.join(", ")}`);
     }
+    // Made for one wave (`volley auth add --for-wave`): that wave's cleanup revokes it. Never
+    // passed down to the `volley auth add` below, which would send this op again.
+    if (p.wave !== undefined && (typeof p.wave !== "string" || !isWave(p.wave))) {
+      return refuse(op, "wave: not a wave id, or an archived wave's");
+    }
     args.push("add", name, "--role", p.role as string);
     if (p.kind !== undefined) args.push("--kind", p.kind as string);
   } else {
@@ -318,10 +366,21 @@ export async function accountOp(
               name,
               role: p.role,
               ...(p.kind !== undefined ? { kind: p.kind } : {}),
+              ...(typeof p.wave === "string" ? { wave: p.wave } : {}),
             },
           }
         : { type: "account_rotated", data: { by: sender, name } },
   };
+}
+
+/**
+ * Revoke a wave-owned account (cleanup of its wave, SPEC §4.6.26): null, or why not. The caller
+ * journals `account_revoked { by, name }` as the op does.
+ */
+export async function revokeAccount(exec: ExecFn, name: string): Promise<string | null> {
+  if (!isValidAgentId(name)) return "name must match [a-z0-9][a-z0-9_-]{0,62}";
+  const r = await volleyAuth(exec, ["revoke", name]);
+  return r.ok ? null : r.error;
 }
 
 function credentials(out: Fields | null): { username: string; password: string } | null {

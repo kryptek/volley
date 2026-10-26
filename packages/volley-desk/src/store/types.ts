@@ -157,7 +157,9 @@ export interface PlacementCandidate {
 export interface TaskPlacement {
   /** A machine name: the supervisor's own machine under its `fleet.local_name`. */
   host: string;
-  by: "auto" | "wave_file" | "decision";
+  by: "auto" | "wave_file" | "decision" | "fallback";
+  /** Why it was moved (`fallback`): what the machine it left said. */
+  why?: string;
   score: number | null;
   decided_at: string;
   candidates: PlacementCandidate[];
@@ -260,10 +262,42 @@ export interface MergeQueueEntry {
   since: string;
 }
 
-/** wave-state `release` (SPEC §4.6.19): the train's stage in play and every stage's state. */
+/**
+ * wave-state `release` (SPEC §4.6.19): the train's stage in play and every stage's state (a ship
+ * stage marked `phase: ship`); the version, the release PR and its merge commit once known.
+ */
 export interface WaveRelease {
   stage: string | null;
-  stages: { name: string; state: "pending" | "awaiting_go" | "running" | "verified" | "failed" }[];
+  stages: {
+    name: string;
+    state: "pending" | "awaiting_go" | "running" | "verified" | "failed" | "skipped";
+    phase?: "ship";
+  }[];
+  phase?: "prepare" | "ship";
+  version?: string;
+  date?: string;
+  default_branch?: string;
+  pr?: { number: number; head: string; title?: string };
+  merged_sha?: string;
+}
+
+/** One thing a wave's cleanup kept, and why (SPEC §4.6.26). */
+export interface CleanupKept {
+  kind: string;
+  /** `local` (the supervisor) or a paired machine's name. */
+  host: string;
+  what: string;
+  task?: string;
+  why?: string;
+}
+
+/** `WaveStatePayload.cleanup`. */
+export interface WaveCleanup {
+  at: string;
+  removed: Record<string, number>;
+  kept: CleanupKept[];
+  summary: string;
+  task?: string;
 }
 
 export interface WaveStatePayload {
@@ -296,6 +330,11 @@ export interface WaveStatePayload {
   ci_mode?: "none" | "workflows" | "required";
   /** Absent from a supervisor that predates autopilot. */
   autopilot?: WaveAutopilot;
+  /**
+   * The wave's last cleanup run (`wave_cleaned`, SPEC §4.6.26): what it removed, what it kept
+   * and why, its summary line; `task`: that run cleaned one task only. Absent: never cleaned.
+   */
+  cleanup?: WaveCleanup;
   /** Absent while the queue is empty. */
   merge_queue?: MergeQueueEntry[];
   /** Absent for a wave without a release train. */
@@ -348,6 +387,7 @@ export const DECISION_KINDS = [
   "merge_refused",
   "release_go",
   "stage_go",
+  "release_pr_ci_failed",
   "terminal_status_lost",
   "churn_exhausted",
 ] as const;
@@ -487,6 +527,8 @@ export interface Tunables {
     local_name?: string | null;
     /** Where managed clones live on every machine (`~` is that machine's home). */
     repo_root?: string;
+    /** The supervisor's own adopted clones, `owner/name` → absolute path (#616). */
+    repos?: Record<string, string>;
     local_agents?: LocalAgentsMode | null;
     fallback?: { max_agents?: number; per_machine?: Record<string, number> };
   };

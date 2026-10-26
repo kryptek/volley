@@ -19,6 +19,7 @@ import {
   type DoctorReport,
   doctor,
   normalizeOrigin,
+  recordInstall,
   runDoctor,
   scrub,
 } from "../../src/peer/doctor";
@@ -30,6 +31,7 @@ import {
   type FakePeerMachine,
   fakePeerMachine,
 } from "../helpers/fake-peer-machine";
+import { tempDir } from "../helpers/tmp";
 
 let box: FakePeerMachine | null = null;
 afterEach(() => {
@@ -322,7 +324,15 @@ describe("volley peer doctor: the volley checkout", () => {
     await m.exec(["git", "-C", m.volleyDir, "checkout", "--detach", "v0.4.0"]);
     const r = await report(m);
     expect(check(r, "volley.installed")).toMatchObject({ ok: false, severity: "block" });
-    expect(check(r, "volley.installed")?.detail).toContain("bun.lock");
+    expect(check(r, "volley.installed")?.fix).toBe(
+      `/usr/bin/bun install --cwd ${m.volleyDir} --frozen-lockfile`,
+    );
+    expect(check(r, "volley.installed")?.detail).toBe(
+      `volley 0.4.0 in ${m.volleyDir}: bun.lock changed since the last recorded install (reinstall with --frozen-lockfile)`,
+    );
+    // Details are cut at 200 characters: the text must leave room for a long checkout path.
+    const detail = check(r, "volley.installed")?.detail ?? "";
+    expect(detail.length - m.volleyDir.length).toBeLessThanOrEqual(110);
     m.calls.length = 0;
     const fixed = await run(m, { fix: true, yes: true });
     expect(MUTATING(m)).toEqual([
@@ -337,6 +347,19 @@ describe("volley peer doctor: the volley checkout", () => {
     const r = await run(m, { fix: true, yes: true });
     expect(r.exit).toBe(0);
     expect(check(await report(m), "volley.installed")?.ok).toBe(true);
+  });
+
+  it("a marker written by recordInstall (volley deploy's own) reads synced", async () => {
+    const m = machine({ staleInstall: true });
+    expect(check(await report(m), "volley.installed")?.ok).toBe(false);
+    recordInstall(m.volleyDir);
+    expect(check(await report(m), "volley.installed")?.ok).toBe(true);
+  });
+
+  it("recordInstall throws when node_modules is missing", () => {
+    const dir = tempDir("volley-record-");
+    writeFileSync(join(dir, "bun.lock"), "{}");
+    expect(() => recordInstall(dir)).toThrow();
   });
 
   it("package.json and bun.lock disagreeing is explained, with no fix the doctor would run", async () => {
@@ -1173,7 +1196,9 @@ describe("volley peer doctor: many repositories (#435)", () => {
       expect(warn?.detail).toContain("remote names the old owner");
       expect(MUTATING(m).filter((a) => a.includes("set-url"))).toEqual([]);
       // One gh repo view per slug per run.
-      const views = m.ran("gh", "repo", "view").filter((a) => a.includes("nameWithOwner"));
+      const views = m
+        .ran("gh", "repo", "view")
+        .filter((a) => a.some((x) => x.startsWith("nameWithOwner")));
       expect(views.map((a) => a[3]).sort()).toEqual(["new-owner/name", "old-owner/name"]);
 
       m.calls.length = 0;
@@ -1354,6 +1379,111 @@ describe("volley peer doctor: many repositories (#435)", () => {
       const c = forRepo(r, "repo.requirements", "a/a");
       expect(c).toMatchObject({ ok: false, severity: "block" });
       expect(c?.detail).toContain("toolz");
+    });
+  });
+
+  describe("push access and the worktree root (#610)", () => {
+    it("repo.push per repository: WRITE on one, READ on the other blocks that one; gh.auth unchanged", async () => {
+      const m = machine({ permissions: { "a/a": "WRITE", "b/b": "READ" } });
+      const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      addClone(m, repos["b/b"], { origin: "git@github.com:b/b.git" });
+      const r = await reportRepos(m, repos);
+      expect(forRepo(r, "repo.push", "a/a")).toMatchObject({ ok: true, severity: "block" });
+      expect(forRepo(r, "repo.push", "a/a")?.detail).toBe("octocat has WRITE access to a/a");
+      const b = forRepo(r, "repo.push", "b/b");
+      expect(b).toMatchObject({ ok: false, severity: "block", repo: "b/b" });
+      expect(b?.detail).toBe("octocat cannot push to b/b (permission READ)");
+      expect(b?.fix).toBe(
+        "ask for write access to b/b for octocat, or gh auth login as an account that has it",
+      );
+      // gh.auth keeps its machine-level meaning: the first repository's permission.
+      expect(check(r, "gh.auth")?.ok).toBe(true);
+      expect(r.auth.gh).toBe("ok");
+      // One gh repo view per slug per run.
+      const views = m.ran("gh", "repo", "view");
+      expect(views.map((a) => a[3]).sort()).toEqual(["a/a", "b/b"]);
+    });
+
+    it("repo.push without gh signed in fails with gh.auth's fix", async () => {
+      const m = machine({ gh: { signedIn: false } });
+      const repos = { "a/a": managed(m, "a/a") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      const c = forRepo(await reportRepos(m, repos), "repo.push", "a/a");
+      expect(c).toMatchObject({ ok: false, severity: "block" });
+      expect(c?.fix).toBe("gh auth login && gh auth setup-git");
+    });
+
+    it("repo.worktrees: a writable root passes; one whose nearest ancestor is not writable fails with mkdir -p, which --fix applies", async () => {
+      const m = machine();
+      const repos = { "a/a": managed(m, "a/a") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      const root = join(m.home, ".volley", "worktrees", "a", "a");
+      const ok = forRepo(await reportRepos(m, repos), "repo.worktrees", "a/a");
+      expect(ok).toMatchObject({ ok: true, severity: "block" });
+      expect(ok?.detail).toContain(root);
+
+      // Nothing at the root yet and its nearest ancestor read-only (to the doctor).
+      const writable = (p: string) => existsSync(p) && p.startsWith(root);
+      const io = makeBufferIO();
+      await doctor(io, m.deps({ writable }), { repos, json: true });
+      const c = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(c).toMatchObject({ ok: false, severity: "block", repo: "a/a" });
+      expect(c?.fix).toBe(`mkdir -p ${root}`);
+
+      const fixed = makeBufferIO();
+      await doctor(fixed, m.deps({ writable }), { repos, fix: true, yes: true, json: true });
+      expect(existsSync(root)).toBe(true);
+      const after = (JSON.parse(fixed.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(after?.ok).toBe(true);
+    });
+
+    it("an adopted clone's worktree root is the managed one, as volleyd cuts them there", async () => {
+      const m = machine();
+      const adopted = join(m.root, "work", "a");
+      addClone(m, adopted, { origin: "https://github.com/a/a" });
+      const c = forRepo(await reportRepos(m, { "a/a": adopted }), "repo.worktrees", "a/a");
+      expect(c?.detail).toContain(join(m.home, ".volley", "worktrees", "a", "a"));
+      expect(c?.detail).not.toContain(".volley-worktrees");
+    });
+
+    it("an adopted clone beside a read-only folder does not block the repository", async () => {
+      const m = machine();
+      const adopted = join(m.root, "opt", "a");
+      addClone(m, adopted, { origin: "https://github.com/a/a" });
+      const writable = (p: string) => !p.startsWith(join(m.root, "opt"));
+      const io = makeBufferIO();
+      await doctor(io, m.deps({ writable }), { repos: { "a/a": adopted }, json: true });
+      const c = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(c?.ok).toBe(true);
+    });
+
+    it("repo.worktrees' fix quotes a root with a space, so it can be pasted", async () => {
+      const m = machine();
+      const home = join(m.root, "my home");
+      mkdirSync(home, { recursive: true });
+      const adopted = join(m.root, "work", "a");
+      addClone(m, adopted, { origin: "https://github.com/a/a" });
+      const root = join(home, ".volley", "worktrees", "a", "a");
+      const writable = (p: string) => existsSync(p) && p.startsWith(root);
+      const io = makeBufferIO();
+      await doctor(io, m.deps({ writable, home }), { repos: { "a/a": adopted }, json: true });
+      const failed = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(failed?.fix).toBe(`mkdir -p '${root}'`);
+    });
+
+    it("the closing line names git.identity while it fails", async () => {
+      const m = machine({ gitIdentity: null });
+      const r = await runRepos(m, {});
+      expect(r.stdout).toMatch(/keep this machine from being ready for agents.*git\.identity/);
     });
   });
 });

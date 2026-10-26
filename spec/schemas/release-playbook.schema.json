@@ -2,33 +2,49 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/release-playbook.schema.json",
   "title": "Volley Release Playbook",
-  "description": "A repository's release playbook, <repo>/.volley/release.yaml (spec section 4.6.19): the stages a supervisor runs, in order, once a wave's tasks are all merged, before it asks the owner release_go. Authored as YAML; this schema validates the parsed document. Not an envelope. Generic hooks: each stage is a brief for the agent that runs it, the commands it runs, and the facts the supervisor checks afterwards. Stage names are unique (enforced by the supervisor's parser with a path-qualified error).",
+  "description": "A repository's release playbook, <repo>/.volley/release.yaml (spec section 4.6.19): the stages a supervisor runs, in order, once a wave's tasks are all merged: the prepare stages before it asks the owner release_go, the ship stages after the go. brief, each run argv element, verify.tag and verify.result values may name the variables {{version}}, {{date}}, {{wave}}, {{release_branch}}, {{default_branch}} and (ship stages only) {{merged_sha}}; any other {{name}} is refused by the supervisor's parser. Authored as YAML; this schema validates the parsed document. Not an envelope. Generic hooks: each stage is a brief for the agent that runs it, the commands it runs, and the facts the supervisor checks afterwards. Stage names are unique (enforced by the supervisor's parser with a path-qualified error).",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "stages"],
   "properties": {
-    "version": { "const": 1, "description": "Playbook format version." },
+    "version": {
+      "const": 1,
+      "description": "Playbook format version."
+    },
     "stages": {
       "type": "array",
       "minItems": 1,
       "maxItems": 32,
-      "items": { "$ref": "#/$defs/stage" },
+      "items": {
+        "$ref": "#/$defs/stage"
+      },
       "description": "The release stages, run in this order."
     }
   },
   "$defs": {
-    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+    },
     "stage": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "brief"],
       "properties": {
-        "name": { "$ref": "#/$defs/id", "description": "Stage name, unique in the playbook." },
+        "name": {
+          "$ref": "#/$defs/id",
+          "description": "Stage name, unique in the playbook."
+        },
         "brief": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/templated"
+            }
+          ],
           "type": "string",
           "minLength": 1,
           "maxLength": 16384,
-          "description": "What the stage's agent does, in prose."
+          "description": "What the stage's agent does, in prose. May name the playbook variables."
         },
         "run": {
           "type": "array",
@@ -36,9 +52,22 @@
           "items": {
             "type": "array",
             "minItems": 1,
-            "items": { "type": "string", "minLength": 1 }
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/templated"
+                }
+              ],
+              "type": "string",
+              "minLength": 1
+            }
           },
-          "description": "Commands the stage's agent runs, each an argv array (never a shell line); shown in its brief verbatim."
+          "description": "Commands the stage's agent runs, each an argv array (never a shell line); shown in its brief verbatim. Each element may name the playbook variables, substituted before the agent sees it."
+        },
+        "phase": {
+          "enum": ["prepare", "ship"],
+          "default": "prepare",
+          "description": "prepare: runs before the owner's release_go, on the release branch. ship: runs after release_go's go, once the supervisor squash-merged the release PR, in a detached worktree at the merge commit on the default branch; it pushes nothing but a tag. Prepare stages come first; a ship stage needs a prepare stage that verifies release_pr, and never verifies commits_on_release or release_pr itself."
         },
         "gate": {
           "enum": ["auto", "owner"],
@@ -55,21 +84,40 @@
               "type": "boolean",
               "description": "true: the stage pushed at least one commit to the release branch."
             },
+            "release_pr": {
+              "type": "boolean",
+              "description": "true (a prepare stage's): exactly one open pull request from the release branch into the default branch, labelled no-changelog, its title starting release:. The supervisor merges it on the owner's release_go go."
+            },
             "tag": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/templated"
+                }
+              ],
               "type": "string",
               "minLength": 1,
-              "description": "A tag matching this glob exists at the release branch's head."
+              "description": "A tag matching this glob exists at the release branch's head (a ship stage's: at the release's merge commit)."
             },
             "files": {
               "type": "array",
               "maxItems": 64,
-              "items": { "type": "string", "minLength": 1 },
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
               "description": "Paths that must exist on the release branch."
             },
             "result": {
               "type": "object",
               "additionalProperties": {
-                "type": ["string", "number", "boolean"]
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/templated"
+                  },
+                  {
+                    "type": ["number", "boolean"]
+                  }
+                ]
               },
               "description": "Fields the stage's result payload must carry, each with exactly this value."
             }
@@ -86,6 +134,53 @@
           "description": "A lease pool (config lease_pools key) the stage holds a lease from while it runs."
         }
       }
+    },
+    "templated": {
+      "type": "string",
+      "pattern": "^(?:[^{]|\\{(?!\\{)|\\{\\{(?:version|date|wave|release_branch|default_branch|merged_sha)\\}\\})*$",
+      "description": "Text that may name the playbook variables as {{name}}: version, date, wave, release_branch, default_branch, merged_sha. Any other {{…}} is refused."
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "A ship stage needs a prepare stage that verifies release_pr (the pull request the supervisor merges on the go).",
+      "if": {
+        "properties": {
+          "stages": {
+            "contains": {
+              "type": "object",
+              "required": ["phase"],
+              "properties": {
+                "phase": {
+                  "const": "ship"
+                }
+              }
+            }
+          }
+        },
+        "required": ["stages"]
+      },
+      "then": {
+        "properties": {
+          "stages": {
+            "contains": {
+              "type": "object",
+              "required": ["verify"],
+              "properties": {
+                "verify": {
+                  "type": "object",
+                  "required": ["release_pr"],
+                  "properties": {
+                    "release_pr": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

@@ -42,6 +42,7 @@ export const DECISION_KINDS = [
   "merge_refused",
   "release_go",
   "stage_go",
+  "release_pr_ci_failed",
   "terminal_status_lost",
   "churn_exhausted",
 ] as const;
@@ -211,6 +212,11 @@ export interface DecisionPayload {
   stage?: string;
   /** release_go: every release stage, verified, with where its evidence lives. */
   stages?: { name: string; evidence?: string }[];
+  /** release_go: the release's version; release_go / release_pr_ci_failed: its PR (SPEC §4.6.19). */
+  version?: string;
+  pr?: number;
+  /** release_pr_ci_failed: the release PR's red head. */
+  head?: string;
   /** Held: waiting on a task, PR or issue (`decision_held`), until it lands or is released. */
   held?: Held;
   /**
@@ -660,6 +666,11 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
   const release = {
     ...(d.kind === "stage_go" && typeof d.stage === "string" ? { stage: d.stage } : {}),
     ...(d.kind === "release_go" && Array.isArray(d.stages) ? { stages: d.stages } : {}),
+    ...(d.kind === "release_go" && typeof d.version === "string" ? { version: d.version } : {}),
+    ...((d.kind === "release_go" || d.kind === "release_pr_ci_failed") && typeof d.pr === "number"
+      ? { pr: d.pr }
+      : {}),
+    ...(d.kind === "release_pr_ci_failed" && typeof d.head === "string" ? { head: d.head } : {}),
   };
   return {
     decision_id: d.decision_id,

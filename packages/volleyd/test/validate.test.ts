@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -170,14 +170,17 @@ describe("volleyd validate: the release branch", () => {
     writeFileSync(join(home, "config.yaml"), "require_fresh_base: false\n");
     const alone = await runCli(["validate", waveFile(repo)], env);
     expect(alone.exitCode).toBe(0);
-    expect(alone.stdout).toContain("placement: local (no paired machine)\n");
+    const me = localMachineName(null);
+    expect(alone.stdout).toContain(`placement: local (no paired machine; this machine ${me})\n`);
     writeFileSync(
       join(home, "config.yaml"),
       "require_fresh_base: false\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
     );
     const paired = await runCli(["validate", waveFile(repo)], env);
     expect(paired.exitCode).toBe(0);
-    expect(paired.stdout).toContain("placement: auto (placement.default; 1 paired machine)\n");
+    expect(paired.stdout).toContain(
+      `placement: auto (placement.default; this machine ${me}, 1 paired: box-a)\n`,
+    );
     // It places, so the preview is attempted (no supervisor here: it says so).
     expect(paired.stdout).toContain("placement preview unavailable");
     writeFileSync(
@@ -185,7 +188,30 @@ describe("volleyd validate: the release branch", () => {
       "require_fresh_base: false\nplacement: { default: local }\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
     );
     const pinned = await runCli(["validate", waveFile(repo)], env);
-    expect(pinned.stdout).toContain("placement: local (placement.default)\n");
+    expect(pinned.stdout).toContain(
+      `placement: local (placement.default; this machine ${me}, 1 paired: box-a)\n`,
+    );
+  });
+
+  it("a task's host: may name this machine; an unknown name is refused with the names (#608)", async () => {
+    git(repo, "branch", "release/x");
+    const home = join(dir, "home-names");
+    mkdirSync(home);
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nfleet: { local_name: null }\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
+    );
+    const me = localMachineName(null);
+    const own = await runCli(["validate", waveFile(repo, `{ issue: 1, host: ${me} }`)], env);
+    expect(own.stderr).toBe("");
+    expect(own.exitCode).toBe(0);
+    expect(own.stdout).toContain(`this machine ${me}, 1 paired: box-a)\n`);
+    const typo = await runCli(["validate", waveFile(repo, "{ issue: 1, host: mac }")], env);
+    expect(typo.exitCode).not.toBe(0);
+    expect(typo.stderr).toContain(
+      `tasks.T1.host: unknown host "mac": this machine is ${me}; paired: box-a`,
+    );
   });
 
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {
@@ -335,8 +361,28 @@ describe("volleyd validate: the release playbook (SPEC §4.6.19)", () => {
     const r = await runCli(["validate", waveFile()]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(
-      "release playbook: .volley/release.yaml (2 stages, 1 owner-gated)\n",
+      "release playbook: .volley/release.yaml (2 stages: 2 prepare, 0 ship, 1 owner-gated)\n",
     );
+  });
+
+  it("the Volley repository's own playbook: two prepare stages, two ship stages", async () => {
+    copyFileSync(
+      new URL("../../../.volley/release.yaml", import.meta.url),
+      join(repo, ".volley", "release.yaml"),
+    );
+    const r = await runCli(["validate", waveFile()]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "release playbook: .volley/release.yaml (4 stages: 2 prepare, 2 ship, 0 owner-gated)\n",
+    );
+  });
+
+  it("release_version: 0.14.0 is the wave's; release_version: 14 is refused at its path", async () => {
+    const ok = await runCli(["validate", waveFile("release_version: 0.14.0\n")]);
+    expect(ok.exitCode).toBe(0);
+    const bad = await runCli(["validate", waveFile("release_version: 14\n")]);
+    expect(bad.exitCode).not.toBe(0);
+    expect(bad.stderr + bad.stdout).toMatch(/release_version: /);
   });
 
   it("playbook: <path> overrides it; playbook: none and no file both print none", async () => {
@@ -344,7 +390,7 @@ describe("volleyd validate: the release playbook (SPEC §4.6.19)", () => {
     const r = await runCli(["validate", waveFile(`playbook: ${join(repo, "release.yaml")}\n`)]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(
-      `release playbook: ${join(repo, "release.yaml")} (2 stages, 1 owner-gated)\n`,
+      `release playbook: ${join(repo, "release.yaml")} (2 stages: 2 prepare, 0 ship, 1 owner-gated)\n`,
     );
     for (const extra of ["playbook: none\n", ""]) {
       const n = await runCli(["validate", waveFile(extra)]);

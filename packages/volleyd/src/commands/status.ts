@@ -118,6 +118,7 @@ export function formatPlacement(t: TaskState): string {
   const head = `    on ${p.host} (${p.by}${p.score !== null ? `, ${score(p.score)}` : ""})\n`;
   return (
     head +
+    (p.why !== undefined ? `      why: ${p.why}\n` : "") +
     p.candidates
       .map((c) => `      ${c.host.padEnd(hostW)}  ${score(c.score).padEnd(4)}  ${c.line}\n`)
       .join("")
@@ -249,6 +250,8 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  // The last cleanup run (SPEC §4.6.26), under hygiene: absent until the wave was cleaned.
+  const cleanup = s.cleanup !== undefined ? `  ${formatCleanup(s.cleanup)}\n` : "";
   const ci = s.ci_mode !== undefined ? `  ${formatCiMode(s)}\n` : "";
   const github = s.github !== undefined ? `  github: ${s.github.slug}\n` : "";
   // What autopilot did in the wave (absent: a state from before autopilot).
@@ -263,19 +266,27 @@ export function formatWave(
       : "";
   const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
   const spawns = s.spawns !== undefined ? `  ${formatSpawns(s.spawns)}\n` : "";
-  // The release train (SPEC §4.6.19): the stage running, awaiting its go or failed, and how far
-  // the train is (`release: smoke running (2/4 verified)`).
+  // The release train (SPEC §4.6.19): its version, the stage running, awaiting its go or failed,
+  // and how far the train is (`release: v0.13.3 · smoke running (2/4 verified)`).
   const r = s.release;
   const cur = r?.stages.find(
     (x) => x.state === "running" || x.state === "awaiting_go" || x.state === "failed",
   );
+  // Every prepare stage settled and nothing shipping yet: the owner's go (or the PR's CI) is next.
+  const prepared =
+    r !== undefined &&
+    s.status === "releasing" &&
+    r.phase !== "ship" &&
+    r.stages.every((x) => x.phase === "ship" || x.state === "verified" || x.state === "skipped");
   const where =
     cur !== undefined
       ? `${cur.name} ${cur.state === "awaiting_go" ? "awaiting go" : cur.state}`
-      : "-";
+      : prepared
+        ? "awaiting release_go"
+        : "-";
   const release =
     r !== undefined
-      ? `  release: ${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
+      ? `  release: ${r.version !== undefined ? `v${r.version} · ` : ""}${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
       : "";
   // The overlap plan (SPEC §4.6.22): each cluster, how it runs now, its members in flight, and why.
   const plan = (s.overlap_plan?.clusters ?? [])
@@ -323,6 +334,7 @@ export function formatWave(
     autopilot +
     preface +
     hygiene +
+    cleanup +
     ci +
     github +
     rows.join("") +
@@ -359,12 +371,19 @@ export function formatMergeQueue(q: NonNullable<WaveState["merge_queue"]>): stri
  * `ci: none (no workflows: the two reviewers and the gate are the check)`, `ci: workflows (3)` or
  * `ci: required (build, test)`: the repository's CI as read for this version (SPEC §4.6.8).
  */
-export function formatCiMode(s: WaveState): string {
+export function formatCiMode(
+  s: Pick<WaveState, "ci_mode" | "ci_required_checks" | "ci_workflows">,
+): string {
   if (s.ci_mode === "none")
     return "ci: none (no workflows: the two reviewers and the gate are the check)";
   if (s.ci_mode === "required")
     return `ci: required (${(s.ci_required_checks ?? []).join(", ") || "no check named on the branch"})`;
   return `ci: workflows (${typeof s.ci_workflows === "number" ? s.ci_workflows : "not read"})`;
+}
+
+/** `cleanup: cleaned w1: 3 worktrees, 2 sessions; kept 1`: the wave's last cleanup run. Pure. */
+export function formatCleanup(c: NonNullable<WaveState["cleanup"]>): string {
+  return `cleanup: ${c.summary}`;
 }
 
 /**

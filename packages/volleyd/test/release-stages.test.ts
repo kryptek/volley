@@ -5,6 +5,7 @@ import {
   type PlaybookStage,
   parsePlaybook,
   releaseGoInput,
+  substituteStage,
   trainState,
 } from "../src/autopilot/playbook";
 import {
@@ -12,12 +13,14 @@ import {
   type ReleaseAction,
   type ReleaseEvent,
   ReleaseTrain,
+  type ReleaseView,
   STAGE_STEER_REASON,
   globPrefix,
   globRegex,
   nextRelease,
   parseStageResult,
   releaseView,
+  renderStageMd,
   verifyStage,
 } from "../src/autopilot/release-train";
 import type { DecisionRecord } from "../src/decisions";
@@ -41,7 +44,11 @@ stages:
 `);
 
 /** A scripted train: the journal, the decisions, and the interpreter applied to both. */
-function train() {
+function train(
+  playbook = PLAYBOOK,
+  started: Record<string, unknown> = {},
+  driver: { ci?: ReleaseView["ci"] } = {},
+) {
   const events: JournalEvent[] = [];
   const decisions: Record<string, DecisionRecord> = {};
   const at = "2026-10-20T00:00:00.000Z";
@@ -53,7 +60,12 @@ function train() {
       data,
       ...(task !== undefined ? { task } : {}),
     } as JournalEvent);
-  push("release_started", { done: ["A"], cancelled: [], playbook: { stages: PLAYBOOK.stages } });
+  push("release_started", {
+    done: ["A"],
+    cancelled: [],
+    ...started,
+    playbook: { stages: playbook.stages },
+  });
   let status = "releasing";
   const view = () => {
     const v = releaseView({
@@ -65,7 +77,7 @@ function train() {
       decisions,
     });
     if (v === null) throw new Error("no train");
-    return v;
+    return { ...v, ...(driver.ci !== undefined ? { ci: driver.ci } : {}) };
   };
   /** Apply what the daemon would: journal events and decisions land; the rest is returned. */
   const apply = (acts: ReleaseAction[]) => {
@@ -116,12 +128,13 @@ function train() {
         x.kind === kind && x.resolved === undefined && (x as { stage?: string }).stage === stage,
     ) as DecisionRecord;
     d.resolved = { answer, by: "owner", at };
+    push("decision_resolved", { decision_id: d.decision_id, answer, by: "owner" });
     return step({ kind: "decision_resolved", decision: d });
   };
   const setStatus = (s: string) => {
     status = s;
   };
-  return { events, decisions, view, step, spawned, resolve, setStatus };
+  return { events, decisions, view, step, spawned, resolve, setStatus, push, driver };
 }
 
 const kinds = (acts: ReleaseAction[]) =>
@@ -210,7 +223,8 @@ describe("nextRelease (SPEC §4.6.19)", () => {
     ]);
     t.spawned("smoke", 1);
     t.step({ kind: "stage_checked", stage: "smoke", agent_id: "w1-release-smoke-1", report: OK });
-    // The last stage verified: nothing more from the train (the daemon asks release_go).
+    // The last stage verified: release_go (no release PR in this playbook: no CI to wait for).
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide release_go undefined"]);
     expect(t.step({ kind: "advance" })).toEqual([]);
     expect(t.view().train.stages.map((s) => s.state)).toEqual(["verified", "verified", "verified"]);
   });
@@ -442,6 +456,202 @@ describe("nextRelease (SPEC §4.6.19)", () => {
   });
 });
 
+describe("nextRelease: prepare, the go, ship (SPEC §4.6.19)", () => {
+  const SHIPPING = parsePlaybook(`version: 1
+stages:
+  - name: bump
+    brief: Bump to {{version}}.
+    run: [[bun, scripts/release-version.ts, --set, "{{version}}"]]
+    verify: { commits_on_release: true }
+  - { name: release-pr, brief: Open the PR., verify: { release_pr: true } }
+  - name: tag
+    phase: ship
+    brief: Tag it.
+    run: [[git, push, origin, "v{{version}}"]]
+    verify: { tag: "v{{version}}" }
+  - { name: deploy, phase: ship, brief: Deploy., verify: { result: { deployed: "v{{version}}" } } }
+`);
+  const HEAD = "d".repeat(40);
+  const MERGED = "e".repeat(40);
+  const STARTED = { version: "0.13.3", date: "2026-10-25", default_branch: "main" };
+  const PR = { pr: 12, head: HEAD, title: "release: v0.13.3 — one go", stage: "release-pr" };
+
+  /** Both prepare stages verified, the release PR detected; CI as `ci`. */
+  function prepared(ci?: ReleaseView["ci"]) {
+    const t = train(SHIPPING, STARTED, ci !== undefined ? { ci } : {});
+    for (const stage of ["bump", "release-pr"]) {
+      t.push("release_stage_entered", { stage, attempt: 1 });
+      if (stage === "release-pr") t.push("release_pr_detected", PR);
+      t.push("release_stage_verified", { stage });
+    }
+    return t;
+  }
+  const go = (t: ReturnType<typeof train>, answer = "go") => {
+    const d = Object.values(t.decisions).find(
+      (x) => x.kind === "release_go" && x.resolved === undefined,
+    ) as DecisionRecord;
+    d.resolved = { answer, by: "owner", at: "2026-10-25T00:00:00.000Z" };
+    t.push("decision_resolved", { decision_id: d.decision_id, answer, by: "owner" });
+    return t.step({ kind: "decision_resolved", decision: d });
+  };
+
+  it("the release PR's CI green at its head: release_go names the version, the PR and the bullets", () => {
+    const t = prepared({ head: HEAD, state: "green", excerpt: ["- **One go.** (#609)"] });
+    const acts = t.step({ kind: "advance" });
+    expect(kinds(acts)).toEqual(["decide release_go undefined"]);
+    const d = acts[0] as Extract<ReleaseAction, { kind: "decide" }>;
+    expect(d.decision.question).toContain("release v0.13.3 is ready: PR #12");
+    expect(d.decision.question).toContain("Changelog: - **One go.** (#609)");
+    expect(d.decision.question).toContain("then runs tag, deploy at the merge commit");
+    expect(d.data).toMatchObject({ version: "0.13.3", pr: 12 });
+    expect(t.view().train).toMatchObject({ version: "0.13.3", pr: { number: 12, head: HEAD } });
+  });
+
+  it("CI running, unread, or green at another head: no decision, the PR is read", () => {
+    expect(kinds(prepared({ head: HEAD, state: "running" }).step({ kind: "advance" }))).toEqual([
+      "check_pr ",
+    ]);
+    expect(kinds(prepared().step({ kind: "advance" }))).toEqual(["check_pr "]);
+    expect(
+      kinds(prepared({ head: "f".repeat(40), state: "green" }).step({ kind: "advance" })),
+    ).toEqual(["check_pr "]);
+  });
+
+  it("CI red: release_pr_ci_failed (retry / hold), once; retry reads CI afresh", () => {
+    const t = prepared({ head: HEAD, state: "red" });
+    const acts = t.step({ kind: "advance" });
+    expect(kinds(acts)).toEqual(["decide release_pr_ci_failed undefined"]);
+    expect((acts[0] as Extract<ReleaseAction, { kind: "decide" }>).decision.options).toEqual([
+      "retry",
+      "hold",
+    ]);
+    expect(t.step({ kind: "advance" })).toEqual([]);
+    const d = Object.values(t.decisions).find((x) => x.kind === "release_pr_ci_failed");
+    if (d === undefined) throw new Error("no decision");
+    d.resolved = { answer: "retry", by: "owner", at: "2026-10-25T00:00:00.000Z" };
+    expect(t.step({ kind: "decision_resolved", decision: d })).toEqual([
+      { kind: "check_pr", fresh: true },
+    ]);
+  });
+
+  it("go merges the release PR at its green head; release_merged enters the first ship stage", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    t.step({ kind: "advance" });
+    expect(go(t)).toEqual([{ kind: "merge", pr: 12, head: HEAD }]);
+    // While the merge runs, nothing else.
+    expect(nextRelease({ ...t.view(), merging: true }, { kind: "advance" })).toEqual([]);
+    t.push("release_merged", { pr: 12, sha: MERGED });
+    expect(t.view().train).toMatchObject({ phase: "ship", merged_sha: MERGED });
+    expect(t.view().vars).toMatchObject({ merged_sha: MERGED, version: "0.13.3" });
+    expect(kinds(t.step({ kind: "advance" }))).toEqual([
+      "release_stage_entered tag",
+      "spawn tag 1",
+    ]);
+    t.spawned("tag", 1);
+    t.step({ kind: "stage_checked", stage: "tag", agent_id: "w1-release-tag-1", report: OK });
+    expect(kinds(t.step({ kind: "advance" }))).toEqual([
+      "release_stage_entered deploy",
+      "spawn deploy 1",
+    ]);
+    t.spawned("deploy", 1);
+    const last = t.step({
+      kind: "stage_checked",
+      stage: "deploy",
+      agent_id: "w1-release-deploy-1",
+      report: OK,
+    });
+    expect(kinds(last)).toEqual(["release_stage_verified deploy", "retire w1-release-deploy-1"]);
+    const done = t.step({ kind: "advance" });
+    expect(kinds(done)).toEqual(["release_done undefined"]);
+    expect((done[0] as Extract<ReleaseAction, { kind: "journal" }>).event.data).toMatchObject({
+      by: "owner",
+      version: "0.13.3",
+      merged_sha: MERGED,
+    });
+    expect(t.step({ kind: "advance" })).toEqual([]);
+  });
+
+  it("release_merge_failed asks release_go again with the reason; hold asks again too", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    t.step({ kind: "advance" });
+    go(t);
+    t.push("release_merge_failed", {
+      pr: 12,
+      head: HEAD,
+      reason: "GraphQL: Base branch was modified",
+    });
+    const again = t.step({ kind: "advance" });
+    expect(kinds(again)).toEqual(["decide release_go undefined"]);
+    const d = again[0] as Extract<ReleaseAction, { kind: "decide" }>;
+    expect(d.decision.question).toContain(
+      "The last go did not merge: GraphQL: Base branch was modified.",
+    );
+    expect(d.data).toMatchObject({ class: "held" });
+    expect(go(t, "hold")).toMatchObject([{ kind: "decide", data: { class: "held" } }]);
+  });
+
+  it("release_go names the head it was asked at, and the go is for that head only", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    const acts = t.step({ kind: "advance" });
+    expect((acts[0] as Extract<ReleaseAction, { kind: "decide" }>).data).toMatchObject({
+      pr: 12,
+      head: HEAD,
+    });
+    go(t);
+    expect(t.view().go).toMatchObject({ by: "owner", head: HEAD });
+  });
+
+  it("go, then the head moves: the go is dropped (never merged), release_go asked at the new head", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    const drv = t.driver;
+    t.step({ kind: "advance" });
+    // A push to the release branch lands while release_go is open; the driver reads it after.
+    const moved = "f".repeat(40);
+    t.push("release_pr_detected", { ...PR, head: moved, moved_from: HEAD });
+    drv.ci = { head: moved, state: "green" };
+    const acts = go(t);
+    expect(kinds(acts)).toEqual(["release_merge_failed undefined"]);
+    const failed = acts[0] as Extract<ReleaseAction, { kind: "journal" }>;
+    expect(failed.event.data).toMatchObject({ pr: 12, head: moved });
+    expect(String(failed.event.data.reason)).toContain("moved");
+    const again = t.step({ kind: "advance" });
+    expect(kinds(again)).toEqual(["decide release_go undefined"]);
+    expect((again[0] as Extract<ReleaseAction, { kind: "decide" }>).data).toMatchObject({
+      head: moved,
+    });
+    // The go on the question about the new head merges it.
+    expect(go(t)).toEqual([{ kind: "merge", pr: 12, head: moved }]);
+  });
+
+  it("go, then the head's CI reads red: the go is dropped and release_pr_ci_failed is asked", () => {
+    const t = prepared({ head: HEAD, state: "green" });
+    const drv = t.driver;
+    t.step({ kind: "advance" });
+    // A restart between the go and the merge, and the head's CI re-ran red.
+    drv.ci = { head: HEAD, state: "red" };
+    expect(kinds(go(t))).toEqual(["release_merge_failed undefined"]);
+    expect(t.view().go).toBeUndefined();
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide release_pr_ci_failed undefined"]);
+    // retry reads CI afresh; green again asks release_go again (a new decision).
+    const d = Object.values(t.decisions).find((x) => x.kind === "release_pr_ci_failed");
+    if (d === undefined) throw new Error("no decision");
+    d.resolved = { answer: "retry", by: "owner", at: "2026-10-25T00:00:00.000Z" };
+    expect(t.step({ kind: "decision_resolved", decision: d })).toEqual([
+      { kind: "check_pr", fresh: true },
+    ]);
+    drv.ci = { head: HEAD, state: "green" };
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide release_go undefined"]);
+  });
+
+  it("a playbook with no release PR and no ship stage: go → release_done at once (as before)", () => {
+    const t = train(PLAYBOOK, STARTED);
+    for (const stage of ["bump", "deploy-staging", "smoke"])
+      t.push("release_stage_verified", { stage });
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide release_go undefined"]);
+    expect(kinds(go(t))).toEqual(["release_done undefined"]);
+  });
+});
+
 describe("releaseGoInput", () => {
   it("names the skipped stages apart from the verified ones", () => {
     const { input } = releaseGoInput(
@@ -575,6 +785,7 @@ describe("verifyStage", () => {
     brief: "Tag it.",
     run: [["git", "tag", "v0.5.0"]],
     gate: "auto",
+    phase: "prepare",
     ...(verify !== undefined ? { verify } : {}),
   });
   /** A fake exec over a scripted repo: the tip, HEAD, ancestry, files and tags. */
@@ -770,6 +981,153 @@ describe("verifyStage", () => {
       stage: stage({ tag: "v0.5.0" }),
     });
     expect(r).toMatchObject({ ok: false, missing: ["tag v0.5.0"] });
+  });
+});
+
+describe("verifyStage: the release PR and a ship stage (SPEC §4.6.19)", () => {
+  const TIP = "c".repeat(40);
+  const HEAD = "d".repeat(40);
+  const MERGED = "e".repeat(40);
+  const stage = (s: Partial<PlaybookStage>): PlaybookStage => ({
+    name: "s",
+    brief: "b",
+    run: [],
+    gate: "auto",
+    phase: "prepare",
+    ...s,
+  });
+  const result = { stage: "s", commands: [], artifacts: {} };
+  const prs = (list: unknown[]) => {
+    const calls: string[][] = [];
+    const exec: ExecFn = async (argv) => {
+      calls.push([...argv]);
+      const r = (stdout: string, code = 0) => ({ code, stdout, stderr: "", timedOut: false });
+      const a = argv.join(" ");
+      if (a.includes(" fetch ")) return r("");
+      if (a.includes("rev-parse --verify --quiet")) return r(`${TIP}\n`);
+      if (a.endsWith("rev-parse HEAD")) return r(`${MERGED}\n`);
+      if (argv[1] === "pr" && argv[2] === "list") return r(JSON.stringify(list));
+      if (argv[0] === "gh" && a.includes("matching-refs/tags/v0.13.3"))
+        return r(
+          JSON.stringify([[{ ref: "refs/tags/v0.13.3", object: { sha: MERGED, type: "commit" } }]]),
+        );
+      if (argv[3] === "show") return r("", String(argv.at(-1)).startsWith(MERGED) ? 0 : 128);
+      return r("", 1);
+    };
+    return { exec, calls };
+  };
+  const pr = (o: Record<string, unknown> = {}) => ({
+    number: 12,
+    headRefOid: HEAD,
+    title: "release: v0.13.3 — one go",
+    labels: [{ name: "no-changelog" }],
+    ...o,
+  });
+  const base = { cwd: "/wt", start: undefined, release_branch: "release/w1", result };
+
+  it("release_pr: exactly one open PR into the default branch, labelled and titled, is reported", async () => {
+    const f = prs([pr()]);
+    const r = await verifyStage(f.exec, {
+      ...base,
+      stage: stage({ verify: { release_pr: true } }),
+      default_branch: "main",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.pr).toEqual({ number: 12, head: HEAD, title: "release: v0.13.3 — one go" });
+    expect(f.calls).toContainEqual([
+      "gh",
+      "pr",
+      "list",
+      "--head",
+      "release/w1",
+      "--base",
+      "main",
+      "--state",
+      "open",
+      "--json",
+      "number,headRefOid,title,labels",
+    ]);
+  });
+
+  it("release_pr fails naming why: two PRs, no label, another title, none", async () => {
+    const why = async (list: unknown[]) => {
+      const r = await verifyStage(prs(list).exec, {
+        ...base,
+        stage: stage({ verify: { release_pr: true } }),
+        default_branch: "main",
+      });
+      expect(r.ok).toBe(false);
+      expect(r.pr).toBeUndefined();
+      return r.facts.find((x) => x.fact === "release_pr")?.evidence;
+    };
+    expect(await why([pr(), pr({ number: 13 })])).toBe(
+      "2 open release PRs (#12, #13), want exactly one",
+    );
+    expect(await why([pr({ labels: [] })])).toBe("#12 is not labelled no-changelog");
+    expect(await why([pr({ title: "Release 0.13.3" })])).toBe(
+      '#12\'s title does not start with "release:"',
+    );
+    expect(await why([])).toBe("no open release PR");
+  });
+
+  it("a ship stage's tag and files are checked at the merge commit, not the release tip", async () => {
+    const f = prs([]);
+    const r = await verifyStage(f.exec, {
+      ...base,
+      stage: stage({ phase: "ship", verify: { tag: "v0.13.3", files: ["CHANGELOG.md"] } }),
+      default_branch: "main",
+      ship: { default_branch: "main", merged_sha: MERGED },
+    });
+    expect(r.facts).toEqual([
+      { fact: "tag v0.13.3", ok: true, evidence: `v0.13.3 at ${MERGED.slice(0, 7)}` },
+      {
+        fact: "file CHANGELOG.md",
+        ok: true,
+        evidence: `on the merge commit ${MERGED.slice(0, 7)}`,
+      },
+    ]);
+    expect(r.ok).toBe(true);
+    // The default branch is fetched (the release branch is gone), its tip never read.
+    expect(f.calls).toContainEqual(["git", "-C", "/wt", "fetch", "--quiet", "origin", "main"]);
+    expect(f.calls.some((c) => c.includes("--verify"))).toBe(false);
+    // Checked against the release tip instead, the same tag does not hold.
+    const prepare = await verifyStage(prs([]).exec, {
+      ...base,
+      stage: stage({ verify: { tag: "v0.13.3" } }),
+    });
+    expect(prepare.missing).toEqual(["tag v0.13.3"]);
+  });
+
+  it("renderStageMd carries the substituted run lines and, for a ship stage, the tag-only rule", () => {
+    const own = parsePlaybook(
+      readFileSync(new URL("../../../.volley/release.yaml", import.meta.url), "utf-8"),
+    );
+    const vars = {
+      version: "0.13.3",
+      date: "2026-10-25",
+      wave: "w1",
+      release_branch: "release/w1",
+      default_branch: "main",
+    };
+    const bump = substituteStage(own.stages[0] as PlaybookStage, vars);
+    const md = renderStageMd(bump, { wave: "w1", release_branch: "release/w1", attempt: 1 });
+    expect(md).toContain("bun scripts/release-version.ts --set 0.13.3");
+    expect(md).toContain("bun run changelog --version 0.13.3 --date 2026-10-25");
+    expect(md).not.toContain("{{");
+    const tag = substituteStage(own.stages[2] as PlaybookStage, { ...vars, merged_sha: MERGED });
+    const ship = renderStageMd(tag, {
+      wave: "w1",
+      release_branch: "release/w1",
+      attempt: 1,
+      ship: { default_branch: "main", merged_sha: MERGED },
+    });
+    expect(ship).toContain("git push origin v0.13.3");
+    expect(ship).toContain(
+      `A tag matching \`v0.13.3\` exists on origin at the release's merge commit \`${MERGED.slice(0, 7)}\``,
+    );
+    expect(ship).toContain("Push nothing but the tag the stage names");
+    expect(ship).not.toContain("git push origin HEAD:release/w1");
+    expect(ship).not.toContain("## Release PR body");
   });
 });
 

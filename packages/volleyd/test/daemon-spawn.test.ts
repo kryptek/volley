@@ -336,7 +336,8 @@ describe("daemon spawn loop", () => {
       const io = makeBufferIO();
       const worktree = join(env.home, "wt", "w1", "T1-implementer");
       expect(await cleanupWave(env.home, "w1", { yes: false, force: false }, io)).toBe(0);
-      expect(io.readStdout()).toBe("skip T1: merge_ready\n");
+      expect(io.readStdout()).toMatch(/^skip T1: merge_ready\n/);
+      expect(io.readStdout()).not.toContain("would remove");
       expect(await cleanupWave(env.home, "w1", { yes: false, force: false, all: true }, io)).toBe(
         0,
       );
@@ -351,9 +352,11 @@ describe("daemon spawn loop", () => {
         ),
       ).toBe(0);
       expect(fx.argvs()).toEqual([
-        ["git", "-C", repo, "worktree", "remove", worktree],
-        // The wave's leftover claude processes are looked for (none here).
+        // The wave's leftover processes are looked for (none here), before the worktree goes.
         ["ps", "-axo", "pid=,command="],
+        ["git", "-C", repo, "worktree", "remove", worktree],
+        // The task's branch: unmerged (no merge on file), so it is kept.
+        ["git", "-C", repo, "rev-parse", "--verify", "--quiet", "w1/T1-implementer-1"],
       ]);
     });
   });
@@ -823,13 +826,16 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         payload: { tasks: TaskState[] };
       }
     ).payload;
-  const submit = async (wave: string, head: string, tasks: string, at = repo) => {
+  const runFile = async (wave: string, head: string, tasks: string, at = repo) => {
     const file = join(env.home, `${wave}.yaml`);
     writeFileSync(
       file,
       `wave: ${wave}\nrepo: ${at}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\n${head}tasks:\n${tasks}`,
     );
-    const r = await runCli(["run", file], env.env);
+    return runCli(["run", file], env.env);
+  };
+  const submit = async (wave: string, head: string, tasks: string, at = repo) => {
+    const r = await runFile(wave, head, tasks, at);
     expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     return r.stdout;
@@ -855,6 +861,11 @@ describe("placement at admission (SPEC §4.6.15)", () => {
        * `fleet.repo_root` is the supervisor's absolute `<VOLLEYD_HOME>/repos`.
        */
       installed?: boolean;
+      /**
+       * With `repos`: a/a is also assigned to the supervisor's own machine (`control`), whose
+       * doctor reports its clone at `repo` (#608: a machine to fall back to).
+       */
+      localClone?: boolean;
     } = {},
   ) {
     env = await makeDaemonEnv();
@@ -913,7 +924,9 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     const boxClone =
       o.repos === true ? "" : `    repo: ${repo}\n    worktree_root: ${join(dir, "remote-wt")}\n`;
     const repos =
-      o.repos === true ? "repos:\n  a/a: { machines: [box] }\n  b/b: { machines: [box] }\n" : "";
+      o.repos === true
+        ? `repos:\n  a/a: { machines: [box${o.localClone === true ? ", control" : ""}] }\n  b/b: { machines: [box] }\n`
+        : "";
     writeFileSync(
       join(env.home, "config.yaml"),
       `fleet:\n  local_name: control\n${o.localAgents !== undefined ? `  local_agents: ${o.localAgents}\n` : ""}${repos}hosts:\n  box:\n    target: dev@box\n${boxClone}    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
@@ -937,6 +950,21 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         localDoctor: async () => ({
           ...GREEN_DOCTOR,
           versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
+          ...(o.localClone === true
+            ? {
+                repos: [
+                  {
+                    slug: "a/a",
+                    path: repo,
+                    exists: true,
+                    origin: "github.com/a/a",
+                    managed: false,
+                    fetched_at: "2026-10-19T08:58:00.000Z",
+                    toolchain: { ok: true, missing: [], outdated: [] },
+                  },
+                ],
+              }
+            : {}),
           ...o.doctor,
         }),
         localPath: () => ({ claude: localClaude, bun: localClaude }),
@@ -1204,31 +1232,16 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       });
     });
 
-    it("a box without a clone of the wave's slug is skipped by placement, with the reason", async () => {
+    it("a box without a clone of the wave's slug: a wave only it could run is refused at submit, with the fix (#610)", async () => {
       localClaude = false;
       await setup({ repos: true });
       await beat({ repos: (boxRepos ?? []).filter((r) => r.slug === "a/a") });
-      const out = await submit("w2", "", "  T1: { issue: 42, host: auto }\n", repo2);
-      // run's preview judges the box from its record: no verdict judges b/b before it runs.
-      expect(out).toContain(
-        "T1 → waiting (no eligible machine: box: no ready clone of b/b (absent: no clone of b/b on box))",
+      const r = await runFile("w2", "", "  T1: { issue: 42, host: auto }\n", repo2);
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stderr).toContain(
+        "repo: no machine that could run this wave is ready for b/b: box: absent (no clone of b/b on box); fix: volley repo check b/b --fix, or volley repo add b/b --machine box",
       );
-      await tick();
-      await eventually(async () => {
-        await tick(0);
-        return (await verdict("box"))?.payload.repos["b/b"] !== undefined;
-      });
-      expect((await verdict("box"))?.payload).toMatchObject({
-        ready: true,
-        eligible: true,
-        repos: { "b/b": { state: "absent", reasons: ["no clone of b/b on box"] } },
-      });
-      await tick();
-      const t1 = (await state("w2")).tasks.find((t) => t.id === "T1");
-      expect(t1?.why_waiting).toBe(
-        "no eligible machine: box: no ready clone of b/b (absent: no clone of b/b on box)",
-      );
-      expect(journal("w2").some((e) => e.type === "task_placed")).toBe(false);
+      expect(existsSync(join(env.home, "waves", "w2", "journal.jsonl"))).toBe(false);
     });
 
     it("remote_repo_missing names the slug and the two ways to add it; add runs repo_add for that machine, then retries", async () => {
@@ -1277,10 +1290,14 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         await tick();
         return spawnedOn("w1") !== undefined;
       });
-      const added = readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).find(
+      const added = readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).filter(
         (e) => e.type === "repo_added",
       );
-      expect(added?.data).toEqual({ by: "tester", slug: "a/a", machines: ["box"] });
+      // The submit adopted the supervisor's clone the wave runs from (#616); then the add.
+      expect(added.map((e) => e.data)).toEqual([
+        { by: "wave w1", slug: "a/a", machines: ["control"], paths: { control: repo } },
+        { by: "tester", slug: "a/a", machines: ["box"] },
+      ]);
       // Its run on box: the doctor adds it there (the clone is reported, so no clone runs).
       await eventually(async () => {
         await tick(0);
@@ -1290,6 +1307,174 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         fix: false,
         repos_add: ["a/a"],
       });
+    });
+  });
+
+  describe("the spawn path, and falling back with a reason (#608)", () => {
+    const spawnedOn = (wave: string) =>
+      journal(wave).find((e) => e.type === "agent_spawned")?.data as
+        | { host?: string; remote?: { target: string; repo: string } }
+        | undefined;
+    const managedA = () => join(boxHome, ".volley", "repos", "a/a");
+
+    it("a spawn path that is not the reported clone blocks the repository before any spawn; auto tasks go elsewhere", async () => {
+      localClaude = true;
+      // The box adopts a/a at a path its record does not report: the two disagree.
+      await setup({
+        repos: true,
+        localClone: true,
+        extraConfig: "    repos: { a/a: /elsewhere/a/a }\n",
+      });
+      await eventually(async () => {
+        await tick(0);
+        return (await verdict("box"))?.payload.repos["a/a"]?.state === "blocked";
+      });
+      expect((await verdict("box"))?.payload.repos["a/a"]).toMatchObject({
+        state: "blocked",
+        path: managedA(),
+        reasons: [
+          `the supervisor would spawn in /elsewhere/a/a but box reports its clone at ${managedA()}`,
+        ],
+      });
+      await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return journal("w1").some((e) => e.type === "task_placed");
+      });
+      const placed = journal("w1").filter((e) => e.type === "task_placed");
+      expect(placed.map((e) => e.data.host)).toEqual(["control"]);
+      expect(JSON.stringify(journal("w1"))).not.toContain("REMOTE_REPO_MISSING");
+    });
+
+    it("the probe at the spawn path: missing blocks it, found clears it, a failed probe changes nothing", async () => {
+      localClaude = false;
+      await setup({ repos: true });
+      const b = box;
+      if (b === undefined) throw new Error("no box");
+      const aa = async () => (await verdict("box"))?.payload.repos["a/a"];
+      const probeOnce = async (want: (v: Awaited<ReturnType<typeof aa>>) => boolean) => {
+        await clock.advance(DAEMON_DEFAULTS.path_probe_interval_ms);
+        await eventually(async () => {
+          await beat();
+          return want(await aa());
+        });
+      };
+      expect((await aa())?.state).toBe("ready");
+      b.answers.clone = (path) =>
+        path === managedA() ? { state: "missing" } : { state: "found", root: path, slug: "b/b" };
+      await probeOnce((v) => v?.state === "blocked");
+      expect((await aa())?.reasons[0]).toMatch(
+        new RegExp(`^no clone at ${managedA()} on box( \\(probed \\d+ s ago\\))?$`),
+      );
+      expect(b.cloneProbes).toContain(managedA());
+      b.answers.clone = (path) => ({
+        state: "found",
+        root: path,
+        slug: path === managedA() ? "a/a" : "b/b",
+      });
+      await probeOnce((v) => v?.state === "ready");
+      b.answers.clone = () => new Error("ssh: connect to host box: Connection refused");
+      await probeOnce(() => true);
+      expect((await aa())?.state).toBe("ready");
+    });
+
+    it("an auto-placed task whose machine has no clone is placed elsewhere with why; no decision", async () => {
+      localClaude = true;
+      await setup({
+        repos: true,
+        localClone: true,
+        onBox: (b) => {
+          b.repoExists = async () => false;
+        },
+      });
+      await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return spawnedOn("w1") !== undefined;
+      });
+      const events = journal("w1");
+      const failed = events.findIndex(
+        (e) => e.type === "spawn_failed" && e.data.code === "REMOTE_REPO_MISSING",
+      );
+      const placed = events.filter((e) => e.type === "task_placed");
+      expect(placed[0]?.data).toMatchObject({ host: "box", by: "auto" });
+      expect(placed[1]?.data).toMatchObject({ host: "control", by: "fallback", from: "box" });
+      expect(placed[1]?.data.why).toMatch(/^no clone at /);
+      expect(failed).toBeGreaterThan(-1);
+      expect(events.indexOf(placed[1] as JournalEvent)).toBeGreaterThan(failed);
+      expect(events.some((e) => e.type === "decision_opened")).toBe(false);
+      expect(spawnedOn("w1")?.remote).toBeUndefined();
+      const t1 = (await state("w1")).tasks.find((t) => t.id === "T1");
+      expect(t1?.placement).toMatchObject({ host: "control", by: "fallback" });
+      expect((await verdict("box"))?.payload.repos["a/a"]).toMatchObject({
+        state: "blocked",
+        reasons: [expect.stringMatching(/^no clone at /)],
+      });
+    });
+
+    it("a later role of a task that already spawned is never moved: remote_repo_missing opens", async () => {
+      localClaude = true;
+      let clone = true;
+      await setup({
+        repos: true,
+        localClone: true,
+        onBox: (b) => {
+          b.repoExists = async () => clone;
+        },
+      });
+      await submit("w1", "placement: auto\nplacement_prefer: [box]\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return spawnedOn("w1") !== undefined;
+      });
+      expect(spawnedOn("w1")?.host).toBe("box");
+      // The clone goes away between roles: the reviewer's spawn finds none on the box.
+      clone = false;
+      const r = await client.request("spawn", { wave: "w1", task: "T1", role: "spec_reviewer" });
+      expect(r).toMatchObject({ ok: false });
+      await eventually(async () =>
+        journal("w1").some(
+          (e) => e.type === "decision_opened" && e.data.kind === "remote_repo_missing",
+        ),
+      );
+      expect(journal("w1").some((e) => e.type === "task_placed" && e.data.by === "fallback")).toBe(
+        false,
+      );
+      expect((await state("w1")).tasks.find((t) => t.id === "T1")?.placement?.host).toBe("box");
+    });
+
+    it("nowhere else to go: remote_repo_missing opens as before; pinned by the wave file to a box with no clone: refused at submit (#610)", async () => {
+      localClaude = false;
+      await setup({
+        repos: true,
+        localAgents: "never",
+        onBox: (b) => {
+          b.repoExists = async () => false;
+        },
+      });
+      await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n");
+      // Its probe found no clone at the spawn path: admission refuses the pinned wave, naming it.
+      const pinned = await runFile("w2", "", "  T1: { issue: 42, host: box }\n");
+      expect(pinned.exitCode).not.toBe(0);
+      expect(pinned.stderr).toMatch(
+        /repo: a task is pinned to box, which is not ready for a\/a: box: blocked \(no clone at .+ on dev@box/,
+      );
+      await tick();
+      const opened = (wave: string) =>
+        journal(wave).find(
+          (e) => e.type === "decision_opened" && e.data.kind === "remote_repo_missing",
+        );
+      await eventually(async () => {
+        await tick(0);
+        return opened("w1") !== undefined;
+      });
+      expect(opened("w1")?.data.question).toMatch(/; no other machine can take it now \(.+\)\?$/);
+      expect(journal("w1").some((e) => e.type === "task_placed" && e.data.by === "fallback")).toBe(
+        false,
+      );
     });
   });
 

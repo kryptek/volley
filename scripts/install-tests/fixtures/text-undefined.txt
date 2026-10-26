@@ -1,0 +1,3 @@
+wave hello-1 (running)
+coordinator: undefined on undefined
+  T1  implement  1 agent

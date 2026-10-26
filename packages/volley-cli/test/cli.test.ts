@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,16 @@ describe("cli", () => {
     expect(Object.keys(versions).length).toBeGreaterThan(5);
     for (const [name, v] of Object.entries(versions))
       expect(`${name}@${v}`).toBe(`${name}@${pkg.version}`);
+  });
+
+  it("scripts/release-version.ts --check agrees (every package.json, bun.lock, SKILL.md)", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    const r = spawnSync("bun", [join(root, "scripts", "release-version.ts"), "--check"], {
+      cwd: root,
+      encoding: "utf-8",
+    });
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
   });
 
   it("the CHANGELOG's newest section and bun.lock's workspaces carry that version", () => {

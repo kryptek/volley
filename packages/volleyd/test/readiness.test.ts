@@ -252,6 +252,31 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     expect(r.repos["someone/fork"]).toMatchObject({ state: "ready", path: "/srv/repo" });
   });
 
+  it("#610: no git commit identity is not ready, naming the fix (a warn check, yet readiness needs it)", () => {
+    const checks = [
+      { id: "repo.clone", ok: true, severity: "block" as const, detail: "clone at /srv/repo" },
+      {
+        id: "git.identity",
+        ok: false,
+        severity: "warn" as const,
+        detail: "git has no commit identity (user.name/user.email)",
+      },
+    ];
+    const r = readiness(input({ record: record({ checks }) }));
+    expect(r.ready).toBe(false);
+    expect(r.reasons).toEqual([
+      "git: no commit identity on box-a (volley setup --peer --step signin)",
+    ]);
+    const ok = readiness(
+      input({
+        record: record({
+          checks: [{ id: "git.identity", ok: true, severity: "warn", detail: "git commits as x" }],
+        }),
+      }),
+    );
+    expect(ok.ready).toBe(true);
+  });
+
   it("carries requirements (bun, sharing), heavy and usage through", () => {
     const r = readiness(
       input({
@@ -393,6 +418,38 @@ describe("readiness per (machine, repository) (#436)", () => {
     });
   });
 
+  it("#610: a failing repo.push or repo.worktrees blocks that repository only; the machine stays ready", () => {
+    const rec = many(
+      [repo("a/a"), repo("b/b")],
+      [
+        {
+          id: "repo.push",
+          ok: false,
+          severity: "block",
+          repo: "a/a",
+          detail: "octocat cannot push to a/a (permission READ)",
+        },
+        {
+          id: "repo.worktrees",
+          ok: false,
+          severity: "block",
+          repo: "b/b",
+          detail: "cannot write /path/to/wt (nor create it)",
+        },
+      ],
+    );
+    const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b"]) }));
+    expect(r.repos["a/a"]).toMatchObject({
+      state: "blocked",
+      reasons: ["repo.push: octocat cannot push to a/a (permission READ)"],
+    });
+    expect(r.repos["b/b"]).toMatchObject({
+      state: "blocked",
+      reasons: ["repo.worktrees: cannot write /path/to/wt (nor create it)"],
+    });
+    expect(r.ready).toBe(true);
+  });
+
   it("an older peer's legacy repo maps to its slug through its origin", () => {
     const r = readiness(input());
     expect(r.repos).toEqual({
@@ -422,6 +479,71 @@ describe("readiness per (machine, repository) (#436)", () => {
       }),
     );
     expect(r.reasons).toEqual(["gh: no write permission on a/a"]);
+  });
+
+  describe("the path the supervisor would spawn in (#608)", () => {
+    const BOX = "/path/to/home/.volley/repos/a/a";
+    const SPAWN = "/sup/.volley/volleyd/repos/a/a";
+    const rec = many([repo("a/a", { path: BOX })]);
+    const at = (repos: Partial<ReadinessInput["repos"]>, over: Partial<ReadinessInput> = {}) =>
+      readiness(input({ record: rec, repos: { ...reposOf(rec, ["a/a"]), ...repos }, ...over }))
+        .repos["a/a"];
+
+    it("a spawn path other than the reported clone blocks the repository, keeping the clone's path", () => {
+      const v = at({ spawn: { "a/a": SPAWN } });
+      expect(v?.state).toBe("blocked");
+      expect(v?.path).toBe(BOX);
+      expect(v?.reasons[0]).toBe(
+        `the supervisor would spawn in ${SPAWN} but box-a reports its clone at ${BOX}`,
+      );
+    });
+
+    it("the same path (trailing slash aside), no spawn path, or the own machine: ready", () => {
+      expect(at({ spawn: { "a/a": `${BOX}/` } })?.state).toBe("ready");
+      expect(at({})?.state).toBe("ready");
+      expect(at({ spawn: { "a/a": SPAWN } }, { local: true })?.state).toBe("ready");
+    });
+
+    it("a probe that finds no clone, or another repository's, at the spawn path blocks it", () => {
+      const probed = (p: object) => at({ spawn: { "a/a": BOX }, probed: { "a/a": p as never } });
+      expect(probed({ state: "missing" })).toMatchObject({
+        state: "blocked",
+        reasons: [`no clone at ${BOX} on box-a`],
+      });
+      expect(probed({ state: "not_git" })?.reasons[0]).toBe(`no clone at ${BOX} on box-a`);
+      expect(probed({ state: "missing", at: CHECKED.getTime() - 40_000 })?.reasons[0]).toBe(
+        `no clone at ${BOX} on box-a (probed 40 s ago)`,
+      );
+      expect(probed({ state: "found", slug: "b/b" })).toMatchObject({
+        state: "blocked",
+        reasons: [`${BOX} on box-a is a clone of b/b`],
+      });
+      expect(probed({ state: "found", slug: "a/a" })?.state).toBe("ready");
+      expect(probed({ state: "no_origin" })?.state).toBe("ready");
+    });
+
+    it("a spawn that failed there (a runs entry) blocks it with its why", () => {
+      const why = "no clone at /x on box-a";
+      expect(at({ runs: { "a/a": { state: "blocked", reasons: [why] } } })).toMatchObject({
+        state: "blocked",
+        reasons: [why],
+      });
+    });
+
+    it("the probe's age never makes a re-publish on its own", () => {
+      const v = (ago: number) =>
+        readiness(
+          input({
+            record: rec,
+            repos: {
+              ...reposOf(rec, ["a/a"]),
+              spawn: { "a/a": BOX },
+              probed: { "a/a": { state: "missing", at: CHECKED.getTime() - ago } },
+            },
+          }),
+        );
+      expect(readinessKey(v(5_000))).toBe(readinessKey(v(65_000)));
+    });
   });
 
   it("every per-repository verdict validates against readiness.schema.json", () => {

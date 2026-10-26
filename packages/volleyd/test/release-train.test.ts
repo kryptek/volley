@@ -137,8 +137,11 @@ describe("a settled wave whose repo has a playbook", () => {
     const state = await retainedState();
     expect(state.status).toBe("releasing");
     expect(state.open_decisions).toEqual([]);
+    // No tag, no default branch read here: the day only (the playbook needs no variable).
     expect(state.release).toEqual({
       stage: null,
+      phase: "prepare",
+      date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       stages: [
         { name: "smoke", state: "pending" },
         { name: "notes", state: "pending" },

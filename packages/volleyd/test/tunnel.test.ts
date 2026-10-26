@@ -385,11 +385,32 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       await cleanupWave(env.home, "w1", { yes: true, force: false, all: true, exec: fx.exec }, io),
     ).toBe(0);
     const wt = join(box.spec.worktree_root, "w1", "T1-implementer");
+    // The order (#612 D2): reachability, the branch evidence, the processes on the box, the
+    // worktree; the failed task's branch is unmerged, so no branch step follows.
     expect(fx.calls.map((c) => [c.argv.at(-3), c.opts.remote?.steps.map((x) => x.argv)])).toEqual([
+      ["dev@box", [["git", "-C", repo, "rev-parse", "--git-dir"]]],
+      ["dev@box", [["git", "-C", repo, "rev-parse", "--verify", "--quiet", "w1/T1-implementer-1"]]],
+      [
+        "dev@box",
+        [
+          [
+            "bun",
+            `${box.spec.volley_dir}/packages/volley-cli/src/cli.ts`,
+            "peer",
+            "cleanup",
+            "--json",
+            "--worktree",
+            wt,
+            "--yes",
+          ],
+        ],
+      ],
       ["dev@box", [["git", "-C", wt, "rev-parse", "--is-inside-work-tree"]]],
       ["dev@box", [["git", "-C", repo, "worktree", "remove", wt]]],
     ]);
     expect(io.readStdout()).toContain(`removed ${wt} on dev@box`);
+    expect(io.readStdout()).toContain("kept branch w1/T1-implementer-1 on box: unmerged");
+    expect(io.readStdout()).toMatch(/cleaned w1: 1 worktree \(1 on box\); kept 2\n/);
 
     // A second run is a no-op: the box says the path is no work tree any more.
     const gone = fakeExec().on(["ssh"], (_argv, opts) =>
@@ -410,7 +431,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(
       gone.calls.some((c) => c.opts.remote?.steps.some((x) => x.argv.includes("remove"))),
     ).toBe(false);
-    // ssh failing is not "gone": the remove is attempted (and reported) instead.
+    // ssh failing is not "gone" and not a failure: the box's items are kept for the next run.
     const down = fakeExec().on(["ssh"], { code: 255, stderr: "ssh: connect: refused" });
     const io3 = makeBufferIO();
     expect(
@@ -420,8 +441,11 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
         { yes: true, force: false, all: true, exec: down.exec },
         io3,
       ),
-    ).toBe(1);
-    expect(io3.readStderr()).toContain(`could not remove ${wt} on dev@box`);
+    ).toBe(0);
+    expect(io3.readStdout()).toContain(
+      `kept worktree ${wt} on box: box unreachable; cleanup runs again next tick`,
+    );
+    expect(down.calls).toHaveLength(1);
   });
 
   it("a remote repo's trust is the box's: one decision, `trust` is recorded on the box, never locally", async () => {

@@ -21,12 +21,14 @@ import { asGitHubRepo } from "./repo-visibility";
 import { hygieneLevel } from "./reviews";
 import { CHURN_BY_KEY, emptyChurnBy, isChurnCause } from "./spawn-class";
 import type {
+  CleanupCounts,
   FixerRemediation,
   Footprint,
   JournalEvent,
   PlanCluster,
   PublicHygiene,
   RepoVisibility,
+  Resource,
   TaskAgents,
   TaskId,
   TaskPlacement,
@@ -513,6 +515,18 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       };
       break;
     }
+    // Wave cleanup (SPEC §4.6.26): the last real run's counts, kept items and summary.
+    case "wave_cleaned":
+      if (ev.data.dry_run !== true) {
+        state.cleanup = {
+          at: ev.at,
+          removed: ev.data.removed as CleanupCounts,
+          kept: Array.isArray(ev.data.kept) ? (ev.data.kept as Resource[]) : [],
+          summary: String(ev.data.summary ?? ""),
+          ...(typeof ev.data.task === "string" ? { task: ev.data.task } : {}),
+        };
+      }
+      break;
     case "wave_planned":
       state.overlap_plan = { clusters: (ev.data.clusters as PlanCluster[] | undefined) ?? [] };
       break;
@@ -583,6 +597,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         score: d.score,
         decided_at: ev.at,
         candidates: d.candidates,
+        ...(typeof d.why === "string" ? { why: d.why } : {}),
       };
       setTaskHost(next, ev.task, d.local === true ? LOCAL_HOST : d.host);
       break;

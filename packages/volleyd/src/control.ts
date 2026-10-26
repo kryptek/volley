@@ -75,6 +75,8 @@ export type ControlOp =
   | "stop"
   // Retire an ended wave (archive.ts); also an admin op on the account-op topic.
   | "archive"
+  // Clean a wave's items on every machine (commands/cleanup.ts, SPEC §4.6.26).
+  | "cleanup"
   | "steer"
   // The Desk's Terminal popout sizes the agent's terminal (#403; hosts/ssh-tmux.ts resize).
   | "terminal_resize"
@@ -115,6 +117,9 @@ export type ControlOp =
   | "repo_list"
   | "repo_status"
   | "repo_probe"
+  // Is a repository ready to run a wave, on every machine that could run it (#610): a read; its
+  // `fix: true` an admin op.
+  | "repo_check"
   // The coordinator role (SPEC §4.6.25): restart and stop are admin ops; status is also a read.
   | "coordinator_restart"
   | "coordinator_stop"
@@ -139,6 +144,10 @@ export interface ControlResponse {
   rejected?: PathError[];
   /** Advisory lines for the caller to print (e.g. `run`'s overlap warnings). */
   warnings?: string[];
+  /** run: what the submit did besides (`adopted <root> as <machine>'s clone of <slug>`, #616). */
+  notes?: string[];
+  /** run: what the repository check found without refusing (SPEC §4.6.21), one line each. */
+  repo_check?: { lines: string[] };
   /** run (a new version of a submitted wave) and diff: the structural plan change. */
   plan?: { version: number; diff: PlanDiff; unchanged: boolean; decisions?: DecisionPayload[] };
   /** peer_invite / peer_join: the secret, sealed to the request's `reply_key` (peers.ts). */

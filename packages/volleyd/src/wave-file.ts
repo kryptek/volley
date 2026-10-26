@@ -3,6 +3,7 @@ import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { NO_PLAYBOOK } from "./autopilot/playbook";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { dropRetired, rewordWeights } from "./config-store";
+import { LOCAL_HOST } from "./fleet-name";
 import type { Tree } from "./footprint";
 import {
   type FileTask,
@@ -83,6 +84,7 @@ interface RawWave {
   merge?: MergeMode;
   ci?: CiOverride;
   playbook?: string;
+  release_version?: string;
 }
 
 /**
@@ -96,6 +98,13 @@ export interface PlacementDefaults {
   paired: number;
   /** A known wave's kept placement: only the file's own `placement:` changes it, not its `config:`. */
   kept?: boolean;
+  /**
+   * The supervisor's own machine name (`localMachineName(fleet.local_name)`): a task's `host:`
+   * naming it is the `local` token. With `pairedNames`, a host name that is neither is refused.
+   */
+  local?: string;
+  /** The paired machines' names (`hosts.<name>`, the own name aside). */
+  pairedNames?: string[];
 }
 
 /** Where a wave's unpinned tasks run, and what decided it (the line validate and run print). */
@@ -119,13 +128,28 @@ export function defaultPlacement(
 }
 
 /**
- * `placement: auto (placement.default; 1 paired machine)`, `placement: local (no paired
- * machine)`, `placement: local (placement.default)` or `placement: auto (wave file)`.
+ * `placement: auto (placement.default; this machine macbook-pro, 1 paired: box-a)`,
+ * `placement: local (no paired machine; this machine macbook-pro)`,
+ * `placement: local (placement.default; …)` or `placement: auto (wave file; …)`. Without the
+ * machine names (`d.local`): `placement: auto (placement.default; 1 paired machine)` and so on.
  */
-export function formatPlacement(p: WavePlacement, paired: number): string {
-  if (p.by === "wave file") return `placement: ${p.placement} (wave file)`;
-  if (p.by === "unpaired") return `placement: ${p.placement} (no paired machine)`;
-  if (p.placement === "local") return "placement: local (placement.default)";
+export function formatPlacement(p: WavePlacement, d: PlacementDefaults): string {
+  const paired = d.pairedNames?.length ?? d.paired;
+  const by = {
+    "wave file": "wave file",
+    default: "placement.default",
+    unpaired: "no paired machine",
+  }[p.by];
+  if (d.local !== undefined) {
+    const names =
+      p.by === "unpaired"
+        ? ""
+        : paired === 0
+          ? ", no paired machine"
+          : `, ${paired} paired: ${(d.pairedNames ?? []).join(", ")}`;
+    return `placement: ${p.placement} (${by}; this machine ${d.local}${names})`;
+  }
+  if (p.by !== "default" || p.placement === "local") return `placement: ${p.placement} (${by})`;
   return `placement: auto (placement.default; ${paired} paired machine${paired === 1 ? "" : "s"})`;
 }
 
@@ -148,7 +172,7 @@ export function resolveWaveRepo(
 ): Wave {
   if (!isSlug(wave.repo)) return wave;
   const slug = wave.repo;
-  const clone = cloneFor(cfg, local, slug, { home });
+  const clone = cloneFor(cfg, local, local, slug, { home });
   if (clone !== undefined) return { ...wave, repo: clone };
   const holders = holdersOf(cfg, local, slug).filter((m) => m !== local);
   if (holders.length === 0) {
@@ -295,13 +319,40 @@ export function parseWaveFile(
     }
   }
   if (hostErrors.length > 0) fail(hostErrors);
+  const unknownHosts = unknownHostErrors(w, defaults);
+  if (unknownHosts.length > 0) fail(unknownHosts);
 
   const cycle = findCycle(ids, (id) => w.tasks[id]?.after ?? []);
   if (cycle !== null) {
     fail([{ path: `tasks.${cycle[0]}.after`, reason: `dependency cycle ${cycle.join(" -> ")}` }]);
   }
 
-  return normalise(w, defaultPlacement(w, defaults).placement);
+  return normalise(w, defaultPlacement(w, defaults).placement, defaults?.local);
+}
+
+/**
+ * A task's `host:`, `placement_prefer` and `placement_avoid` names none of `local`, `auto`, the
+ * own machine (`d.local`) or a paired one (`d.pairedNames`): `unknown host "mac": this machine is
+ * macbook-pro; paired: box-a`. Checked only when the caller knows both (an inline host is its own
+ * definition, never checked).
+ */
+function unknownHostErrors(w: RawWave, d: PlacementDefaults | undefined): PathError[] {
+  if (d?.local === undefined || d.pairedNames === undefined) return [];
+  const known = new Set([LOCAL_HOST, AUTO_HOST, d.local, ...d.pairedNames]);
+  const paired =
+    d.pairedNames.length > 0 ? `paired: ${d.pairedNames.join(", ")}` : "no paired machine";
+  const reason = (name: string) => `unknown host "${name}": this machine is ${d.local}; ${paired}`;
+  const out: PathError[] = [];
+  for (const [id, t] of Object.entries(w.tasks)) {
+    if (typeof t.host === "string" && !known.has(t.host))
+      out.push({ path: `tasks.${id}.host`, reason: reason(t.host) });
+  }
+  for (const key of ["placement_prefer", "placement_avoid"] as const) {
+    (w[key] ?? []).forEach((name, i) => {
+      if (!known.has(name)) out.push({ path: `${key}[${i}]`, reason: reason(name) });
+    });
+  }
+  return out;
 }
 
 /** Read and parse a wave file from disk; errors carry the file path. */
@@ -309,7 +360,7 @@ export async function loadWaveFile(path: string, defaults?: PlacementDefaults): 
   return parseWaveFile(await readFile(path, "utf-8"), path, defaults);
 }
 
-function normalise(w: RawWave, placement: "auto" | "local"): Wave {
+function normalise(w: RawWave, placement: "auto" | "local", local?: string): Wave {
   const tasks: Record<TaskId, WaveTask> = {};
   for (const [id, t] of Object.entries(w.tasks)) {
     const pipeline = t.pipeline ?? w.pipeline;
@@ -321,7 +372,7 @@ function normalise(w: RawWave, placement: "auto" | "local"): Wave {
       pipeline,
       stages: toStageGroups(pipeline),
       model: t.model ?? w.model,
-      ...normaliseHost(t.host, placement),
+      ...normaliseHost(t.host, placement, local),
       files: t.files ?? [],
       ...(t.account !== undefined ? { account: t.account } : {}),
       ...(t.heavy === true ? { heavy: true } : {}),
@@ -353,6 +404,7 @@ function normalise(w: RawWave, placement: "auto" | "local"): Wave {
     ...(w.merge !== undefined ? { merge: w.merge } : {}),
     ...(w.ci !== undefined ? { ci: w.ci } : {}),
     ...(w.playbook !== undefined ? { playbook: w.playbook } : {}),
+    ...(w.release_version !== undefined ? { release_version: w.release_version } : {}),
   };
   // The file's own overlap plan, as written: the Desk and `validate` read it before any run.
   if (planned) wave.overlap_plan = { clusters: filePlan(wave).clusters };
@@ -485,13 +537,15 @@ export function planNotes(wave: Wave, tree: Tree): string[] {
 /**
  * `host:` as a name (`local`, `auto`, a config `hosts.<name>`) plus the inline spec when there is
  * one. No `host:` is `auto` under the wave's placement `auto` (its own, or the default), else `local`.
+ * The own machine's name (`local`) is the `local` token: everything downstream sees `host: local`.
  */
 function normaliseHost(
   h: RawTask["host"],
   placement: "auto" | "local",
+  local?: string,
 ): Pick<WaveTask, "host" | "host_spec"> {
-  if (h === undefined) return { host: placement === "auto" ? AUTO_HOST : "local" };
-  if (typeof h === "string") return { host: h };
+  if (h === undefined) return { host: placement === "auto" ? AUTO_HOST : LOCAL_HOST };
+  if (typeof h === "string") return { host: h === local ? LOCAL_HOST : h };
   return { host: h.name ?? (h.target as string), host_spec: h };
 }
 

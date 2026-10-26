@@ -25,6 +25,8 @@ import {
   MODEL_ID,
   assertAllowed,
   machineAddArgv,
+  mintBranchDeleteToken,
+  mintCloneRemoveToken,
   mintConsentToken,
   mintCoordinatorKill,
   mintHandoffToken,
@@ -33,6 +35,7 @@ import {
   mintModelSwitchToken,
   mintPickerToken,
   mintProfileRemoveToken,
+  mintReleaseToken,
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
@@ -1573,6 +1576,90 @@ describe("merge token (autopilot merging)", () => {
   });
 });
 
+describe("release token (the release PR, SPEC §4.6.19)", () => {
+  const H = "a".repeat(40);
+  const H2 = "b".repeat(40);
+  const release = (pr = 12, head = H) =>
+    mintReleaseToken({
+      wave: "w",
+      pr,
+      head,
+      release_branch: "release/w",
+      decision_id: "release_go-w",
+    });
+  const MERGE = [
+    "gh",
+    "pr",
+    "merge",
+    "12",
+    "--squash",
+    "--match-head-commit",
+    H,
+    "--delete-branch",
+  ];
+
+  it("allows exactly the release PR's squash at its head, deleting the release branch", () => {
+    expect(() => assertAllowed(MERGE, { release: release() })).not.toThrow();
+    expect(() => assertAllowed([...MERGE, "--repo", "o/n"], { release: release() })).not.toThrow();
+  });
+
+  it("is denied with a MergeToken, a TrainToken, no token, another PR or another head", () => {
+    expect(() => assertAllowed(MERGE)).toThrow(/FENCE_DENIED: gh pr merge/);
+    // Another PR and head: a MergeToken for PR 12 at H would allow this argv (the gate's squash
+    // accepts --delete-branch), but MergeTokens are minted only for gated task PRs, never the
+    // release PR.
+    const merge = mintMergeToken({ wave: "w", task: "T1", pr: 13, head: H2, release_branch: "x" });
+    expect(() => assertAllowed(MERGE, { merge })).toThrow(FenceError);
+    const train = mintTrainToken({
+      train: "train-1",
+      pr: 12,
+      head: H,
+      release_branch: "release/w",
+      members: [
+        { task: "T1", head: H },
+        { task: "T2", head: H2 },
+      ],
+    });
+    expect(() => assertAllowed(MERGE, { train })).toThrow(FenceError);
+    expect(() => assertAllowed(MERGE, { release: release(13) })).toThrow(FenceError);
+    expect(() => assertAllowed(MERGE, { release: release(12, H2) })).toThrow(FenceError);
+  });
+
+  it("denies --admin, other strategies and a merge that keeps the release branch", () => {
+    const t = release();
+    for (const argv of [
+      ["gh", "pr", "merge", "12", "--squash", "--match-head-commit", H],
+      [...MERGE, "--admin"],
+      [...MERGE, "--auto"],
+      ["gh", "pr", "merge", "12", "--merge", "--match-head-commit", H, "--delete-branch"],
+      ["gh", "pr", "merge", "12", "--rebase", "--match-head-commit", H, "--delete-branch"],
+      ["gh", "pr", "merge", "12", "--squash", "--delete-branch", "--match-head-commit", H],
+    ])
+      expect(() => assertAllowed(argv, { release: t }), argv.join(" ")).toThrow(FenceError);
+    for (const argv of [
+      ["git", "push"],
+      ["git", "merge", "x"],
+      ["gh", "workflow", "run", "ci"],
+    ])
+      expect(() => assertAllowed(argv, { release: t }), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("is checked by identity, frozen, and minted only over a PR number and a full sha", async () => {
+    const forged = {
+      wave: "w",
+      pr: 12,
+      head: H,
+      release_branch: "release/w",
+      decision_id: "d",
+    } as unknown as ReturnType<typeof mintReleaseToken>;
+    expect(() => assertAllowed(MERGE, { release: forged })).toThrow(FenceError);
+    await expect(exec(MERGE, { release: forged })).rejects.toThrow(FenceError);
+    expect(Object.isFrozen(release())).toBe(true);
+    expect(() => release(0)).toThrow(FenceError);
+    expect(() => release(12, "abc1234")).toThrow(FenceError);
+  });
+});
+
 describe("train token (the merge train)", () => {
   const H = "a".repeat(40);
   const H2 = "b".repeat(40);
@@ -2280,5 +2367,140 @@ describe("COORDINATOR (SPEC §4.6.25): the role's script, session and directory,
     expect(() => run([{ ...write(`${DIR}/.mcp.json`, mcp), append: true } as never])).toThrow(
       FenceError,
     );
+  });
+});
+
+describe("wave cleanup (#612): the branch and clone tokens, the reads, the remote step", () => {
+  const REPO = "/path/to/repo";
+  const B = "w1/T1-implementer-1";
+  const del = (repo = REPO, branch = B) => ["git", "-C", repo, "branch", "-D", branch];
+
+  it("git branch -D <agent branch> only with that branch's token; -d never", () => {
+    const branchDelete = mintBranchDeleteToken(REPO, B);
+    expect(() => assertAllowed(del(), { branchDelete })).not.toThrow();
+    expect(() => assertAllowed(del())).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(del(), { branchDelete: mintBranchDeleteToken(REPO, "w1/T2-implementer-1") }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(del(), { branchDelete: mintBranchDeleteToken("/path/to/other", B) }),
+    ).toThrow(FenceError);
+    expect(() => assertAllowed(del(), { branchDelete: { repo: REPO, branch: B } })).toThrow(
+      FenceError,
+    );
+    for (const argv of [
+      ["git", "-C", REPO, "branch", "-d", B],
+      ["git", "-C", REPO, "branch", "-D", B, "main"],
+      ["git", "-C", REPO, "branch", "--delete", "--force", B],
+      ["git", "branch", "-D", B],
+    ])
+      expect(() => assertAllowed(argv, { branchDelete }), argv.join(" ")).toThrow(FenceError);
+    // only an agent branch can carry a token at all
+    expect(() => mintBranchDeleteToken(REPO, "main")).toThrow(FenceError);
+    expect(() => mintBranchDeleteToken(REPO, "release/2026-10-25-gaps")).toThrow(FenceError);
+    expect(() => mintBranchDeleteToken("relative", B)).toThrow(FenceError);
+  });
+
+  it("rm -rf <clone> only with that path's token, exactly", () => {
+    const CLONE = "/path/to/home/.volley/repos/acme/demo";
+    const cloneRemove = [mintCloneRemoveToken(CLONE)];
+    expect(() => assertAllowed(["rm", "-rf", CLONE], { cloneRemove })).not.toThrow();
+    expect(() => assertAllowed(["rm", "-rf", CLONE])).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(["rm", "-rf", CLONE], {
+        cloneRemove: [mintCloneRemoveToken("/path/to/home/.volley/repos/acme/other")],
+      }),
+    ).toThrow(FenceError);
+    expect(() => assertAllowed(["rm", "-rf", CLONE], { cloneRemove: [{ path: CLONE }] })).toThrow(
+      FenceError,
+    );
+    for (const argv of [
+      ["rm", "-r", CLONE],
+      ["rm", "-rf", `${CLONE}/`],
+      ["rm", "-rf", CLONE, "/"],
+      ["rm", "-fr", CLONE],
+      ["rm", "-rf", `${CLONE}/../../..`],
+    ])
+      expect(() => assertAllowed(argv, { cloneRemove }), argv.join(" ")).toThrow(FenceError);
+    for (const bad of ["/", "/path", "relative/acme/demo", "/path/to/../x/y"])
+      expect(() => mintCloneRemoveToken(bad), bad).toThrow(FenceError);
+  });
+
+  it("the clone checks' git reads are allowed; stash writes stay denied", () => {
+    const C = "/path/to/clone";
+    for (const argv of [
+      ["git", "-C", C, "stash", "list"],
+      ["git", "-C", C, "worktree", "list", "--porcelain"],
+      ["git", "-C", C, "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      ["git", "-C", C, "rev-list", "--count", "main@{u}..main"],
+      ["git", "-C", C, "status", "--porcelain"],
+    ])
+      expect(() => assertAllowed(argv), argv.join(" ")).not.toThrow();
+    for (const argv of [
+      ["git", "-C", C, "stash", "drop"],
+      ["git", "-C", C, "stash", "pop"],
+      ["git", "-C", C, "stash"],
+      ["git", "-C", C, "stash", "list", "-p"],
+      ["git", "-C", C, "worktree", "list"],
+      ["git", "-C", C, "worktree", "prune"],
+      ["git", "-C", C, "worktree", "list", "--porcelain", "-z"],
+      ["git", "-C", C, "for-each-ref", "refs/remotes"],
+      ["git", "-C", C, "rev-list", "--exec=x", "main"],
+    ])
+      expect(() => assertAllowed(argv), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("lsof only as the one cwd listing", () => {
+    expect(() => assertAllowed(["lsof", "-a", "-d", "cwd", "-F", "pn"])).not.toThrow();
+    expect(() => assertAllowed(["lsof", "-i"])).toThrow(FenceError);
+    expect(() => assertAllowed(["lsof", "-a", "-d", "cwd", "-F", "pn", "-p", "1"])).toThrow(
+      FenceError,
+    );
+  });
+
+  describe("the remote peer cleanup step", () => {
+    const VD = "/path/to/volley";
+    const WT = "/path/to/worktrees/w1/T1-implementer";
+    const CLI = `${VD}/packages/volley-cli/src/cli.ts`;
+    const ssh = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
+    const step =
+      (args: string[], extra: Record<string, unknown> = {}) =>
+      () =>
+        assertAllowed(ssh, {
+          remote: {
+            steps: [{ argv: ["bun", CLI, "peer", "cleanup", "--json", ...args] }],
+            host: { name: "box", worktree_root: "/path/to/worktrees", volley_dir: VD },
+          },
+          ...extra,
+        });
+    const consent = mintConsentToken("volleyd cleanup w1 --yes");
+    const CLONE = "/path/to/home/.volley/repos/acme/demo";
+
+    it("lists without consent; --yes needs the cleanup consent", () => {
+      expect(step(["--worktree", WT])).not.toThrow();
+      expect(step(["--worktree", WT, "--repo", REPO, "--branch", B])).not.toThrow();
+      expect(step(["--worktree", WT, "--yes"])).toThrow(FenceError);
+      expect(step(["--worktree", WT, "--yes"], { consent })).not.toThrow();
+      expect(step(["--repo", REPO, "--branch", B, "--yes"], { consent })).not.toThrow();
+    });
+
+    it("refuses a worktree outside the host's root, a non-agent branch, a stray option", () => {
+      expect(step(["--worktree", "/path/to/elsewhere/T1"], { consent })).toThrow(FenceError);
+      expect(step(["--worktree", "/path/to/worktrees/../x"], { consent })).toThrow(FenceError);
+      expect(step(["--repo", REPO, "--branch", "main", "--yes"], { consent })).toThrow(FenceError);
+      expect(step(["--branch", B, "--yes"], { consent })).toThrow(FenceError);
+      expect(step(["--worktree", WT, "--force"], { consent })).toThrow(FenceError);
+      expect(step([])).toThrow(FenceError);
+    });
+
+    it("--clone only with the consent and that path's clone token", () => {
+      const cloneRemove = [mintCloneRemoveToken(CLONE)];
+      expect(step(["--clone", CLONE, "--yes"], { consent, cloneRemove })).not.toThrow();
+      expect(step(["--clone", CLONE, "--yes"], { consent })).toThrow(FenceError);
+      expect(step(["--clone", CLONE, "--yes"], { cloneRemove })).toThrow(FenceError);
+      expect(
+        step(["--clone", "/path/to/home/.volley/repos/acme/x", "--yes"], { consent, cloneRemove }),
+      ).toThrow(FenceError);
+    });
   });
 });

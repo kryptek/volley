@@ -35,7 +35,9 @@ mosquitto-data/
 mosquitto.log
 
 # Volley local state
-.volley/
+.volley/*
+# The repository's own release playbook (SPEC §4.6.19) is tracked; agent files under .volley/ are not.
+!.volley/release.yaml
 
 # Internal planning + design docs (local only; do not commit)
 docs/superpowers/

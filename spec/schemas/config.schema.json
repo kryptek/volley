@@ -396,6 +396,11 @@
           "default": true,
           "description": "Before cutting an agent's worktree on any host, the supervisor fetches the release branch there; true: a fetch that fails fails the spawn, so no agent starts on a stale base (spec section 4.6.15). false: the host's last fetched copy is used. Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "cleanup_on_end": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: the supervisor cleans a task's items (worktrees, sessions, processes, its merged branch) once the task ends and its agents are retired, and the whole wave's (logins, wave-owned registrations, accounts and clones) once the wave ended and no agent is live, journaling wave_cleaned (spec section 4.6.26). false: only volleyd cleanup does. Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "retire_close_session": {
           "type": "boolean",
           "default": true,
@@ -612,7 +617,20 @@
               "maxLength": 1024,
               "pattern": "^(~|~/[^\\n\\r]*|/[^\\n\\r]*)$",
               "default": "~/.volley/repos",
-              "description": "Where managed clones live on every machine: a repository owner/name assigned to a machine (repos.<owner/name>.machines) is cloned at <repo_root>/<owner>/<name> there, a leading ~ being that machine's home (spec section 4.6.4). An adopted clone (hosts.<name>.repos) keeps its own path."
+              "description": "Where managed clones live on every machine: a repository owner/name assigned to a machine (repos.<owner/name>.machines) is cloned at <repo_root>/<owner>/<name> there, a leading ~ being that machine's home (spec section 4.6.4). An adopted clone (fleet.repos on the supervisor's own machine, hosts.<name>.repos on a paired one) keeps its own path."
+            },
+            "repos": {
+              "type": "object",
+              "description": "Adopted clones on the supervisor's own machine: a repository owner/name to its clone's absolute path there, used in place of the managed path under fleet.repo_root (spec section 4.6.4), as hosts.<name>.repos is for a paired machine. A wave submitted from a clone of a repository config names adopts that clone here when the supervisor holds none (spec section 4.6.21). Its worktrees are still created under worktree_root.",
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$"
+              },
+              "maxProperties": 64,
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024,
+                "pattern": "^/[^\\n\\r]*$"
+              }
             }
           }
         },
@@ -654,6 +672,7 @@
                   "merge_refused",
                   "release_go",
                   "stage_go",
+                  "release_pr_ci_failed",
                   "terminal_status_lost",
                   "churn_exhausted"
                 ]
@@ -663,7 +682,8 @@
                 "repo_untrusted",
                 "model_switch",
                 "release_go",
-                "stage_go"
+                "stage_go",
+                "release_pr_ci_failed"
               ],
               "description": "Decision kinds the supervisor never answers itself: it escalates them to the owner (owner_only)."
             },

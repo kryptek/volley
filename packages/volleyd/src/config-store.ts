@@ -464,9 +464,10 @@ export class ConfigStore {
 
   /**
    * `repo_add` / `repo_remove` (SPEC §4.6.21): set `repos.<slug>.machines` (null: drop the
-   * repository) and each `hosts.<m>.repos.<slug>` in `paths` (null: drop the adopted path), the
-   * slug as config already spells it. config_set cannot delete a key, so this writes the layer
-   * itself; journaled as one `config_changed` whose removals read as null leaves.
+   * repository) and each `hosts.<m>.repos.<slug>` in `paths` (`fleet.repos.<slug>` for the
+   * supervisor's own machine; null: drop the adopted path), the slug as config already spells
+   * it. config_set cannot delete a key, so this writes the layer itself; journaled as one
+   * `config_changed` whose removals read as null leaves.
    */
   setRepo(
     slug: string,
@@ -477,25 +478,39 @@ export class ConfigStore {
     const key = slugKey(this.fileLayer.repos, slug) ?? slugKey(this.global.repos, slug) ?? slug;
     const { [key]: _old, ...otherRepos } = this.fileLayer.repos ?? {};
     const repos = machines === null ? otherRepos : { ...otherRepos, [key]: { machines } };
+    const local = this.localName();
     const hosts = { ...this.fileLayer.hosts };
     const hostPatch: Record<string, { repos: Record<string, string | null> }> = {};
+    // The supervisor's own adopted clone is `fleet.repos` (#616); a paired machine's its host's.
+    let fleet = this.fileLayer.fleet;
+    let fleetPatch: { repos: Record<string, string | null> } | undefined;
+    const without = (map: Record<string, string> | undefined, path: string | null) => {
+      const { [slugKey(map, key) ?? key]: _was, ...rest } = map ?? {};
+      return path === null ? rest : { ...rest, [key]: path };
+    };
     for (const [m, path] of Object.entries(paths)) {
+      if (m === local) {
+        const next = without(this.fileLayer.fleet?.repos, path);
+        const { repos: _r, ...others } = this.fileLayer.fleet ?? {};
+        fleet = Object.keys(next).length > 0 ? { ...others, repos: next } : others;
+        fleetPatch = { repos: { [key]: path } };
+        continue;
+      }
       const host = hosts[m];
       if (host === undefined) {
         return { applied: false, rejected: [{ path: `hosts.${m}`, reason: "not in config.yaml" }] };
       }
-      const adopted = slugKey(host.repos, key);
-      const { [adopted ?? key]: _was, ...rest } = host.repos ?? {};
-      const next = path === null ? rest : { ...rest, [key]: path };
-      const { repos: _r, ...without } = host;
-      hosts[m] = Object.keys(next).length > 0 ? { ...without, repos: next } : without;
+      const next = without(host.repos, path);
+      const { repos: _r, ...others } = host;
+      hosts[m] = Object.keys(next).length > 0 ? { ...others, repos: next } : others;
       hostPatch[m] = { repos: { [key]: path } };
     }
-    const { repos: _rs, hosts: _hs, ...base } = this.fileLayer;
+    const { repos: _rs, hosts: _hs, fleet: _fl, ...base } = this.fileLayer;
     const nextLayer = {
       ...base,
       ...(Object.keys(repos).length > 0 ? { repos } : {}),
       ...(Object.keys(hosts).length > 0 ? { hosts } : {}),
+      ...(fleet !== undefined && Object.keys(fleet).length > 0 ? { fleet } : {}),
     } as TunablesPatch;
     const nextGlobal = merge(this.defaults, nextLayer);
     const rejected = tunablesErrors(nextGlobal, this.hostname);
@@ -503,6 +518,7 @@ export class ConfigStore {
     const patch = {
       repos: { [key]: machines === null ? null : { machines } },
       ...(Object.keys(hostPatch).length > 0 ? { hosts: hostPatch } : {}),
+      ...(fleetPatch !== undefined ? { fleet: fleetPatch } : {}),
     } as unknown as TunablesPatch;
     const previous = {
       repos: { [key]: this.global.repos[key] ?? null },
@@ -515,6 +531,9 @@ export class ConfigStore {
               ]),
             ),
           }
+        : {}),
+      ...(fleetPatch !== undefined
+        ? { fleet: { repos: { [key]: this.global.fleet.repos?.[key] ?? null } } }
         : {}),
     };
     return this.commit(nextLayer, nextGlobal, patch, previous, by);

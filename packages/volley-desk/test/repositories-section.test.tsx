@@ -54,6 +54,19 @@ describe("Settings › Repositories", () => {
     expect(chips(LIB).getByRole("listitem", { name: "box-a: ready" })).toBeInTheDocument();
   });
 
+  it("a repository adopted on the supervisor's machine (fleet.repos) has its chip there (#616)", async () => {
+    const config = repoConfig({ [LIB]: { machines: ["box-a"] } });
+    config.fleet = { ...config.fleet, repos: { "example-org/widgets": "/src/widgets" } };
+    setup({ config });
+    await act(flush);
+    expect(screen.getByRole("article", { name: "example-org/widgets" })).toBeInTheDocument();
+    expect(
+      chips("example-org/widgets")
+        .getAllByRole("listitem")
+        .map((li) => li.getAttribute("aria-label")?.split(":")[0]),
+    ).toEqual(["hub"]);
+  });
+
   it("cloning shows as cloning…, a machine with no verdict yet as waiting", async () => {
     const { "box-b": _gone, ...r } = readiness();
     r["box-a"] = verdict("box-a", { [APP]: { state: "cloning", reasons: [] } });

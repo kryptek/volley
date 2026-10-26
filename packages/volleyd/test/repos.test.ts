@@ -6,6 +6,7 @@ import {
   type RepoConfig,
   SLUG_PATTERN,
   addPlan,
+  adoptedOn,
   assignedSlugs,
   cloneFor,
   ghRepoContext,
@@ -15,7 +16,9 @@ import {
   legacyOrigin,
   managedClonePath,
   managedWorktreeRoot,
+  namedSlug,
   originToSlug,
+  ownedClonesOf,
   pendingRepoRuns,
   remoteRepoRoot,
   repoStateLine,
@@ -74,6 +77,7 @@ describe("repos: slugs (owner/name)", () => {
     const t = schema.$defs.tunableProperties.properties;
     expect(t.repos.propertyNames.pattern).toBe(SLUG_PATTERN);
     expect(schema.$defs.remoteHost.properties.repos.propertyNames.pattern).toBe(SLUG_PATTERN);
+    expect(t.fleet.properties.repos.propertyNames.pattern).toBe(SLUG_PATTERN);
     // The machine record's repositories and per-repository checks (#435).
     const machine = readFileSync(join(SCHEMAS_DIR, "machine.schema.json"), "utf-8");
     const slugs = [...machine.matchAll(/"pattern": ("\^\[A-Za-z0-9\]\(\?:[^\n]*?\$")/g)].map((m) =>
@@ -82,10 +86,10 @@ describe("repos: slugs (owner/name)", () => {
     expect(slugs).toEqual([SLUG_PATTERN, SLUG_PATTERN]);
   });
 
-  it("the schema takes repos, fleet.repo_root and hosts.<m>.repos", () => {
+  it("the schema takes repos, fleet.repo_root, fleet.repos and hosts.<m>.repos", () => {
     const ok = {
       repos: { "example-org/widgets": { machines: "all" }, "o/r": { machines: ["box", "mini"] } },
-      fleet: { repo_root: "/srv/repos" },
+      fleet: { repo_root: "/srv/repos", repos: { "example-org/widgets": "/src/widgets" } },
       hosts: { box: { target: "dev@box", volley_dir: "/v", repos: { "o/r": "/src/r" } } },
     };
     expect(schemaErrors("config.schema.json#/$defs/tunables", ok)).toEqual([]);
@@ -96,6 +100,8 @@ describe("repos: slugs (owner/name)", () => {
       { repos: { "o/r": {} } },
       { hosts: { box: { repos: { "o/r": "relative/path" } } } },
       { hosts: { box: { repos: { "https://x/o/r": "/p" } } } },
+      { fleet: { repos: { "o/r": "relative/path" } } },
+      { fleet: { repos: { "https://x/o/r": "/p" } } },
     ]) {
       expect(
         schemaErrors("config.schema.json#/$defs/tunables", bad),
@@ -165,30 +171,36 @@ describe("repos: cloneFor precedence", () => {
       repos: { "o/r": { machines: "all" } },
       hosts: { box: { repo: "/legacy", repos: { "O/R": "/adopted/r" } } },
     });
-    expect(cloneFor(c, "box", "o/r", { home, origin: "github.com/o/r" })).toBe("/adopted/r");
+    expect(cloneFor(c, "control", "box", "o/r", { home, origin: "github.com/o/r" })).toBe(
+      "/adopted/r",
+    );
   });
 
   it("then the managed path, when repos.<slug>.machines includes the machine", () => {
     const listed = cfg({ repos: { "o/r": { machines: ["box"] } } });
-    expect(cloneFor(listed, "box", "o/r", { home })).toBe("/path/to/home/.volley/repos/o/r");
-    expect(cloneFor(listed, "mini", "o/r", { home })).toBeUndefined();
+    expect(cloneFor(listed, "control", "box", "o/r", { home })).toBe(
+      "/path/to/home/.volley/repos/o/r",
+    );
+    expect(cloneFor(listed, "control", "mini", "o/r", { home })).toBeUndefined();
     const all = cfg({ repos: { "O/r": { machines: "all" } } });
     // Spelled as the config spells it: paths on disk are case-sensitive.
-    expect(cloneFor(all, "mini", "o/R", { home })).toBe("/path/to/home/.volley/repos/O/r");
+    expect(cloneFor(all, "control", "mini", "o/R", { home })).toBe(
+      "/path/to/home/.volley/repos/O/r",
+    );
   });
 
   it("then a legacy hosts.<m>.repo, unless the record's origin is another repository", () => {
     const c = cfg({ hosts: { box: { repo: "/src/r" } } });
-    expect(cloneFor(c, "box", "o/r", { origin: "github.com/O/R" })).toBe("/src/r");
-    expect(cloneFor(c, "box", "o/r", { origin: "github.com/o/other" })).toBeUndefined();
-    expect(cloneFor(c, "box", "o/r", { origin: "gitlab.example/o/r" })).toBeUndefined();
+    expect(cloneFor(c, "control", "box", "o/r", { origin: "github.com/O/R" })).toBe("/src/r");
+    expect(cloneFor(c, "control", "box", "o/r", { origin: "github.com/o/other" })).toBeUndefined();
+    expect(cloneFor(c, "control", "box", "o/r", { origin: "gitlab.example/o/r" })).toBeUndefined();
     // No origin reported yet: nothing says the clone is another repository's.
-    expect(cloneFor(c, "box", "o/r", {})).toBe("/src/r");
-    expect(cloneFor(c, "box", "o/r", { origin: null })).toBe("/src/r");
+    expect(cloneFor(c, "control", "box", "o/r", {})).toBe("/src/r");
+    expect(cloneFor(c, "control", "box", "o/r", { origin: null })).toBe("/src/r");
   });
 
   it("is undefined for a machine with none of them", () => {
-    expect(cloneFor(cfg(), "box", "o/r", { home })).toBeUndefined();
+    expect(cloneFor(cfg(), "control", "box", "o/r", { home })).toBeUndefined();
   });
 });
 
@@ -222,15 +234,15 @@ describe("repos: a paired machine's clone (#596)", () => {
       repos: { "o/r": { machines: ["box"] } },
       fleet: { repo_root: "/sup/.volley/volleyd/repos" },
     });
-    expect(cloneFor(listed, "box", "o/r", { clone })).toBe(clone);
+    expect(cloneFor(listed, "control", "box", "o/r", { clone })).toBe(clone);
     // Not assigned there: the fact changes nothing (adopted, legacy or none as before).
-    expect(cloneFor(listed, "mini", "o/r", { clone })).toBeUndefined();
+    expect(cloneFor(listed, "control", "mini", "o/r", { clone })).toBeUndefined();
     const adopted = cfg({
       repos: { "o/r": { machines: ["box"] } },
       hosts: { box: { repos: { "o/r": "/srv/r" } }, mini: { repo: "/src/r" } },
     });
-    expect(cloneFor(adopted, "box", "o/r", { clone })).toBe("/srv/r");
-    expect(cloneFor(adopted, "mini", "o/r", { clone })).toBe("/src/r");
+    expect(cloneFor(adopted, "control", "box", "o/r", { clone })).toBe("/srv/r");
+    expect(cloneFor(adopted, "control", "mini", "o/r", { clone })).toBe("/src/r");
   });
 
   it("addPlan under an absolute repo_root: a paired machine never shows the supervisor's path", () => {
@@ -300,9 +312,9 @@ describe("repos: assignedSlugs", () => {
       },
       hosts: { box: { repos: { "o/adopted": "/a" } } },
     });
-    expect(assignedSlugs(c, "box")).toEqual(["o/adopted", "o/all", "o/listed"]);
-    expect(assignedSlugs(c, "mini")).toEqual(["o/all", "o/other"]);
-    expect(assignedSlugs(cfg(), "box")).toEqual([]);
+    expect(assignedSlugs(c, "control", "box")).toEqual(["o/adopted", "o/all", "o/listed"]);
+    expect(assignedSlugs(c, "control", "mini")).toEqual(["o/all", "o/other"]);
+    expect(assignedSlugs(cfg(), "control", "box")).toEqual([]);
   });
 
   it("unassignedSlugs: configured slugs given to other machines only, any spelling (#439)", () => {
@@ -310,10 +322,10 @@ describe("repos: assignedSlugs", () => {
       repos: { "o/all": { machines: "all" }, "o/other": { machines: ["mini"] } },
       hosts: { box: { repos: { "o/adopted": "/a" } } },
     });
-    expect(unassignedSlugs(c, "box", ["O/Other", "o/all", "o/adopted", "o/unknown"])).toEqual([
-      "O/Other",
-    ]);
-    expect(unassignedSlugs(c, "mini", ["o/other", "o/adopted"])).toEqual(["o/adopted"]);
+    expect(
+      unassignedSlugs(c, "control", "box", ["O/Other", "o/all", "o/adopted", "o/unknown"]),
+    ).toEqual(["O/Other"]);
+    expect(unassignedSlugs(c, "control", "mini", ["o/other", "o/adopted"])).toEqual(["o/adopted"]);
   });
 
   it("names an adopted clone of an assigned slug once", () => {
@@ -321,7 +333,7 @@ describe("repos: assignedSlugs", () => {
       repos: { "o/r": { machines: "all" } },
       hosts: { box: { repos: { "O/R": "/a" } } },
     });
-    expect(assignedSlugs(c, "box")).toEqual(["o/r"]);
+    expect(assignedSlugs(c, "control", "box")).toEqual(["o/r"]);
   });
 });
 
@@ -473,5 +485,128 @@ describe("repos: repo_add / repo_remove assignments (SPEC §4.6.21)", () => {
     );
     expect(repoStateLine("box", { state: "cloning", reasons: [] })).toBe("box: cloning");
     expect(repoStateLine("box", undefined)).toBe("box: not assigned");
+  });
+});
+
+describe("ownedClonesOf (#612 D10)", () => {
+  const cfg = { repo_root: "/path/to/volleyd/repos", localName: "supervisor" };
+  let seq = 0;
+  const e = (type: string, data: Record<string, unknown>) => ({ seq: ++seq, type, data });
+  const added = (wave?: string) =>
+    e("repo_added", {
+      by: "c",
+      slug: "acme/demo",
+      machines: ["supervisor", "box"],
+      ...(wave ? { wave } : {}),
+    });
+  const run = (machine: string, path: string, cloned = true) =>
+    e("repo_clone_run", { machine, slug: "acme/demo", ok: true, cloned, path });
+  const LOCAL = "/path/to/volleyd/repos/acme/demo";
+  const BOX = "/path/to/box-home/.volley/repos/acme/demo";
+
+  it("yields the clones volleyd's own run made at the managed path, for an owned registration", () => {
+    expect(
+      ownedClonesOf("w1", [added("w1"), run("supervisor", LOCAL), run("box", BOX)], cfg),
+    ).toEqual([
+      { machine: "supervisor", slug: "acme/demo", path: LOCAL },
+      { machine: "box", slug: "acme/demo", path: BOX },
+    ]);
+  });
+
+  it("nothing for an adopted clone, a registration without wave, another wave's, or a path outside the root", () => {
+    expect(ownedClonesOf("w1", [added("w1"), run("supervisor", LOCAL, false)], cfg)).toEqual([]);
+    expect(ownedClonesOf("w1", [added(), run("supervisor", LOCAL)], cfg)).toEqual([]);
+    expect(ownedClonesOf("w1", [added("w2"), run("supervisor", LOCAL)], cfg)).toEqual([]);
+    expect(
+      ownedClonesOf("w1", [added("w1"), run("supervisor", "/path/to/elsewhere/acme/demo")], cfg),
+    ).toEqual([]);
+    // a run before the owned add does not count
+    expect(ownedClonesOf("w1", [run("supervisor", LOCAL), added("w1")], cfg)).toEqual([]);
+  });
+
+  it("a removed clone is gone from the list", () => {
+    expect(
+      ownedClonesOf(
+        "w1",
+        [
+          added("w1"),
+          run("supervisor", LOCAL),
+          e("repo_clone_removed", {
+            machine: "supervisor",
+            slug: "acme/demo",
+            path: LOCAL,
+            wave: "w1",
+          }),
+        ],
+        cfg,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("repos: the supervisor's own adopted clones (#616)", () => {
+  const home = "/path/to/home";
+  const c = cfg({
+    repos: { "example-org/widgets": { machines: ["box", "hub"] } },
+    fleet: { repo_root: "~/.volley/repos", repos: { "Example-Org/Widgets": "/src/widgets" } },
+    hosts: { box: { repos: { "o/boxed": "/b" } } },
+  });
+
+  it("adoptedOn is fleet.repos for the supervisor's machine, hosts.<m>.repos for a paired one", () => {
+    expect(adoptedOn(c, "hub", "hub")).toEqual({ "Example-Org/Widgets": "/src/widgets" });
+    expect(adoptedOn(c, "hub", "box")).toEqual({ "o/boxed": "/b" });
+    expect(adoptedOn(c, "hub", "mini")).toBeUndefined();
+    // A host entry named like the supervisor is never read for it.
+    expect(adoptedOn(cfg({ hosts: { hub: { repos: { "o/r": "/x" } } } }), "hub", "hub")).toBe(
+      undefined,
+    );
+  });
+
+  it("an adopted clone on the supervisor's machine beats its managed path", () => {
+    expect(cloneFor(c, "hub", "hub", "example-org/widgets", { home })).toBe("/src/widgets");
+    // Only the supervisor's machine reads fleet.repos.
+    expect(cloneFor(c, "hub", "box", "example-org/widgets", { home })).toBe(
+      "/path/to/home/.volley/repos/example-org/widgets",
+    );
+    // Adopted without an assignment still counts.
+    const only = cfg({ fleet: { repo_root: "~/r", repos: { "o/r": "/src/r" } } });
+    expect(cloneFor(only, "hub", "hub", "o/r", { home })).toBe("/src/r");
+  });
+
+  it("assignedSlugs, holdersOf and unassignedSlugs count it", () => {
+    const only = cfg({
+      repos: { "example-org/widgets": { machines: ["box"] } },
+      fleet: { repo_root: "~/r", repos: { "example-org/widgets": "/src/widgets" } },
+      hosts: { box: {} },
+    });
+    expect(assignedSlugs(only, "hub", "hub")).toEqual(["example-org/widgets"]);
+    expect(holdersOf(only, "hub", "example-org/widgets")).toEqual(["box", "hub"]);
+    expect(unassignedSlugs(only, "hub", "hub", ["example-org/widgets"])).toEqual([]);
+    // Without the adoption the supervisor does not hold it.
+    const none = cfg({
+      repos: { "example-org/widgets": { machines: ["box"] } },
+      hosts: { box: {} },
+    });
+    expect(unassignedSlugs(none, "hub", "hub", ["example-org/widgets"])).toEqual([
+      "example-org/widgets",
+    ]);
+    // A slug adopted only on the supervisor is named.
+    const own = cfg({ fleet: { repo_root: "~/r", repos: { "O/R": "/src/r" } } });
+    expect(namedSlug(own, "hub", "o/r")).toBe("O/R");
+    expect(namedSlug(own, "hub", "o/other")).toBeUndefined();
+  });
+
+  it("addPlan for the supervisor's machine adopts the path, no clone", () => {
+    const [step] = addPlan(c, "hub", [], () => undefined, "example-org/widgets", ["hub"], {
+      localHome: home,
+      localDir: (id) => `/path/to/home/.volley/claude/${id}`,
+    });
+    expect(step).toMatchObject({
+      machine: "hub",
+      local: true,
+      repo_add: "example-org/widgets=/src/widgets",
+      path: "/src/widgets",
+      clone: false,
+    });
   });
 });

@@ -29,7 +29,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 | `repo`, `release_branch`, `branch`, `worktree` | the repo root, the base branch, the agent's branch and worktree |
 | `extra` | repo-specific notes (below), or empty |
 | `hygiene_rule`, `hygiene_contract` | reviewer briefs: the hygiene check line and its result-contract bullet for the wave's hygiene level (`reviews.ts` `hygieneText`: P1 for a public repository, P3 for a private one, empty under `public_hygiene: off`) |
-| `stage`, `stage_brief`, `stage_commands`, `stage_verify` | the release brief: the playbook stage's name, its `brief`, its `run` lines (and a heavy stage's lease) and its `verify` facts in prose (`autopilot/release-train.ts` `stageBriefVars`); empty for every other role |
+| `stage`, `stage_brief`, `stage_commands`, `stage_verify`, `stage_rules` | the release brief: the playbook stage's name, its `brief`, its `run` lines (and a heavy stage's lease), its `verify` facts in prose (a ship stage's read at the merge commit) and its rules (where it works and what it may push) (`autopilot/release-train.ts` `stageBriefVars`); empty for every other role |
 
 ## The protocol block
 

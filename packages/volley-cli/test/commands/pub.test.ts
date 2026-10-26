@@ -138,6 +138,28 @@ describe("volley pub", () => {
     expect(r.stderr).toContain("unknown channel");
   });
 
+  it("--clear empties every retained record of a finished agent (#613: no mosquitto_pub -P)", async () => {
+    const id = "w1-t1-impl";
+    const topics = [
+      `volley/_system/registry/${id}`,
+      `volley/test/${id}/status`,
+      `volley/test/${id}/result`,
+      `volley/test/${id}/capability`,
+    ];
+    for (const t of topics) await inspector.publish(t, '{"x":1}', { qos: 1, retain: true });
+    for (const t of topics) expect(await inspector.queryRetained(t, 500)).not.toBeNull();
+    const r = await runCli({
+      argv: ["pub", "--clear", "--broker-url", tb.url, "--namespace", "test", "--agent-id", id],
+    });
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    for (const t of topics) expect(await inspector.queryRetained(t, 300)).toBeNull();
+    const bad = await runCli({
+      argv: ["pub", "--clear", "--broker-url", tb.url, "--agent-id", id, "--type", "done"],
+    });
+    expect(bad.exitCode).toBe(2);
+  });
+
   it("rejects an invalid agent_id and exits 2 (USAGE)", async () => {
     const r = await runCli({
       argv: [

@@ -127,12 +127,15 @@ describe("the reach-from-anywhere docs", () => {
     }
   });
 
-  test("CLAUDE.md's status names the release smoke; AUTOPILOT.md has the coordinator role", () => {
+  test("CLAUDE.md's status points at the changelog and smokes, naming no version; AUTOPILOT.md has the coordinator role", () => {
     const status =
       read("CLAUDE.md")
         .split("\n")
         .find((l) => l.startsWith("**Status:**")) ?? "";
-    expect(status).toContain("docs/SMOKE-v0.13.md");
+    // No release in progress named (#609): the playbook bumps versions, never prose.
+    expect(status).toContain("CHANGELOG.md");
+    expect(status).toContain("docs/SMOKE-v*.md");
+    expect(status).not.toMatch(/\bv?\d+\.\d+\.\d+\b/);
     const presence = section(read("docs/AUTOPILOT.md"), "## Presence: nothing to keep alive");
     expect(presence).toContain("coordinator role");
     expect(presence).toContain("volley coordinator");

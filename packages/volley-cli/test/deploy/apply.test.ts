@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type ApplyDeps, applyDeploy } from "../../src/deploy/apply";
-import { type Ref, platformServices } from "../../src/deploy/plan";
+import { type ApplyDeps, applyDeploy, q } from "../../src/deploy/apply";
+import { RECORD_LOCK_ARGV, type Ref, platformServices } from "../../src/deploy/plan";
+import { LOCK_MARKER, lockHash } from "../../src/peer/doctor";
 import { DESK_STAMP, deskStamp } from "../../src/setup/desk-build";
 import { fakeRepo } from "./fake-repo";
 
@@ -46,6 +47,7 @@ function setup(o: Parameters<typeof fakeRepo>[0] & { from?: Ref }) {
 }
 
 const checkout = (repo: string, ref: string) => `git -C ${repo} checkout --detach ${ref}`;
+const marker = (repo: string) => join(repo, "node_modules", LOCK_MARKER);
 
 describe("applyDeploy", () => {
   it("runs the plan in order, stamps the Desk build, and reports each step", async () => {
@@ -246,6 +248,7 @@ describe("applyDeploy", () => {
     expect(r.rollbackFailed?.byHand).toEqual([
       `git -C ${f.repo} checkout --detach v0.4.0`,
       `cd ${f.repo} && ${f.bun} install --frozen-lockfile`,
+      `cd ${f.repo} && ${RECORD_LOCK_ARGV.map(q).join(" ")}`,
       `cd ${f.repo}/packages/volley-desk && ${f.bun} run build`,
       "launchctl kickstart -k gui/501/systems.volley.volleyd",
       "launchctl kickstart -k gui/501/systems.volley.desk",
@@ -278,5 +281,59 @@ describe("applyDeploy", () => {
     expect(r.rollbackFailed?.why).toMatch(/does not run/);
     expect(r.rollbackFailed?.byHand[0]).toBe(checkout(f.repo, "v0.4.0"));
     expect(lines.some((l) => l.startsWith("FAILED  rollback: checkout v0.4.0"))).toBe(true);
+  });
+
+  describe("the lock marker", () => {
+    it("records the bun.lock the install used, so the supervisor's doctor reads synced", async () => {
+      const { f, run } = setup({ head: { tag: "v0.4.0" } });
+      expect((await run()).ok).toBe(true);
+      expect(readFileSync(marker(f.repo), "utf-8")).toBe(`${lockHash(f.repo)}\n`);
+    });
+
+    it("after a rollback the marker names the previous ref's bun.lock", async () => {
+      const { f, run } = setup({ head: { tag: "v0.4.0" } });
+      f.fail(`${f.bun} run build`, "0.5.0");
+      const r = await run();
+      expect(r.rolledBack).toBe(true);
+      expect(f.versionAt()).toBe("0.4.0");
+      expect(readFileSync(marker(f.repo), "utf-8")).toBe(`${lockHash(f.repo)}\n`);
+    });
+
+    it("a failed install records nothing", async () => {
+      const { f, run } = setup({ head: { tag: "v0.4.0" } });
+      f.fail(`${f.bun} install --frozen-lockfile`, "0.5.0");
+      // The rollback's install fails too: nothing ever succeeds, so nothing is recorded.
+      f.fail(`${f.bun} install --frozen-lockfile`, "0.4.0");
+      const r = await run();
+      expect(r.failed?.step).toBe("bun install --frozen-lockfile");
+      expect(existsSync(marker(f.repo))).toBe(false);
+    });
+
+    it("a marker that cannot be written fails the install step and rolls back", async () => {
+      const { lines, run } = setup({ head: { tag: "v0.4.0" }, noNodeModules: true });
+      const r = await run();
+      expect(r.ok).toBe(false);
+      expect(r.failed?.step).toBe("bun install --frozen-lockfile");
+      expect(r.failed?.why).toMatch(/^could not record node_modules\/\.volley-lock-sha256: /);
+      expect(lines).toContain("rolling back to v0.4.0");
+    });
+
+    it("a node_modules that is a file fails the install step the same way", async () => {
+      const { f, deps, run } = setup({ head: { tag: "v0.4.0" } });
+      const exec = deps.exec;
+      deps.exec = async (argv, o) => {
+        if (argv[1] === "install") {
+          rmSync(join(f.repo, "node_modules"), { recursive: true, force: true });
+          writeFileSync(join(f.repo, "node_modules"), "");
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return exec(argv, o);
+      };
+      const r = await run();
+      expect(r.failed?.why).toMatch(/^could not record node_modules\/\.volley-lock-sha256: /);
+      // The stub breaks the rollback's install too, so the rollback fails at the same step.
+      expect(r.rolledBack).toBe(false);
+      expect(r.rollbackFailed?.step).toBe(r.failed?.step);
+    });
   });
 });

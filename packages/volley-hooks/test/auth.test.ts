@@ -84,10 +84,22 @@ describe("resolveHooksAuth — coordinator mode", () => {
   it("a malformed coordinator file throws AUTH_FAILED (loud, never a cached miss), naming the path", () => {
     const dir = authDir("{not json");
     expect(resolveIn({ VOLLEY_AUTH_DIR: dir })).toThrow(join(dir, "coordinator.json"));
-    expect(resolveIn({ VOLLEY_AUTH_DIR: dir })).toThrow(/malformed/);
+    expect(resolveIn({ VOLLEY_AUTH_DIR: dir })).toThrow(/not a JSON object/);
     expect(captured(resolveIn({ VOLLEY_AUTH_DIR: dir }))).toMatchObject({ code: "AUTH_FAILED" });
     const noUser = authDir({ password: "x" });
     expect(resolveIn({ VOLLEY_AUTH_DIR: noUser })).toThrow(/username/);
+    // The four damaged forms: the path, never a byte of the file (#613).
+    const marker = "hunter2-marker-aa11";
+    for (const text of [
+      marker,
+      `{"username":"coordinator","password":${marker}}`,
+      `{"username":"coordinator","password":"${marker}`,
+    ]) {
+      const d = authDir(text);
+      const e = captured(resolveIn({ VOLLEY_AUTH_DIR: d })) as Error;
+      expect(e.message).toContain(join(d, "coordinator.json"));
+      expect(e.message).not.toContain(marker);
+    }
     expect(captured(resolveIn({ VOLLEY_AUTH_DIR: noUser }))).toMatchObject({
       code: "AUTH_FAILED",
     });

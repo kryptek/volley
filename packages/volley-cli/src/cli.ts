@@ -29,6 +29,7 @@ Subcommands:
   desk     The built Volley Desk: serve it, install it as a service (serve, install, uninstall, check)
   deploy   Deploy a release tag to this machine's volleyd and Desk services
   sim      The simulator: fake claude and gh for a wave without an account (env, reset)
+  bug      Report a problem: gather diagnostics, redact them, show them, then open a GitHub issue or write a file
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -96,6 +97,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/deploy")).deploy as Subcommand;
     case "sim":
       return (await import("./commands/sim")).sim as Subcommand;
+    case "bug":
+      return (await import("./commands/bug")).bug as Subcommand;
     default:
       return null;
   }

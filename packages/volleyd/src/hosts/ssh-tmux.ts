@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import { type PeerCleanupReport, parsePeerCleanupReport } from "volley-cli/peer/cleanup";
 import { normalizeOrigin } from "volley-cli/peer/repo";
 import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import type { ProbeLogin } from "../claude/usage";
@@ -8,6 +9,7 @@ import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../confi
 import { COORDINATOR_COMMAND } from "../coordinator/role";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
+  type CloneRemoveToken,
   type ConsentToken,
   type CoordinatorToken,
   FenceError,
@@ -147,6 +149,8 @@ export function resolveRemoteHost(
               },
             },
           },
+          // A paired host's own spec: no machine in it is the supervisor's.
+          null,
           name,
           repo.slug,
           repo,
@@ -217,9 +221,10 @@ export interface RemoteHost extends Host {
   /**
    * `repo_probe` (SPEC §4.6.21): what is at `path` on the box, read only — its clone's root and
    * origin (and the GitHub repository that names). Throws when ssh fails or git says something
-   * else.
+   * else. Readiness also probes each repository's spawn path with it, on the PATH probe's
+   * cadence and bounded by `timeoutMs` (#608).
    */
-  probeClone(path: string): Promise<CloneProbe>;
+  probeClone(path: string, opts?: { timeoutMs?: number }): Promise<CloneProbe>;
   /**
    * Readiness's PATH probe: whether `claude` and `bun` resolve on the non-interactive ssh PATH
    * (the same `bash -s` that runs launch.sh). Throws when ssh fails.
@@ -234,6 +239,11 @@ export interface RemoteHost extends Host {
    * added one without a clone is cloned. Throws when ssh fails or the doctor printed no report.
    */
   runDoctor(opts: DoctorRunOptions): Promise<DoctorReport>;
+  /**
+   * `volley peer cleanup --json …` on the box (SPEC §4.6.26): null when ssh failed. Optional:
+   * a host without it gets no process, branch or clone step.
+   */
+  runCleanup?(opts: PeerCleanupOptions): Promise<PeerCleanupReport | null>;
   /**
    * One Claude login's usage probe on the box (`volley peer doctor --json --probe-login
    * <profile>`, a prime): its `claude_logins`. Null when the box's volley has no such flag.
@@ -264,6 +274,24 @@ export function classifyRevParse(r: ExecResult): CloneProbe | null {
   return null;
 }
 
+/**
+ * `probeClone`'s two reads on the supervisor's own machine (#616), through its own exec: the
+ * clone's root (`rev-parse --show-toplevel`), then its origin and the GitHub slug it names.
+ */
+export async function probeLocalClone(exec: ExecFn, path: string): Promise<CloneProbe> {
+  const top = await exec(["git", "-C", path, "rev-parse", "--show-toplevel"]);
+  const found = classifyRevParse(top);
+  if (found === null) throw new Error(firstLine(top.stderr, `git rev-parse exited ${top.code}`));
+  if (found.state !== "found" || found.root === undefined || found.root === "")
+    return found.state === "found" ? { state: "not_git" } : found;
+  const root = found.root;
+  const o = await exec(["git", "-C", root, "remote", "get-url", "origin"]);
+  const origin = o.stdout.trim();
+  if (o.code !== 0 || origin === "") return { state: "no_origin", root };
+  const slug = originToSlug(normalizeOrigin(origin));
+  return { state: "found", root, origin, ...(slug !== undefined ? { slug } : {}) };
+}
+
 /** What a doctor run on a box is asked to do (`RemoteHost.runDoctor`). */
 export interface DoctorRunOptions {
   fix: boolean;
@@ -292,7 +320,24 @@ export type RemoteRunOptions = Pick<
   | "profileRemove"
   | "signinEntry"
   | "coordinator"
+  | "cloneRemove"
 >;
+
+/** What `volley peer cleanup` is asked to do on a box (RemoteHost.runCleanup, SPEC §4.6.26). */
+export interface PeerCleanupOptions {
+  /** Worktrees whose processes it lists (stops, with `consent`). */
+  worktrees?: readonly string[];
+  /** The box's clone the `branches` are deleted in. */
+  repo?: string;
+  /** Agent branches the supervisor proved merged: deleted with `consent`. */
+  branches?: readonly string[];
+  /** Managed clones it re-checks and removes, each with its CloneRemoveToken (and `consent`). */
+  clones?: readonly CloneRemoveToken[];
+  /** Absent: a listing only. */
+  consent?: ConsentToken;
+}
+
+export type { PeerCleanupReport };
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
 const SSH_FAILED = 255;
@@ -407,6 +452,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.profileRemove !== undefined ? { profileRemove: opts.profileRemove } : {}),
         ...(opts.signinEntry !== undefined ? { signinEntry: opts.signinEntry } : {}),
         ...(opts.coordinator !== undefined ? { coordinator: opts.coordinator } : {}),
+        ...(opts.cloneRemove !== undefined ? { cloneRemove: opts.cloneRemove } : {}),
       },
     );
   }
@@ -892,19 +938,22 @@ export class SshTmuxHost implements RemoteHost {
     return r.code === 0 ? r.stdout : null;
   }
 
-  async probeClone(path: string): Promise<CloneProbe> {
+  async probeClone(path: string, opts: { timeoutMs?: number } = {}): Promise<CloneProbe> {
+    const timeout = opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {};
     // Two scripts: a failing first step is an answer, not an aborted script.
-    const top = await this.run([
-      { argv: ["git", "-C", path, "rev-parse", "--show-toplevel"] },
-    ]).catch(this.noResult("clone probe"));
+    const top = await this.run(
+      [{ argv: ["git", "-C", path, "rev-parse", "--show-toplevel"] }],
+      timeout,
+    ).catch(this.noResult("clone probe"));
     if (top === null || transportFailed(top)) throw this.sshFailed("clone probe", top);
     const found = classifyRevParse(top);
     if (found === null) throw new Error(firstLine(top.stderr, `git rev-parse exited ${top.code}`));
     if (found.state !== "found" || found.root === undefined) return found;
     const root = found.root;
-    const o = await this.run([{ argv: ["git", "-C", root, "remote", "get-url", "origin"] }]).catch(
-      this.noResult("clone probe"),
-    );
+    const o = await this.run(
+      [{ argv: ["git", "-C", root, "remote", "get-url", "origin"] }],
+      timeout,
+    ).catch(this.noResult("clone probe"));
     if (o === null || transportFailed(o)) throw this.sshFailed("clone probe", o);
     if (o.code !== 0) return { state: "no_origin", root };
     const origin = o.stdout.trim();
@@ -985,6 +1034,41 @@ export class SshTmuxHost implements RemoteHost {
       throw new Error(noReportReason(this.spec.target, this.spec.volley_dir, r));
     }
     return report;
+  }
+
+  /**
+   * `volley peer cleanup --json …` on the box (SPEC §4.6.26): stop the processes under each
+   * worktree, delete each proven-merged branch, re-check and remove each managed clone; without
+   * `consent` it only lists. Null when ssh failed (the box is unreachable); throws when the box
+   * printed no report.
+   */
+  async runCleanup(opts: PeerCleanupOptions): Promise<PeerCleanupReport | null> {
+    const branches = opts.repo !== undefined ? (opts.branches ?? []) : [];
+    const args = [
+      "peer",
+      "cleanup",
+      "--json",
+      ...(opts.worktrees ?? []).flatMap((w) => ["--worktree", w]),
+      ...(opts.repo !== undefined && branches.length > 0 ? ["--repo", opts.repo] : []),
+      ...branches.flatMap((b) => ["--branch", b]),
+      ...(opts.consent !== undefined
+        ? (opts.clones ?? []).flatMap((c) => ["--clone", c.path])
+        : []),
+      ...(opts.consent !== undefined ? ["--yes"] : []),
+    ];
+    const r = await this.run([{ argv: remoteVolleyArgv(this.spec.volley_dir, args) }], {
+      timeoutMs: DAEMON_DEFAULTS.remote_exec_timeout_ms,
+      ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
+      ...(opts.clones !== undefined && opts.clones.length > 0 ? { cloneRemove: opts.clones } : {}),
+    }).catch(this.noResult("peer cleanup"));
+    if (r === null || transportFailed(r)) return null;
+    try {
+      return parsePeerCleanupReport(r.stdout);
+    } catch {
+      throw new Error(
+        `volley peer cleanup on ${this.spec.target}: ${r.stderr.trim() || `exit ${r.code}`}`,
+      );
+    }
   }
 
   /**

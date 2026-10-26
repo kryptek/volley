@@ -179,6 +179,11 @@ export interface Tunables {
    * false: finished sessions stay open for inspection.
    */
   retire_close_session: boolean;
+  /**
+   * The daemon cleans a wave's items itself (SPEC §4.6.26): a task's once it ends and its agents
+   * are retired, the whole wave's once it ended and no agent is live. false: only by hand.
+   */
+  cleanup_on_end: boolean;
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
@@ -294,6 +299,11 @@ export interface FleetConfig {
   fallback: FallbackProfile;
   /** Where managed clones live on each machine (`<repo_root>/<owner>/<name>`; `~` is its home). */
   repo_root: string;
+  /**
+   * The supervisor's own adopted clones, `owner/name` → absolute path (#616): `hosts.<name>.repos`
+   * for its own machine, used in place of the managed path.
+   */
+  repos?: Record<string, string>;
 }
 
 /** Config `repos.<owner/name>`: the machines holding a clone (`all`: every machine). */
@@ -519,6 +529,8 @@ export interface Wave {
   ci?: CiOverride;
   /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
   playbook?: string;
+  /** `release_version:` (SPEC §4.6.19): the release's version, instead of the one volleyd resolves. */
+  release_version?: string;
   /**
    * The overlap plan for this version (`wave_planned`); absent until planned. Not `plan`: a
    * `WaveRecord`'s `plan` is already the versioned wave file.
@@ -635,7 +647,9 @@ export interface TaskState {
 export interface TaskPlacement {
   /** A machine name: the supervisor's own under its `fleet.local_name`. */
   host: string;
-  by: "auto" | "wave_file" | "decision";
+  by: "auto" | "wave_file" | "decision" | "fallback";
+  /** Why it was moved (`fallback`): what the machine it left said. */
+  why?: string;
   score: number | null;
   decided_at: string;
   candidates: { host: string; score: number | null; line: string }[];
@@ -701,6 +715,8 @@ export interface WaveState {
   alarms?: { alarm: string; message: string }[];
   /** When, by whom and why the wave was archived (`volleyd status --all` only). */
   archived?: { at: string; by: string; reason: string };
+  /** The last cleanup run (`wave_cleaned`, SPEC §4.6.26): its counts and what it kept, and why. */
+  cleanup?: WaveCleanup;
   /** The overlap plan (`wave_planned`); absent until planned. Not `plan`: that is the wave file. */
   overlap_plan?: { clusters: PlanCluster[] };
   /**
@@ -751,10 +767,21 @@ export type ReleaseStageState =
   | "failed"
   | "skipped";
 
-/** wave-state `release`: the stage running or awaiting its go (else null), and every stage. */
+/**
+ * wave-state `release`: the stage running or awaiting its go (else null), and every stage (a ship
+ * stage marked `phase: ship`). The version, day and default branch come with `release_started`;
+ * `pr` once a prepare stage verified the release PR; `merged_sha` once volleyd merged it, from
+ * when the train is in its `ship` phase (SPEC §4.6.19).
+ */
 export interface ReleaseState {
   stage: string | null;
-  stages: { name: string; state: ReleaseStageState }[];
+  stages: { name: string; state: ReleaseStageState; phase?: "ship" }[];
+  phase?: "prepare" | "ship";
+  version?: string;
+  date?: string;
+  default_branch?: string;
+  pr?: { number: number; head: string; title?: string };
+  merged_sha?: string;
 }
 
 /** wave-state `autopilot` (SPEC §4.6.1, §4.6.16). */
@@ -781,6 +808,51 @@ export interface CoordinatorAttention {
   session_url?: string;
   workspace?: string;
   last_seen: string;
+}
+
+/** What one cleanup run removed, by kind (`wave_cleaned.removed`; zeros included). */
+export interface CleanupCounts {
+  worktrees: number;
+  sessions: number;
+  processes: number;
+  branches: number;
+  logins: number;
+  repos: number;
+  accounts: number;
+  clones: number;
+}
+
+/** A thing a wave left (SPEC §4.6.26): its kind, the machine it is on, what it is, and why kept. */
+export interface Resource {
+  kind:
+    | "worktree"
+    | "session"
+    | "process"
+    | "branch"
+    | "remote_branch"
+    | "release_branch"
+    | "login"
+    | "lock"
+    | "repo"
+    | "clone"
+    | "account";
+  /** `local` (the supervisor) or a paired machine's name. */
+  host: string;
+  what: string;
+  task?: string;
+  /** Why it was kept (borrowed, unmerged, unreachable, …), with the command to remove it if any. */
+  why?: string;
+}
+
+/** `WaveState.cleanup`: the last `wave_cleaned` folded (reducer.ts). */
+export interface WaveCleanup {
+  at: string;
+  removed: CleanupCounts;
+  kept: Resource[];
+  /** The summary line the run printed last. */
+  summary: string;
+  /** Set when the run cleaned one task only (the per-task pass). */
+  task?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +994,9 @@ export const WAVE_EVENT_TYPES = [
   "release_stage_failed",
   "release_stage_skipped",
   "release_cancelled",
+  "release_pr_detected",
+  "release_merged",
+  "release_merge_failed",
   "release_done",
   // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
   "inbox_opened",
@@ -966,6 +1041,10 @@ export const WAVE_EVENT_TYPES = [
   "peer_retargeted",
   // Fleet (SPEC §4.6.14): an admin's `machine_add` made a bare box a paired machine (or failed).
   "machine_added",
+  // Wave cleanup (SPEC §4.6.26): one run's summary in the wave's journal, and a managed clone
+  // a wave-owned registration's run made, deleted, in `_system`.
+  "wave_cleaned",
+  "repo_clone_removed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

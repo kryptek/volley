@@ -172,15 +172,15 @@ describe("Getting started › Repos: Add a repo", () => {
     expect(setSummary).toHaveBeenCalledWith({ repos: ["example-org/other", SLUG] });
   });
 
-  it("A folder: lists paired machines only and says how the supervisor's own clones are added", () => {
+  it("A folder: lists the supervisor's machine first, then the paired ones (#616)", () => {
     mount();
     fireEvent.click(screen.getByRole("tab", { name: "A folder on a computer" }));
     const picker = screen.getByRole("combobox", { name: "Computer" });
     const names = within(picker)
       .getAllByRole("option")
       .map((o) => o.textContent);
-    expect(names).toEqual(["box-a", "box-b"]);
-    expect(screen.getByText(/hub's own clones are added by path in the wave file/)).toBeVisible();
+    expect(names).toEqual(["hub (this one)", "box-a", "box-b"]);
+    expect(screen.queryByText(/added by path in the wave file/)).toBeNull();
   });
 
   it("A folder: a found clone fills the slug, shows the folder line, and adds with its path", async () => {
@@ -201,6 +201,9 @@ describe("Getting started › Repos: Add a repo", () => {
       },
     });
     fireEvent.click(screen.getByRole("tab", { name: "A folder on a computer" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Computer" }), {
+      target: { value: "box-a" },
+    });
     fireEvent.change(screen.getByRole("textbox", { name: "Folder" }), {
       target: { value: FOLDER },
     });
@@ -247,6 +250,9 @@ describe("Getting started › Repos: Add a repo", () => {
       },
     });
     fireEvent.click(screen.getByRole("tab", { name: "A folder on a computer" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Computer" }), {
+      target: { value: "box-a" },
+    });
     fireEvent.change(screen.getByRole("textbox", { name: "Folder" }), {
       target: { value: FOLDER },
     });
@@ -277,9 +283,12 @@ describe("Getting started › Repos: Add a repo", () => {
     };
     rerender({ ctx: { ...ctx, state: bare } });
     fireEvent.click(screen.getByRole("tab", { name: "A folder on a computer" }));
-    expect(screen.getByText(/No computer is paired yet/)).toBeInTheDocument();
+    // The supervisor's own machine alone (#616), then the paired ones once they land.
+    expect(screen.getByRole("combobox", { name: "Computer" })).toHaveValue("hub");
     rerender({ ctx });
-    // The select shows box-a, and the form probes box-a without the person picking it.
+    fireEvent.change(screen.getByRole("combobox", { name: "Computer" }), {
+      target: { value: "box-a" },
+    });
     expect(screen.getByRole("combobox", { name: "Computer" })).toHaveValue("box-a");
     fireEvent.change(screen.getByRole("textbox", { name: "Folder" }), {
       target: { value: FOLDER },
@@ -301,7 +310,7 @@ describe("Getting started › Repos: Add a repo", () => {
     }
   });
 
-  it("A folder: without a paired machine it says so and offers no form", () => {
+  it("A folder: without a paired machine it offers the supervisor's own (#616)", () => {
     const { rerender, ctx } = mount();
     rerender({
       ctx: {
@@ -314,7 +323,12 @@ describe("Getting started › Repos: Add a repo", () => {
       },
     });
     fireEvent.click(screen.getByRole("tab", { name: "A folder on a computer" }));
-    expect(screen.getByText(/No computer is paired yet/)).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Folder" })).toBeNull();
+    const picker = screen.getByRole("combobox", { name: "Computer" });
+    expect(
+      within(picker)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["hub (this one)"]);
+    expect(screen.getByRole("textbox", { name: "Folder" })).toBeInTheDocument();
   });
 });

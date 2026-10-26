@@ -175,6 +175,21 @@ describe("the coordinator login on the supervisor machine", () => {
       expect(keychainCalls + fileCalls).toBe(0);
     });
 
+    it("the coordinator switch (VOLLEY_HOOKS_COORDINATOR=1) clears the env markers, never an identity file above", () => {
+      const env = {
+        VOLLEY_AGENT_ID: "coordinator",
+        VOLLEY_HOOKS_DIR: "/path/to/volley-hooks",
+        VOLLEY_HOOKS_COORDINATOR: "1",
+      };
+      expect(agentContext(env, dir, { coordinatorRole: true })).toBeNull();
+      // Only the auth dir step asks with the carve-out; the saved login's steps never do.
+      expect(agentContext(env, dir)).toBe("VOLLEY_AGENT_ID is set");
+      const sub = join(worktree(), "packages", "deep", "src");
+      expect(agentContext(env, sub, { coordinatorRole: true })).toContain(
+        join(dir, "wt", ".volley", "agent.json"),
+      );
+    });
+
     it("an operator in a plain directory still gets it", () => {
       expect(agentContext({}, dir)).toBeNull();
     });
@@ -231,9 +246,16 @@ describe("the coordinator login on the supervisor machine", () => {
         username: "bob",
         password: "x",
       });
-      // Without the broker URL (an older caller) or for a remote broker: anonymous, as before.
-      expect(resolveAuth({}, env, dir, undefined, d)).toBeNull();
-      expect(resolveAuth({}, env, dir, "mqtt://broker.example:1883", d)).toBeNull();
+      // VOLLEY_AUTH_DIR names the file: it serves without a broker URL, and for any broker (the
+      // MCP server's rule: the coordinator role on a peer logs in to the hub with it).
+      expect(resolveAuth({}, env, dir, undefined, d)?.password).toBe("saved");
+      expect(resolveAuth({}, env, dir, "mqtt://broker.example:1883", d)?.password).toBe("saved");
+      // The saved login without VOLLEY_AUTH_DIR: never without the URL, never for a remote broker.
+      const home = join(dir, "no-setup");
+      expect(resolveAuth({}, { VOLLEYD_HOME: home }, dir, undefined, d)).toBeNull();
+      expect(
+        resolveAuth({}, { VOLLEYD_HOME: home }, dir, "mqtt://broker.example:1883", d),
+      ).toBeNull();
     });
   });
 });
