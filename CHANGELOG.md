@@ -2,6 +2,114 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.14.0 — 2026-10-26
+
+### Added
+
+- **volleyd: `volleyd add <wave> <issue...>` adds issues to a running wave in one command.** It
+  fetches each issue, derives the task as `wave-from-issues` does (the shared code now lives in
+  `volleyd/issue-task`), refuses an issue already in the wave, a closed one, an open dependency
+  outside the wave and a wave that is not live, writes the task into the wave file in the
+  repository at the file's own indent and submits the next plan version; owner only. (#606)
+- **volley-cli: `volley bug`.** Gathers the version, install method, `setup --check`, `peer
+  doctor`, `volleyd status`, the wave's last journal events and the service logs; redacts tokens,
+  credentials, e-mails, the user, hosts, IPs and repository names; shows the exact text and, only
+  on a yes, opens a GitHub issue through `gh` (when its active account is signed in) or a
+  browser page with the report saved beside it. The repository gains a bug issue template; Settings › About names the command. (#607)
+- **volleyd: placement takes the supervisor's own machine by name, checks the spawn path, and falls
+  back with a reason.** A wave file's `host:` (and `placement_prefer` / `placement_avoid`) may name
+  this machine by its `fleet.local_name`, the same as `host: local`; an unknown host name is
+  refused by `volleyd validate` and at submit with the names it knows (`unknown host "mac": this
+  machine is macbook-pro; paired: box-a`), and the placement line names them (`placement: auto
+  (placement.default; this machine macbook-pro, 1 paired: box-a)`). A paired machine's repository
+  is `blocked` in readiness when the path the supervisor would spawn in is not the clone the
+  machine reports, or when the supervisor's own probe of that path finds no clone there. An
+  auto-placed task whose spawn fails `REMOTE_REPO_MISSING` is placed again elsewhere
+  (`task_placed { by: fallback, from, why }`) instead of asking; the `remote_repo_missing`
+  decision opens only when no other machine can take it, the wave file named the host, or an
+  earlier role of the task already ran there. (#608)
+- **volley-issues: `--placement <machine>` pins every task to one machine.** The issue helper's
+  `--placement` takes a machine name beside `local` / `auto` and writes `host: <machine>` on every
+  task; SKILL.md's Step 3 command shows the flag and says where to read this machine's name. (#608)
+- **volleyd: a finished wave releases itself on one `release_go`.** The release playbook gains `{{version}}`, `{{date}}` and friends, a `ship` phase that runs after the owner's go, and a `release_pr` fact. volleyd resolves the release version from the newest tag and the change fragments (minor on any `added` or `removed`, else patch; `release_version:` in the wave file overrides it), waits for the release PR's CI, squash-merges it on `go` at exactly the head `release_go` named (a head that moves or turns red after the question drops the go and asks again; deleting the release branch, never `--admin`), closes the wave's issues at once, runs the ship stages at the merge commit, then completes the wave. The morning digest's release line names the version, the PR and the merge commit, and `release_pr_ci_failed` is owner-only by default. A release stage's agent is adopted again after a volleyd restart, so a `deploy` stage can restart volleyd. This repository ships its own `.volley/release.yaml` (bump, release PR, tag, `volley deploy`) and `scripts/release-version.ts` (`bun run release:version --set <v>`, `--check`). (#609)
+- **volley-desk: the release train shows its version, the release PR and the ship stages.** (#609)
+- **volley-issues: the wave helper says when a repository has no release playbook.** The skill's release-branch merge is the train's on one `release_go`, by hand only without a playbook. (#609)
+- **volley: `volley repo check <owner/name>` says whether a repository can run a wave, on every
+  machine that could run it.** One line per check (the repository on GitHub, its release branch
+  and the reviews it requires, then each machine's clone, push access, git identity, worktree
+  root, toolchain and trust, from a fresh doctor run), the fix under each failing one, `--fix` for
+  the safe ones, and a `--machine` that holds no clone named with the add that gives it one; `volley repo add` ends on it, and a wave whose repository is not ready on any
+  machine that could run it, whose release branch is missing on origin, or whose `merge: auto` a
+  branch rule would refuse is refused at submit with the fix. (#610)
+- **install tests: one command verifies a branch on fresh VMs.**
+  `scripts/install-tests/verify.sh [<branch>] [--version vX.Y.Z]` dispatches `install-vm.yml` on
+  the paired Linux machine's runner (fresh Ubuntu 24.04 and Debian 13 VMs, then a hub and a peer),
+  prints one pass/fail table and always destroys the VMs; the nightly runs the same jobs, and only
+  it reports to the `install-tests` tracking issue. New checks: a wave on a repository with no CI,
+  a repository added by slug and placed on a paired machine, and no `undefined` in any CLI output;
+  volley-sim gains `gh repo clone`, `VOLLEY_SIM_ORIGINS` and `VOLLEY_SIM_WORKFLOWS`. (#611)
+- **volleyd: cleanup removes everything a wave made, on every machine, and runs itself.**
+  Processes are found by working directory as well as argv, so a dev server dies with the agent
+  that started it. Merged agent branches are deleted under a per-branch token, on paired machines
+  too (`volley peer cleanup` runs there), and leftover agent logins go. Registrations and accounts
+  made with `--for-wave` go with the wave (`volley repo add … --for-wave`,
+  `volley auth add … --for-wave`), along with the clones volleyd made for them; a clone with
+  unpushed work, or a worktree still checked out from it, is kept and named. Every run ends with one summary line plus what was kept and why
+  (`wave_cleaned`, `volleyd status`'s `cleanup:` line, the Desk's `cleaned` chip). A task's items
+  are cleaned when it ends and the whole wave's when the wave ends (`cleanup_on_end`, default on).
+  A paired machine that cannot be reached keeps its items for the next run. The owner's clones and
+  registrations, unmerged branches and human accounts are never removed. (#612)
+- **volley-cli: `volley auth status`, and the coordinator manages repositories.** `volley auth
+  status [--json]` prints the login this shell's commands use (identity, role, which source
+  answered and why the others did not, whether the broker accepts it), never a secret and without
+  an admin login. The fixed `coordinator` identity may `volley repo add|remove` with no flag and
+  no admin account (the broker grants it its own account-op topic; volleyd answers only the five
+  repository ops there); adopting a clone by `--path`, pairing, archive and the account ops stay
+  an admin's. `volley pub --clear --agent-id <id>` clears a finished agent's retained records
+  with the same login, replacing `mosquitto_pub -P` in `/volley-issues`. Run `volley auth migrate
+  --roles --yes` (setup offers it) to bring an existing broker's `coordinator` role up to date.
+  (#613)
+
+### Changed
+
+- volleyd: a machine with no git commit identity is not ready for agents; the doctor's new
+  `repo.push` and `repo.worktrees` checks block a repository on a machine that cannot push to it
+  or write its worktree root. (#610)
+- **volley setup moves a broker login out of ~/.claude.json.** The Claude Code step now plans and
+  applies the re-registration of a volley MCP entry that carries `VOLLEY_AUTH_USERNAME` /
+  `VOLLEY_AUTH_PASSWORD` (or a login in its URL), once the coordinator login is in the auth dir;
+  `volley setup --check` shows it as `to move`, keys are named, values never. When the login was
+  an account's, the step names the `volley auth rotate <account>` that retires it. An entry with
+  other settings of your own is still left as is. (#614)
+
+### Fixed
+
+- **volley-cli, volleyd: one login ladder, secret-free errors.** Every CLI resolves its broker
+  login the same way (flags, the identity file, `VOLLEY_AUTH_*`, the auth dir's
+  `coordinator.json`, the keychain, the saved file), the volleyd-run coordinator's CLIs log in
+  through the file `VOLLEY_AUTH_DIR` names, and a damaged credentials file (an agent.json of the
+  wrong shape included) is reported by path only, exit 1 — no parser text, so no password
+  fragment can reach stderr or `hooks-error.json`. Hints and refusals point at `volley auth
+  status` instead of naming `VOLLEY_AUTH_PASSWORD` (an admin op's refusal adds "or pass
+  --username <admin>"), and the skills stop teaching it. (#613)
+- **volley deploy: the supervisor's own install records its lock marker.** The deploy (and the
+  installer) record the `bun.lock` they installed from in `node_modules/.volley-lock-sha256` as
+  paired machines do, so the supervisor's doctor no longer reports `volley.installed` stale after
+  every release and the machine stays ready. (#615)
+- **volleyd: the supervisor's own clones join the repository registry.** A wave submitted from a
+  local clone of a registered repository adopts that clone for the supervisor's machine
+  (`fleet.repos`, journaled `repo_added { by: "wave <id>" }`; `volleyd run` prints `note: adopted
+  <root> as <machine>'s clone of <owner/name>`), `volley repo add` adopts a clone a wave already
+  runs in, `--path`, `repo_probe` and the Desk's add forms accept the supervisor's machine, and
+  its machine card and `placement: auto` see the repository as ready there. A repository config
+  does not name is still never registered. (#616)
+
+### Removed
+
+- **install tests: the macOS VM layer (Layer 3) is gone.** It never booted a real VM and needed a
+  second always-on Mac; the one-command install on macOS is tested on Layer 1's hosted Mac on every
+  PR and in the owner's smoke. (#611)
+
 ## 0.13.2 — 2026-10-25
 
 ### Fixed

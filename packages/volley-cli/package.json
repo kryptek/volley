@@ -1,6 +1,6 @@
 {
   "name": "volley-cli",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "private": true,
   "description": "Volley CLI — `volley pub / sub / wait / list` for shell scripts and CI",
   "license": "Apache-2.0",
