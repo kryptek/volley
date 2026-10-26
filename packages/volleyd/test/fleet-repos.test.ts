@@ -389,6 +389,17 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
         payload?: { fleet?: { repos?: Record<string, string> } };
       } | null
     )?.payload?.fleet?.repos;
+  /**
+   * `fleet.repos` once it says `want`: the daemon publishes a config change from a job queued
+   * behind the op that made it, so the retained config can land just after the reply.
+   */
+  const settledRepos = async (want: Record<string, string> | undefined) => {
+    await eventually(async () => {
+      await f.tick(0);
+      return JSON.stringify(await fleetRepos()) === JSON.stringify(want);
+    });
+    return fleetRepos();
+  };
 
   /** The fleet, its sessions held: a wave's agent launches but never publishes (no race at close). */
   async function start(): Promise<void> {
@@ -414,7 +425,7 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
     expect(r.error).toBeUndefined();
     const note = `adopted ${f.repo} as ${LOCAL}'s clone of ${B}`;
     expect((r as { notes?: string[] }).notes).toEqual([note]);
-    expect(await fleetRepos()).toEqual({ [B]: f.repo });
+    expect(await settledRepos({ [B]: f.repo })).toEqual({ [B]: f.repo });
     expect(sys("config_changed")).toHaveLength(before + 1);
     expect(sys("repo_added").at(-1)?.data).toEqual({
       by: "wave wb",
@@ -502,7 +513,7 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
       });
     const r = await f.client.request("run", { wave_yaml: waveYaml("wb") });
     expect(r.error).toBeUndefined();
-    expect(await fleetRepos()).toEqual({ [B]: f.repo });
+    expect(await settledRepos({ [B]: f.repo })).toEqual({ [B]: f.repo });
   });
 
   it("no gh and no origin: nothing is adopted", async () => {
@@ -526,7 +537,7 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
     };
     expect(added.ok).toBe(true);
     expect(added.result.status).toContain(`${LOCAL}: ready (${f.repo}, adopted from wave wb)`);
-    expect(await fleetRepos()).toEqual({ [B]: f.repo });
+    expect(await settledRepos({ [B]: f.repo })).toEqual({ [B]: f.repo });
 
     // repo_probe on the supervisor's machine reads the clone here.
     f.exec.on(["git", "-C", f.repo, "remote", "get-url", "origin"], {
@@ -547,7 +558,7 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
     // repo_remove drops fleet.repos and deletes nothing.
     const removed = await f.adminOp({ op: "repo_remove", slug: B, machines: [LOCAL] });
     expect(removed).toMatchObject({ ok: true, result: { clones: { [LOCAL]: f.repo } } });
-    expect(await fleetRepos()).toBeUndefined();
+    expect(await settledRepos(undefined)).toBeUndefined();
 
     // --path for the supervisor's machine is accepted.
     const mine = join(f.env.home, "mine-b");
@@ -555,6 +566,6 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
     expect(
       await f.adminOp({ op: "repo_add", slug: B, machines: [LOCAL], paths: { [LOCAL]: mine } }),
     ).toMatchObject({ ok: true });
-    expect(await fleetRepos()).toEqual({ [B]: mine });
+    expect(await settledRepos({ [B]: mine })).toEqual({ [B]: mine });
   });
 });
