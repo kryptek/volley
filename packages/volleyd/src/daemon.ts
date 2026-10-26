@@ -7363,9 +7363,12 @@ export class Daemon {
         const view = await readSlugView(this.host.exec, slug);
         if (typeof view === "string") return refuse(view);
         const given = paths as Record<string, string>;
-        // The supervisor's machine without a path: the clone a wave already runs from (D3).
+        // The supervisor's machine without a path: the clone a wave already runs from (D3). Never
+        // for the coordinator: adopting trusts that folder, an admin's (coordinatorRepoRefusal).
         const known =
-          this.namedMachines(machines).includes(local) && !Object.hasOwn(given, local)
+          sender !== "coordinator" &&
+          this.namedMachines(machines).includes(local) &&
+          !Object.hasOwn(given, local)
             ? await this.knownWaveClone(view.slug)
             : null;
         const r = await this.enqueue(() =>
@@ -7408,9 +7411,10 @@ export class Daemon {
   }
 
   /**
-   * The clone `slug`'s newest wave on a path runs from, for a `repo_add` that gives the
-   * supervisor's machine no path (#616, D3): the wave's `repo:` path whose `github.slug` is
-   * `slug`, at its root; null when the supervisor already holds one by config, or no wave does.
+   * The clone a wave on a path of `slug` runs from, for a `repo_add` that gives the supervisor's
+   * machine no path (#616, D3): the wave's `repo:` path whose `github.slug` is `slug`, at its
+   * root (the last such wave in `this.waves`, which after a restart is load order, not submit
+   * order); null when the supervisor already holds one by config, or no wave does.
    */
   private async knownWaveClone(slug: string): Promise<{ root: string; wave: string } | null> {
     const local = this.config.localName();

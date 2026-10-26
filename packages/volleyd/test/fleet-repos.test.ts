@@ -501,6 +501,21 @@ describe("the supervisor's own clones join the repository registry (#616)", () =
     expect((r as { notes?: string[] }).notes).toBeUndefined();
     expect(sys("config_changed")).toHaveLength(before);
     expect(await fleetRepos()).toBeUndefined();
+    expect(f.logs).toContain(`${B}: the wave runs from ${f.repo}, the registry has ${BOX_B}`);
+  });
+
+  it("a repo_add from the coordinator never adopts the clone a wave runs from", async () => {
+    await start();
+    expect((await f.client.request("run", { wave_yaml: waveYaml("wb") })).error).toBeUndefined();
+    theBox().answers.doctor = report([clone(B, BOX_B)]);
+    const added = (await f.adminOp({ op: "repo_add", slug: B }, "coordinator")) as {
+      ok: boolean;
+      result: { status: string[] };
+    };
+    expect(added.ok).toBe(true);
+    expect(added.result.status.join("\n")).not.toContain("adopted from wave");
+    expect(sys("repo_added").at(-1)?.data.paths).toBeUndefined();
+    expect(await fleetRepos()).toBeUndefined();
   });
 
   it("gh failing: the clone's origin names the repository", async () => {

@@ -3154,7 +3154,8 @@ it. A second submit changes nothing; a clone config already gives the supervisor
 left alone (logged: `<owner/name>: the wave runs from <root>, the registry has <path>`); a
 repository config does not name is never registered. `volley repo add` with the supervisor's
 machine and no `--path` for it adopts the clone such a wave runs from the same way
-(`<machine>: ready (<root>, adopted from wave <id>)`), and `--path <machine>=<abs>` adopts any.
+(`<machine>: ready (<root>, adopted from wave <id>)`; never one the coordinator sends: adopting
+trusts the folder, an admin's), and `--path <machine>=<abs>` adopts any.
 
 **The supervisor's own machine runs a repository's agents only when it is assigned there.** For a
 repository config names (`repos`, or an adopted clone on a host) without assigning it to the
