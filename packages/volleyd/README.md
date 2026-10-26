@@ -3716,7 +3716,9 @@ setup, role and coordinator ops.
   clone verdict says (`releaseBranchMissing` checks that clone) unless `git.identity` fails; a
   candidate with no record yet, or not PATH-probed yet, refuses nothing. The rest comes back as
   `repo_check.lines`, which `volleyd run` prints (`repo check: ! …`); unreadable facts journal
-  `alarm_raised { alarm: "repo_check_unknown" }`.
+  `alarm_raised { alarm: "repo_check_unknown" }` (not an unread CI mode, which is
+  `ci_mode_unknown`'s; a classically protected branch's `/protection` is admin-only, so a
+  non-admin owner raises it on every submit there).
 - `repo_probe { machine, path }` reads what is at an adopted clone's path on a paired machine
   before an add (`RemoteHost.probeClone`: `git -C <path> rev-parse --show-toplevel`, then `git -C
   <root> remote get-url origin`, as two scripts) and answers `{ machine, path, state: found |

@@ -124,10 +124,13 @@ export async function readRepoFacts(
   };
 }
 
-/** Whether a fact the refusals need could not be read (journaled as `repo_check_unknown`). */
+/**
+ * Whether a fact the refusals need could not be read (journaled as `repo_check_unknown`). An
+ * unread CI mode is not one: `ci_mode_unknown` reports it. Classic protection is admin-only, so a
+ * non-admin's submit to a classically protected branch raises it every time, as its reviews are.
+ */
 export const factsUnknown = (f: RepoFacts): boolean =>
   typeof f.view === "string" ||
-  (f.ci === null && f.branch_exists !== false) ||
   (f.branch !== null && f.branch_exists === null) ||
   !f.reviews_readable;
 

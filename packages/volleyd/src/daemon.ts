@@ -8006,12 +8006,16 @@ export class Daemon {
     const cfg = this.config.effective();
     const local = this.config.localName();
     let names = holdersOf(cfg, local, slug);
+    // A machine the caller named that holds no clone: not asked, but named in the summary.
+    let bare: string[] = [];
     if (p.machines !== undefined) {
       const asked = this.requestMachines(p.machines);
       if ("error" in asked) return { ok: false, error: asked.error };
       // `machines` narrows the holders (SPEC §4.6.21): a machine that holds no clone is not asked.
       const named = this.namedMachines(asked.machines);
+      const holders = names;
       names = names.filter((m) => named.includes(m));
+      bare = [...new Set(named)].filter((m) => !holders.includes(m));
     }
     // In repo_status' order: the own machine, then each configured host.
     const order = this.allMachines();
@@ -8052,7 +8056,12 @@ export class Daemon {
         repository: repositoryChecks(facts),
         machines,
         ready_on: names.filter((m) => machines[m]?.ready === true),
-        summary: closingLine(machines),
+        summary: [
+          closingLine(machines),
+          ...bare.map(
+            (m) => `${m} holds no clone of ${slug}: volley repo add ${slug} --machine ${m}`,
+          ),
+        ].join(" "),
       },
     };
   }

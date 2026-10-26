@@ -762,8 +762,9 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
         requirements = { error: e instanceof Error ? e.message : String(e) };
       }
     }
-    // volleyd's worktree root for it: managed under ~/.volley/worktrees, else beside the clone.
-    const wtRoot = managed ? managedWorktreeRoot(deps.home, repoSlug) : worktreeRoot(at, deps.home);
+    // volleyd's worktree root for it: a configured repository's (managed or adopted) is always
+    // under ~/.volley/worktrees (hosts/ssh-tmux.ts); only the legacy clone keeps them beside it.
+    const wtRoot = managedWorktreeRoot(deps.home, repoSlug);
     const near = nearestExisting(wtRoot);
     let nearDir = false;
     try {

@@ -1442,22 +1442,38 @@ describe("volley peer doctor: many repositories (#435)", () => {
       expect(after?.ok).toBe(true);
     });
 
-    it("an adopted clone's worktree root is beside it (.volley-worktrees)", async () => {
+    it("an adopted clone's worktree root is the managed one, as volleyd cuts them there", async () => {
       const m = machine();
       const adopted = join(m.root, "work", "a");
       addClone(m, adopted, { origin: "https://github.com/a/a" });
       const c = forRepo(await reportRepos(m, { "a/a": adopted }), "repo.worktrees", "a/a");
-      expect(c?.detail).toContain(join(m.root, "work", ".volley-worktrees"));
+      expect(c?.detail).toContain(join(m.home, ".volley", "worktrees", "a", "a"));
+      expect(c?.detail).not.toContain(".volley-worktrees");
+    });
+
+    it("an adopted clone beside a read-only folder does not block the repository", async () => {
+      const m = machine();
+      const adopted = join(m.root, "opt", "a");
+      addClone(m, adopted, { origin: "https://github.com/a/a" });
+      const writable = (p: string) => !p.startsWith(join(m.root, "opt"));
+      const io = makeBufferIO();
+      await doctor(io, m.deps({ writable }), { repos: { "a/a": adopted }, json: true });
+      const c = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
+        (x) => x.id === "repo.worktrees",
+      );
+      expect(c?.ok).toBe(true);
     });
 
     it("repo.worktrees' fix quotes a root with a space, so it can be pasted", async () => {
       const m = machine();
-      const adopted = join(m.root, "my work", "a");
+      const home = join(m.root, "my home");
+      mkdirSync(home, { recursive: true });
+      const adopted = join(m.root, "work", "a");
       addClone(m, adopted, { origin: "https://github.com/a/a" });
-      const root = join(m.root, "my work", ".volley-worktrees");
+      const root = join(home, ".volley", "worktrees", "a", "a");
       const writable = (p: string) => existsSync(p) && p.startsWith(root);
       const io = makeBufferIO();
-      await doctor(io, m.deps({ writable }), { repos: { "a/a": adopted }, json: true });
+      await doctor(io, m.deps({ writable, home }), { repos: { "a/a": adopted }, json: true });
       const failed = (JSON.parse(io.readStdout()) as DoctorReport).checks.find(
         (x) => x.id === "repo.worktrees",
       );

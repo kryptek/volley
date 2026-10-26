@@ -821,6 +821,19 @@ describe("repo_check (#610)", () => {
     expect(theBox().doctorRuns.slice(runs)).toEqual([{ fix: true, repos_add: [SLUG] }]);
   });
 
+  it("--machine naming a box that holds no clone says so, rather than dropping it silently", async () => {
+    await added();
+    const r = await f.client.request(
+      "repo_check",
+      { slug: "b/b", machines: [PEER] },
+      { timeoutMs: 20_000 },
+    );
+    const res = r.result as { machines: object; summary: string };
+    expect(Object.keys(res.machines)).toEqual([]);
+    expect(res.summary).toContain(`${PEER} holds no clone of b/b`);
+    expect(res.summary).toContain(`volley repo add b/b --machine ${PEER}`);
+  });
+
   it("--machine narrows; a malformed slug or branch is refused", async () => {
     await added();
     const r = await f.client.request(

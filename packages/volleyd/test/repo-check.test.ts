@@ -134,6 +134,16 @@ describe("readRepoFacts", () => {
     expect(fake.calls.every((c) => c.opts.cwd === "/repo")).toBe(true);
   });
 
+  it("only the workflows unreadable: CI mode unknown (ci_mode_unknown's alarm), no refusal fact unknown", async () => {
+    const fake = github().on(api("actions/workflows?per_page=100"), {
+      code: 1,
+      stderr: "HTTP 403: rate limit",
+    });
+    const f = await readRepoCheck(fake.exec, SLUG, B);
+    expect(f).toMatchObject({ ci: null, branch_exists: true, reviews_readable: true });
+    expect(factsUnknown(f)).toBe(false);
+  });
+
   it("any read failing is a fact unknown, never a throw", async () => {
     const fake = fakeExec()
       .on(VIEW, { code: 1, stderr: "HTTP 403: rate limit" })
