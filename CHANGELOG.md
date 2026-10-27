@@ -2,6 +2,24 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.14.1 — 2026-10-27
+
+### Fixed
+
+- **volleyd: `cleanup` works for the owner again.** `volleyd cleanup <wave> [--by <id>]` resolves
+  the caller exactly as `stop` and `steer` do (`--by`, the caller's session, `VOLLEY_COORDINATOR`
+  or the name `volley setup` saved) and takes `--json`, `--broker-url` and `--namespace`; the
+  identity hints no longer send an owner to `VOLLEY_AGENT_ID` (which marks an agent's shell and
+  turns the saved login off; a refused anonymous connect now says so); `status` shows the
+  whole-wave cleanup instead of the last task's `nothing to clean`; and the whole-wave pass no
+  longer re-runs per task. (#630)
+- **volleyd: a machine whose clone has its own git identity is ready for a wave.** The doctor
+  judges a commit identity per clone (`repo.identity`, `git -C <clone> var GIT_COMMITTER_IDENT`:
+  repo, global or system config, as git resolves it), readiness blocks the clone that lacks one
+  instead of the machine, and the machine-level `git.identity` warning blocks only while no clone
+  has one; admission and `volley repo check` follow. A repo-level identity with no global one was
+  refused at `volleyd run` since v0.14.0 (#610). (#631)
+
 ## 0.14.0 — 2026-10-26
 
 ### Added
