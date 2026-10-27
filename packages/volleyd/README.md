@@ -3563,15 +3563,17 @@ publishes there):
 yet, the tunnel down, no doctor report (`no doctor report: run volley peer doctor`), a failing
 `block` check, a volley version other than volleyd's, `claude` or `bun` missing from the PATH an
 agent gets, GitHub without push access (`gh: no write permission on <owner/name>`, the first
-repository the record reports), git without a commit identity (`git: no commit identity on
-<machine> (volley setup --peer --step signin)`: the doctor's `git.identity` only warns, but an
-agent's first commit there would die), or Claude signed out (`claude: not signed in`). A repository is
+repository the record reports), git without a commit identity anywhere (`git: no commit identity
+on <machine> (volley setup --peer --step signin)`: the doctor's `git.identity`, the home's
+global or system identity, only warns, but while no clone has one of its own (`repo.identity`)
+an agent's first commit there would die; a clone with its own commits on a machine with no
+global one, so then only a clone without one is `blocked`), or Claude signed out (`claude: not signed in`). A repository is
 never a machine blocker: `repos` judges each one on its own, by `owner/name` — every running
 wave's, and every one the machine's record reports (an older peer's single `repo` by its origin's
 slug; one without an origin yet stands for every running wave's). `ready`: its clone exists and
 passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`; `repo.push:
 …`, the machine's own `gh` may not push to it; `repo.worktrees: …`, its worktree root can be
-neither written nor created) or a tool
+neither written nor created; `repo.identity: …`, git has no commit identity in that clone) or a tool
 it needs that is missing or too old (`java not installed (needed by owner/name)`, `node older than
 required (needed by owner/name)`); `absent`: no clone (`no clone of owner/name on box-a`);
 `cloning` while a `repo_add` run makes the clone there. On the supervisor's own machine, a running
@@ -3729,7 +3731,11 @@ setup, role and coordinator ops.
   a release branch not on origin for a wave with no local task, no candidate ready (and none
   `cloning`) for the repository, a task pinned to a machine not ready for it, and `merge: auto`
   on a branch that requires approving reviews. The own machine takes its local tasks whatever its
-  clone verdict says (`releaseBranchMissing` checks that clone) unless `git.identity` fails; a
+  clone verdict says (`releaseBranchMissing` checks that clone) unless git cannot commit in that
+  clone (`lacksIdentity(record, slug)`: its `repo.identity` fails, or no identity stands
+  anywhere; the line `<machine>: no commit identity in <clone> (git -C <clone> config user.name …
+  && … user.email …, or volley setup --peer --step signin)`); a paired machine is judged by its
+  repository verdict, which a failing `repo.identity` makes `blocked`; a
   candidate with no record yet, or not PATH-probed yet, refuses nothing. The rest comes back as
   `repo_check.lines`, which `volleyd run` prints (`repo check: ! …`); unreadable facts journal
   `alarm_raised { alarm: "repo_check_unknown" }` (not an unread CI mode, which is

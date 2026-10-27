@@ -559,7 +559,8 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `repo.worktrees` | block, for that repository only | the folder volleyd cuts the repository's worktrees under (`~/.volley/worktrees/<owner>/<name>` for a managed clone, `<clone>/../.volley-worktrees` for an adopted one) is writable, or its nearest existing ancestor is; `--fix` creates it (`mkdir -p`) |
 | `tool.<name>` (a repository's), `repo.requirements` | block, for that repository only | a tool the repository needs (its manifests and `.volley/requirements.yaml`; the volleyd README's "Repository toolchains") is installed and at least its minimum version; the file is valid |
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
-| `git.identity` | warn | `git var GIT_COMMITTER_IDENT` succeeds in the home (`git commits as <name> <<email>>`): without an identity an agent's first commit there fails with "Author identity unknown"; the fix is `volley setup --peer --step signin`. A warn (a join is not held up), but readiness needs it: the closing line names it while it fails |
+| `repo.identity` | block, for that repository only | `git -C <clone> var GIT_COMMITTER_IDENT` succeeds in the clone (`commits as <name> <<email>>`), its identity resolved as git does: the clone's own config, then the global, then the system's (and `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the doctor's environment). Without one an agent's first commit there fails with "Author identity unknown"; the fix is `git -C <clone> config user.name "<name>" && git -C <clone> config user.email <email>` for that clone, or `volley setup --peer --step signin` for a global one. The legacy `--repo` clone has it untagged |
+| `git.identity` | warn | `git var GIT_COMMITTER_IDENT` succeeds in the home (`git commits as <name> <<email>>`: the global or the system's identity, what a new clone gets); the fix is `volley setup --peer --step signin`. A warn (a join is not held up), but readiness needs it while no clone has an identity of its own (`repo.identity`): the closing line names it then. With none global and every repository's clone setting its own, it says so (`every repository's clone sets its own, a new clone would not`) and holds nothing back |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`); while signed in, `auth.claude_email` / `auth.claude_org` are the login's identity from `~/.claude.json`'s `oauthAccount.emailAddress` / `organizationName` (the only two fields of it the doctor reports; identity, never a credential) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
 | `skills` | warn | `~/.claude/skills/volley` and `~/.claude/skills/volley-issues` link to this checkout's `packages/volley-skill` and `packages/volley-issues` (sharing `skills: copy`: they are there, copied or not; `own`: left as is) |
@@ -733,11 +734,13 @@ volley repo check example-org/widgets --release-branch release/2026-10-26-x
 #   box-a (doctor 40 s ago)
 #   ✓ repo.clone: clone at /path/to/home/.volley/repos/example-org/widgets
 #   ✓ repo.push: octocat has WRITE access to example-org/widgets
+#   ✗ repo.identity: no commit identity in /path/to/home/.volley/repos/example-org/widgets (user.name/user.email): an agent's first commit there fails with "Author identity unknown"
+#       fix: git -C /path/to/home/.volley/repos/example-org/widgets config user.name "<name>" && git -C /path/to/home/.volley/repos/example-org/widgets config user.email <email> (for this clone), or volley setup --peer --step signin (a global one for every clone)
+#   ✓ repo.worktrees: /path/to/home/.volley/worktrees/example-org/widgets is writable
 #   ! git.identity: git has no commit identity (user.name/user.email): an agent's first commit here fails with "Author identity unknown"
 #       fix: volley setup --peer --step signin
-#   ✓ repo.worktrees: /path/to/home/.volley/worktrees/example-org/widgets is writable
 #
-#   not ready for a wave on box-a (git.identity); ready on control.
+#   not ready for a wave on box-a (repo.identity, git.identity); ready on control.
 volley repo status example-org/widgets
 #   control: ready (/path/to/home/.volley/repos/example-org/widgets)
 #   box-a: cloning
@@ -787,8 +790,9 @@ volley repo add example-org/demo --for-wave w1            # for wave w1 only: it
   `ci.mode`. Then one block per machine from its doctor run fresh for the answer (`<machine>
   (doctor 40 s ago)`; a machine whose doctor is busy, or that is down, shows its last report and
   says so): its clone, origin, push access (`repo.push`), worktree root (`repo.worktrees`), the
-  repository's tools, git identity and Claude trust, the fix under each failing line, as `volley
-  peer doctor` prints them. It ends on `ready for a wave on: <machines>.` or `not ready for a wave
+  repository's tools, git identity (the clone's, `repo.identity`, and the home's, `git.identity`,
+  which holds a machine back only while no clone has one of its own) and Claude trust, the fix
+  under each failing line, as `volley peer doctor` prints them. It ends on `ready for a wave on: <machines>.` or `not ready for a wave
   on <machine> (<why>); ready on <machines>.`; exit 0 when every machine asked is ready, 1
   otherwise. `--fix` (an admin's) runs each paired machine's doctor with its safe fixes and the
   repository added (a missing clone is cloned, a worktree root created) and prints the final

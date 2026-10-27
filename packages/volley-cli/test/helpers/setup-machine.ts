@@ -106,9 +106,11 @@ export interface FakeMachine {
   /**
    * git's commit identity (`git var GIT_COMMITTER_IDENT`: `Name <email>`; null: none, so a commit
    * dies with "Author identity unknown"). `git config --global user.name|user.email` writes
-   * `<home>/.gitconfig` and sets it once both are written.
+   * `<home>/.gitconfig` and sets it once both are written. `clones`: a clone's own identity by
+   * path (repo-level config, #631), what `git var` answers there (`-C <clone>` or `cwd`); a
+   * `git config` scoped to a clone (`-C`, `--local`) writes it.
    */
-  git: { identity: string | null };
+  git: { identity: string | null; clones: Record<string, string | null> };
   /** The answers `ask` gives, in order (then null); and the prompts it showed. */
   typed: (string | null)[];
   asked: string[];
@@ -228,7 +230,7 @@ export function fakeMachine(
     },
     claude: { installed: true, signedIn: true, plan: "max" },
     gh: { installed: true, signedIn: true, login: "octo-volley" },
-    git: { identity: OCTO_IDENTITY },
+    git: { identity: OCTO_IDENTITY, clones: {} },
     typed: [],
     asked: [],
     claudeJson: join(home, ".claude.json"),
@@ -277,6 +279,21 @@ export function fakeMachine(
     }
     if (a[0] === "gh" && a[1] === "issue" && a[2] === "create") {
       return ok(`https://github.com/${a[4]}/issues/${fw.nextIssue++}\n`);
+    }
+    // A clone's own identity (#631): repo > global, as git resolves it.
+    const cloneAt = a[0] === "git" && a[1] === "-C" ? (a[2] as string) : o?.cwd;
+    if (cloneAt !== undefined && Object.hasOwn(m.git.clones, cloneAt)) {
+      const sub = a[0] === "git" && a[1] === "-C" ? a.slice(3) : a.slice(1);
+      if (sub[0] === "var" && sub[1] === "GIT_COMMITTER_IDENT") {
+        const id = m.git.clones[cloneAt] ?? m.git.identity;
+        return id !== null
+          ? ok(`${id} 1760000000 +0000\n`)
+          : { code: 128, stdout: "", stderr: "fatal: unable to auto-detect email address\n" };
+      }
+      if (sub[0] === "config" && sub[1] !== "--global" && sub.includes("user.name")) {
+        m.git.clones[cloneAt] = `${sub.at(-1)} <set-in-clone>`;
+        return ok();
+      }
     }
     if (a[0] === "git" && a[1] === "-C") {
       if (a[3] === "remote") {

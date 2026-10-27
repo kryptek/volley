@@ -18,10 +18,11 @@ import type { LocalAgentsMode } from "./types";
  * `ready` is false on a failing `block` check, a volley version other than the supervisor's, a
  * `claude` or `bun` the PATH probe did not find (the supervisor's own probe decides: the doctor's
  * `claude_on_path` / `bun_on_path` only estimate the non-interactive ssh PATH), GitHub without
- * push access, git without a commit identity or Claude signed out. A repository is judged on its
- * own (`repos`, #436): a clone that is missing, fails a per-repository check or lacks a tool its
- * repository needs blocks that repository only, never the machine; placement skips the machine
- * for that repository's waves.
+ * push access, git without a commit identity anywhere (neither the home's nor any clone's) or
+ * Claude signed out. A repository is judged on its own (`repos`, #436): a clone that is missing,
+ * fails a per-repository check (`repo.identity` among them) or lacks a tool its repository needs
+ * blocks that repository only, never the machine; placement skips the machine for that
+ * repository's waves.
  * `eligible` / `ineligible_reason` are placement's own machine
  * filter (`machineIneligible`): ready, not draining, under `max_agents`, the machine's own
  * admission open, load per core, memory, disk and usage within the supervisor's thresholds. So a
@@ -348,6 +349,14 @@ function spawnPathCheck(
   }
 }
 
+/**
+ * The machine-level identity blocker (#631): the home has no commit identity (`git.identity`) and
+ * no clone it reports commits under its own (`repo.identity`).
+ */
+export const noCommitIdentity = (r: MachineRecord): boolean =>
+  (r.checks?.some((c) => c.id === "git.identity" && !c.ok) ?? false) &&
+  !(r.checks?.some((c) => c.id === "repo.identity" && c.ok) ?? false);
+
 /** The blockers, in the order a person fixes them. */
 function blockers(i: ReadinessInput): string[] {
   const r = i.record;
@@ -365,8 +374,9 @@ function blockers(i: ReadinessInput): string[] {
   else out.push(...doctorReasons(r, i));
   out.push(...pathReasons(i.probe, i.local, i.probeError));
   if (doctored) out.push(...authReasons(r, i));
-  // A warn check (it never holds up a join), but an agent's first commit dies without it (#610).
-  if (doctored && r.checks?.some((c) => c.id === "git.identity" && !c.ok)) {
+  // A warn check (it never holds up a join), but an agent's first commit dies without it (#610),
+  // unless a clone commits under its own identity (#631: `repo.identity` judges each clone).
+  if (doctored && noCommitIdentity(r)) {
     out.push(`git: no commit identity on ${i.name} (volley setup --peer --step signin)`);
   }
   return out;

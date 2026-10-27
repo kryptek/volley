@@ -536,7 +536,9 @@ describe("volley peer doctor: GitHub and Claude", () => {
     const ok = check(await report(m), "git.identity");
     expect(ok?.ok).toBe(true);
     expect(ok?.detail).toBe("git commits as Octo Cat <1+octocat@users.noreply.github.com>");
-    expect(m.calls.map((c) => c.argv).find((a) => a.includes("GIT_COMMITTER_IDENT"))).toEqual([
+    expect(
+      m.calls.map((c) => c.argv).find((a) => a.includes("GIT_COMMITTER_IDENT") && a[4] === m.home),
+    ).toEqual([
       "env",
       "GIT_TERMINAL_PROMPT=0",
       "/usr/bin/git",
@@ -1078,6 +1080,7 @@ describe("volley peer doctor: many repositories (#435)", () => {
       branch: c.branch === undefined ? "main" : c.branch,
       default: c.default === undefined ? "main" : c.default,
       dirty: c.dirty ?? false,
+      ...(c.identity !== undefined ? { identity: c.identity } : {}),
     });
   };
   const checksOf = (r: DoctorReport, id: string) => r.checks.filter((c) => c.id === id);
@@ -1484,6 +1487,86 @@ describe("volley peer doctor: many repositories (#435)", () => {
       const m = machine({ gitIdentity: null });
       const r = await runRepos(m, {});
       expect(r.stdout).toMatch(/keep this machine from being ready for agents.*git\.identity/);
+    });
+
+    describe("repo.identity: git's commit identity judged in each clone (#631)", () => {
+      const REPO_ID = "Repo Level <1+repo@users.noreply.github.com>";
+      const identProbe = (at: string) => [
+        "env",
+        "GIT_TERMINAL_PROMPT=0",
+        "/usr/bin/git",
+        "-C",
+        at,
+        "var",
+        "GIT_COMMITTER_IDENT",
+      ];
+
+      it("no global identity: a clone with its own passes, one without blocks that repository only", async () => {
+        const m = machine({ gitIdentity: null });
+        const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+        addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git", identity: REPO_ID });
+        addClone(m, repos["b/b"], { origin: "git@github.com:b/b.git", identity: null });
+        const r = await reportRepos(m, repos);
+        expect(forRepo(r, "repo.identity", "a/a")).toMatchObject({
+          ok: true,
+          severity: "block",
+          detail: `commits as ${REPO_ID}`,
+        });
+        const b = forRepo(r, "repo.identity", "b/b");
+        expect(b).toMatchObject({ ok: false, severity: "block" });
+        expect(b?.detail).toContain(repos["b/b"]);
+        expect(b?.detail).toContain("Author identity unknown");
+        expect(b?.fix).toContain(`git -C ${repos["b/b"]} config user.name`);
+        expect(b?.fix).toContain("volley setup --peer --step signin");
+        const probes = m.calls.map((c) => c.argv).filter((a) => a.includes("GIT_COMMITTER_IDENT"));
+        expect(probes.filter((a) => a[4] === repos["a/a"])).toEqual([identProbe(repos["a/a"])]);
+        expect(probes.filter((a) => a[4] === repos["b/b"])).toEqual([identProbe(repos["b/b"])]);
+        expect(probes.filter((a) => a[4] === m.home)).toEqual([identProbe(m.home)]);
+        expect(check(r, "git.identity")).toMatchObject({
+          ok: false,
+          severity: "warn",
+          fix: "volley setup --peer --step signin",
+        });
+        expect(check(r, "git.identity")?.detail).not.toContain("every repository's clone");
+      });
+
+      it("every clone has its own: git.identity says so, and the closing line names no warning", async () => {
+        const m = machine({ gitIdentity: null });
+        const repos = { "a/a": managed(m, "a/a") };
+        addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git", identity: REPO_ID });
+        const r = await reportRepos(m, repos);
+        const g = check(r, "git.identity");
+        expect(g).toMatchObject({ ok: false, severity: "warn" });
+        expect(g?.detail).toContain("every repository's clone sets its own");
+        expect(g?.fix).toBe("volley setup --peer --step signin");
+        const out = await runRepos(m, repos);
+        expect(out.stdout).toContain("! git.identity:");
+        expect(out.stdout).not.toContain("keep this machine from being ready");
+      });
+
+      it("no clone has one: the closing line names git.identity as before", async () => {
+        const m = machine({ gitIdentity: null });
+        const repos = { "a/a": managed(m, "a/a") };
+        addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+        const out = await runRepos(m, repos);
+        expect(out.stdout).toMatch(/keep this machine from being ready for agents.*git\.identity/);
+        expect(out.stdout).toContain("✗ repo.identity (a/a): no commit identity in");
+      });
+
+      it("the legacy --repo clone: repo.identity untagged, probed in that clone", async () => {
+        const m = machine();
+        const r = await report(m);
+        const c = r.checks.filter((x) => x.id === "repo.identity");
+        expect(c).toHaveLength(1);
+        expect(c[0]).toMatchObject({ ok: true, severity: "block" });
+        expect(c[0]?.repo).toBeUndefined();
+        expect(m.calls.map((x) => x.argv)).toContainEqual(identProbe(m.repoPath));
+      });
+
+      it("no git: no repo.identity line", async () => {
+        const r = await report(machine({ tools: { git: { path: null, sshPath: null } } }));
+        expect(r.checks.some((x) => x.id === "repo.identity")).toBe(false);
+      });
     });
   });
 });

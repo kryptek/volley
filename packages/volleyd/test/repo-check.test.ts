@@ -6,6 +6,7 @@ import {
   admissionRefusals,
   closingLine,
   factsUnknown,
+  lacksIdentity,
   machineBlock,
   readRepoCheck,
   readRepoFacts,
@@ -297,6 +298,59 @@ describe("machineBlock and the closing line", () => {
     expect(closingLine({ control: ok })).toBe("ready for a wave on: control.");
   });
 
+  it("#631: a record's failing repo.identity is picked for its slug and gets its fix, naming the clone", () => {
+    const rec = {
+      ...record([
+        {
+          id: "repo.identity",
+          ok: false,
+          severity: "block" as const,
+          repo: SLUG,
+          detail: "no commit identity in /c",
+        },
+        { id: "repo.identity", ok: true, severity: "block" as const, repo: "o/other", detail: "x" },
+      ]),
+      repos: [
+        {
+          slug: SLUG,
+          path: "/c",
+          exists: true,
+          managed: true,
+          fetched_at: null,
+          toolchain: { ok: true, missing: [], outdated: [] },
+        },
+      ],
+    } as MachineRecord;
+    const b = machineBlock(
+      SLUG,
+      rec,
+      undefined,
+      { ready: true, reasons: [] },
+      { state: "blocked", path: "/c", reasons: ["repo.identity: no commit identity in /c"] },
+      { from: "record" },
+    );
+    expect(b.checks.map((c) => c.id)).toEqual(["repo.identity"]);
+    expect(b.checks[0]?.fix).toBe(
+      'git -C /c config user.name "<name>" && git -C /c config user.email <email>, or volley setup --peer --step signin',
+    );
+  });
+
+  it("#631: the closing line does not name git.identity while a clone commits under its own", () => {
+    const b = machineBlock(
+      SLUG,
+      record([
+        { id: "tool.tmux", ok: false, severity: "block" as const, detail: "no tmux" },
+        { id: "git.identity", ok: false, severity: "warn" as const, detail: "no global" },
+        { id: "repo.identity", ok: true, severity: "block" as const, repo: SLUG, detail: "ok" },
+      ]),
+      undefined,
+      { ready: false, reasons: ["tmux missing"] },
+      { state: "ready", path: "/c", reasons: [] },
+      { from: "record" },
+    );
+    expect(closingLine({ "box-a": b })).toBe("not ready for a wave on box-a (tool.tmux).");
+  });
+
   it("no record: not ready, the readiness reason", () => {
     const b = machineBlock(
       SLUG,
@@ -352,7 +406,7 @@ const peer = (name: string, over: Partial<Candidate> = {}): Candidate => ({
   ready: true,
   reasons: [],
   repo: { state: "ready", path: `/srv/${name}`, reasons: [] },
-  noIdentity: false,
+  cloneLacksIdentity: false,
   ...over,
 });
 const W = { slug: SLUG, release_branch: B, merge: "manual" as const, spawnsLocally: false };
@@ -408,7 +462,6 @@ describe("admissionRefusals (D7)", () => {
       peer("box-a", {
         ready: false,
         reasons: ["git: no commit identity on box-a (volley setup --peer --step signin)"],
-        noIdentity: true,
       }),
     ]);
     expect(r.refusals[0]?.reason).toContain(
@@ -449,11 +502,35 @@ describe("admissionRefusals (D7)", () => {
     const own = peer("control", { local: true, ready: false, repo: undefined });
     expect(admissionRefusals({ ...W, spawnsLocally: true }, facts(), [own]).refusals).toEqual([]);
     const none = admissionRefusals({ ...W, spawnsLocally: true }, facts(), [
-      { ...own, noIdentity: true },
+      { ...own, cloneLacksIdentity: true, clone: "/srv/control" },
     ]);
     expect(none.refusals[0]?.reason).toContain(
-      "control: no commit identity (volley setup --peer --step signin)",
+      'control: no commit identity in /srv/control (git -C /srv/control config user.name "<name>" && git -C /srv/control config user.email <email>, or volley setup --peer --step signin)',
     );
+  });
+
+  it("#631: a peer whose clone lacks an identity is refused by its repository verdict", () => {
+    const r = admissionRefusals(W, facts(), [
+      peer("box-a", {
+        repo: {
+          state: "blocked",
+          path: "/srv/box-a",
+          reasons: ["repo.identity: no commit identity in /srv/box-a"],
+        },
+      }),
+    ]);
+    expect(r.refusals[0]?.reason).toContain(
+      "box-a: blocked (repo.identity: no commit identity in /srv/box-a)",
+    );
+  });
+
+  it("#631: the own machine whose clone commits admits its local tasks", () => {
+    const own = peer("control", { local: true, ready: false, repo: undefined });
+    expect(
+      admissionRefusals({ ...W, spawnsLocally: true }, facts(), [
+        { ...own, cloneLacksIdentity: false },
+      ]).refusals,
+    ).toEqual([]);
   });
 
   it("unread facts (null) refuse nothing about the repository", () => {
@@ -461,5 +538,29 @@ describe("admissionRefusals (D7)", () => {
       refusals: [],
       lines: [],
     });
+  });
+});
+
+describe("lacksIdentity (#631)", () => {
+  const gi = (ok: boolean) => ({ id: "git.identity", ok, severity: "warn" as const, detail: "" });
+  const ri = (ok: boolean, repo: string) => ({
+    id: "repo.identity",
+    ok,
+    severity: "block" as const,
+    detail: "",
+    repo,
+  });
+  it("a failing repo.identity of the slug: lacks one", () => {
+    expect(lacksIdentity(record([gi(true), ri(false, SLUG)]), SLUG)).toBe(true);
+  });
+  it("a failing git.identity with no passing repo.identity: lacks one", () => {
+    expect(lacksIdentity(record([gi(false)]), SLUG)).toBe(true);
+  });
+  it("a failing git.identity with a passing repo.identity of any slug: has one", () => {
+    expect(lacksIdentity(record([gi(false), ri(true, "o/other")]), SLUG)).toBe(false);
+    expect(lacksIdentity(record([gi(false), ri(true, SLUG)]), SLUG)).toBe(false);
+  });
+  it("no record: has nothing against it", () => {
+    expect(lacksIdentity(undefined, SLUG)).toBe(false);
   });
 });

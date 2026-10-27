@@ -113,6 +113,11 @@ export interface FakeClone {
   dirty?: boolean;
   /** Files at the clone's root (its manifests). */
   files?: Record<string, string>;
+  /**
+   * `git -C <clone> var GIT_COMMITTER_IDENT`'s `Name <email>` (a repo-level identity); null: git
+   * cannot commit there; unset: the home's `gitIdentity`, as git falls back to the global one.
+   */
+  identity?: string | null;
 }
 
 interface CloneState {
@@ -121,6 +126,7 @@ interface CloneState {
   branch: string | null;
   default: string | null;
   dirty: boolean;
+  identity?: string | null;
 }
 
 export interface Call {
@@ -226,6 +232,7 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       branch: c.branch === undefined ? "main" : c.branch,
       default: c.default === undefined ? "main" : c.default,
       dirty: c.dirty ?? false,
+      ...(c.identity !== undefined ? { identity: c.identity } : {}),
     });
   }
   const cloneAt = (path: string | undefined): CloneState | undefined =>
@@ -436,10 +443,13 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       }
       if (sub[0] === "rev-parse") return c?.isGit === true ? { stdout: "true\n" } : { code: 128 };
       if (sub[0] === "var" && sub[1] === "GIT_COMMITTER_IDENT") {
+        // A clone's own identity wins over the global one (repo > global), as git resolves it.
         const id =
-          opts.gitIdentity === undefined
-            ? "Octo Cat <1+octocat@users.noreply.github.com>"
-            : opts.gitIdentity;
+          c?.identity !== undefined
+            ? c.identity
+            : opts.gitIdentity === undefined
+              ? "Octo Cat <1+octocat@users.noreply.github.com>"
+              : opts.gitIdentity;
         return id !== null
           ? { stdout: `${id} 1760000000 +0000\n` }
           : { code: 128, stderr: "fatal: unable to auto-detect email address\n" };

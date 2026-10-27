@@ -126,7 +126,7 @@ const FIXABLE: string[] = [
 /**
  * Warn checks that do not hold up a join but that the supervisor's readiness still needs (SPEC
  * §4.6.15: GitHub may push, git has a commit identity and Claude is signed in): the human output
- * says so.
+ * says so. `git.identity` only while no clone commits under its own (`repo.identity`, #631).
  */
 const NEEDED_FOR_READY = ["gh.auth", "git.identity", "claude.signin"];
 
@@ -178,6 +178,8 @@ export interface RepoFacts {
   origin: string | null;
   fetchable: boolean | null;
   fetchedAt: string | null;
+  /** `Name <email>` git commits as in this clone (repo > global > system); null: none, or no git. */
+  identity: string | null;
   /**
    * GitHub's canonical `owner/name` for the configured slug and for the remote's (D6), asked only
    * when the two differ and gh is signed in; null otherwise (or when GitHub did not answer).
@@ -253,6 +255,8 @@ export interface Facts {
     release: string | null;
     fetchable: boolean | null;
     fetchedAt: string | null;
+    /** `Name <email>` git commits as in the clone; null: none, or no git clone. */
+    identity: string | null;
   };
   github: {
     present: boolean;
@@ -593,7 +597,23 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     }
   }
 
-  // A clone: there, a git work tree, its origin, fetchable without a prompt, last fetched.
+  // git's own verdict on whether an agent's commit can work in `at` (its identity, from any source).
+  const identityIn = async (at: string) => {
+    if (gitBin === null) return null;
+    const r = await sh([
+      "env",
+      "GIT_TERMINAL_PROMPT=0",
+      gitBin,
+      "-C",
+      at,
+      "var",
+      "GIT_COMMITTER_IDENT",
+    ]);
+    return r.code === 0 ? identityOf(r.stdout) : null;
+  };
+
+  // A clone: there, a git work tree, its origin, fetchable without a prompt, last fetched, and
+  // the identity an agent's commit there takes (#631: a clone's own config wins over the global).
   const clone = async (at: string, release: string | null) => {
     const exists = existsSync(at);
     let empty = false;
@@ -611,6 +631,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     let origin: string | null = null;
     let fetchable: boolean | null = null;
     let fetchedAt: string | null = null;
+    let identity: string | null = null;
     if (isGit && gitBin !== null) {
       const r = await sh([gitBin, "-C", at, "remote", "get-url", "origin"]);
       origin = r.code === 0 ? normalizeOrigin(firstLine(r.stdout)) : null;
@@ -621,8 +642,9 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       try {
         fetchedAt = statSync(join(at, ".git", "FETCH_HEAD")).mtime.toISOString();
       } catch {}
+      identity = await identityIn(at);
     }
-    return { exists, empty, isGit, origin, fetchable, fetchedAt };
+    return { exists, empty, isGit, origin, fetchable, fetchedAt, identity };
   };
 
   // The wave repo's clone (the legacy single repository).
@@ -638,8 +660,9 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
           origin: null,
           fetchable: null,
           fetchedAt: null,
+          identity: null,
         };
-  const { exists, empty, isGit, origin, fetchable, fetchedAt } = legacy;
+  const { exists, empty, isGit, origin, fetchable, fetchedAt, identity: cloneIdentity } = legacy;
   const expected = opts.origin !== undefined ? normalizeOrigin(opts.origin) : null;
 
   // GitHub.
@@ -649,20 +672,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     signedIn && ghBin !== null
       ? ghUser((await sh([ghBin, "api", "user", "--jq", ".login"])).stdout)
       : null;
-  // git's own verdict on whether an agent's commit can work here (its identity, from any source).
-  const ident =
-    gitBin !== null
-      ? await sh([
-          "env",
-          "GIT_TERMINAL_PROMPT=0",
-          gitBin,
-          "-C",
-          deps.home,
-          "var",
-          "GIT_COMMITTER_IDENT",
-        ])
-      : null;
-  const gitIdentity = ident?.code === 0 ? identityOf(ident.stdout) : null;
+  // The home's identity: what a new clone gets (the global one, or the system's).
+  const gitIdentity = await identityIn(deps.home);
   // peer.json's repositories, sorted by slug (the first is the one gh.auth checks push access to).
   const configured = Object.entries(opts.repos ?? {}).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
@@ -908,6 +919,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       release,
       fetchable,
       fetchedAt,
+      identity: cloneIdentity,
     },
     github: { present: ghPresent, signedIn, user, slug, permission, gitIdentity },
     claude: {
@@ -1118,16 +1130,25 @@ const nameOf = (c: { id: string; repo?: string }) =>
 
 /**
  * One line per check (`✓` / `!` / `✗`), the fix under a failing one, and a closing line naming
- * the `!` checks the supervisor's readiness still needs.
+ * the `!` checks the supervisor's readiness still needs, judged among `all` (the whole report,
+ * when only its failing lines are printed).
  */
-export function renderHuman(checks: DoctorReport["checks"]): string {
+export function renderHuman(
+  checks: DoctorReport["checks"],
+  all: DoctorReport["checks"] = checks,
+): string {
   const lines = checks
     .map(
       (c) =>
         `${mark(c)} ${nameOf(c)}: ${c.detail}\n${!c.ok && c.fix !== undefined ? `    fix: ${c.fix}\n` : ""}`,
     )
     .join("");
-  const needed = checks.filter((c) => !c.ok && NEEDED_FOR_READY.includes(c.id)).map((c) => c.id);
+  // A clone that commits under its own identity is enough for readiness (#631).
+  const cloneCommits = all.some((c) => c.id === "repo.identity" && c.ok);
+  const needed = checks
+    .filter((c) => !c.ok && NEEDED_FOR_READY.includes(c.id))
+    .filter((c) => c.id !== "git.identity" || !cloneCommits)
+    .map((c) => c.id);
   return needed.length > 0
     ? `${lines}${needed.length} warning(s) still keep this machine from being ready for agents (the supervisor needs them): ${needed.join(", ")}\n`
     : lines;
