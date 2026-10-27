@@ -4828,7 +4828,7 @@ export class Daemon {
         : cleanupSummary(wave, total.removed, run.kept.length, {
             worktrees_on: total.worktrees_on,
           });
-    const covered = o.task === undefined ? coveredTasks(state) : undefined;
+    const covered = o.task === undefined && !o.dry ? coveredTasks(state, run.kept) : undefined;
     await this.enqueue(() =>
       this.append(wave, cleanedEvent(o.by, { ...total, summary }, o.dry, o.task, covered)),
     );

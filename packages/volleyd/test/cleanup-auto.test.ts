@@ -223,4 +223,30 @@ describe("cleanup_on_end: false", () => {
     });
     expect(other.error).toContain("owned by");
   });
+
+  it("a manual whole run does not cover a done task whose agent is not retired (#630 Q1)", async () => {
+    await ranAndRetired("B");
+    await stage("B", "done");
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: {
+        agent_id: `${WAVE}-a-implementer-1`,
+        role: "implementer",
+        host: "local",
+        worktree: `/path/to/worktrees/${WAVE}/A-implementer`,
+        branch: `${WAVE}/A-implementer-1`,
+        credentials: "none",
+      },
+    });
+    await stage("A", "done");
+    const r = await client.request("cleanup", { wave: WAVE, by: OWNER, dry_run: false });
+    expect(r.ok).toBe(true);
+    const whole = cleaned().find((e) => e.task === undefined && e.data.dry_run === false);
+    expect(whole?.data.kept).toContainEqual(
+      expect.objectContaining({ kind: "worktree", task: "A" }),
+    );
+    // A's worktree was kept, so A's own pass is still owed; B was cleaned.
+    expect(whole?.data.tasks).toEqual(["B"]);
+  });
 });

@@ -1271,17 +1271,30 @@ export async function cleanupWave(
   // Only one writer per journal: a daemon that holds the home journals its own runs.
   if (!daemonUp(home))
     Journal.open(join(home, "waves", wave)).append(
-      cleanedEvent("volleyd cleanup", run, !opts.yes, undefined, coveredTasks(state)),
+      cleanedEvent(
+        "volleyd cleanup",
+        run,
+        !opts.yes,
+        undefined,
+        opts.yes ? coveredTasks(state, run.kept) : undefined,
+      ),
     );
   return run.failed;
 }
 
 /**
  * The tasks a whole-wave run covers: every one done or cancelled when it ran (`wave_cleaned.tasks`),
- * whose own pass is then never needed.
+ * whose own pass is then never needed. A task whose worktree the run kept for a live agent is not
+ * covered: its own pass runs once the agent retires.
  */
-export const coveredTasks = (state: WaveState): string[] =>
-  state.tasks.filter((t) => t.stage === "done" || t.stage === "cancelled").map((t) => t.id);
+export const coveredTasks = (state: WaveState, kept: Resource[]): string[] => {
+  const live = new Set(
+    kept.filter((r) => r.why?.startsWith("agent(s) not retired")).map((r) => r.task),
+  );
+  return state.tasks
+    .filter((t) => (t.stage === "done" || t.stage === "cancelled") && !live.has(t.id))
+    .map((t) => t.id);
+};
 
 /** The `wave_cleaned` event of a run (SPEC §4.6.26); `tasks`: a whole-wave run's `coveredTasks`. */
 export function cleanedEvent(
