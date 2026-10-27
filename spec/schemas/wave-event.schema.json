@@ -1661,14 +1661,15 @@
                   "data": {
                     "type": "object",
                     "required": ["by", "removed", "kept", "summary", "dry_run"],
-                    "description": "One cleanup run of the wave (spec section 4.6.26): what it removed by kind, each item it kept with the reason, and its summary line. task: the per-task pass cleaned that task only.",
+                    "description": "One cleanup run of the wave (spec section 4.6.26): what it removed by kind, each item it kept with the reason, and its summary line. task: the per-task pass cleaned that task only. tasks: a whole-wave run's tasks that were done or cancelled when it ran (it covered their own passes).",
                     "properties": {
                       "by": { "type": "string", "minLength": 1 },
                       "removed": { "$ref": "#/$defs/cleanupCounts" },
                       "kept": { "type": "array", "items": { "$ref": "#/$defs/cleanupResource" } },
                       "summary": { "type": "string", "minLength": 1 },
                       "dry_run": { "type": "boolean" },
-                      "task": { "type": "string" }
+                      "task": { "type": "string" },
+                      "tasks": { "type": "array", "items": { "type": "string" } }
                     }
                   }
                 }

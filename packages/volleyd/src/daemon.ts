@@ -249,6 +249,7 @@ import {
   type LedgerOptions,
   cleanedEvent,
   summaryLine as cleanupSummary,
+  coveredTasks,
   keptUnreachable,
   ledgerOf,
   runCleanup,
@@ -274,6 +275,7 @@ import {
 } from "./control";
 import {
   AckTracker,
+  IDENTITY_HINT,
   KILL_SWITCH_REASON,
   TASK_ROLES,
   candidates as admissible,
@@ -451,7 +453,13 @@ import {
   readinessTopic,
   repoVerdictFromRecord,
 } from "./readiness";
-import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
+import {
+  type SpawnFailure,
+  type WaveRecord,
+  isAdditiveSteer,
+  latestSpawnFailure,
+  resetsWholeCleanup,
+} from "./reducer";
 import {
   type Candidate,
   type MachineBlock,
@@ -4634,7 +4642,10 @@ export class Daemon {
       const unreachable = keptUnreachable(e.data.kept);
       if (typeof e.data.task === "string") {
         if (!unreachable) st.tasks.add(e.data.task);
-      } else if (!unreachable) st.whole = true;
+      } else if (!unreachable) {
+        st.whole = true;
+        for (const t of coveredBy(e)) st.tasks.add(t);
+      }
     }
     this.cleanupDone.set(wave, st);
     return st;
@@ -4705,7 +4716,10 @@ export class Daemon {
             return;
           }
           if (task !== undefined) st.tasks.add(task);
-          else st.whole = true;
+          else {
+            st.whole = true;
+            for (const t of run.covered ?? []) st.tasks.add(t);
+          }
         })
         .catch((e: unknown) =>
           this.log(`cleanup ${wave}: ${e instanceof Error ? e.message : String(e)}`),
@@ -4729,7 +4743,7 @@ export class Daemon {
       all?: boolean;
       lines?: string[];
     },
-  ): Promise<CleanupRun | null> {
+  ): Promise<(CleanupRun & { covered?: string[] }) | null> {
     const log = this.waves.get(wave) ?? this.archived.get(wave);
     const state = log?.record.state;
     if (log === undefined || state == null) return null;
@@ -4815,11 +4829,12 @@ export class Daemon {
         : cleanupSummary(wave, total.removed, run.kept.length, {
             worktrees_on: total.worktrees_on,
           });
+    const covered = o.task === undefined && !o.dry ? coveredTasks(state, run.kept) : undefined;
     await this.enqueue(() =>
-      this.append(wave, cleanedEvent(o.by, { ...total, summary }, o.dry, o.task)),
+      this.append(wave, cleanedEvent(o.by, { ...total, summary }, o.dry, o.task, covered)),
     );
     if (!o.dry) this.log(`cleanup ${wave}${o.task !== undefined ? ` ${o.task}` : ""}: ${summary}`);
-    return { ...total, summary };
+    return { ...total, summary, ...(covered !== undefined ? { covered } : {}) };
   }
 
   /** `repo_remove` of a wave-owned registration (SPEC §4.6.26): null, or why not. */
@@ -13464,8 +13479,7 @@ export class Daemon {
         if (typeof p.by !== "string" || p.by === "")
           return {
             ok: false,
-            error:
-              "claim needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID",
+            error: `claim needs an identity: ${IDENTITY_HINT}`,
           };
         // The new owner lands in the wave-state `owner` (agent id pattern): never a free-form name.
         if (!isValidAgentId(p.by))
@@ -16086,9 +16100,9 @@ function windowShort(window: string | undefined): string {
   return f !== "" ? `${f.charAt(0).toUpperCase()}${f.slice(1)}` : "window";
 }
 
-/** Does `e` send a wave back to needing its whole-wave cleanup pass (it resumed or ended again)? */
-const resetsWholeCleanup = (e: JournalEvent): boolean =>
-  e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed";
+/** The tasks a whole-wave `wave_cleaned` covered (`data.tasks`; none in older journals). */
+const coveredBy = (e: JournalEvent): string[] =>
+  Array.isArray(e.data.tasks) ? e.data.tasks.filter((t): t is string => typeof t === "string") : [];
 
 /** The task `e` takes back out of done or cancelled, whose cleanup then runs again when it ends. */
 function reopenedTask(e: JournalEvent): string | undefined {

@@ -379,6 +379,18 @@ export async function withClient(
       }
     }
     io.stderr(`${prefix}: ${e instanceof Error ? e.message : String(e)}\n`);
+    // The login ladder skips the saved coordinator login in an agent's shell (#613): say so.
+    const agentId = (target.env ?? process.env).VOLLEY_AGENT_ID;
+    if (
+      e instanceof VolleyError &&
+      e.code === "AUTH_FAILED" &&
+      target.auth === null &&
+      agentId !== undefined &&
+      agentId !== ""
+    )
+      io.stderr(
+        "VOLLEY_AGENT_ID is set, so the saved coordinator login was not used (it marks an agent's shell); unset it, or identify with --by / VOLLEY_COORDINATOR\n",
+      );
     return EXIT.ERROR;
   }
   try {

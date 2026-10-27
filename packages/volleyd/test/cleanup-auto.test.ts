@@ -112,6 +112,50 @@ describe("cleanup_on_end: true (the default)", () => {
     expect(cleaned()).toHaveLength(n);
   });
 
+  it("the whole-wave run covers the tasks: no task pass after it, status shows it (#630)", async () => {
+    await ranAndRetired("A");
+    await ranAndRetired("B");
+    await stage("A", "done");
+    await stage("B", "done");
+    await stage("C", "cancelled");
+    await daemon.tick();
+    await daemon.tick();
+    const real = () => cleaned().filter((e) => e.data.dry_run === false);
+    await eventually(() => real().some((e) => e.task === undefined));
+    const whole = real().find((e) => e.task === undefined);
+    // It names the tasks it covered (every done or cancelled one).
+    expect([...((whole?.data.tasks as string[]) ?? [])].sort()).toEqual(["A", "B", "C"]);
+    for (let i = 0; i < 3; i++) {
+      await daemon.tick();
+      await daemon.settled();
+    }
+    expect(real().filter((e) => e.task !== undefined)).toEqual([]);
+    expect(daemon.record(WAVE)?.state?.cleanup?.task).toBeUndefined();
+    expect(daemon.record(WAVE)?.state?.cleanup?.summary).toBe(whole?.data.summary);
+  });
+
+  it("a wave that ended before the daemon started is cleaned on its first ticks (#630 D6)", async () => {
+    // Journaled with no tick in between: nothing has cleaned it when the daemon stops.
+    await ranAndRetired("A");
+    await stage("A", "done");
+    await stage("B", "done");
+    await stage("C", "done");
+    await daemon.recordEvent(WAVE, { type: "wave_complete", data: {} });
+    expect(daemon.record(WAVE)?.state?.status).toBe("complete");
+    expect(cleaned()).toEqual([]);
+    await client.close();
+    await daemon.stop();
+    daemon = await t.start({ clock });
+    client = await ControlClient.connect(t.broker.url, NS);
+    await daemon.tick();
+    await daemon.tick();
+    await eventually(() =>
+      cleaned().some(
+        (e) => e.task === undefined && e.data.dry_run === false && e.data.by === "volleyd",
+      ),
+    );
+  });
+
   it("a wave resumed after its whole-wave run is cleaned again when it ends again", async () => {
     await ranAndRetired("A");
     await stage("A", "done");
@@ -178,5 +222,31 @@ describe("cleanup_on_end: false", () => {
       dry_run: false,
     });
     expect(other.error).toContain("owned by");
+  });
+
+  it("a manual whole run does not cover a done task whose agent is not retired (#630 Q1)", async () => {
+    await ranAndRetired("B");
+    await stage("B", "done");
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: {
+        agent_id: `${WAVE}-a-implementer-1`,
+        role: "implementer",
+        host: "local",
+        worktree: `/path/to/worktrees/${WAVE}/A-implementer`,
+        branch: `${WAVE}/A-implementer-1`,
+        credentials: "none",
+      },
+    });
+    await stage("A", "done");
+    const r = await client.request("cleanup", { wave: WAVE, by: OWNER, dry_run: false });
+    expect(r.ok).toBe(true);
+    const whole = cleaned().find((e) => e.task === undefined && e.data.dry_run === false);
+    expect(whole?.data.kept).toContainEqual(
+      expect.objectContaining({ kind: "worktree", task: "A" }),
+    );
+    // A's worktree was kept, so A's own pass is still owed; B was cleaned.
+    expect(whole?.data.tasks).toEqual(["B"]);
   });
 });

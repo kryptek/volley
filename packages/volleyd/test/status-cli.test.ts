@@ -27,6 +27,7 @@ import { isCoordinatorRole } from "../src/coordinator/role";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
+import { reduce } from "../src/reducer";
 import type { NewEvent } from "../src/types";
 import { makeDaemonEnv } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
@@ -191,6 +192,54 @@ describe("volleyd status formatting", () => {
     });
     expect(out).toContain(`  hygiene: P3 (private)\n  cleanup: ${summary}\n`);
     expect(formatWave(base)).not.toContain("cleanup:");
+    // A task pass after the whole-wave run: status still shows the whole run (#630 D5).
+    const whole = "cleaned w1: 58 worktrees (58 on mac), 10 branches; kept 26";
+    const at = (m: number) => `2026-10-18T12:0${m}:00.000Z`;
+    const zero = { worktrees: 0, sessions: 0, processes: 0, branches: 0 };
+    const counts = { ...zero, logins: 0, repos: 0, accounts: 0, clones: 0 };
+    const state = reduce([
+      {
+        seq: 1,
+        at: at(0),
+        type: "wave_submitted",
+        data: {
+          wave: {
+            wave: "w1",
+            version: 1,
+            repo: "r",
+            release_branch: "release/w1",
+            model: "m",
+            pipeline: ["implement"],
+            tasks: {},
+            task_order: [],
+            config: {},
+          },
+        },
+      },
+      {
+        seq: 2,
+        at: at(1),
+        type: "wave_cleaned",
+        data: { by: "volleyd", removed: counts, kept: [], summary: whole, dry_run: false },
+      },
+      {
+        seq: 3,
+        at: at(2),
+        type: "wave_cleaned",
+        task: "T1",
+        data: {
+          by: "volleyd",
+          task: "T1",
+          removed: counts,
+          kept: [],
+          summary: "nothing to clean; kept 1",
+          dry_run: false,
+        },
+      },
+    ]);
+    expect(formatWave({ ...base, ...(state.cleanup ? { cleanup: state.cleanup } : {}) })).toContain(
+      `  cleanup: ${whole}\n`,
+    );
   });
 
   it("prints a header and one row per task", () => {
