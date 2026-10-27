@@ -16,8 +16,9 @@ import {
   daemonAuth,
 } from "../src/broker-auth";
 import { daemonStartOptions } from "../src/commands/daemon";
-import { resolveControlTarget } from "../src/control";
+import { resolveControlTarget, withClient } from "../src/control";
 import { Daemon } from "../src/daemon";
+import { EXIT, makeBufferIO } from "../src/io";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
@@ -340,5 +341,53 @@ describe("a damaged credentials file is reported by path, never by content (#613
       expect(m).toContain(path);
       expect(m).not.toContain(MARKER);
     }
+  });
+});
+
+describe("withClient: an anonymous connect refused under VOLLEY_AGENT_ID (#630 D4)", () => {
+  let broker: TestBroker;
+  beforeEach(async () => {
+    broker = await startTestBroker({ users: USERS });
+  });
+  afterEach(async () => {
+    await broker.close();
+  });
+
+  const LINE =
+    "VOLLEY_AGENT_ID is set, so the saved coordinator login was not used (it marks an agent's shell); unset it, or identify with --by / VOLLEY_COORDINATOR";
+  const attempt = async (
+    env: Record<string, string | undefined>,
+    auth: { username: string; password: string } | null,
+  ) => {
+    const io = makeBufferIO();
+    const code = await withClient(
+      { brokerUrl: broker.url, namespace: NS, auth, env },
+      io,
+      "volleyd cleanup",
+      async () => EXIT.OK,
+    );
+    return { code, stderr: io.readStderr() };
+  };
+
+  it("names VOLLEY_AGENT_ID as the reason the saved login was not used", async () => {
+    const r = await attempt({ VOLLEY_AGENT_ID: "some-agent" }, null);
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.stderr).toContain("refused anonymous access");
+    expect(r.stderr).toContain(`\n${LINE}\n`);
+  });
+
+  it("says nothing more without VOLLEY_AGENT_ID, or when credentials were sent", async () => {
+    const anon = await attempt({}, null);
+    expect(anon.stderr).toContain("refused anonymous access");
+    expect(anon.stderr).not.toContain("VOLLEY_AGENT_ID");
+    const wrong = await attempt(
+      { VOLLEY_AGENT_ID: "some-agent" },
+      {
+        username: "coordinator",
+        password: "wrong",
+      },
+    );
+    expect(wrong.code).toBe(EXIT.ERROR);
+    expect(wrong.stderr).not.toContain(LINE);
   });
 });

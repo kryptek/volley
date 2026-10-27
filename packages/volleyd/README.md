@@ -196,14 +196,19 @@ config.hard_ceiling: must be <= 100
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
 | `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, what the hard ceiling counts (`ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1`), every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
-| `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove everything the wave made, on every machine: its retired agents' workspaces or sessions, worktrees, locks and processes (by argv or working directory), its merged agent branches, leftover agent logins, and `--for-wave` registrations, accounts and managed clones; one `kept <kind> <what>: <why>` line per item it keeps, then the summary (`cleaned <wave>: …; kept <k>`), journaled `wave_cleaned`. Only tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. With `cleanup_on_end` on, the daemon runs it itself (see "Retire and cleanup"). |
+| `volleyd cleanup <wave> [--yes] [--force] [--all] [--by <name\|agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]` | Remove everything the wave made, on every machine: its retired agents' workspaces or sessions, worktrees, locks and processes (by argv or working directory), its merged agent branches, leftover agent logins, and `--for-wave` registrations, accounts and managed clones; one `kept <kind> <what>: <why>` line per item it keeps, then the summary (`cleaned <wave>: …; kept <k>`), journaled `wave_cleaned`. Only tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. With `cleanup_on_end` on, the daemon runs it itself (see "Retire and cleanup"). |
 
-The mutating commands (`resolve`, `pause`, `resume`, `stop`, `archive`, `steer`, `claim`) act as the caller's
-agent id: `--by <id>`, else `VOLLEY_AGENT_ID`, else the top-level session registered for the
-closest enclosing directory (newest first among equally close ones; the daemon's own entry and
-sessions whose retained status is `reaped`/`done`/`failed` are skipped). `run` uses the same
-detection for the owner (`--owner` overrides it). `run` and `claim` warn when `VOLLEY_AGENT_ID`
-names an agent with no registry entry, and `claim` refuses to run without any identity.
+The mutating commands (`resolve`, `pause`, `resume`, `stop`, `archive`, `steer`, `claim`,
+`cleanup`) act as the caller's agent id: `--by <id>`, else `VOLLEY_AGENT_ID` (a supervised
+session's own id), else the top-level session registered for the closest enclosing directory
+(newest first among equally close ones; the daemon's own entry and sessions whose retained status
+is `reaped`/`done`/`failed` are skipped), else `VOLLEY_COORDINATOR` (the name `volley setup`
+saved applies on its own). `run` uses the same detection for the owner (`--owner` overrides it).
+`run` and `claim` warn when `VOLLEY_AGENT_ID` names an agent with no registry entry, and `claim`
+refuses to run without any identity. An owner identifies with `--by <name|agent-id>` or
+`VOLLEY_COORDINATOR`, never by exporting `VOLLEY_AGENT_ID`: that variable marks an agent's shell,
+so the broker login falls back from the saved coordinator login, and an anonymous connect the
+broker refuses says so (`VOLLEY_AGENT_ID is set, so the saved coordinator login was not used …`).
 
 Commands that talk to the daemon fail fast with `volleyd not running` (exit 1, within ~1 s) when
 the daemon's retained status is missing or terminal. `events`/`ack` read `$VOLLEYD_HOME` directly
@@ -1673,8 +1678,9 @@ wave is owned by coord-main (via coordinator-c7d9), reconnecting (gone 3m ago, g
 A claim is journaled as `owner_claimed { owner, previous, why }` (`why`: `owner coord-main
 offline since <time>`). `claim_after_s` is retired: a stored `claim_after_s` (in `config.yaml` or a
 wave file's `config:`) is dropped with one log line, and `volleyd config set claim_after_s` is
-refused. A claim must name a stable identity (`--by`,
-`VOLLEY_AGENT_ID`, a registered session or `VOLLEY_COORDINATOR`); the CLI's own per-invocation id is never used.
+refused. A claim must name a stable identity (`--by`, a registered session or
+`VOLLEY_COORDINATOR`, the name `volley setup` saved applying on its own); the CLI's own
+per-invocation id is never used.
 
 ## Pause, stop and the kill switch
 
@@ -2986,7 +2992,7 @@ wave) — volley repo remove <owner/name>`, only when no other wave uses it), th
 how many commits are not on the default branch), and every human account. The run ends with one
 line, `cleaned <wave>: 3 worktrees (1 on box), 2 sessions, 1 process, 3 branches, 2 logins; kept
 1` (`nothing to clean` when nothing was removed), and journals `wave_cleaned { by, removed, kept,
-summary, dry_run, task? }`; `volleyd status` prints its summary as `cleanup: …` and the Desk shows
+summary, dry_run, task?, tasks? }`; `volleyd status` prints its summary as `cleanup: …` and the Desk shows
 a `cleaned` chip with the kept items. A paired machine that cannot be reached keeps its items
 (`kept … (<machine> unreachable; cleanup runs again next tick)`) and the command still exits 0.
 
@@ -2994,10 +3000,14 @@ a `cleaned` chip with the kept items. A paired machine that cannot be reached ke
 on the tick after it is `done` or `cancelled` with no agent of it live (`wave_cleaned { task }`),
 and the whole ledger once the wave is `complete` or `stopped` and none of its agents is live; a
 task held unfinished (`merge_ready`) is cleaned when it ends; a run that kept an unreachable
-machine's items runs again a minute later. Archiving waits for that pass, and `volleyd archive`
-runs one last one and answers with the kept items. `volleyd cleanup <wave> [--yes]` is the
-manual path: with the daemon up it is the daemon's `cleanup` op (the owner only), and while the
-daemon is down it reads `$VOLLEYD_HOME` directly and leaves logins, registrations and accounts
+machine's items runs again a minute later. The whole-wave run covers the tasks that were done or
+cancelled when it ran (`wave_cleaned.tasks`: no per-task pass follows for them), and it is the
+run `status` shows: a later task run replaces it only once the wave resumed or ended again. A
+wave that ended before the daemon started is cleaned on its first ticks. Archiving waits for that
+pass, and `volleyd archive` runs one last one and answers with the kept items.
+`volleyd cleanup <wave> [--yes]` is the manual path: with the daemon up it is the daemon's
+`cleanup` op (the owner only, identified as every mutating command is: `--by`, else the caller's
+session, else `VOLLEY_COORDINATOR`), and while the daemon is down it reads `$VOLLEYD_HOME` directly and leaves logins, registrations and accounts
 for the daemon (`kept …: daemon down`). `cleanup_on_end: false` is the old behaviour: nothing is
 cleaned until you run it.
 

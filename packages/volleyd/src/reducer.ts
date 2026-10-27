@@ -110,6 +110,11 @@ export interface WaveRecord {
   autopilot?: AutopilotRecord;
   /** When the wave last ended (`wave_stopped` / `wave_complete`); null after a resume. */
   ended_at?: string | null;
+  /**
+   * The wave resumed or ended again since `state.cleanup`'s whole-wave run (`resetsWholeCleanup`):
+   * a task run may replace it again. Absent in older snapshots.
+   */
+  cleanup_reset?: boolean;
   /** Set by `wave_archived` (archive.ts): when, by whom, why, and how the wave had ended. */
   archived?: { at: string; by: string; reason: string; from: "stopped" | "complete" };
 }
@@ -338,6 +343,10 @@ const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   release_cancelled: "complete",
 };
 
+/** Does `e` send a wave back to needing its whole-wave cleanup pass (it resumed or ended again)? */
+export const resetsWholeCleanup = (e: JournalEvent): boolean =>
+  e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed";
+
 /**
  * Apply one journal event. Pure: returns a new record, or the same record object when the event
  * is a duplicate (seq already applied) — re-applying an event is a no-op.
@@ -372,6 +381,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   const state = next.state;
   if (state === null) return next; // events before submission carry no wave state
   state.updated_at = ev.at;
+  if (resetsWholeCleanup(ev) && state.cleanup !== undefined) next.cleanup_reset = true;
   const task = ev.task !== undefined ? state.tasks.find((t) => t.id === ev.task) : undefined;
 
   switch (ev.type) {
@@ -515,9 +525,13 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       };
       break;
     }
-    // Wave cleanup (SPEC §4.6.26): the last real run's counts, kept items and summary.
-    case "wave_cleaned":
-      if (ev.data.dry_run !== true) {
+    // Wave cleanup (SPEC §4.6.26): the last real run's counts, kept items and summary. The
+    // whole-wave run stays until the wave resumes or ends again: a task run after it is a no-op.
+    case "wave_cleaned": {
+      const task = typeof ev.data.task === "string";
+      const whole = state.cleanup !== undefined && state.cleanup.task === undefined;
+      if (ev.data.dry_run !== true && !(task && whole && next.cleanup_reset !== true)) {
+        if (!task) next.cleanup_reset = false;
         state.cleanup = {
           at: ev.at,
           removed: ev.data.removed as CleanupCounts,
@@ -527,6 +541,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         };
       }
       break;
+    }
     case "wave_planned":
       state.overlap_plan = { clusters: (ev.data.clusters as PlanCluster[] | undefined) ?? [] };
       break;

@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { withSetupCoordinator } from "volley-cli/auth/coordinator-login";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
+import { IDENTITY_HINT } from "../controls";
 import { type ExecFn, exec as realExec } from "../exec";
 import type { Tree } from "../footprint";
 import { type Command, type CommandArgs, EXIT, type ExitCode } from "../io";
@@ -107,9 +108,7 @@ export function makeAdd(deps: AddDeps): Command {
         withSetupCoordinator(env).env,
       );
       if (who.id === null) {
-        return fail(
-          "add needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID",
-        );
+        return fail(`add needs an identity: ${IDENTITY_HINT}`);
       }
       if (who.warning !== undefined) io.stderr(`warning: ${who.warning}\n`);
       const caller = who.id;
