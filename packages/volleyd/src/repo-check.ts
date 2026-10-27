@@ -251,8 +251,14 @@ const RECORD_FIXES: Record<string, (slug: string, clone: string) => string> = {
 };
 
 /** A clone's commit identity is the person's to set: in the clone, or a global one (#631). */
-const identityFix = (clone: string) =>
-  `git -C ${clone} config user.name "<name>" && git -C ${clone} config user.email <email>, or volley setup --peer --step signin`;
+const identityFix = (clone: string) => {
+  const at = shellArg(clone);
+  return `git -C ${at} config user.name "<name>" && git -C ${at} config user.email <email>, or volley setup --peer --step signin`;
+};
+
+/** A path as one shell word, as the doctor's fix quotes it (a fix is pasted); `<clone>` stays a placeholder. */
+const shellArg = (p: string): string =>
+  p === "<clone>" || /^[\w./~@:+,=-]+$/.test(p) ? p : `'${p.replaceAll("'", "'\\''")}'`;
 
 /** Where a record says `slug`'s clone is (its `repos[]` entry, else the legacy `repo`). */
 export const clonePathOf = (record: MachineRecord | undefined, slug: string): string =>
@@ -335,11 +341,12 @@ const NEEDED = ["gh.auth", "git.identity", "claude.signin"];
 
 /** Why a block is not ready, in a word or two: its failing checks' ids, else its first reason. */
 function whyNot(b: MachineBlock): string {
-  // git.identity holds nothing back while a clone commits under its own (#631).
-  const cloneCommits = b.checks.some((c) => c.id === "repo.identity" && c.ok);
+  // git.identity holds a machine back only while readiness says so: no clone of any repository
+  // there commits under its own (#631, `noCommitIdentity`).
+  const identityHolds = b.reasons.some((r) => r.startsWith("git: no commit identity"));
   const ids = b.checks
     .filter((c) => !c.ok && (c.severity === "block" || NEEDED.includes(c.id)))
-    .filter((c) => c.id !== "git.identity" || !cloneCommits)
+    .filter((c) => c.id !== "git.identity" || identityHolds)
     .map((c) => c.id);
   return ids.length > 0 ? [...new Set(ids)].join(", ") : (b.reasons[0] ?? b.state);
 }

@@ -58,8 +58,10 @@ export function ghState(f: Facts): AuthGh {
  */
 function gitIdentityCheck(f: Facts): Check {
   const id = f.github.gitIdentity;
-  // Every repository's clone commits under its own identity (#631): only a new clone would not.
-  const clones = f.repos.length > 0 && f.repos.every((r) => r.identity !== null);
+  // Every repository's clone (the legacy --repo one too) commits under its own identity (#631):
+  // only a new clone would not.
+  const each = [...f.repos.map((r) => r.identity), ...(f.repo.isGit ? [f.repo.identity] : [])];
+  const clones = each.length > 0 && each.every((i) => i !== null);
   return {
     id: "git.identity",
     ok: id !== null,

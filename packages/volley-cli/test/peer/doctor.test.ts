@@ -1563,6 +1563,14 @@ describe("volley peer doctor: many repositories (#435)", () => {
         expect(m.calls.map((x) => x.argv)).toContainEqual(identProbe(m.repoPath));
       });
 
+      it("the legacy --repo clone with its own identity and none global: git.identity says so", async () => {
+        const m = machine({ gitIdentity: null });
+        Object.assign(m.state, { identity: REPO_ID });
+        const r = await report(m);
+        expect(check(r, "repo.identity")).toMatchObject({ ok: true });
+        expect(check(r, "git.identity")?.detail).toContain("every repository's clone sets its own");
+      });
+
       it("no git: no repo.identity line", async () => {
         const r = await report(machine({ tools: { git: { path: null, sshPath: null } } }));
         expect(r.checks.some((x) => x.id === "repo.identity")).toBe(false);

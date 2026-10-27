@@ -351,6 +351,34 @@ describe("machineBlock and the closing line", () => {
     expect(closingLine({ "box-a": b })).toBe("not ready for a wave on box-a (tool.tmux).");
   });
 
+  it("#631: the closing line follows readiness when only another repository's clone commits", () => {
+    const b = machineBlock(
+      SLUG,
+      record([
+        { id: "git.identity", ok: false, severity: "warn" as const, detail: "no global" },
+        {
+          id: "repo.identity",
+          ok: true,
+          severity: "block" as const,
+          repo: "o/other",
+          detail: "ok",
+        },
+        {
+          id: "repo.identity",
+          ok: false,
+          severity: "block" as const,
+          repo: SLUG,
+          detail: "no commit identity in /c",
+        },
+      ]),
+      undefined,
+      { ready: true, reasons: [] },
+      { state: "blocked", path: "/c", reasons: ["repo.identity: no commit identity in /c"] },
+      { from: "record" },
+    );
+    expect(closingLine({ "box-a": b })).toBe("not ready for a wave on box-a (repo.identity).");
+  });
+
   it("no record: not ready, the readiness reason", () => {
     const b = machineBlock(
       SLUG,
@@ -506,6 +534,12 @@ describe("admissionRefusals (D7)", () => {
     ]);
     expect(none.refusals[0]?.reason).toContain(
       'control: no commit identity in /srv/control (git -C /srv/control config user.name "<name>" && git -C /srv/control config user.email <email>, or volley setup --peer --step signin)',
+    );
+    const spaced = admissionRefusals({ ...W, spawnsLocally: true }, facts(), [
+      { ...own, cloneLacksIdentity: true, clone: "/srv/my clone" },
+    ]);
+    expect(spaced.refusals[0]?.reason).toContain(
+      "(git -C '/srv/my clone' config user.name \"<name>\" && git -C '/srv/my clone' config user.email <email>,",
     );
   });
 
