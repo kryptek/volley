@@ -282,6 +282,29 @@ describe("the Sign-ins step", () => {
       expect(again.row).toContain(`✓ git commits as ${OCTO_IDENTITY}`);
     });
 
+    it("#631: no global identity, a clone with its own: plans the global write only, never touches the clone", async () => {
+      const clone = join(m.ctx.home, "work", "repo");
+      const REPO_ID = "Repo Level <1+repo@users.noreply.github.com>";
+      m.git.identity = null;
+      m.git.clones[clone] = REPO_ID;
+      const plan = await planSignin(m.ctx);
+      const ids = plan.changes.filter((c) => c.summary.startsWith("Give git"));
+      expect(ids.map((c) => c.summary)).toEqual([SUMMARY]);
+      await ids[0]?.apply();
+      expect(gitConfigs()).toEqual([
+        ["git", "config", "--global", "user.name", "Octo Volley"],
+        ["git", "config", "--global", "user.email", "1+octo-volley@users.noreply.github.com"],
+      ]);
+      const scoped = m.execCalls.filter(
+        (a) => a[0] === "git" && (a.includes("--local") || (a[1] === "-C" && a.includes("config"))),
+      );
+      expect(scoped).toEqual([]);
+      expect(m.git.clones[clone]).toBe(REPO_ID);
+      for (const c of plan.changes) if (!ids.includes(c)) await c.apply();
+      const again = await planSignin(m.ctx);
+      expect(again.changes).toEqual([]);
+    });
+
     it("none, gh signed out: the GitHub sign-in first, then the identity, read after the sign-in", async () => {
       m.git.identity = null;
       m.gh.signedIn = false;

@@ -371,6 +371,46 @@ describe("volley repo check (#610)", () => {
     expect(r.exitCode).toBe(EXIT.ERROR);
   });
 
+  it("#631: git.identity failing beside a passing repo.identity keeps nothing back", async () => {
+    const boxA = CHECKED.result.machines["box-a"];
+    const answer = {
+      ok: true,
+      result: {
+        ...CHECKED.result,
+        machines: {
+          "box-a": {
+            ...boxA,
+            checks: [
+              ...boxA.checks,
+              {
+                id: "repo.identity",
+                ok: true,
+                severity: "block",
+                repo: "o/r",
+                detail: "commits as Repo Level <1+repo@users.noreply.github.com>",
+              },
+            ],
+            ready: true,
+            reasons: [],
+          },
+        },
+        ready_on: ["box-a"],
+        summary: "ready for a wave on: box-a.",
+      },
+    };
+    const { deps } = checkDeps(answer);
+    const r = await run(["check", "o/r"], deps);
+    expect(r.stdout).toContain(
+      "! git.identity: git has no commit identity (user.name/user.email)\n",
+    );
+    expect(r.stdout).toContain(
+      "✓ repo.identity: commits as Repo Level <1+repo@users.noreply.github.com>\n",
+    );
+    expect(r.stdout).not.toContain("still keep this machine");
+    expect(r.stdout.endsWith("ready for a wave on: box-a.\n")).toBe(true);
+    expect(r.exitCode).toBe(EXIT.OK);
+  });
+
   it("exit 0 when every machine asked is ready; --machine narrows; --json prints the answer", async () => {
     const ready = {
       ok: true,

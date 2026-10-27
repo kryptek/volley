@@ -101,6 +101,19 @@ describe("machineFixes", () => {
       text: "Repair creates the folder box-a cuts o/r's worktrees under",
       safe: true,
     });
+    // #631: a clone's commit identity is the person's to set, in the clone or globally.
+    const many = { ...ctx, repos: [{ slug: "o/r", path: "/srv/o/r" }] };
+    expect(fixFor("repo.identity", many, "o/r")).toEqual({
+      text: "give /srv/o/r on box-a a commit identity: git -C /srv/o/r config user.name … && … user.email …, or a global one with setup's Sign-ins step",
+      command:
+        'git -C /srv/o/r config user.name "<name>" && git -C /srv/o/r config user.email <email>',
+      safe: false,
+    });
+    // A clone path a shell would split or expand pastes single-quoted, as the CLI's fix does.
+    const spaced = { ...ctx, repos: [{ slug: "o/r", path: "/srv/my repos/o r" }] };
+    expect(fixFor("repo.identity", spaced, "o/r")?.command).toBe(
+      "git -C '/srv/my repos/o r' config user.name \"<name>\" && git -C '/srv/my repos/o r' config user.email <email>",
+    );
     // Never "run the doctor by hand": Repair runs it.
     expect(fixFor("something.new", ctx)).toEqual({
       text: "Repair… runs the doctor on box-a again; its plan has this check's fix",

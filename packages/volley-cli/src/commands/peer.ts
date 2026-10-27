@@ -1086,7 +1086,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   // Trust is reported after pairing (step 5), with what to do about it.
   const failing = checked.report.checks.filter((c) => !c.ok && c.id !== "claude.trust");
   if (blocked.length > 0) {
-    io.stdout(renderHuman(failing));
+    io.stdout(renderHuman(failing, checked.report.checks));
     const doctorCmd = [
       "volley peer doctor --fix",
       ...(slugs.length > 0
@@ -1098,7 +1098,9 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
       `${blocked.length} check(s) above keep this machine from running agents: fix them (\`${doctorCmd}\` applies the safe ones) and run join again. Nothing was redeemed: the code is still valid.`,
     );
   }
-  io.stdout(failing.length > 0 ? renderHuman(failing) : "All checks passed.\n");
+  io.stdout(
+    failing.length > 0 ? renderHuman(failing, checked.report.checks) : "All checks passed.\n",
+  );
 
   // 1. ssh reachability.
   io.stdout(`Checking ssh to ${host}...\n`);

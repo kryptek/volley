@@ -14,7 +14,7 @@ import {
 import { formatCiMode } from "./commands/status";
 import type { ExecFn } from "./exec";
 import type { MachineCheck, MachineRecord } from "./machines";
-import type { RepoState, RepoVerdict } from "./readiness";
+import { type RepoState, type RepoVerdict, noCommitIdentity } from "./readiness";
 import { type SlugView, readSlugView } from "./repo-visibility";
 import { repoStateLine, sameSlug } from "./repos";
 import type { MergeMode } from "./types";
@@ -240,14 +240,29 @@ function protectionCheck(f: RepoFacts, b: string): RepoCheck {
 const MACHINE_LINES = ["gh.auth", "git.identity", "claude.signin", "claude.trust"];
 
 /** A record carries no fix text: these are the ones a machine block names without a fresh doctor. */
-const RECORD_FIXES: Record<string, (slug: string) => string> = {
+const RECORD_FIXES: Record<string, (slug: string, clone: string) => string> = {
   "git.identity": () => "volley setup --peer --step signin",
+  "repo.identity": (_slug, clone) => identityFix(clone),
   "gh.auth": () => "gh auth login && gh auth setup-git",
   "claude.signin": () => "claude, then /login",
   "repo.clone": (slug) => `volley repo check ${slug} --fix`,
   "repo.worktrees": (slug) => `volley repo check ${slug} --fix`,
   "repo.fetch": (slug) => `volley repo check ${slug} --fix`,
 };
+
+/** A clone's commit identity is the person's to set: in the clone, or a global one (#631). */
+const identityFix = (clone: string) => {
+  const at = shellArg(clone);
+  return `git -C ${at} config user.name "<name>" && git -C ${at} config user.email <email>, or volley setup --peer --step signin`;
+};
+
+/** A path as one shell word, as the doctor's fix quotes it (a fix is pasted); `<clone>` stays a placeholder. */
+const shellArg = (p: string): string =>
+  p === "<clone>" || /^[\w./~@:+,=-]+$/.test(p) ? p : `'${p.replaceAll("'", "'\\''")}'`;
+
+/** Where a record says `slug`'s clone is (its `repos[]` entry, else the legacy `repo`). */
+export const clonePathOf = (record: MachineRecord | undefined, slug: string): string =>
+  record?.repos?.find((r) => sameSlug(r.slug, slug))?.path ?? record?.repo?.path ?? "<clone>";
 
 /** The supervisor's own clone is the owner's checkout: `--fix` never touches it (D5). */
 const OWN_FIX =
@@ -291,8 +306,11 @@ export function machineBlock(
     return MACHINE_LINES.includes(c.id) || (!c.ok && c.severity === "block");
   });
   const lines: RepoCheck[] = picked.map((c) => {
+    // An identity is the person's to set, on the own machine too: never OWN_FIX's doctor run.
     const recordFix =
-      from.own === true && c.id.startsWith("repo.") ? OWN_FIX : RECORD_FIXES[c.id]?.(slug);
+      from.own === true && c.id.startsWith("repo.") && c.id !== "repo.identity"
+        ? OWN_FIX
+        : RECORD_FIXES[c.id]?.(slug, clonePathOf(record, slug));
     const fix = c.fix ?? (!c.ok ? recordFix : undefined);
     return {
       id: c.id,
@@ -323,8 +341,12 @@ const NEEDED = ["gh.auth", "git.identity", "claude.signin"];
 
 /** Why a block is not ready, in a word or two: its failing checks' ids, else its first reason. */
 function whyNot(b: MachineBlock): string {
+  // git.identity holds a machine back only while readiness says so: no clone of any repository
+  // there commits under its own (#631, `noCommitIdentity`).
+  const identityHolds = b.reasons.some((r) => r.startsWith("git: no commit identity"));
   const ids = b.checks
     .filter((c) => !c.ok && (c.severity === "block" || NEEDED.includes(c.id)))
+    .filter((c) => c.id !== "git.identity" || identityHolds)
     .map((c) => c.id);
   return ids.length > 0 ? [...new Set(ids)].join(", ") : (b.reasons[0] ?? b.state);
 }
@@ -351,15 +373,21 @@ export interface Candidate {
   pinned: boolean;
   /**
    * The supervisor's own machine: its local tasks spawn into the wave's clone whatever its
-   * verdict says (`releaseBranchMissing` checks that clone), so only its git identity refuses.
+   * verdict says (`releaseBranchMissing` checks that clone), so only its clone's commit identity
+   * refuses (`cloneLacksIdentity`).
    */
   local: boolean;
   /** Its readiness (`ready`, `reasons`) and where the repository stands there. */
   ready: boolean;
   reasons: string[];
   repo: RepoVerdict | undefined;
-  /** Its record's `git.identity` fails. */
-  noIdentity: boolean;
+  /**
+   * git cannot commit in the wave's clone there (`lacksIdentity`, #631): only the own machine
+   * refuses on it; a peer is judged by its repository verdict, which says so already.
+   */
+  cloneLacksIdentity: boolean;
+  /** The wave's clone there, for the identity line's fix. */
+  clone?: string;
   /**
    * Its verdict is not settled yet (no record heard, its PATH not probed since the supervisor
    * started): it refuses nothing, as a clone being made does not.
@@ -375,15 +403,17 @@ export interface Refusal {
 
 /** A candidate's one line: `box-a: not ready (…)`, else `repoStateLine`'s. */
 function candidateLine(c: Candidate): string {
-  if (c.local) return `${c.name}: no commit identity (volley setup --peer --step signin)`;
+  if (c.local) {
+    const at = c.clone ?? "<clone>";
+    return `${c.name}: no commit identity in ${at} (${identityFix(at)})`;
+  }
   if (!c.ready) return `${c.name}: not ready (${c.reasons.join("; ") || "no reason given"})`;
   return repoStateLine(c.name, c.repo);
 }
 
 /** Whether a candidate can take the wave's tasks now (`pending`: its clone is still being made). */
 function standing(c: Candidate): "ready" | "pending" | "no" {
-  if (c.noIdentity) return "no";
-  if (c.local) return "ready";
+  if (c.local) return c.cloneLacksIdentity ? "no" : "ready";
   if (c.settling === true) return "pending";
   if (!c.ready) return "no";
   if (c.repo?.state === "ready") return "ready";
@@ -445,6 +475,14 @@ export function admissionRefusals(
   return { refusals, lines };
 }
 
-/** Whether a record's `git.identity` check fails (readiness' blocker, D3). */
-export const lacksIdentity = (r: MachineRecord | undefined): boolean =>
-  r?.checks?.some((c) => c.id === "git.identity" && !c.ok) ?? false;
+/**
+ * Whether git cannot commit in `slug`'s clone on a record's machine (#631): its `repo.identity`
+ * fails, or the machine has no identity anywhere (readiness' blocker).
+ */
+export const lacksIdentity = (r: MachineRecord | undefined, slug: string): boolean =>
+  r !== undefined &&
+  ((r.checks?.some(
+    (c) => c.id === "repo.identity" && !c.ok && c.repo !== undefined && sameSlug(c.repo, slug),
+  ) ??
+    false) ||
+    noCommitIdentity(r));

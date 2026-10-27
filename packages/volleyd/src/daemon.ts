@@ -466,6 +466,7 @@ import {
   type Refusal,
   type RepoFacts,
   admissionRefusals,
+  clonePathOf,
   closingLine,
   factsUnknown,
   lacksIdentity,
@@ -13859,7 +13860,8 @@ export class Daemon {
           ready: r.ready,
           reasons: r.reasons,
           repo: r.repo,
-          noIdentity: lacksIdentity(record),
+          cloneLacksIdentity: lacksIdentity(record, facts.slug),
+          clone: r.repo?.path ?? clonePathOf(record, facts.slug),
           settling,
         };
       },

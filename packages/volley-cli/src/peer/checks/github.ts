@@ -52,9 +52,16 @@ export function ghState(f: Facts): AuthGh {
   return "ok";
 }
 
-/** git can commit here: without an identity an agent's first commit dies (warn, like gh.auth). */
+/**
+ * git can commit here (the home's identity: global or system): without one an agent's first
+ * commit dies unless its clone sets its own (`repo.identity`). A warn, like gh.auth.
+ */
 function gitIdentityCheck(f: Facts): Check {
   const id = f.github.gitIdentity;
+  // Every repository's clone (the legacy --repo one too) commits under its own identity (#631):
+  // only a new clone would not.
+  const each = [...f.repos.map((r) => r.identity), ...(f.repo.isGit ? [f.repo.identity] : [])];
+  const clones = each.length > 0 && each.every((i) => i !== null);
   return {
     id: "git.identity",
     ok: id !== null,
@@ -62,7 +69,9 @@ function gitIdentityCheck(f: Facts): Check {
     detail:
       id !== null
         ? `git commits as ${id}`
-        : 'git has no commit identity (user.name/user.email): an agent\'s first commit here fails with "Author identity unknown"',
+        : clones
+          ? "no global commit identity (user.name/user.email); every repository's clone sets its own, a new clone would not"
+          : 'git has no commit identity (user.name/user.email): an agent\'s first commit here fails with "Author identity unknown"',
     // Without git, tool.git's fix stands.
     ...(id === null && binOf(f.tools.git) !== null
       ? { fix: { command: "volley setup --peer --step signin" } }
