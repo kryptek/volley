@@ -468,4 +468,86 @@ describe("a submit checks the repository first (#610)", () => {
     const after = await client.request("run", { wave_yaml: waveYaml("manual") });
     expect(after.error).not.toContain("git: no commit identity");
   });
+
+  it("#631: a clone with its own identity on a box with no global one: no identity reason; a clone without one is blocked", async () => {
+    await start(github());
+    peer = new VolleyBroker();
+    await peer.connect({ url: env.broker.url, agentId: "box" });
+    const beat = (clone: boolean, at: string) =>
+      peer?.publish(
+        machineTopic("box"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "box",
+            parentId: null,
+            channel: MACHINE_CHANNEL,
+            type: "machine",
+            payload: {
+              name: "box",
+              os: "linux",
+              cores: 8,
+              tunnel: "up",
+              load: [0.1, 0.1, 0.1],
+              agents: 0,
+              last_seen: at,
+              versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.1", git: "2.43.0" },
+              auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+              repos: [
+                {
+                  slug: "b/b",
+                  path: "/srv/b/b",
+                  exists: true,
+                  managed: true,
+                  fetched_at: null,
+                  toolchain: { ok: true, missing: [], outdated: [] },
+                },
+              ],
+              checks: [
+                {
+                  id: "git.identity",
+                  ok: false,
+                  severity: "warn",
+                  detail: "git has no commit identity",
+                },
+                {
+                  id: "repo.identity",
+                  ok: clone,
+                  severity: "block",
+                  detail: clone ? "commits as Repo Level <r@x>" : "no commit identity in /srv/b/b",
+                  repo: "b/b",
+                },
+              ],
+              doctor_at: at,
+            } satisfies MachineRecord,
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+    type Verdict = {
+      reasons?: string[];
+      repos?: Record<string, { state?: string; reasons?: string[] }>;
+    };
+    const verdict = async () =>
+      ((await env.retained(`${machineTopic("box")}/readiness`)) as { payload?: Verdict } | null)
+        ?.payload ?? {};
+    await beat(true, "2026-10-25T09:00:00.000Z");
+    await eventually(async () => (await verdict()).repos?.["b/b"]?.state !== undefined);
+    expect((await verdict()).reasons ?? []).not.toContainEqual(
+      expect.stringContaining("git: no commit identity"),
+    );
+    expect((await verdict()).repos?.["b/b"]?.reasons ?? []).toEqual([]);
+    // The box is not ready for other reasons (its ssh among them): refused, never for identity.
+    const r = await client.request("run", { wave_yaml: waveYaml("manual") });
+    expect(r.ok).toBe(false);
+    expect(r.error).not.toContain("git: no commit identity");
+    await beat(false, "2026-10-25T09:01:00.000Z");
+    await eventually(async () => (await verdict()).repos?.["b/b"]?.state === "blocked");
+    expect((await verdict()).repos?.["b/b"]?.reasons?.[0]).toMatch(
+      /^repo\.identity: no commit identity in \/srv\/b\/b/,
+    );
+    // No clone commits now: the machine-level blocker of #610 is back.
+    expect((await verdict()).reasons).toContain(
+      "git: no commit identity on box (volley setup --peer --step signin)",
+    );
+  });
 });

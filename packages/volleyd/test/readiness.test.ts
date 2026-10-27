@@ -345,6 +345,56 @@ describe("readiness per (machine, repository) (#436)", () => {
     expect(r).toMatchObject({ ready: true, eligible: true, reasons: [] });
   });
 
+  describe("#631: git's commit identity is judged per clone", () => {
+    const noGlobal = {
+      id: "git.identity",
+      ok: false,
+      severity: "warn" as const,
+      detail: "git has no commit identity (user.name/user.email)",
+    };
+    const ident = (slug: string, ok: boolean) => ({
+      id: "repo.identity",
+      ok,
+      severity: "block" as const,
+      detail: ok
+        ? "commits as Repo Level <1+repo@users.noreply.github.com>"
+        : `no commit identity in /path/to/home/volley/repos/${slug} (user.name/user.email)`,
+      repo: slug,
+    });
+    const NONE = "git: no commit identity on box-a (volley setup --peer --step signin)";
+
+    it("repo-level only: the machine is ready and the clone ready", () => {
+      const rec = many([repo("a/a")], [noGlobal, ident("a/a", true)]);
+      const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a"]) }));
+      expect(r).toMatchObject({ ready: true, reasons: [] });
+      expect(r.repos["a/a"]?.state).toBe("ready");
+    });
+
+    it("none anywhere: not ready, naming the fix", () => {
+      const rec = many([repo("a/a")], [noGlobal]);
+      const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a"]) }));
+      expect(r.ready).toBe(false);
+      expect(r.reasons).toEqual([NONE]);
+    });
+
+    it("global only: ready", () => {
+      const rec = many([repo("a/a")], [{ ...noGlobal, ok: true, detail: "git commits as x" }]);
+      expect(readiness(input({ record: rec, repos: reposOf(rec, ["a/a"]) })).ready).toBe(true);
+    });
+
+    it("global missing, clone A set and clone B not: ready, A ready, B blocked by repo.identity", () => {
+      const rec = many(
+        [repo("a/a"), repo("b/b")],
+        [noGlobal, ident("a/a", true), ident("b/b", false)],
+      );
+      const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b"]) }));
+      expect(r).toMatchObject({ ready: true, reasons: [] });
+      expect(r.repos["a/a"]?.state).toBe("ready");
+      expect(r.repos["b/b"]?.state).toBe("blocked");
+      expect(r.repos["b/b"]?.reasons[0]).toMatch(/^repo\.identity: no commit identity in/);
+    });
+  });
+
   it("a wanted slug the machine has no entry for is absent, and the machine stays ready", () => {
     const rec = many([repo("a/a")]);
     const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "c/c"]) }));

@@ -191,7 +191,8 @@ export function repoChecks(f: Facts): Check[] {
       },
     ];
   }
-  return cloneChecks(f, { ...r, path: r.path });
+  const checks = cloneChecks(f, { ...r, path: r.path });
+  return r.isGit ? [...checks, identityCheck({ path: r.path, identity: r.identity })] : checks;
 }
 
 /** A repository's GitHub URL: what `--clone` clones and a repoint sets. */
@@ -285,9 +286,12 @@ export function reposChecks(f: Facts): Check[] {
       git !== null
         ? { command: steps.map((s) => s.join(" ")).join(" && "), steps, refresh: true }
         : undefined;
-    return [...cloneChecks(f, view, origin, fetch), pushCheck(f, r), worktreesCheck(r)].map(
-      (c) => ({ ...c, repo: r.slug }),
-    );
+    return [
+      ...cloneChecks(f, view, origin, fetch),
+      pushCheck(f, r),
+      ...(r.isGit ? [identityCheck(r)] : []),
+      worktreesCheck(r),
+    ].map((c) => ({ ...c, repo: r.slug }));
   });
 }
 
@@ -328,6 +332,27 @@ function pushCheck(f: Facts, r: RepoFacts): Check {
     ok: true,
     severity: "block",
     detail: `${who} has ${r.permission} access to ${r.slug}`,
+  };
+}
+
+/**
+ * `repo.identity` (#631): git can commit in this clone, its identity resolved as git does (the
+ * clone's own config, then the global, then the system's). Blocks this repository only: a clone
+ * with its own identity commits on a machine with no global one.
+ */
+function identityCheck(r: { path: string; identity: string | null }): Check {
+  if (r.identity !== null) {
+    return { id: "repo.identity", ok: true, severity: "block", detail: `commits as ${r.identity}` };
+  }
+  const at = shellArg(r.path);
+  return {
+    id: "repo.identity",
+    ok: false,
+    severity: "block",
+    detail: `no commit identity in ${r.path} (user.name/user.email): an agent's first commit there fails with "Author identity unknown"`,
+    fix: {
+      command: `git -C ${at} config user.name "<name>" && git -C ${at} config user.email <email> (for this clone), or volley setup --peer --step signin (a global one for every clone)`,
+    },
   };
 }
 

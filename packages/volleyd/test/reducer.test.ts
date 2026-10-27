@@ -1215,4 +1215,35 @@ describe("wave_cleaned (#612)", () => {
     );
     expect(reduce(events).cleanup).toBeUndefined();
   });
+
+  it("a task run never replaces the whole-wave run until the wave resumes or ends again (#630)", () => {
+    const whole = cleaned(1, {
+      removed: counts({ worktrees: 58, branches: 10 }),
+      summary: "cleaned w1: 58 worktrees, 10 branches; kept 26",
+    });
+    const task = cleaned(2, { task: "A", removed: counts(), summary: "nothing to clean; kept 1" });
+    const after = reduce([...events, whole, { ...task, task: "A" }]);
+    expect(after.cleanup?.summary).toBe("cleaned w1: 58 worktrees, 10 branches; kept 26");
+    expect(after.cleanup).not.toHaveProperty("task");
+    // A task run alone is what status shows.
+    expect(reduce([...events, { ...task, task: "A" }]).cleanup).toMatchObject({
+      summary: "nothing to clean; kept 1",
+      task: "A",
+    });
+    // A resume sends the wave back to needing its whole-wave run: the task run shows again.
+    const resumed: JournalEvent = {
+      seq: events.length + 2,
+      at: "2026-10-25T12:02:00.000Z",
+      type: "wave_resumed",
+      data: { by: "coord" },
+    };
+    const later = { ...task, seq: events.length + 3, task: "A" };
+    expect(reduce([...events, whole, resumed, later]).cleanup).toMatchObject({ task: "A" });
+    // A dry run replaces neither.
+    const dry = cleaned(4, { removed: counts(), summary: "would clean", dry_run: true });
+    expect(reduce([...events, whole, dry]).cleanup?.summary).toBe(whole.data.summary);
+    expect(reduce([...events, { ...task, task: "A" }, dry]).cleanup?.summary).toBe(
+      "nothing to clean; kept 1",
+    );
+  });
 });

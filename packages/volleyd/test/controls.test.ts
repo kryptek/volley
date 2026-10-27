@@ -897,6 +897,24 @@ describe("CLI", () => {
     expect(steer.stdout).toContain("steer #1 → agent-a1 (implementer): delivered (no ack yet)");
   });
 
+  it("stop and steer identify the owner by --by and by VOLLEY_COORDINATOR (#630)", async () => {
+    const steer = await runCli(["steer", WAVE, "A", "x", "--wait-ack-ms", "0"], {
+      ...env(),
+      VOLLEY_COORDINATOR: "coord-a",
+    });
+    expect(steer.stderr).toBe("");
+    expect(steer.exitCode).toBe(0);
+    const anonymous = await runCli(["stop", WAVE], env());
+    expect(anonymous.exitCode).toBe(1);
+    expect(anonymous.stderr).toContain(
+      "(no caller identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR (the name `volley setup` saved applies on its own))",
+    );
+    expect(anonymous.stderr).not.toContain("VOLLEY_AGENT_ID");
+    const stop = await runCli(["stop", WAVE, "--by", "coord-a"], env());
+    expect(stop.stderr).toBe("");
+    expect(stop.stdout).toContain(`stopped wave ${WAVE}`);
+  });
+
   it("steer with no live agent prints that it is queued", async () => {
     await daemon.recordEvent(WAVE, {
       type: "agent_retired",
@@ -920,7 +938,10 @@ describe("CLI", () => {
   it("claim needs an identity and is refused while the owner is online", async () => {
     const anonymous = await runCli(["claim", WAVE], env());
     expect(anonymous.exitCode).toBe(1);
-    expect(anonymous.stderr).toContain("claim needs an identity");
+    expect(anonymous.stderr).toContain(
+      "claim needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR (the name `volley setup` saved applies on its own)",
+    );
+    expect(anonymous.stderr).not.toContain("VOLLEY_AGENT_ID");
     // coord-a's retained status is live: not claimable until its session is gone.
     const pub = new VolleyBroker();
     await pub.connect({ url: broker.url, agentId: "coord-a" });

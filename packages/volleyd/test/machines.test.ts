@@ -202,6 +202,29 @@ describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)",
     expect(r?.auth?.gh).toBe("ok");
   });
 
+  it("#631: an untagged repo.identity is tagged with its run's slug, as repo.clone is", () => {
+    const base = report("/path/to/a", "github.com/a/a");
+    const r = foldOwnDoctor([
+      {
+        slug: "a/a",
+        report: {
+          ...base,
+          checks: [
+            ...base.checks,
+            { id: "git.identity", ok: false, severity: "warn", detail: "no global" },
+            { id: "repo.identity", ok: true, severity: "block", detail: "commits as x" },
+          ],
+        },
+      },
+    ]);
+    expect(r?.checks.map((c) => [c.id, c.repo])).toEqual([
+      ["tool.git", undefined],
+      ["git.identity", undefined],
+      ["repo.clone", "a/a"],
+      ["repo.identity", "a/a"],
+    ]);
+  });
+
   it("one clone keeps the legacy repo too; no run is null; a slug twice is folded once", () => {
     const one = foldOwnDoctor([{ slug: "a/a", report: report("/path/to/a", "github.com/a/a") }]);
     expect(one?.repo?.path).toBe("/path/to/a");
