@@ -343,14 +343,14 @@ const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   release_cancelled: "complete",
 };
 
-/**
- * Apply one journal event. Pure: returns a new record, or the same record object when the event
- * is a duplicate (seq already applied) — re-applying an event is a no-op.
- */
 /** Does `e` send a wave back to needing its whole-wave cleanup pass (it resumed or ended again)? */
 export const resetsWholeCleanup = (e: JournalEvent): boolean =>
   e.type === "wave_stopped" || e.type === "wave_complete" || e.type === "wave_resumed";
 
+/**
+ * Apply one journal event. Pure: returns a new record, or the same record object when the event
+ * is a duplicate (seq already applied) — re-applying an event is a no-op.
+ */
 export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   if (ev.seq <= rec.seq) return rec;
   const next = structuredClone(rec);
