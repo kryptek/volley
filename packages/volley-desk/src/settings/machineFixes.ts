@@ -15,6 +15,8 @@
  * person is never told to run the doctor by hand.
  */
 
+import { shellQuote } from "../steer/transport";
+
 export interface MachineFix {
   /** One line on what to do. */
   text: string;
@@ -49,6 +51,9 @@ const repoOf = (c: Ctx) =>
   (c.slug !== undefined
     ? c.repos?.find((r) => r.slug.toLowerCase() === c.slug?.toLowerCase())?.path
     : c.repo) ?? "<the repo's clone>";
+
+/** A clone path for a pasted command: single-quoted only when a shell would split or expand it. */
+const argOf = (path: string) => (/^[\w./~@%+=:,-]+$/.test(path) ? path : shellQuote(path));
 
 /** The repository a check is about, in words. */
 const nameOf = (c: Ctx) => c.slug ?? "the wave repo";
@@ -91,7 +96,7 @@ const FIXES: Record<string, Fixer> = {
   }),
   "repo.identity": (c) => ({
     text: `give ${repoOf(c)} on ${c.machine} a commit identity: git -C ${repoOf(c)} config user.name … && … user.email …, or a global one with setup's Sign-ins step`,
-    command: `git -C ${repoOf(c)} config user.name "<name>" && git -C ${repoOf(c)} config user.email <email>`,
+    command: `git -C ${argOf(repoOf(c))} config user.name "<name>" && git -C ${argOf(repoOf(c))} config user.email <email>`,
     safe: false,
   }),
   "gh.auth": (c) => ({
