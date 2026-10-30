@@ -1,5 +1,5 @@
 #!/bin/bash
-# Layer 2 of the install tests (README.md), as the nightly runs it on the Linux box's runner
+# Layer 2 of the install tests (README.md), as install-vm.yml runs it on the Linux box's runner
 # (label volley-linux-vm): the preflight, then vm-linux.sh for one distribution.
 #
 #   run-layer2.sh <ubuntu-24.04|debian-13> [--version vX.Y.Z]

@@ -5,8 +5,7 @@ import { tempDir } from "../helpers/tmp";
 
 // Layers 2 and 4 (README.md), verify.sh and install-vm.yml against the stand-ins in stubs/:
 // multipass keeps its VMs in a state directory, ssh is the fake VM (it answers from rules), gh
-// records the tracking issue's calls and answers verify.sh's. Every call lands in calls.log, which
-// these tests read.
+// answers verify.sh's calls. Every call lands in calls.log, which these tests read.
 
 const HERE = import.meta.dir;
 const STUBS = join(HERE, "stubs");
@@ -545,59 +544,16 @@ describe("the scripts' arguments", () => {
   }
 });
 
-describe("a failing run and the tracking issue", () => {
-  const failing: Rule[] = [["is-active --quiet volleyd\\.service", 3]];
-
-  test("no open install-tests issue: one is opened, and the failure is a comment on it", () => {
+describe("a failing run", () => {
+  test("a failing run files nothing, whatever the environment says", () => {
     const w = world();
     const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
-      rules: failing,
-      env: { VM_TRACK_ISSUE: "1", GITHUB_RUN_ID: "777", GITHUB_REPOSITORY: "kryptek/volley" },
+      rules: [["is-active --quiet volleyd\\.service", 3]],
+      env: { VM_TRACK_ISSUE: "1", GITHUB_RUN_ID: "777" },
     });
     expect(r.code).toBe(1);
-    const gh = r.calls.filter((c) => c.startsWith("gh "));
-    expect(gh).toEqual([
-      expect.stringMatching(/^gh label create install-tests --color \S+ --description .+ --force$/),
-      "gh issue list --label install-tests --state open --json number --jq .[0].number // empty",
-      expect.stringMatching(
-        /^gh issue create --label install-tests --title Nightly install tests are failing --body /,
-      ),
-      expect.stringMatching(/^gh issue comment 99 --body-file \S+issue-comment\.md$/),
-    ]);
-    const comment = read(w, "issue-comment.md");
-    expect(comment).toContain("### Layer 2: ubuntu-24.04 failed");
-    expect(comment).toContain("https://github.com/kryptek/volley/actions/runs/777");
-    expect(comment).toContain("- volleyd.service is not active after the reboot");
-    // The comment carries the metrics table too.
-    expect(comment).toContain("| Setup wall time |");
-  });
-
-  test("an open one: only a comment, no second issue", () => {
-    const w = world();
-    writeFileSync(join(w.state, "gh-open-issue"), "41\n");
-    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
-      rules: failing,
-      env: { VM_TRACK_ISSUE: "1" },
-    });
-    expect(r.code).toBe(1);
-    const gh = r.calls.filter((c) => c.startsWith("gh "));
-    expect(gh.some((c) => c.startsWith("gh issue create"))).toBe(false);
-    expect(gh.at(-1)).toMatch(/^gh issue comment 41 --body-file /);
-  });
-
-  test("a passing run, or one outside the nightly, files nothing", () => {
-    const w = world();
-    expect(
-      run(w, "vm-linux.sh", ["ubuntu-24.04"], { env: { VM_TRACK_ISSUE: "1" } }).calls.some((c) =>
-        c.startsWith("gh "),
-      ),
-    ).toBe(false);
-    const w2 = world();
-    expect(
-      run(w2, "vm-linux.sh", ["ubuntu-24.04"], { rules: failing }).calls.some((c) =>
-        c.startsWith("gh "),
-      ),
-    ).toBe(false);
+    expect(read(w, "failures.md")).toContain("volleyd.service");
+    expect(r.calls.some((c) => c.startsWith("gh "))).toBe(false);
   });
 });
 
@@ -821,6 +777,7 @@ describe("the VM workflow (install-vm.yml)", () => {
     readFileSync(join(HERE, "../../.github/workflows/install-vm.yml"), "utf8"),
   ) as {
     on: Record<string, { inputs?: Record<string, unknown> } | null>;
+    permissions: Record<string, string>;
     env: Record<string, string>;
     concurrency: { group: string; "cancel-in-progress": boolean };
     jobs: Record<
@@ -836,14 +793,14 @@ describe("the VM workflow (install-vm.yml)", () => {
     >;
   };
 
-  test("never on pull_request or push: the schedule and a dispatch (input version only)", () => {
-    expect(Object.keys(wf.on).sort()).toEqual(["schedule", "workflow_dispatch"]);
+  test("only a dispatch (input version only): never on pull_request, push or a schedule", () => {
+    expect(Object.keys(wf.on)).toEqual(["workflow_dispatch"]);
     expect(Object.keys(wf.on.workflow_dispatch?.inputs ?? {})).toEqual(["version"]);
     expect(wf.concurrency).toEqual({ group: "install-vm", "cancel-in-progress": false });
   });
 
-  test("linux-vm and pair on the one runner label, and a report; no macOS job", () => {
-    expect(Object.keys(wf.jobs)).toEqual(["linux-vm", "pair", "report"]);
+  test("linux-vm and pair on the one runner label; no report, no macOS job", () => {
+    expect(Object.keys(wf.jobs)).toEqual(["linux-vm", "pair"]);
     const linux = wf.jobs["linux-vm"];
     expect(linux?.["runs-on"]).toEqual(["self-hosted", "volley-linux-vm"]);
     expect(linux?.strategy?.matrix.distro).toEqual(["ubuntu-24.04", "debian-13"]);
@@ -853,30 +810,14 @@ describe("the VM workflow (install-vm.yml)", () => {
     expect(wf.jobs.pair?.["timeout-minutes"]).toBe(60);
   });
 
-  test("only the schedule reports to the tracking issue", () => {
-    expect(wf.env.VM_TRACK_ISSUE).toBe("${{ github.event_name == 'schedule' && '1' || '' }}");
-  });
-
-  test("the report job fails a run that did not pass; only the schedule comments on the issue", () => {
-    const report = wf.jobs.report;
-    expect(report?.["runs-on"]).toBe("ubuntu-latest");
-    expect(report?.needs).toEqual(["linux-vm", "pair"]);
-    // Always, so a job that failed or never ran is reported (and only in the canonical repository).
-    expect(report?.if).toBe("always() && github.repository == 'kryptek/volley'");
-    const script = JSON.stringify(report?.steps ?? []);
-    // lib.sh's label and title, so the two never make a second issue.
-    expect(script).toContain("install-tests");
-    expect(script).toContain("Nightly install tests are failing");
-    expect(script).toContain("needs.linux-vm.result");
-    expect(script).toContain("needs.pair.result");
-    expect(script).not.toMatch(/macos/i);
-    expect(script).toContain("github.event_name == 'schedule'");
-    const run = report?.steps?.[0]?.run ?? "";
-    // The issue's calls sit inside the schedule's branch; the failure is for every event.
-    const guarded = run.slice(run.indexOf('if [ "$SCHEDULED" = 1 ]'), run.lastIndexOf("fi"));
-    expect(guarded).toContain("gh issue comment");
-    expect(run.replace(guarded, "")).not.toContain("gh issue");
-    expect(run.trimEnd().endsWith("exit 1")).toBe(true);
+  test("no run touches an issue: no issues permission, no tracking env, no gh issue call", () => {
+    expect(wf.permissions).toEqual({ contents: "read" });
+    expect(wf.env).not.toHaveProperty("VM_TRACK_ISSUE");
+    const text = JSON.stringify(wf);
+    expect(text).not.toContain("gh issue");
+    // The install-tests label; the scripts' directory (scripts/install-tests/) is not one.
+    expect(text.replaceAll("scripts/install-tests/", "")).not.toContain("install-tests");
+    expect(text).not.toContain("GH_TOKEN");
   });
 
   test("no artifact uploads the run's private key or raw transcript", () => {

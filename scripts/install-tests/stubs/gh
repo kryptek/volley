@@ -1,11 +1,10 @@
 #!/bin/bash
 # gh in vm.test.ts (scripts/install-tests/README.md): every call appended to
-# $STUB_STATE/calls.log. The tracking issue's calls: `issue list` prints $STUB_STATE/gh-open-issue
-# (the open tracking issue's number) when it exists; `issue create` prints a new issue's URL (#99).
-# verify.sh's: `auth status` exits 1 when $STUB_STATE/gh-signed-out exists; `run list` prints the
-# next of $STUB_STATE/gh-run-list.<n> (1, 2, …; the last one again once they run out), `run view`
-# the next of gh-run-view.<n> the same way; `run watch` exits 0; `run download <id> --dir <dir>`
-# copies $STUB_STATE/artifacts/* into <dir>.
+# $STUB_STATE/calls.log. It answers verify.sh only: `auth status` exits 1 when
+# $STUB_STATE/gh-signed-out exists; `run list` prints the next of $STUB_STATE/gh-run-list.<n>
+# (1, 2, …; the last one again once they run out), `run view` the next of gh-run-view.<n> the same
+# way; `run watch` exits 0; `run download <id> --dir <dir>` copies $STUB_STATE/artifacts/* into
+# <dir>.
 set -u
 S=${STUB_STATE:?STUB_STATE is not set}
 printf 'gh %s\n' "$*" >>"$S/calls.log"
@@ -17,8 +16,6 @@ next() {
   cat "$S/$1.$n" 2>/dev/null
 }
 case "${1:-} ${2:-}" in
-  "issue list") cat "$S/gh-open-issue" 2>/dev/null ;;
-  "issue create") echo "https://github.com/kryptek/volley/issues/99" ;;
   "auth status") [ ! -e "$S/gh-signed-out" ] || exit 1 ;;
   "run list") next gh-run-list ;;
   "run view") next gh-run-view ;;
