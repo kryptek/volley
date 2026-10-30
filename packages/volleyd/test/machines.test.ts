@@ -225,6 +225,36 @@ describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)",
     ]);
   });
 
+  it("#638: each run's untagged claude.trust is tagged with that run's slug", () => {
+    const run = (path: string, origin: string, trusted: boolean) => {
+      const base = report(path, origin);
+      return {
+        ...base,
+        checks: [
+          ...base.checks,
+          {
+            id: "claude.trust",
+            ok: trusted,
+            severity: "warn" as const,
+            detail: trusted
+              ? `Claude Code trusts ${path}`
+              : `Claude Code does not trust ${path} yet`,
+          },
+        ],
+      };
+    };
+    const r = foldOwnDoctor([
+      { slug: "a/a", report: run("/path/to/a", "github.com/a/a", true) },
+      { slug: "b/b", report: run("/path/to/b", "github.com/b/b", false) },
+    ]);
+    expect(
+      r?.checks.filter((c) => c.id === "claude.trust").map((c) => [c.repo, c.ok, c.detail]),
+    ).toEqual([
+      ["a/a", true, "Claude Code trusts /path/to/a"],
+      ["b/b", false, "Claude Code does not trust /path/to/b yet"],
+    ]);
+  });
+
   it("one clone keeps the legacy repo too; no run is null; a slug twice is folded once", () => {
     const one = foldOwnDoctor([{ slug: "a/a", report: report("/path/to/a", "github.com/a/a") }]);
     expect(one?.repo?.path).toBe("/path/to/a");

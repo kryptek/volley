@@ -112,27 +112,40 @@ export function claudeChecks(f: Facts): Check[] {
               }
             : {}),
         };
-  const repo = f.repo.path;
-  const trust: Check =
-    c.trust === "ok"
-      ? { id: "claude.trust", ok: true, severity: "warn", detail: `Claude Code trusts ${repo}` }
-      : {
-          id: "claude.trust",
-          ok: false,
-          severity: "warn",
-          detail:
-            repo === null
-              ? "no wave repo to check Claude Code's folder trust for"
-              : c.trust === "missing"
-                ? `Claude Code does not trust ${repo} yet`
-                : `could not read ~/.claude.json to check trust of ${repo}`,
-          ...(repo !== null
-            ? {
-                fix: {
-                  command: `run claude in ${repo} once and accept the trust dialog (or answer trust to the first repo_untrusted decision)`,
-                },
-              }
-            : {}),
-        };
-  return [signin, trust];
+  // One line per configured repository, naming its clone; else the legacy clone's one line.
+  const trust: Check[] =
+    f.repos.length > 0
+      ? f.repos.map((r) => ({
+          ...trustCheck(
+            r.trusted === true ? "ok" : r.trusted === false ? "missing" : "unknown",
+            r.path,
+          ),
+          repo: r.slug,
+        }))
+      : [trustCheck(f.claude.trust, f.repo.path)];
+  return [signin, ...trust];
+}
+
+/** `claude.trust` for the clone at `repo` (null: no clone to check). */
+function trustCheck(state: Facts["claude"]["trust"], repo: string | null): Check {
+  return state === "ok" && repo !== null
+    ? { id: "claude.trust", ok: true, severity: "warn", detail: `Claude Code trusts ${repo}` }
+    : {
+        id: "claude.trust",
+        ok: false,
+        severity: "warn",
+        detail:
+          repo === null
+            ? "no wave repo to check Claude Code's folder trust for"
+            : state === "missing"
+              ? `Claude Code does not trust ${repo} yet`
+              : `could not read ~/.claude.json to check trust of ${repo}`,
+        ...(repo !== null
+          ? {
+              fix: {
+                command: `run claude in ${repo} once and accept the trust dialog (or answer trust to the first repo_untrusted decision)`,
+              },
+            }
+          : {}),
+      };
 }

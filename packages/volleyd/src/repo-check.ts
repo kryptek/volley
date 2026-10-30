@@ -245,6 +245,7 @@ const RECORD_FIXES: Record<string, (slug: string, clone: string) => string> = {
   "repo.identity": (_slug, clone) => identityFix(clone),
   "gh.auth": () => "gh auth login && gh auth setup-git",
   "claude.signin": () => "claude, then /login",
+  "claude.trust": (_slug, clone) => `run claude in ${clone} once and accept the trust dialog`,
   "repo.clone": (slug) => `volley repo check ${slug} --fix`,
   "repo.worktrees": (slug) => `volley repo check ${slug} --fix`,
   "repo.fetch": (slug) => `volley repo check ${slug} --fix`,

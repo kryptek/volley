@@ -425,6 +425,52 @@ describe("machineBlock and the closing line", () => {
       "volley peer doctor --repo <the clone> --fix, on this machine (volleyd never fixes its own clone)",
     );
   });
+
+  it("#638: the checked repository's claude.trust, not another's; a failing record line gets a fix", () => {
+    const perRepo = [
+      { id: "tool.git", ok: true, severity: "block" as const, detail: "git 2.43" },
+      { id: "repo.clone", ok: true, severity: "block" as const, repo: SLUG, detail: "clone at /c" },
+      {
+        id: "claude.trust",
+        ok: false,
+        severity: "warn" as const,
+        repo: SLUG,
+        detail: "Claude Code does not trust /c yet",
+      },
+      {
+        id: "claude.trust",
+        ok: true,
+        severity: "warn" as const,
+        repo: "o/other",
+        detail: "Claude Code trusts /other",
+      },
+    ];
+    const rec = record(perRepo);
+    const b = machineBlock(
+      SLUG,
+      {
+        ...rec,
+        repos: [
+          {
+            slug: SLUG,
+            path: "/c",
+            exists: true,
+            managed: true,
+            fetched_at: null,
+            toolchain: { ok: true, missing: [], outdated: [] },
+          },
+        ],
+      },
+      undefined,
+      { ready: true, reasons: [] },
+      { state: "ready", path: "/c", reasons: [] },
+      { from: "record" },
+    );
+    const trust = b.checks.filter((c) => c.id === "claude.trust");
+    expect(trust).toHaveLength(1);
+    expect(trust[0]).toMatchObject({ repo: SLUG, detail: "Claude Code does not trust /c yet" });
+    expect(trust[0]?.fix).toBe("run claude in /c once and accept the trust dialog");
+  });
 });
 
 const peer = (name: string, over: Partial<Candidate> = {}): Candidate => ({

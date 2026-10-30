@@ -196,6 +196,8 @@ export interface RepoFacts {
   /** Where volleyd cuts its worktrees here, and whether it (or its nearest ancestor) is writable. */
   worktreeRoot: string;
   worktreeWritable: boolean;
+  /** Claude Code trusts its folder (claude.trust); null: ~/.claude.json could not be read. */
+  trusted: boolean | null;
 }
 
 export interface Memory {
@@ -794,6 +796,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       permission: (await viewOf(repoSlug)).permission,
       worktreeRoot: wtRoot,
       worktreeWritable: nearDir && writable(near),
+      // Filled in below, from the one read of ~/.claude.json.
+      trusted: null,
     });
   }
   // The tools a repository needs beyond the doctor's own: only those, each probed once.
@@ -834,6 +838,13 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
           : trustPaths.every((p) => isRepoTrusted(claudeJson, p))
             ? "ok"
             : "missing";
+  }
+  for (const r of repos) {
+    r.trusted = !existsSync(claudeJsonFile)
+      ? false
+      : claudeJson === undefined
+        ? null
+        : isRepoTrusted(claudeJson, r.path);
   }
   const identity = loginIdentity(
     typeof claudeJson === "object" && claudeJson !== null && !Array.isArray(claudeJson)
