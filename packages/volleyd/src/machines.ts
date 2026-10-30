@@ -383,8 +383,8 @@ export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
 /**
  * The supervisor's own doctor (#436) runs once per running wave's clone (`--repo <dir>`); its
  * reports fold into one: the machine-level fields and checks from the first, and per clone its
- * `repo.*` and `claude.trust` checks (tagged with its slug) and one `repos[]` entry, the first clone of a slug
- * winning. A clone whose slug is unknown (a repository not on GitHub) keeps its checks untagged.
+ * `repo.*` and `claude.trust` checks (tagged with its slug) and one `repos[]` entry, the first
+ * clone of a slug winning. A clone whose slug is unknown (a repository not on GitHub) keeps its checks untagged.
  * The legacy `repo` is kept only when exactly one clone ran, as a peer's doctor does.
  */
 export function foldOwnDoctor(

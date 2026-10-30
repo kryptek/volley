@@ -2002,7 +2002,10 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   let attempts = 0;
   let beatNo = 0;
   const beat = async (mine: number) => {
-    cfg = await freshRepos(deps, cfg);
+    const repos = await freshRepos(deps, cfg);
+    // Given up while it read the repositories: the next beat owns `cfg` and the broker.
+    if (mine !== beatNo || stop.signal.aborted) return;
+    cfg = repos;
     if (broker === null) {
       const fresh = await connectPeer(deps, cfg, report);
       // This beat was given up while it connected: the next one has its own connection.
@@ -2072,7 +2075,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
           attempts++;
           io.stderr(`volley peer run: reconnect attempt ${attempts} failed: ${why}\n`);
         }
-        // Whatever the beat still runs belongs to no beat now.
+        // The given-up beat stops at its next check of `beatNo`; until then it holds only `b`.
         beatNo++;
         await dropBroker();
         const silent = deps.monotonic() - publishedAt;

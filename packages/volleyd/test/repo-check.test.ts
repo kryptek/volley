@@ -499,11 +499,55 @@ describe("machineBlock and the closing line", () => {
       undefined,
       { ready: true, reasons: [] },
       { state: "blocked", path: "/c", reasons: [] },
-      { from: "record" },
+      { from: "record", gitEmail: "dev@example.com" },
     );
     expect(b.checks.find((c) => c.id === "repo.identity")?.fix).toBe(
       "git -C /c config user.email dev@example.com",
     );
+  });
+
+  it("#638: the identity fix takes the email from config, quoted, never from the record's detail", () => {
+    const rec = (detail: string, path: string) => ({
+      ...record([
+        { id: "repo.identity", ok: false, severity: "block" as const, repo: SLUG, detail },
+        {
+          id: "claude.trust",
+          ok: false,
+          severity: "warn" as const,
+          repo: SLUG,
+          detail: `Claude Code does not trust ${path} yet`,
+        },
+      ]),
+      repos: [
+        {
+          slug: SLUG,
+          path,
+          exists: true,
+          managed: true,
+          fetched_at: null,
+          toolchain: { ok: true, missing: [], outdated: [] },
+        },
+      ],
+    });
+    const block = (detail: string, path: string, gitEmail?: string) =>
+      machineBlock(
+        SLUG,
+        rec(detail, path),
+        undefined,
+        { ready: true, reasons: [] },
+        { state: "blocked", path, reasons: [] },
+        { from: "record", ...(gitEmail !== undefined ? { gitEmail } : {}) },
+      ).checks;
+    const quoted = block("commits as X <x@y>, expected evil;rm@x", "/my clone", "a|b@c");
+    expect(quoted.find((c) => c.id === "repo.identity")?.fix).toBe(
+      "git -C '/my clone' config user.email 'a|b@c'",
+    );
+    expect(quoted.find((c) => c.id === "claude.trust")?.fix).toBe(
+      "run claude in '/my clone' once and accept the trust dialog",
+    );
+    // No expectation in config: the generic identity fix, whatever the detail claims.
+    const none = block("commits as X <x@y>, expected evil;rm@x", "/c");
+    expect(none.find((c) => c.id === "repo.identity")?.fix).not.toContain("evil");
   });
 });
 

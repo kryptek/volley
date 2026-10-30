@@ -7115,10 +7115,6 @@ export class Daemon {
     return this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
   }
 
-  /**
-   * What the own doctor checks: the running waves' clones, then each repository config assigns
-   * the own machine (SPEC §4.6.21), by its clone's path here, each once.
-   */
   /** The expected email of the repository the own clone at `dir` is of (#638), if config has one. */
   private expectedEmailOfDir(dir: string): { slug: string; email: string } | undefined {
     const slug = this.slugOfRepo(dir) ?? this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
@@ -7137,6 +7133,10 @@ export class Daemon {
     );
   }
 
+  /**
+   * What the own doctor checks: the running waves' clones, then each repository config assigns
+   * the own machine (SPEC §4.6.21), by its clone's path here, each once.
+   */
   private ownDoctorDirs(): string[] {
     const dirs = this.waveRepos();
     for (const c of this.ownAssignedClones()) if (!dirs.includes(c.dir)) dirs.push(c.dir);
@@ -8248,6 +8248,8 @@ export class Daemon {
     const canonical = view !== null && typeof view !== "string" ? view.slug : slug;
     const blocks = await this.enqueue(async () => {
       const out: Record<string, MachineBlock> = {};
+      const repos = this.config.effective().repos;
+      const gitEmail = repos[slugKey(repos, canonical) ?? canonical]?.git_email;
       for (const [i, m] of names.entries()) {
         const run = runs[i] ?? { from: "record" as const };
         const r = this.readinessFor(m, canonical);
@@ -8261,6 +8263,7 @@ export class Daemon {
             from: run.from,
             ...(run.note !== undefined ? { note: run.note } : {}),
             ...(m === local ? { own: true } : {}),
+            ...(gitEmail !== undefined ? { gitEmail } : {}),
           },
         );
       }

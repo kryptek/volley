@@ -240,18 +240,17 @@ function protectionCheck(f: RepoFacts, b: string): RepoCheck {
 const MACHINE_LINES = ["gh.auth", "git.identity", "claude.signin", "claude.trust"];
 
 /** A record carries no fix text: these are the ones a machine block names without a fresh doctor. */
-const RECORD_FIXES: Record<string, (slug: string, clone: string, detail: string) => string> = {
+const RECORD_FIXES: Record<string, (slug: string, clone: string, gitEmail?: string) => string> = {
   "git.identity": () => "volley setup --peer --step signin",
-  "repo.identity": (_slug, clone, detail) => {
-    // Another email than the repository expects (#638): the expected one, in the clone.
-    const expected = /, expected (\S+)$/.exec(detail)?.[1];
-    return expected !== undefined
-      ? `git -C ${shellArg(clone)} config user.email ${expected}`
-      : identityFix(clone);
-  },
+  // Another email than the repository expects (#638): config's, never the record's text (a peer wrote it).
+  "repo.identity": (_slug, clone, gitEmail) =>
+    gitEmail !== undefined
+      ? `git -C ${shellArg(clone)} config user.email ${shellArg(gitEmail)}`
+      : identityFix(clone),
   "gh.auth": () => "gh auth login && gh auth setup-git",
   "claude.signin": () => "claude, then /login",
-  "claude.trust": (_slug, clone) => `run claude in ${clone} once and accept the trust dialog`,
+  "claude.trust": (_slug, clone) =>
+    `run claude in ${shellArg(clone)} once and accept the trust dialog`,
   "repo.clone": (slug) => `volley repo check ${slug} --fix`,
   "repo.worktrees": (slug) => `volley repo check ${slug} --fix`,
   "repo.fetch": (slug) => `volley repo check ${slug} --fix`,
@@ -302,7 +301,7 @@ export function machineBlock(
   checks: (MachineCheck & { fix?: string })[] | undefined,
   machine: { ready: boolean; reasons: string[] },
   verdict: RepoVerdict | undefined,
-  from: { from: "doctor" | "record"; note?: string; own?: boolean },
+  from: { from: "doctor" | "record"; note?: string; own?: boolean; gitEmail?: string },
 ): MachineBlock {
   const all: (MachineCheck & { fix?: string })[] = checks ?? record?.checks ?? [];
   const tagged = all.some((c) => c.repo !== undefined && sameSlug(c.repo, slug));
@@ -317,7 +316,7 @@ export function machineBlock(
     const recordFix =
       from.own === true && c.id.startsWith("repo.") && c.id !== "repo.identity"
         ? OWN_FIX
-        : RECORD_FIXES[c.id]?.(slug, clonePathOf(record, slug), c.detail);
+        : RECORD_FIXES[c.id]?.(slug, clonePathOf(record, slug), from.gitEmail);
     const fix = c.fix ?? (!c.ok ? recordFix : undefined);
     return {
       id: c.id,

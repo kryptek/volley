@@ -284,7 +284,6 @@ export class VolleyBroker {
     return this.client;
   }
 
-  /** Clean disconnect — sends a DISCONNECT packet, which suppresses the LWT. */
   /**
    * End the connection; always settles. A live one sends DISCONNECT (so the broker does not
    * fire the LWT), falling back to force after DISCONNECT_FORCE_MS. A dropped one is ended
