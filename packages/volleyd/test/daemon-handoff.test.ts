@@ -3,11 +3,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { type InboxItem, handoffItemId, inboxTopic, pickerItemId } from "../src/autopilot/inbox";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import { NS } from "./helpers/daemon-env";
 import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
+import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { schemaErrors } from "./helpers/schema";
-import { type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
+import {
+  AGENT,
+  type SupervisedEnv,
+  makeSupervisedEnv,
+  systemJournal,
+} from "./helpers/supervised-env";
 
 let s: SupervisedEnv;
 let client: ControlClient | undefined;
@@ -27,19 +34,26 @@ const COORD = "coord-1";
 const QUESTION = "T1 is merged. Shall I dispatch T2 now, or hold until CI on main is green?";
 const phone = { kind: "desk", device: "phone" };
 
-/** What the coordinator session's hooks publish on its progress channel. */
-const coord = (type: string, seq: number, hookEvent: string, payload: Record<string, unknown>) =>
+/** What the coordinator session's hooks publish on its progress channel (sent at `at`, ms). */
+const coord = (
+  type: string,
+  seq: number,
+  hookEvent: string,
+  payload: Record<string, unknown>,
+  at?: number,
+) =>
   s.agent.publish(
     buildTopic(NS, COORD, "progress"),
-    JSON.stringify(
-      buildEnvelope({
+    JSON.stringify({
+      ...buildEnvelope({
         agentId: COORD,
         parentId: null,
         channel: "progress",
         type,
         payload: { ...payload, source: "harness-hook", seq, hook_event: hookEvent },
       }),
-    ),
+      ...(at !== undefined ? { wall_time: new Date(at).toISOString() } : {}),
+    }),
     { qos: 1, retain: false },
   );
 
@@ -342,6 +356,32 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     expect(s.host.texts).toEqual([]);
   });
 
+  it("a workspace whose registered session shut down cleanly (blocked, shutdown) is free again", async () => {
+    s = await makeSupervisedEnv();
+    await entry("coord-other", "workspace:7");
+    await s.agent.publish(
+      buildTopic(NS, "coord-other", "status"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "coord-other",
+          parentId: null,
+          channel: "status",
+          type: "blocked",
+          payload: { reason: "shutdown" },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await s.consumed();
+    const item = await handoff(32, "workspace:7");
+    s.host.screens = [asked()];
+    const r = await answer(item.id, "go");
+    expect(r.error).toBeUndefined();
+    expect(s.host.texts).toEqual([
+      expect.objectContaining({ workspace: "workspace:7", text: "go" }),
+    ]);
+  });
+
   /** A retained registry entry for `agent` naming `workspace`. */
   const entry = (agent: string, workspace: string) =>
     s.agent.publish(
@@ -425,4 +465,168 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
       where: { kind: "terminal" },
     });
   });
+});
+
+/** coord-1's retained status, as its MCP server publishes it. */
+const coordStatus = (type: string, payload: Record<string, unknown> = {}) =>
+  s.agent.publish(
+    buildTopic(NS, COORD, "status"),
+    JSON.stringify(
+      buildEnvelope({ agentId: COORD, parentId: null, channel: "status", type, payload }),
+    ),
+    { qos: 1, retain: true },
+  );
+
+const GONE_MS = DAEMON_DEFAULTS.inbox_session_gone_ms;
+const SESSION_ENDED = { answer: "session ended", where: { kind: "terminal" } };
+
+describe("needs-you inbox: the items of a session that has ended (#637)", () => {
+  let clock: FakeClock;
+
+  it("a clean shutdown (blocked, reason shutdown) closes the session's open handoff as session ended", async () => {
+    s = await makeSupervisedEnv();
+    const item = await handoff();
+    await coordStatus("blocked", { reason: "shutdown" });
+    await s.until(() => s.daemon.inboxItem(item.id)?.answered !== undefined);
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject(SESSION_ENDED);
+  });
+
+  it("a handoff whose session has no status and is not heard from closes after inbox_session_gone_ms", async () => {
+    clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const item = await handoff();
+    await s.daemon.tick();
+    await s.consumed();
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+    await clock.advance(GONE_MS + 1_000);
+    await s.daemon.tick();
+    await s.consumed();
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject(SESSION_ENDED);
+    expect(
+      systemJournal(s.env).some(
+        (e) =>
+          e.type === "inbox_answered" && e.data.id === item.id && e.data.answer === "session ended",
+      ),
+    ).toBe(true);
+  }, 60_000);
+
+  it("a session that keeps publishing progress is never swept", async () => {
+    clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const item = await handoff();
+    for (let i = 0; i < 4; i++) {
+      await clock.advance(GONE_MS / 2);
+      await coord("heartbeat", 20 + i, "PostToolUse", {}, clock.now());
+      await s.consumed();
+      await s.daemon.tick();
+      await s.consumed();
+    }
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+  }, 60_000);
+
+  it("on start, a stranded handoff whose session left no status closes after the bound", async () => {
+    s = await makeSupervisedEnv();
+    const item = await handoff();
+    await s.daemon.stop();
+    clock = fakeClock(Date.now());
+    const d = await s.restart({ clock });
+    await d.tick();
+    expect(d.inboxItem(item.id)?.answered).toBeUndefined();
+    await clock.advance(GONE_MS + 1_000);
+    await d.tick();
+    await s.until(() => d.inboxItem(item.id)?.answered !== undefined);
+    expect(d.inboxItem(item.id)?.answered).toMatchObject(SESSION_ENDED);
+    expect(
+      systemJournal(s.env).filter((e) => e.type === "inbox_answered" && e.data.id === item.id),
+    ).toHaveLength(1);
+  }, 60_000);
+
+  it("an answer to a handoff whose session ended is refused session ended at once and types nothing", async () => {
+    s = await makeSupervisedEnv();
+    const item = await handoff();
+    s.host.screens = [asked()];
+    await coordStatus("blocked", { reason: "shutdown" });
+    await s.consumed();
+    const r = await answer(item.id, "go");
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^(session ended|already answered on .*terminal)/);
+    expect(s.host.texts).toEqual([]);
+    expect(s.host.keys).toEqual([]);
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject(SESSION_ENDED);
+    const again = await answer(item.id, "go");
+    expect(again.error).toMatch(/^already answered on .*terminal/);
+  });
+
+  it("an answer to a no-status session gone past the bound is refused session ended before any screen read", async () => {
+    clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const item = await handoff();
+    s.host.screens = [asked()];
+    // Only the wall clock moves: no tick runs, so the sweep has not closed the item and the
+    // answer itself must find the session gone and refuse it.
+    clock.sleepHost(GONE_MS + 1_000);
+    const reads = s.host.screenReads.length;
+    const r = await answer(item.id, "go");
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("session ended: the item is closed, nothing was typed");
+    expect(s.host.texts).toEqual([]);
+    expect(s.host.screenReads.length).toBe(reads);
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject(SESSION_ENDED);
+  }, 60_000);
+
+  it("an unreadable screen is refused as such, not as prompt not idle", async () => {
+    s = await makeSupervisedEnv();
+    const item = await handoff();
+    s.host.screens = [null];
+    const r = await answer(item.id, "go");
+    expect(r.error).toBe("the session's screen cannot be read: it may have ended");
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+  });
+
+  it("a picker whose screen cannot be read is refused as such, not as picker not on screen", async () => {
+    s = await makeSupervisedEnv();
+    await coord("picker_opened", 41, "PreToolUse", {
+      tool_use_id: "toolu_01Gone",
+      questions: [
+        {
+          question: "Which fruit do you want?",
+          header: "Fruit",
+          options: [{ label: "Apple" }, { label: "Banana" }],
+          multiSelect: false,
+        },
+      ],
+      workspace: "workspace:7",
+    });
+    const id = pickerItemId(COORD, "toolu_01Gone");
+    await s.until(() => s.daemon.inboxItem(id) !== undefined);
+    s.host.screens = [null];
+    const r = await answer(id, "Banana");
+    expect(r.error).toBe("the session's screen cannot be read: it may have ended");
+    expect(s.host.keys).toEqual([]);
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
+  });
+
+  it("a supervised agent's picker is not swept by the session-gone sweep", async () => {
+    clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.pub(
+      buildTopic(NS, AGENT, "progress"),
+      "picker_opened",
+      "progress",
+      {
+        source: "harness-hook",
+        seq: 40,
+        hook_event: "PreToolUse",
+        tool_use_id: "toolu_01S",
+        questions: [{ question: "Q?", options: [{ label: "a" }, { label: "b" }] }],
+      },
+      false,
+    );
+    const id = pickerItemId(AGENT, "toolu_01S");
+    await s.until(() => s.daemon.inboxItem(id) !== undefined);
+    await clock.advance(GONE_MS + 1_000);
+    await s.daemon.tick();
+    await s.consumed();
+    expect(s.daemon.inboxItem(id)?.answered?.answer).not.toBe("session ended");
+  }, 60_000);
 });

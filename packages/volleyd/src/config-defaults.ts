@@ -354,6 +354,13 @@ export const DAEMON_DEFAULTS = {
   cleanup_retry_ms: 60_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
+  /** Hard bound on one key or text send on a local host; a send still pending then fails. */
+  send_keys_timeout_ms: 5_000,
+  /**
+   * An unsupervised session whose presence is offline (SPEC §7.5) and that has not been heard on
+   * progress this long has ended: its open pickers and handoffs close as `session ended`.
+   */
+  inbox_session_gone_ms: 120_000,
   /**
    * A multi-select picker answered from the inbox: screen reads (this many, this far apart) that
    * wait for the review screen its Submit opens (autopilot/carry.ts).
