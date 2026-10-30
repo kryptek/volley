@@ -2,6 +2,17 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.15.1 — 2026-10-30
+
+### Fixed
+
+- **volleyd: the supervisor no longer hangs matching processes on macOS.** Process matching by
+  working directory resolved every process's cwd, and one inside another app's protected
+  container blocked the call forever on a privacy prompt a background service cannot show: the
+  daemon stopped answering a second after a start or a retire. Another process's path is now
+  compared as the kernel reports it; only volleyd's own roots are resolved. `volley peer`
+  cleanup gets the same fix. (#644)
+
 ## 0.15.0 — 2026-10-30
 
 ### Fixed
