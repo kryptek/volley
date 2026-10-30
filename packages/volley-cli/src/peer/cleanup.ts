@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -231,11 +231,19 @@ function canonical(path: string): string {
   }
 }
 
-/** Is `path` `root` itself or inside it? Realpaths, with a trailing separator: `w1` ≠ `w10`. */
+/**
+ * Is `path` `root` itself or inside it? With a trailing separator: `w1` ≠ `w10`. `path` (another
+ * process's working directory or argv) is compared as given and never resolved: on macOS,
+ * resolving a path in another app's protected folder (`~/Library/Containers/…`) blocks until a
+ * privacy prompt a background service can never show, and the whole process hangs with it. The
+ * kernel reports working directories already resolved, so only `root` is: `path` is matched
+ * against `root` as given and resolved.
+ */
 export function underRoot(path: string, root: string): boolean {
-  const p = canonical(path);
-  const r = canonical(root);
-  return p === r || p.startsWith(r.endsWith(sep) ? r : r + sep);
+  const p = normalize(path);
+  return [normalize(root), canonical(root)].some(
+    (r) => p === r || p.startsWith(r.endsWith(sep) ? r : r + sep),
+  );
 }
 
 /** Whether a process belongs under `worktree`: by its agent's `--mcp-config=` or by its cwd. */

@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
@@ -53,6 +53,20 @@ describe("procs (pure)", () => {
     expect(underRoot(join(root, "w1"), join(root, "w1"))).toBe(true);
     expect(underRoot(join(root, "w10", "T1-fixup"), join(root, "w1"))).toBe(false);
     expect(underRoot("/elsewhere/w1/T1", join(root, "w1"))).toBe(false);
+  });
+
+  it("underRoot never resolves the process's path, only the root (a protected folder blocks)", () => {
+    const real = tempDir("volleyd-procs-real-");
+    const alias = join(tempDir("volleyd-procs-alias-"), "link");
+    symlinkSync(real, alias);
+    mkdirSync(join(real, "w1"));
+    // A root given through a symlink matches the resolved path the kernel reports, and the path
+    // as written into an agent's argv.
+    expect(underRoot(join(realpathSync(real), "w1", "T1"), join(alias, "w1"))).toBe(true);
+    expect(underRoot(join(alias, "w1", "T1"), join(alias, "w1"))).toBe(true);
+    // The path itself is never resolved: one that reaches the root only through a symlink is
+    // outside (a path in a protected folder would block the caller).
+    expect(underRoot(join(alias, "w1", "T1"), join(realpathSync(real), "w1"))).toBe(false);
   });
 
   it("stopProcesses: SIGTERM, then SIGKILL for what outlives the grace; gone pids skipped", async () => {
