@@ -190,8 +190,21 @@ export const DAEMON_DEFAULTS = {
   login_count_refresh_ms: 30_000,
   /** How long the CLI waits for a control response. */
   request_timeout_ms: 10_000,
-  /** How often the daemon checks its broker connection; a lost connection makes it exit. */
+  /**
+   * How often the daemon checks its broker connection: a dropped one is reconnected, a silent one
+   * (no packet for `broker_stale_factor` keepalives) is closed, and one gone longer than
+   * `broker_reconnect_give_up_ms` makes the daemon exit 1 for its service manager to restart.
+   */
   watchdog_ms: 1_000,
+  /** The daemon's MQTT keepalive (seconds): the broker answers a PINGREQ at least this often. */
+  broker_keepalive_s: 60,
+  /** Keepalives without any inbound packet before volleyd closes a connection as dead. */
+  broker_stale_factor: 2,
+  /** Reconnect backoff of the daemon's own connection after a drop: doubles up to max. */
+  broker_reconnect_base_ms: 1_000,
+  broker_reconnect_max_ms: 30_000,
+  /** How long the daemon stays without a broker connection before it exits 1. */
+  broker_reconnect_give_up_ms: 300_000,
   /** How long a mailbox drain waits before re-arming (only bounds a wait; no latency cost). */
   mailbox_idle_ms: 30_000,
   /** Recently answered control requests remembered for QoS 1 redelivery dedupe. */

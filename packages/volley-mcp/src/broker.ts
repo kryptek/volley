@@ -1,5 +1,10 @@
 import { randomBytes } from "node:crypto";
-import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
+import mqtt, {
+  type IClientOptions,
+  type IClientSubscribeOptions,
+  type ISubscriptionMap,
+  type MqttClient,
+} from "mqtt";
 import { VolleyError } from "./errors";
 
 export interface BrokerConnectOptions {
@@ -42,6 +47,61 @@ export interface BrokerConnectOptions {
   /** Broker credentials (SPEC §11.5). Omit both to connect anonymously. */
   username?: string;
   password?: string;
+  /**
+   * Reconnect after the broker drops the connection, with backoff (off by default: the MCP
+   * server, the hooks and the CLIs reconnect by restarting, SPEC §11). For a long-lived
+   * supervisor. While offline every operation fails with BROKER_DOWN; held filters and their
+   * routes survive, and mqtt.js re-subscribes them when the broker lost the session.
+   */
+  reconnect?: ReconnectOptions;
+}
+
+export interface ReconnectOptions {
+  /** The first retry's delay; each failed attempt doubles it, up to `maxMs`. */
+  baseMs: number;
+  maxMs: number;
+  /**
+   * Once per outage, when the connection is lost, with `describeDisconnect`'s reason and the
+   * broker's DISCONNECT reason code (MQTT 5; undefined when the broker sent none).
+   */
+  onOffline?: (why: string, reasonCode: number | undefined) => void;
+  /** When the connection is back; `sessionPresent` is false when the broker lost the session. */
+  onReconnected?: (sessionPresent: boolean) => void;
+  /**
+   * A reconnect the broker refused the credentials of (AUTH_FAILED: the login was rotated or
+   * deleted meanwhile). The client keeps retrying unless the caller stops it.
+   */
+  onRefused?: (e: VolleyError) => void;
+}
+
+/** MQTT 5 DISCONNECT reason codes a broker sends before closing a client. */
+const DISCONNECT_REASONS: Readonly<Record<number, string>> = {
+  128: "Unspecified error",
+  129: "Malformed Packet",
+  130: "Protocol Error",
+  131: "Implementation specific error",
+  135: "Not authorized",
+  137: "Server busy",
+  139: "Server shutting down",
+  141: "Keep Alive timeout",
+  142: "Session taken over",
+  152: "Administrative action",
+};
+
+/**
+ * Why a connection closed: the broker's DISCONNECT reason code when it sent one (MQTT 5:
+ * mosquitto sends 152 for a Dynamic Security kick, 142 for a same-clientId takeover, 139 when
+ * it shuts down), else the client-side error that closed it, if any.
+ */
+export function describeDisconnect(
+  reasonCode: number | undefined,
+  error: Error | undefined,
+): string {
+  if (reasonCode !== undefined) {
+    const name = DISCONNECT_REASONS[reasonCode];
+    return `broker sent DISCONNECT ${reasonCode}${name !== undefined ? ` (${name})` : ""}`;
+  }
+  return `connection closed (${error !== undefined ? error.message : "no reason given"})`;
 }
 
 /** CONNACK codes meaning "credentials refused": MQTT 3.1.1 (4, 5) and MQTT 5 (134, 135). */
@@ -131,6 +191,17 @@ function connectClient(
   });
 }
 
+/**
+ * Never reconnect `client` again: no retry after its next close, and none already armed (a plain
+ * stream destroy keeps today's crash semantics: no DISCONNECT, and nothing flushed).
+ * `_clearReconnect` is private to mqtt.js: checked against 5.15.1 (the locked version); the
+ * reconnect-mode crash and disconnect tests fail if a later version drops it.
+ */
+function stopReconnecting(client: MqttClient): void {
+  client.options.reconnectPeriod = 0;
+  (client as unknown as { _clearReconnect(): void })._clearReconnect();
+}
+
 /** How long a clean `disconnect()` waits for DISCONNECT to go out before it forces the end. */
 const DISCONNECT_FORCE_MS = 2000;
 
@@ -161,6 +232,14 @@ export class VolleyBroker {
   /** Filters drained on this connection (held until disconnect) → their SUBSCRIBE. */
   private drainFilters = new Map<string, Promise<void>>();
   private drainWaiters = new Set<DrainWaiter>();
+  /** The connection's reconnect mode, when on (`BrokerConnectOptions.reconnect`). */
+  private reconnecting: ReconnectOptions | undefined;
+  /** When the last packet arrived from the broker (real clock), for `inboundIdleMs`. */
+  private lastInboundAt = Date.now();
+  /** Why the current outage began (`kill`), and the broker's last DISCONNECT reason / error. */
+  private killedFor: string | undefined;
+  private lastReason: number | undefined;
+  private lastError: Error | undefined;
 
   async connect(opts: BrokerConnectOptions): Promise<void> {
     if (this.client !== null) {
@@ -174,6 +253,10 @@ export class VolleyBroker {
       );
     }
     const timeoutMs = opts.connectTimeoutMs ?? 5000;
+    this.killedFor = undefined;
+    this.lastReason = undefined;
+    this.lastError = undefined;
+    this.lastInboundAt = Date.now();
     // Hoist timer so the catch block can clear it on the connect-failure path.
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -203,7 +286,7 @@ export class VolleyBroker {
         clientId,
         keepalive: opts.keepaliveSeconds ?? 60,
         connectTimeout: timeoutMs,
-        reconnectPeriod: 0,
+        reconnectPeriod: opts.reconnect?.baseMs ?? 0,
         clean: !persistent,
         protocolVersion,
         ...(protocolVersion === 5 && persistent
@@ -222,6 +305,7 @@ export class VolleyBroker {
           // A resumed session's queued messages arrive right behind CONNACK — before
           // any caller can call drainQueued — so routing must be armed pre-connect.
           this.attachDispatcher(client, persistent);
+          this.watchConnection(client, opts);
         }).then((client) => {
           // Clear the timeout timer so it does not keep the event loop alive
           // after a successful connect.
@@ -241,6 +325,7 @@ export class VolleyBroker {
           );
         }),
       ]);
+      this.reconnecting = opts.reconnect;
     } catch (e) {
       clearTimeout(timer);
       this.resetConnectionState();
@@ -278,7 +363,9 @@ export class VolleyBroker {
     if (!this.client.connected) {
       throw new VolleyError(
         "BROKER_DOWN",
-        "broker connection was dropped (kicked by same-clientId reconnect, network issue, or server-side close). Reconnect by restarting the MCP server.",
+        this.reconnecting !== undefined
+          ? "broker connection was dropped; reconnecting"
+          : "broker connection was dropped (kicked by same-clientId reconnect, network issue, or server-side close). Reconnect by restarting the MCP server.",
       );
     }
     return this.client;
@@ -315,27 +402,96 @@ export class VolleyBroker {
         this.client = null;
         this.resetConnectionState();
       }
+      this.reconnecting = undefined;
     }
   }
 
-  /** Test/crash helper: destroy the socket with no DISCONNECT so the broker fires the LWT. */
+  /**
+   * Destroy the socket with no DISCONNECT so the broker fires the LWT (a crash, or a daemon
+   * ending on its own). Never reconnects.
+   */
   simulateCrash(): void {
-    if (this.client === null) return;
-    this.client.stream.destroy();
+    const client = this.client;
+    if (client === null) return;
     this.client = null;
     this.resetConnectionState();
+    this.reconnecting = undefined;
+    stopReconnecting(client);
+    client.stream.destroy();
   }
 
   /**
-   * Test-only: destroy the underlying socket WITHOUT nulling `this.client`,
-   * to exercise the "set-but-disconnected" branch in `requireClient()`.
-   * NOT for production code paths — `disconnect()` and `simulateCrash()` are
-   * the public verbs.
+   * Close a connection that is no longer trusted (a broker that stopped answering without
+   * closing), keeping the client: `connected` turns false, and in reconnect mode it reconnects
+   * (`onOffline` names `why`); otherwise every later call fails with BROKER_DOWN.
    */
-  _destroyForTest(): void {
+  kill(why: string): void {
     if (this.client === null) return;
+    this.killedFor = why;
     this.client.stream.destroy();
-    // intentionally NOT setting this.client = null
+  }
+
+  /** Reconnect mode off from here on: the next close (or the current outage) is final. */
+  stopReconnecting(): void {
+    if (this.client !== null) stopReconnecting(this.client);
+  }
+
+  /** Milliseconds since the broker last sent this client anything (real clock). */
+  inboundIdleMs(): number {
+    return Date.now() - this.lastInboundAt;
+  }
+
+  /**
+   * Listeners for the connection's whole life, attached before the first packet: inbound traffic
+   * (`inboundIdleMs`), the broker's DISCONNECT reason and the last error (for the outage's
+   * reason), and in reconnect mode the backoff and the two callbacks.
+   */
+  private watchConnection(client: MqttClient, opts: BrokerConnectOptions): void {
+    const reconnect = opts.reconnect;
+    let offline = false;
+    let everConnected = false;
+    client.on("packetreceive", () => {
+      this.lastInboundAt = Date.now();
+    });
+    client.on("disconnect", (packet) => {
+      this.lastReason = packet.reasonCode;
+    });
+    client.on("error", (err) => {
+      this.lastError = err;
+      const code = (err as { code?: unknown }).code;
+      if (offline && typeof code === "number" && AUTH_REFUSED_CODES.has(code)) {
+        reconnect?.onRefused?.(authFailed(opts.url, opts.username));
+      }
+    });
+    if (reconnect === undefined) return;
+    client.on("reconnect", () => {
+      // mqtt.js re-arms its retry timer with this period after the attempt's close.
+      client.options.reconnectPeriod = Math.min(
+        (client.options.reconnectPeriod ?? reconnect.baseMs) * 2,
+        reconnect.maxMs,
+      );
+    });
+    client.on("close", () => {
+      if (this.client !== client || client.disconnecting || offline) return;
+      offline = true;
+      const why = describeDisconnect(this.lastReason, this.lastError);
+      reconnect.onOffline?.(
+        this.killedFor !== undefined ? `${this.killedFor}; ${why}` : why,
+        this.lastReason,
+      );
+    });
+    client.on("connect", (connack) => {
+      client.options.reconnectPeriod = reconnect.baseMs;
+      this.lastInboundAt = Date.now();
+      this.killedFor = undefined;
+      this.lastReason = undefined;
+      this.lastError = undefined;
+      const first = !everConnected;
+      everConnected = true;
+      if (first || !offline) return;
+      offline = false;
+      reconnect.onReconnected?.(connack.sessionPresent);
+    });
   }
 
   /**
@@ -384,8 +540,14 @@ export class VolleyBroker {
   }
 
   private sendSubscribe(client: MqttClient, filter: string): Promise<void> {
+    // `resubscribe` makes mqtt.js send it even for a filter it already tracks: in reconnect mode
+    // it skips one it holds for its own re-subscribe, and every hold must re-SUBSCRIBE.
+    const opts: IClientSubscribeOptions =
+      client.options.protocolVersion === 5 ? { qos: 1, nl: false, rap: false, rh: 0 } : { qos: 1 };
+    const subscription = { [filter]: opts } as ISubscriptionMap;
+    subscription.resubscribe = true;
     return new Promise((resolve, reject) => {
-      client.subscribe(filter, { qos: 1 }, (err) => {
+      client.subscribe(subscription, (err) => {
         if (err) {
           reject(new VolleyError("BROKER_DOWN", `subscribe failed for ${filter}: ${err.message}`));
           return;
@@ -415,8 +577,12 @@ export class VolleyBroker {
       return;
     }
     this.filterHolds.delete(filter);
-    // A dead socket has no subscription left to remove (and the UNSUBACK would never come).
-    if (!client.connected) return;
+    // A dead socket has no subscription left to remove (and the UNSUBACK would never come). In
+    // reconnect mode it is queued for the next connection, so mqtt.js stops re-subscribing it.
+    if (!client.connected) {
+      if (this.reconnecting !== undefined) client.unsubscribe(filter, () => {});
+      return;
+    }
     await client.unsubscribeAsync(filter).catch(() => {});
   }
 
@@ -517,8 +683,8 @@ export class VolleyBroker {
 
   /**
    * Publish, resolved once the broker acknowledged it (QoS 1). A publish still unacknowledged
-   * when the connection closes fails with BROKER_DOWN: the client never reconnects, and mqtt.js
-   * keeps a persistent session's QoS 1 publishes for a reconnect, so it would never settle.
+   * when the connection closes fails with BROKER_DOWN: mqtt.js keeps a QoS 1 publish for a
+   * reconnect, so it would never settle without one (in reconnect mode it is resent then).
    */
   async publish(
     topic: string,
@@ -532,15 +698,25 @@ export class VolleyBroker {
     if ((await Promise.race([sent, this.closedOf(client)])) === "closed")
       throw new VolleyError(
         "BROKER_DOWN",
-        `broker connection closed before the publish on ${topic} was acknowledged`,
+        `broker connection closed before the publish on ${topic} was acknowledged${
+          this.reconnecting !== undefined ? " (it is resent once the connection is back)" : ""
+        }`,
       );
   }
 
-  /** Resolves once `client`'s connection closes (one listener per connection). */
+  /**
+   * Resolves once `client`'s current connection closes (one listener per connection: a client
+   * that reconnects gets a fresh one for the next).
+   */
   private closedOf(client: MqttClient): Promise<"closed"> {
     let closed = this.closings.get(client);
     if (closed === undefined) {
-      closed = new Promise((resolve) => client.once("close", () => resolve("closed")));
+      closed = new Promise((resolve) =>
+        client.once("close", () => {
+          this.closings.delete(client);
+          resolve("closed");
+        }),
+      );
       this.closings.set(client, closed);
     }
     return closed;
