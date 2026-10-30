@@ -26,6 +26,11 @@
         "commands": "linked",
         "plugins": "linked",
         "mcp": "copy"
+      },
+      "repos": {
+        "example-org/example-repo": {
+          "git_email": "dev@example.com"
+        }
       }
     },
     "heavy": {

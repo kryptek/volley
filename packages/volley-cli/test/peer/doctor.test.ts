@@ -750,7 +750,7 @@ describe("volley peer doctor: machine and secrets", () => {
   it("the Claude profile's four checks come after Claude's own, in the documented order", async () => {
     const r = await report(machine({ trusted: true }));
     const ids = r.checks.map((c) => c.id);
-    const at = ids.indexOf("claude.trust");
+    const at = ids.lastIndexOf("claude.trust");
     expect(ids.slice(at + 1, at + 5)).toEqual(["skills", "hooks", "mcp", "sharing"]);
     for (const id of ["skills", "hooks", "mcp", "sharing"]) {
       expect(check(r, id)).toMatchObject({ ok: true, severity: "warn" });
@@ -1333,7 +1333,10 @@ describe("volley peer doctor: many repositories (#435)", () => {
       const r = await reportRepos(m, { "a/a": pa, "b/b": pb });
       expect(forRepo(r, "tool.java", "a/a")).toMatchObject({ ok: false, severity: "block" });
       expect(forRepo(r, "tool.java", "a/a")?.detail).toContain("a/a");
-      expect(r.checks.filter((c) => c.repo === "b/b" && !c.ok)).toEqual([]);
+      // (Folder trust is per repository too, and nothing here trusts b/b's clone.)
+      expect(r.checks.filter((c) => c.repo === "b/b" && !c.ok && c.id !== "claude.trust")).toEqual(
+        [],
+      );
       expect(r.repos?.map((x) => [x.slug, x.toolchain])).toEqual([
         ["a/a", { ok: false, missing: ["java"], outdated: [] }],
         ["b/b", { ok: true, missing: [], outdated: [] }],
@@ -1406,6 +1409,45 @@ describe("volley peer doctor: many repositories (#435)", () => {
       // One gh repo view per slug per run.
       const views = m.ran("gh", "repo", "view");
       expect(views.map((a) => a[3]).sort()).toEqual(["a/a", "b/b"]);
+    });
+
+    it("gh.auth names the sign-in only, never another repository's access", async () => {
+      const m = machine({ permissions: { "a/a": "WRITE", "b/b": "WRITE" } });
+      const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      addClone(m, repos["b/b"], { origin: "git@github.com:b/b.git" });
+      const r = await reportRepos(m, repos);
+      expect(check(r, "gh.auth")).toMatchObject({ ok: true, detail: "signed in as octocat" });
+      expect(forRepo(r, "repo.push", "b/b")?.detail).toBe("octocat has WRITE access to b/b");
+    });
+
+    it("claude.trust is one tagged line per configured repository naming its clone; the legacy --repo run keeps one untagged line", async () => {
+      const m = machine();
+      const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+      addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+      addClone(m, repos["b/b"], { origin: "git@github.com:b/b.git" });
+      writeFileSync(
+        join(m.home, ".claude.json"),
+        JSON.stringify({ projects: { [repos["a/a"]]: { hasTrustDialogAccepted: true } } }),
+      );
+      const r = await reportRepos(m, repos);
+      const a = forRepo(r, "claude.trust", "a/a");
+      expect(a).toMatchObject({ ok: true, severity: "warn" });
+      expect(a?.detail).toBe(`Claude Code trusts ${repos["a/a"]}`);
+      const b = forRepo(r, "claude.trust", "b/b");
+      expect(b).toMatchObject({ ok: false, severity: "warn" });
+      expect(b?.detail).toBe(`Claude Code does not trust ${repos["b/b"]} yet`);
+      expect(b?.fix).toContain(`run claude in ${repos["b/b"]} once`);
+      expect(checksOf(r, "claude.trust").map((c) => c.repo)).toEqual(["a/a", "b/b"]);
+      // auth.trust: every clone trusted, or not.
+      expect(r.auth.trust).toBe("missing");
+      box?.cleanup();
+      const legacy = machine({ trusted: true });
+      const l = await report(legacy);
+      const lines = l.checks.filter((c) => c.id === "claude.trust");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.repo).toBeUndefined();
+      expect(lines[0]?.detail).toBe(`Claude Code trusts ${legacy.repoPath}`);
     });
 
     it("repo.push without gh signed in fails with gh.auth's fix", async () => {
@@ -1569,6 +1611,44 @@ describe("volley peer doctor: many repositories (#435)", () => {
         const r = await report(m);
         expect(check(r, "repo.identity")).toMatchObject({ ok: true });
         expect(check(r, "git.identity")?.detail).toContain("every repository's clone sets its own");
+      });
+
+      it("#638 an expected email: a clone committing under another fails the block check with the config fix; the same email (any case) passes; the legacy --repo run takes it too", async () => {
+        const m = machine();
+        const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+        addClone(m, repos["a/a"], {
+          origin: "git@github.com:a/a.git",
+          identity: "Dev <other@example.com>",
+        });
+        addClone(m, repos["b/b"], {
+          origin: "git@github.com:b/b.git",
+          identity: "Dev <Dev@Example.com>",
+        });
+        const r = await reportRepos(m, repos, {
+          gitEmails: { "A/A": "dev@example.com", "b/b": "dev@example.com" },
+        });
+        const a = forRepo(r, "repo.identity", "a/a");
+        expect(a).toMatchObject({ ok: false, severity: "block" });
+        expect(a?.detail).toBe("commits as Dev <other@example.com>, expected dev@example.com");
+        expect(a?.fix).toBe(`git -C ${repos["a/a"]} config user.email dev@example.com`);
+        expect(forRepo(r, "repo.identity", "b/b")).toMatchObject({ ok: true });
+        // The machine-level line is untouched.
+        expect(check(r, "git.identity")).toMatchObject({ ok: true });
+        // No expectation: unchanged.
+        expect(forRepo(await reportRepos(m, repos), "repo.identity", "a/a")).toMatchObject({
+          ok: true,
+        });
+        box?.cleanup();
+        const legacy = machine();
+        Object.assign(legacy.state, { identity: REPO_ID });
+        const l = await report(legacy, {
+          gitEmails: { "example-org/example-repo": "dev@example.com" },
+        });
+        expect(check(l, "repo.identity")).toMatchObject({
+          ok: false,
+          detail: `commits as ${REPO_ID}, expected dev@example.com`,
+          fix: `git -C ${legacy.repoPath} config user.email dev@example.com`,
+        });
       });
 
       it("no git: no repo.identity line", async () => {

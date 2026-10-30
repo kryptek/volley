@@ -7,7 +7,8 @@ import type { CoordinatorRolePayload } from "./role";
  * the superseded ones `superseded` and opens the new ones.
  */
 
-export type NoticeKind = "coordinator-link" | "coordinator-failed";
+/** The coordinator's two, and a silent paired machine's (`machine-notice.ts`, #638). */
+export type NoticeKind = "coordinator-link" | "coordinator-failed" | `machine-down-${string}`;
 
 export const noticeItemId = (notice: NoticeKind) => `n-${notice}`;
 export const NOTICE_LINK = noticeItemId("coordinator-link");
@@ -22,6 +23,8 @@ export interface NoticeSpec {
   question: string;
   /** The coordinator's link (`pointers.link`): the link notice's. */
   link?: string;
+  /** What the notice is about since (`source.since`): a silent machine's outage. */
+  since?: string;
 }
 
 /** The notices a payload change opens, and the open ones it supersedes. */

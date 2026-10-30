@@ -172,6 +172,32 @@ describe("a record's repositories (#435)", () => {
   });
 });
 
+describe("realLocalDoctor's argv (#638)", () => {
+  it("passes --git-email <owner/name>=<email> only when the clone's repository expects one", async () => {
+    const seen: string[][] = [];
+    const doctor = realLocalDoctor(async (argv) => {
+      seen.push([...argv]);
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    });
+    const signal = new AbortController().signal;
+    await doctor("/path/to/a", signal, { gitEmail: { slug: "a/a", email: "dev@example.com" } });
+    await doctor("/path/to/b", signal);
+    expect(seen).toEqual([
+      [
+        "volley",
+        "peer",
+        "doctor",
+        "--json",
+        "--repo",
+        "/path/to/a",
+        "--git-email",
+        "a/a=dev@example.com",
+      ],
+      ["volley", "peer", "doctor", "--json", "--repo", "/path/to/b"],
+    ]);
+  });
+});
+
 describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)", () => {
   const report = (path: string, origin: string, ok = true): DoctorReport => ({
     checks: [
@@ -222,6 +248,36 @@ describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)",
       ["git.identity", undefined],
       ["repo.clone", "a/a"],
       ["repo.identity", "a/a"],
+    ]);
+  });
+
+  it("#638: each run's untagged claude.trust is tagged with that run's slug", () => {
+    const run = (path: string, origin: string, trusted: boolean) => {
+      const base = report(path, origin);
+      return {
+        ...base,
+        checks: [
+          ...base.checks,
+          {
+            id: "claude.trust",
+            ok: trusted,
+            severity: "warn" as const,
+            detail: trusted
+              ? `Claude Code trusts ${path}`
+              : `Claude Code does not trust ${path} yet`,
+          },
+        ],
+      };
+    };
+    const r = foldOwnDoctor([
+      { slug: "a/a", report: run("/path/to/a", "github.com/a/a", true) },
+      { slug: "b/b", report: run("/path/to/b", "github.com/b/b", false) },
+    ]);
+    expect(
+      r?.checks.filter((c) => c.id === "claude.trust").map((c) => [c.repo, c.ok, c.detail]),
+    ).toEqual([
+      ["a/a", true, "Claude Code trusts /path/to/a"],
+      ["b/b", false, "Claude Code does not trust /path/to/b yet"],
     ]);
   });
 

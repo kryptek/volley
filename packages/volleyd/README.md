@@ -1498,6 +1498,7 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
 | `notice` | `n-coordinator-link`, `n-coordinator-failed` | the coordinator role's link changed, or it failed ([The coordinator role](#the-coordinator-role)) |
+| `notice` | `n-machine-down-<name>` | a paired machine holding a running wave's repository has been silent for `placement.down_decision_after_s`: its name, the waves it would serve and its restart command; `superseded` when its heartbeat resumes |
 
 A `notice` is volleyd's own (`owner_only: true`): it tells the owner something, never blocks a
 wave, carries its link in `pointers.link`, and takes only `open` (acknowledged: the owner opened
@@ -3462,7 +3463,16 @@ machine whose record stopped for 90 s down (republishing the record with
 `reason: heartbeat_timeout`). While a machine is down its spawns park with
 `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it
 (running ones too) carries `host_down` in the wave state, and each wave on it journals
-`MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage.
+`MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage. A configured paired
+machine down for `placement.down_decision_after_s` (5 min) that holds a clone of a running wave's
+repository opens one owner-only notice, `n-machine-down-<name>` (Needs you, and the phone's push),
+even when no task waits there (the own machine took its work): `<name> has been silent for <n>
+min`, the waves it would serve and `systemctl --user restart volley-peer.service` (macOS:
+`launchctl kickstart -k gui/$(id -u)/systems.volley.peer`), with `alarm_raised { alarm:
+machine_silent }` in `_system`. Once per outage; its next heartbeat answers it `superseded` and
+journals `alarm_cleared`. A repository's `git_email` (`volley repo add --git-email`) is published
+to every machine as the verdict's `requirements.repos`, and a clone whose `repo.identity` commits
+under another email is `blocked` for it; the own doctor runs with `--git-email <owner/name>=<email>`.
 
 **What the machine's Claude profile gets.** The doctor (by hand, at join, in every heartbeat
 and on a Desk's Repair) also checks the machine's own Claude profile, `~/.claude` of the user

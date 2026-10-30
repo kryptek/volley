@@ -391,6 +391,7 @@ import {
   realMachineAddEnv,
   runMachineAdd,
 } from "./machine-add";
+import { MACHINE_SILENT_ALARM, machineNoticeId, silentMachineNotice } from "./machine-notice";
 import {
   type DoctorReport,
   MACHINES_FILTER,
@@ -488,6 +489,7 @@ import {
   ghRepoContext,
   holdersOf,
   homeFromClones,
+  isGitEmail,
   isSlug,
   legacyOrigin,
   managedClonePath,
@@ -803,8 +805,15 @@ export interface DaemonOptions {
    * here), and the version a machine must run (default: this package's).
    */
   fleet?: {
-    /** Ends its run (its child process) once `signal` aborts: a stop waits for that. */
-    localDoctor?: (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null>;
+    /**
+     * Ends its run (its child process) once `signal` aborts: a stop waits for that. `gitEmail`:
+     * the email the clone's repository expects its commits under (`repos.<slug>.git_email`).
+     */
+    localDoctor?: (
+      repo: string | null,
+      signal: AbortSignal,
+      opts?: { gitEmail?: { slug: string; email: string } },
+    ) => Promise<DoctorReport | null>;
     /**
      * The own machine's usage probe of one Claude login (a prime: `realLocalProbe`); null when
      * it printed no report. Absent: a prime runs the whole own doctor instead.
@@ -1156,9 +1165,21 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
  */
 export function realLocalDoctor(
   exec: ExecFn = realExec,
-): (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null> {
-  return async (repo, signal) => {
-    const argv = ["volley", "peer", "doctor", "--json", ...(repo !== null ? ["--repo", repo] : [])];
+): (
+  repo: string | null,
+  signal: AbortSignal,
+  opts?: { gitEmail?: { slug: string; email: string } },
+) => Promise<DoctorReport | null> {
+  return async (repo, signal, opts) => {
+    const e = opts?.gitEmail;
+    const argv = [
+      "volley",
+      "peer",
+      "doctor",
+      "--json",
+      ...(repo !== null ? ["--repo", repo] : []),
+      ...(e !== undefined ? ["--git-email", `${e.slug}=${e.email}`] : []),
+    ];
     const r = await exec(argv, {
       timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
       signal,
@@ -3367,6 +3388,7 @@ export class Daemon {
     await this.closeGoneSessionItems();
     await this.sweepMachines();
     await this.machineDownPass();
+    await this.machineSilentPass();
     await this.removalSweep();
     await this.fleetTick();
     // The coordinator role: its ssh steps run beside the queue (a pass in flight is not repeated).
@@ -3917,6 +3939,90 @@ export class Daemon {
         }
       }
     }
+  }
+
+  /**
+   * Every tick (#638): a configured paired machine down for `placement.down_decision_after_s`
+   * that holds a clone of a running wave's repository opens the owner-only notice
+   * `n-machine-down-<name>` (naming it, the waves it would serve and its restart command) and
+   * journals `alarm_raised { alarm: machine_silent }` in `_system`, once per outage
+   * (`silentMachineNotice`). Its waves carry on without it; `onMachine` clears both when it is back.
+   */
+  private async machineSilentPass(): Promise<void> {
+    const waves = this.runningWaves().flatMap(([wave]) => {
+      const slug = this.slugOf(wave);
+      return slug !== undefined ? [{ wave, slug }] : [];
+    });
+    if (waves.length === 0) return;
+    const now = this.now();
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const boundMs = secondsMs(cfg.placement.down_decision_after_s);
+    for (const record of this.machines.all()) {
+      const name = record.name;
+      const downSince = this.machines.downSince(name);
+      if (name === local || downSince === undefined) continue;
+      const prior = this.inbox.get(machineNoticeId(name));
+      const spec = silentMachineNotice({
+        name,
+        os: record.os,
+        lastSeen: record.last_seen,
+        why: this.machines.whyDown(record),
+        downSince,
+        now,
+        boundMs,
+        paired: cfg.hosts[name] !== undefined,
+        waves,
+        holds: (slug) => holdersOf(cfg, local, slug).includes(name),
+        prior,
+      });
+      if (spec === null) continue;
+      const item = itemForNotice(
+        spec,
+        dateOf(this.time).toISOString(),
+        prior !== undefined ? prior.version + 1 : 1,
+      );
+      this.inbox.set(item.id, item);
+      await this.journalInbox(item, openedEvent(item));
+      await this.publishInboxItem(item);
+      this.silentAlarms.add(name);
+      await this.appendSystem({
+        type: "alarm_raised",
+        data: {
+          alarm: MACHINE_SILENT_ALARM,
+          host: name,
+          down_since: new Date(downSince).toISOString(),
+          last_seen: record.last_seen,
+          waves: waves
+            .filter((w) => holdersOf(cfg, local, w.slug).includes(name))
+            .map((w) => w.wave),
+          message: item.title,
+        },
+      });
+      this.log(`inbox ${item.id}: ${item.title}`);
+    }
+  }
+  /** The machines whose `machine_silent` alarm is raised and not cleared yet. */
+  private readonly silentAlarms = new Set<string>();
+
+  /** A silent machine is back: its notice is answered `superseded` and its alarm cleared. */
+  private async machineNotSilent(name: string): Promise<void> {
+    const item = this.inbox.get(machineNoticeId(name));
+    const open = item !== undefined && item.answered === undefined;
+    if (open) {
+      await this.recordInboxAnswer(item, {
+        version: item.version,
+        answer: "superseded",
+        by: DAEMON_AGENT_ID,
+        where: { kind: "autopilot" },
+      });
+    }
+    if (!open && !this.silentAlarms.has(name)) return;
+    this.silentAlarms.delete(name);
+    await this.appendSystem({
+      type: "alarm_cleared",
+      data: { alarm: MACHINE_SILENT_ALARM, host: name, message: `${name} is back` },
+    });
   }
 
   /**
@@ -6337,7 +6443,12 @@ export class Daemon {
       const runs: { dir: string | null; report: DoctorReport }[] = [];
       const failed: string[] = [];
       for (const dir of dirs.length > 0 ? dirs : [null]) {
-        const report = await doctor(dir, this.localDoctorAbort.signal).catch((e: unknown) => {
+        const gitEmail = dir !== null ? this.expectedEmailOfDir(dir) : undefined;
+        const report = await doctor(
+          dir,
+          this.localDoctorAbort.signal,
+          gitEmail !== undefined ? { gitEmail } : undefined,
+        ).catch((e: unknown) => {
           this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
           return null;
         });
@@ -6853,6 +6964,7 @@ export class Daemon {
     const records = accountRecords(this.usage);
     const record = isLocal ? this.ownRecord : this.machines.record(name);
     const waves = this.waveSlugs();
+    const emails = this.expectedEmails(cfg);
     const spawn = isLocal ? {} : this.spawnPaths(name, cfg);
     // A spawn that found no clone stands while its spawn path does (a repo_add's run wins).
     const blocked = [...(this.spawnBlocked.get(name) ?? [])].filter(
@@ -6907,6 +7019,7 @@ export class Daemon {
         // The own doctor reports every running wave's clone; a repository config gives only to
         // other machines is checked out here for the supervisor, not for agents (#439).
         ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, name, waves) } : {}),
+        ...(Object.keys(emails).length > 0 ? { expected_emails: emails } : {}),
       },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
@@ -7007,6 +7120,24 @@ export class Daemon {
       }
     }
     return this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
+  }
+
+  /** The expected email of the repository the own clone at `dir` is of (#638), if config has one. */
+  private expectedEmailOfDir(dir: string): { slug: string; email: string } | undefined {
+    const slug = this.slugOfRepo(dir) ?? this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
+    if (slug === undefined) return undefined;
+    const repos = this.config.effective().repos;
+    const email = repos[slugKey(repos, slug) ?? slug]?.git_email;
+    return email !== undefined ? { slug, email } : undefined;
+  }
+
+  /** `repos.<slug>.git_email` by slug (readiness's `expected_emails`, #638). */
+  private expectedEmails(cfg: Tunables): Record<string, string> {
+    return Object.fromEntries(
+      Object.entries(cfg.repos).flatMap(([slug, r]) =>
+        r?.git_email !== undefined ? [[slug, r.git_email]] : [],
+      ),
+    );
   }
 
   /**
@@ -7372,6 +7503,10 @@ export class Daemon {
     const wave = p.wave;
     if (wave !== undefined && (typeof wave !== "string" || !this.isWaveFor(wave)))
       return refuse("wave: not a wave id, or an archived wave's");
+    // The email the repository's commits are expected under (#638): null clears it.
+    const gitEmail = p.git_email;
+    if (gitEmail !== undefined && gitEmail !== null && !isGitEmail(gitEmail))
+      return refuse("git_email must be an email (or null to clear it)");
     const local = this.config.localName();
     const hosts = this.config.effective().hosts;
     for (const [m, path] of Object.entries(paths)) {
@@ -7401,6 +7536,7 @@ export class Daemon {
             known !== null ? { ...given, [local]: known.root } : given,
             sender,
             typeof wave === "string" ? wave : undefined,
+            gitEmail as string | null | undefined,
           ),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
@@ -7500,17 +7636,30 @@ export class Daemon {
     paths: Record<string, string>,
     by: string,
     wave?: string,
+    gitEmail?: string | null,
   ): Promise<{ slug: string; machines: string[]; status: string[] } | string> {
     const cfg = this.config.effective();
     const key = slugKey(cfg.repos, slug);
     const current = key !== undefined ? cfg.repos[key]?.machines : undefined;
+    const currentEmail = key !== undefined ? cfg.repos[key]?.git_email : undefined;
+    const emailChanged = gitEmail !== undefined && (gitEmail ?? undefined) !== currentEmail;
     const next = withMachines(current, machines);
     const local = this.config.localName();
     const changed = Object.fromEntries(
       Object.entries(paths).filter(([m, path]) => adoptedPath(cfg, local, m, slug) !== path),
     );
-    if (JSON.stringify(next) !== JSON.stringify(current) || Object.keys(changed).length > 0) {
-      const r = this.config.setRepo(key ?? slug, next, changed, by);
+    if (
+      JSON.stringify(next) !== JSON.stringify(current) ||
+      Object.keys(changed).length > 0 ||
+      emailChanged
+    ) {
+      const r = this.config.setRepo(
+        key ?? slug,
+        next,
+        changed,
+        by,
+        emailChanged ? gitEmail : undefined,
+      );
       if (!r.applied) {
         return `repos.${slug} not set: ${r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ")}`;
       }
@@ -7977,10 +8126,12 @@ export class Daemon {
           return k !== undefined ? [[m, map[k] as string]] : [];
         }),
       );
+      const entry = cfg.repos[slugKey(cfg.repos, slug) ?? slug];
       return {
         slug,
-        machines: cfg.repos[slugKey(cfg.repos, slug) ?? slug]?.machines ?? [],
+        machines: entry?.machines ?? [],
         ...(Object.keys(adopted).length > 0 ? { paths: adopted } : {}),
+        ...(entry?.git_email !== undefined ? { git_email: entry.git_email } : {}),
       };
     });
     return { ok: true, result: { repos } };
@@ -7994,7 +8145,8 @@ export class Daemon {
     const want = p.slug;
     if (want !== undefined && (typeof want !== "string" || !isSlug(want)))
       return { ok: false, error: "slug must be a GitHub <owner/name>" };
-    const all = (this.repoList().result.repos as { slug: string }[]).map((r) => r.slug);
+    const listed = this.repoList().result.repos as { slug: string; git_email?: string }[];
+    const all = listed.map((r) => r.slug);
     const slugs = want === undefined ? all : all.filter((s) => sameSlug(s, want));
     if (want !== undefined && slugs.length === 0)
       return { ok: false, error: `${want} is not a configured repository` };
@@ -8004,7 +8156,13 @@ export class Daemon {
         assignedSlugs(cfg, this.config.localName(), m).some((s) => sameSlug(s, slug)),
       );
       const verdicts = this.repoVerdicts(slug, names);
-      return { slug, machines: verdicts, lines: names.map((m) => repoStateLine(m, verdicts[m])) };
+      const email = listed.find((r) => r.slug === slug)?.git_email;
+      return {
+        slug,
+        machines: verdicts,
+        lines: names.map((m) => repoStateLine(m, verdicts[m])),
+        ...(email !== undefined ? { git_email: email } : {}),
+      };
     });
     return { ok: true, result: { repos } };
   }
@@ -8097,6 +8255,8 @@ export class Daemon {
     const canonical = view !== null && typeof view !== "string" ? view.slug : slug;
     const blocks = await this.enqueue(async () => {
       const out: Record<string, MachineBlock> = {};
+      const repos = this.config.effective().repos;
+      const gitEmail = repos[slugKey(repos, canonical) ?? canonical]?.git_email;
       for (const [i, m] of names.entries()) {
         const run = runs[i] ?? { from: "record" as const };
         const r = this.readinessFor(m, canonical);
@@ -8110,6 +8270,7 @@ export class Daemon {
             from: run.from,
             ...(run.note !== undefined ? { note: run.note } : {}),
             ...(m === local ? { own: true } : {}),
+            ...(gitEmail !== undefined ? { gitEmail } : {}),
           },
         );
       }
@@ -8219,6 +8380,7 @@ export class Daemon {
     if (!this.running) return;
     if (status === "up") {
       await this.machineBack(name);
+      await this.machineNotSilent(name);
       // A repo_add that could not reach it runs again (SPEC §4.6.21).
       this.retryRepos(name);
     }

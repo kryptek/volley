@@ -89,6 +89,12 @@ export interface ReadinessInput {
     unassigned?: string[];
     spawn?: Record<string, string>;
     probed?: Record<string, CloneProbe & { at?: number }>;
+    /**
+     * `repos.<slug>.git_email` (#638): the email each repository's commits are expected under,
+     * published as `requirements.repos`; a clone whose `repo.identity` commits under another is
+     * `blocked` (before the machine's doctor knows of it).
+     */
+    expected_emails?: Record<string, string>;
   };
   /** The last PATH probe; null: not probed yet. */
   probe: PathProbe | null;
@@ -144,7 +150,12 @@ export interface ReadinessPayload {
   max_agents: number;
   placed: number;
   path_ok: { claude: boolean | null; bun: boolean | null };
-  requirements: { volley: string; bun?: string; sharing?: Sharing };
+  requirements: {
+    volley: string;
+    bun?: string;
+    sharing?: Sharing;
+    repos?: Record<string, { git_email: string }>;
+  };
   heavy: Record<string, { held: number; per_machine: number }>;
   usage: { account: string | null; five_hour_pct: number | null };
   /** Each repository by its `owner/name`: where it stands on the machine. */
@@ -219,12 +230,23 @@ function repoReasons(
   slug: string,
   checks: MachineRecord["checks"],
   toolchain: MachineRepo["toolchain"] | undefined,
+  expectedEmail?: string,
 ): string[] {
   const out = (checks ?? [])
     // A toolchain's `tool.<name>` checks are said once, from the toolchain below.
     .filter((c) => !c.ok && c.severity === "block")
     .filter((c) => toolchain === undefined || !c.id.startsWith("tool."))
     .map((c) => `${c.id}: ${c.detail}`);
+  // A passing repo.identity's email (`commits as Name <email>`, the doctor's wording) against the
+  // expected one: a second opinion until the machine's doctor applies the expectation itself.
+  const ident = (checks ?? []).find((c) => c.id === "repo.identity" && c.ok);
+  const email = ident !== undefined ? /<([^<>]*)>\s*$/.exec(ident.detail)?.[1] : undefined;
+  if (
+    expectedEmail !== undefined &&
+    email !== undefined &&
+    email.toLowerCase() !== expectedEmail.toLowerCase()
+  )
+    out.push(`repo.identity: ${ident?.detail}, expected ${expectedEmail}`);
   for (const t of toolchain?.missing ?? []) out.push(`${t} not installed (needed by ${slug})`);
   for (const t of toolchain?.outdated ?? [])
     out.push(`${t} older than required (needed by ${slug})`);
@@ -241,13 +263,14 @@ function repoVerdict(
     toolchain?: MachineRepo["toolchain"];
   },
   checks: MachineRecord["checks"],
+  expectedEmail?: string,
 ): RepoVerdict {
   const at = { path: clone.path };
   const fetched = typeof clone.fetched_at === "string" ? { fetched_at: clone.fetched_at } : {};
   if (!clone.exists) {
     return { state: "absent", ...at, reasons: [`no clone of ${slug} at ${clone.path}`] };
   }
-  const reasons = repoReasons(slug, checks, clone.toolchain);
+  const reasons = repoReasons(slug, checks, clone.toolchain, expectedEmail);
   return { state: reasons.length > 0 ? "blocked" : "ready", ...at, reasons, ...fetched };
 }
 
@@ -263,12 +286,15 @@ function repoVerdicts(
   const checks = i.record?.checks;
   const out: Record<string, RepoVerdict> = {};
   const has = (s: string) => Object.keys(out).some((k) => sameSlug(k, s));
+  const emailOf = (s: string) =>
+    Object.entries(i.repos.expected_emails ?? {}).find(([k]) => sameSlug(k, s))?.[1];
   for (const r of i.repos.records ?? []) {
     if (has(r.slug)) continue;
     out[r.slug] = repoVerdict(
       r.slug,
       r,
       checks?.filter((c) => c.repo !== undefined && sameSlug(c.repo, r.slug)),
+      emailOf(r.slug),
     );
   }
   const legacy = i.repos.legacy;
@@ -276,13 +302,13 @@ function repoVerdicts(
   // Its checks carry no `repo`: its `repo.*` ones are about that one clone.
   const legacyChecks = checks?.filter((c) => c.repo === undefined && c.id.startsWith("repo."));
   if (legacy !== undefined && legacySlug !== undefined && !has(legacySlug)) {
-    out[legacySlug] = repoVerdict(legacySlug, legacy, legacyChecks);
+    out[legacySlug] = repoVerdict(legacySlug, legacy, legacyChecks, emailOf(legacySlug));
   }
   for (const s of [...i.repos.wanted, ...Object.keys(i.repos.runs ?? {})]) {
     if (has(s)) continue;
     out[s] =
       legacy !== undefined && legacy.origin === undefined
-        ? repoVerdict(s, legacy, legacyChecks)
+        ? repoVerdict(s, legacy, legacyChecks, emailOf(s))
         : { state: "absent", reasons: [`no clone of ${s} on ${i.name}`] };
   }
   if (i.local !== true) spawnPathCheck(i, out);
@@ -463,6 +489,16 @@ export function readiness(i: ReadinessInput): ReadinessPayload {
       volley: i.hostVersion,
       ...(i.bun !== undefined ? { bun: i.bun } : {}),
       ...(i.sharing !== undefined ? { sharing: { ...i.sharing } } : {}),
+      ...(Object.keys(i.repos.expected_emails ?? {}).length > 0
+        ? {
+            repos: Object.fromEntries(
+              Object.entries(i.repos.expected_emails ?? {}).map(([slug, git_email]) => [
+                slug,
+                { git_email },
+              ]),
+            ),
+          }
+        : {}),
     },
     heavy: i.heavy,
     usage: i.usage,

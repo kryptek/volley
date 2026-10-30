@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
-import { isSlug } from "volleyd/repos";
+import { isGitEmail, isSlug } from "volleyd/repos";
 import { parsePositiveInt } from "../args";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -31,7 +31,7 @@ export const REPO_DEFAULTS = {
 
 const HELP = `Usage:
   volley repo add <owner/name> [--machine <name>]... [--path <name>=<abs path>]... [--wait]
-                 [--for-wave <wave>]
+                 [--for-wave <wave>] [--git-email <email>|none]
                                      Add a repository to every machine (or these): each paired
                                      machine clones it (or adopts the clone at --path, on the
                                      supervisor's machine too) and trusts it; --wait follows
@@ -58,6 +58,10 @@ Options:
   --for-wave <wave>    add: the registration is for that wave only; cleaning the wave up removes
                        it (and the clones volleyd made for it); without it the repository is
                        yours and cleanup never removes it
+  --git-email <email>  add: the email the repository's commits are expected under (on a
+                       repository already added too); a machine whose clone would commit under
+                       another is blocked for it, its repo.identity failing with the fix.
+                       none clears it
   --release-branch <b> check: also check the wave's release branch (on origin, its review rules)
   --fix                check: apply the safe fixes on each paired machine (an admin op)
   --json               list, status, check: the answer as JSON
@@ -76,6 +80,7 @@ const OPTIONS = {
   wait: { type: "boolean" },
   "wait-timeout": { type: "string" },
   "for-wave": { type: "string" },
+  "git-email": { type: "string" },
   "release-branch": { type: "string" },
   fix: { type: "boolean" },
   json: { type: "boolean" },
@@ -94,6 +99,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   wait: ["add"],
   "wait-timeout": ["add"],
   "for-wave": ["add"],
+  "git-email": ["add"],
   "release-branch": ["check"],
   fix: ["check"],
   json: ["list", "status", "check"],
@@ -147,6 +153,8 @@ interface RepoStatus {
   slug: string;
   machines: Record<string, { state: string; path?: string; reasons: string[] }>;
   lines: string[];
+  /** The email its commits are expected under (#638). */
+  git_email?: string;
 }
 
 export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Promise<ExitCode> {
@@ -213,11 +221,15 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
       const wave = v["for-wave"];
       if (wave !== undefined && !WAVE_ID_RE.test(wave))
         return usage(`--for-wave "${wave}" is not a wave id ([a-z0-9][a-z0-9_-]{0,62})`);
+      const email = v["git-email"];
+      if (email !== undefined && email !== "none" && !isGitEmail(email))
+        return usage(`--git-email "${email}" is not an email (or none, to clear it)`);
       const fields = {
         slug,
         ...machines,
         ...(Object.keys(paths).length > 0 ? { paths } : {}),
         ...(wave !== undefined ? { wave } : {}),
+        ...(email !== undefined ? { git_email: email === "none" ? null : email } : {}),
       };
       const adopting = Object.keys(paths).length > 0;
       const a = await deps.ask(
@@ -364,11 +376,12 @@ export async function runRepo({ argv, env, io }: RepoArgs, deps: RepoDeps): Prom
         slug: string;
         machines: unknown;
         paths?: Record<string, string>;
+        git_email?: string;
       }[]) {
         const on = r.machines === "all" ? "all machines" : (r.machines as string[]).join(", ");
         const adopted = Object.entries(r.paths ?? {}).map(([m, p]) => `${m}=${p}`);
         io.stdout(
-          `${r.slug}  ${on !== "" ? on : "(adopted only)"}${adopted.length > 0 ? `  adopted: ${adopted.join(", ")}` : ""}\n`,
+          `${r.slug}  ${on !== "" ? on : "(adopted only)"}${adopted.length > 0 ? `  adopted: ${adopted.join(", ")}` : ""}${r.git_email !== undefined ? `  git email: ${r.git_email}` : ""}\n`,
         );
       }
       return EXIT.OK;
@@ -479,7 +492,7 @@ function renderMachines(a: CheckAnswer, now: number): string {
 }
 
 function printStatus(r: RepoStatus, io: IO): void {
-  io.stdout(`${r.slug}\n`);
+  io.stdout(`${r.slug}${r.git_email !== undefined ? `  git email: ${r.git_email}` : ""}\n`);
   for (const l of r.lines) io.stdout(`  ${l}\n`);
 }
 

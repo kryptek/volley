@@ -258,6 +258,50 @@ describe("volley repo: arguments", () => {
     expect(asked[2]?.fields).toEqual({});
   });
 
+  it("#638 add --git-email sends git_email; none sends null; list and status print it; another verb refuses it", async () => {
+    const { deps, asked } = fakeDeps((op) =>
+      op === "repo_list"
+        ? {
+            ok: true,
+            result: { repos: [{ slug: "a/a", machines: "all", git_email: "dev@example.com" }] },
+          }
+        : op === "repo_status"
+          ? {
+              ok: true,
+              result: {
+                repos: [
+                  { ...status({ box: "ready" }).result.repos[0], git_email: "dev@example.com" },
+                ],
+              },
+            }
+          : { ok: true, result: { slug: "a/a", machines: ["box"], status: [] } },
+    );
+    expect((await run(["add", "a/a", "--git-email", "dev@example.com"], deps)).exitCode).toBe(
+      EXIT.OK,
+    );
+    expect((await run(["add", "a/a", "--git-email", "none"], deps)).exitCode).toBe(EXIT.OK);
+    expect(asked.map((a) => a.fields)).toEqual([
+      { slug: "a/a", git_email: "dev@example.com" },
+      { slug: "a/a", git_email: null },
+    ]);
+    expect((await run(["list"], deps)).stdout).toBe(
+      "a/a  all machines  git email: dev@example.com\n",
+    );
+    expect((await run(["status", "a/a"], deps)).stdout).toBe(
+      "a/a  git email: dev@example.com\n  box: ready\n",
+    );
+    const before = asked.length;
+    for (const argv of [
+      ["add", "a/a", "--git-email", "not an email"],
+      ["add", "a/a", "--git-email", "-x@example.com"],
+      ["remove", "a/a", "--git-email", "dev@example.com"],
+      ["check", "a/a", "--git-email", "dev@example.com"],
+    ]) {
+      expect((await run(argv, deps)).exitCode, argv.join(" ")).toBe(EXIT.USAGE);
+    }
+    expect(asked).toHaveLength(before);
+  });
+
   it("a refusal's exit code passes through", async () => {
     const { deps } = fakeDeps(() => EXIT.ERROR);
     expect((await run(["add", "a/a"], deps)).exitCode).toBe(EXIT.ERROR);

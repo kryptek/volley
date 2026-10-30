@@ -425,6 +425,139 @@ describe("machineBlock and the closing line", () => {
       "volley peer doctor --repo <the clone> --fix, on this machine (volleyd never fixes its own clone)",
     );
   });
+
+  it("#638: the checked repository's claude.trust, not another's; a failing record line gets a fix", () => {
+    const perRepo = [
+      { id: "tool.git", ok: true, severity: "block" as const, detail: "git 2.43" },
+      { id: "repo.clone", ok: true, severity: "block" as const, repo: SLUG, detail: "clone at /c" },
+      {
+        id: "claude.trust",
+        ok: false,
+        severity: "warn" as const,
+        repo: SLUG,
+        detail: "Claude Code does not trust /c yet",
+      },
+      {
+        id: "claude.trust",
+        ok: true,
+        severity: "warn" as const,
+        repo: "o/other",
+        detail: "Claude Code trusts /other",
+      },
+    ];
+    const rec = record(perRepo);
+    const b = machineBlock(
+      SLUG,
+      {
+        ...rec,
+        repos: [
+          {
+            slug: SLUG,
+            path: "/c",
+            exists: true,
+            managed: true,
+            fetched_at: null,
+            toolchain: { ok: true, missing: [], outdated: [] },
+          },
+        ],
+      },
+      undefined,
+      { ready: true, reasons: [] },
+      { state: "ready", path: "/c", reasons: [] },
+      { from: "record" },
+    );
+    const trust = b.checks.filter((c) => c.id === "claude.trust");
+    expect(trust).toHaveLength(1);
+    expect(trust[0]).toMatchObject({ repo: SLUG, detail: "Claude Code does not trust /c yet" });
+    expect(trust[0]?.fix).toBe("run claude in /c once and accept the trust dialog");
+  });
+
+  it("#638: a record's repo.identity failing the expected email shows with the email fix", () => {
+    const b = machineBlock(
+      SLUG,
+      {
+        ...record([
+          {
+            id: "repo.identity",
+            ok: false,
+            severity: "block" as const,
+            repo: SLUG,
+            detail: "commits as Dev <other@example.com>, expected dev@example.com",
+          },
+        ]),
+        repos: [
+          {
+            slug: SLUG,
+            path: "/c",
+            exists: true,
+            managed: true,
+            fetched_at: null,
+            toolchain: { ok: true, missing: [], outdated: [] },
+          },
+        ],
+      },
+      undefined,
+      { ready: true, reasons: [] },
+      { state: "blocked", path: "/c", reasons: [] },
+      { from: "record", gitEmail: "dev@example.com" },
+    );
+    expect(b.checks.find((c) => c.id === "repo.identity")?.fix).toBe(
+      "git -C /c config user.email dev@example.com",
+    );
+  });
+
+  it("#638: the identity fix takes the email from config, quoted, never from the record's detail", () => {
+    const rec = (detail: string, path: string) => ({
+      ...record([
+        { id: "repo.identity", ok: false, severity: "block" as const, repo: SLUG, detail },
+        {
+          id: "claude.trust",
+          ok: false,
+          severity: "warn" as const,
+          repo: SLUG,
+          detail: `Claude Code does not trust ${path} yet`,
+        },
+      ]),
+      repos: [
+        {
+          slug: SLUG,
+          path,
+          exists: true,
+          managed: true,
+          fetched_at: null,
+          toolchain: { ok: true, missing: [], outdated: [] },
+        },
+      ],
+    });
+    const block = (detail: string, path: string, gitEmail?: string) =>
+      machineBlock(
+        SLUG,
+        rec(detail, path),
+        undefined,
+        { ready: true, reasons: [] },
+        { state: "blocked", path, reasons: [] },
+        { from: "record", ...(gitEmail !== undefined ? { gitEmail } : {}) },
+      ).checks;
+    const quoted = block("commits as X <x@y>, expected evil;rm@x", "/my clone", "a|b@c");
+    expect(quoted.find((c) => c.id === "repo.identity")?.fix).toBe(
+      "git -C '/my clone' config user.email 'a|b@c'",
+    );
+    expect(quoted.find((c) => c.id === "claude.trust")?.fix).toBe(
+      "run claude in '/my clone' once and accept the trust dialog",
+    );
+    // No expectation in config: the generic identity fix, whatever the detail claims.
+    const none = block("commits as X <x@y>, expected evil;rm@x", "/c");
+    expect(none.find((c) => c.id === "repo.identity")?.fix).not.toContain("evil");
+    // No identity at all: setting the email alone does not fix it, even with one in config.
+    const missing = block(
+      "no commit identity in /c (user.name/user.email): …",
+      "/c",
+      "dev@example.com",
+    );
+    expect(missing.find((c) => c.id === "repo.identity")?.fix).toBe(
+      'git -C /c config user.name "<name>" && git -C /c config user.email <email>, or volley setup --peer --step signin',
+    );
+  });
 });
 
 const peer = (name: string, over: Partial<Candidate> = {}): Candidate => ({

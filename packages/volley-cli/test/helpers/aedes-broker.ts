@@ -4,6 +4,8 @@ import Aedes from "aedes";
 export interface TestBroker {
   url: string;
   port: number;
+  /** The broker itself, for a test that needs its hooks or its clients. */
+  aedes: Aedes;
   close: () => Promise<void>;
 }
 
@@ -36,6 +38,7 @@ export async function startTestBroker(opts: TestBrokerOptions = {}): Promise<Tes
   return {
     url: `mqtt://127.0.0.1:${port}`,
     port,
+    aedes,
     close: () =>
       new Promise<void>((resolve, reject) => {
         aedes.close(() => {

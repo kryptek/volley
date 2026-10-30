@@ -146,6 +146,45 @@ describe("VolleyBroker connect / disconnect / LWT", () => {
     expect(gotWill).toBe(false);
     await observer.endAsync();
   });
+  it("disconnect() settles after the broker closed the socket under an unacknowledged QoS 1 publish", async () => {
+    tb.aedes.authorizePublish = (client, packet, done) => {
+      if (packet.topic === "volley/test/kick") {
+        client?.conn.destroy();
+        return;
+      }
+      done(null);
+    };
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "agent-kick" });
+    await expect(
+      b.publish("volley/test/kick", "{}", { qos: 1, retain: false }),
+    ).rejects.toMatchObject({ code: "BROKER_DOWN" });
+    const settled = await Promise.race([
+      b.disconnect().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    expect(settled).toBe("settled");
+    expect(b.connected).toBe(false);
+  });
+  it("disconnect() on a live connection with an unacknowledged QoS 1 publish forces the socket closed", async () => {
+    tb.aedes.authorizePublish = (_client, packet, done) => {
+      // Hold the publish: no PUBACK ever comes, the connection stays up.
+      if (packet.topic === "volley/test/hold") return;
+      done(null);
+    };
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "agent-hold" });
+    void b.publish("volley/test/hold", "{}", { qos: 1, retain: false }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    expect(tb.aedes.connectedClients).toBe(1);
+    const settled = await Promise.race([
+      b.disconnect().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 4000)),
+    ]);
+    expect(settled).toBe("settled");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(tb.aedes.connectedClients).toBe(0);
+  }, 10_000);
 });
 
 describe("VolleyBroker publish / queryRetained", () => {

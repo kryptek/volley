@@ -123,8 +123,14 @@ export async function makeFleet(
     repoRoot?: string;
     /** The Claude profiles root (default: the suite's empty one). */
     claudeRoot?: string;
-    /** The own doctor's report for a run on `repo` (default: GREEN_DOCTOR, whatever the repo). */
-    localDoctor?: (repo: string | null) => DoctorReport;
+    /**
+     * The own doctor's report for a run on `repo` (default: GREEN_DOCTOR, whatever the repo);
+     * `opts` as the daemon passed them (the repository's expected email).
+     */
+    localDoctor?: (
+      repo: string | null,
+      opts?: { gitEmail?: { slug: string; email: string } },
+    ) => DoctorReport;
     /**
      * The box's legacy `hosts.box.repo` (default: the supervisor's `repo`); null: none, the box
      * works on what `repos` / `hosts.box.repos` give it.
@@ -267,8 +273,8 @@ export async function makeFleet(
     ...(o.claudeRoot !== undefined ? { claude: { root: o.claudeRoot } } : {}),
     fleet: {
       version: VERSION,
-      localDoctor: async (repo) => ({
-        ...(o.localDoctor?.(repo) ?? GREEN_DOCTOR),
+      localDoctor: async (repo, _signal, opts) => ({
+        ...(o.localDoctor?.(repo, opts) ?? GREEN_DOCTOR),
         versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
       }),
       localPath: () => ({ claude: true, bun: true }),
