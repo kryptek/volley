@@ -2,9 +2,8 @@
 # What Layers 2 and 4 of the install tests share (scripts/install-tests/README.md), sourced by
 # vm-linux.sh and vm-pair.sh: the run's VM names (`volley-it-<run id>-<what>`), the run's ssh key,
 # the cleanup trap that always deletes the run's VMs, waiting for ssh and for a reboot, a test
-# wave's submission, the check that CLI output never says `undefined`, the metrics hand-off to
-# metrics.ts and, on a failing nightly, the one tracking issue labelled `install-tests` (a comment
-# per failure, through `gh`).
+# wave's submission, the check that CLI output never says `undefined` and the metrics hand-off to
+# metrics.ts.
 #
 # The caller sets LAYER (2 or 4) and LABEL, defines `vm_exists <name>` and `vm_delete <name>`
 # for its hypervisor, and calls `lib_init` first and `finish` last.
@@ -13,9 +12,8 @@
 # ./vm-results; with a snap multipass it must be under your home directory, not under a hidden
 # directory of it: the snap reads nothing else), VM_RUN_ID (default $GITHUB_RUN_ID),
 # VM_POLL_S (seconds between polls; default 3), VM_MAX_WAIT_S (caps every wait; the tests' stand-ins
-# answer at once), VM_TRACK_ISSUE=1 (a failing run opens or comments
-# on the tracking issue; the scheduled nightly sets it, a dispatch never), VM_MULTIPASS_IS_SNAP=1 (treat multipass as the snap
-# wherever it is: the tests' seam, their stand-in is not under /snap/).
+# answer at once), VM_MULTIPASS_IS_SNAP=1 (treat multipass as the snap wherever it is: the tests'
+# seam, their stand-in is not under /snap/).
 # Bash 3.2 (a Mac's /bin/bash): no associative arrays, no mapfile.
 
 LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -24,8 +22,6 @@ OUT="${VM_OUT:-$PWD/vm-results}"
 POLL_S=${VM_POLL_S:-3}
 # The account cloud-init makes (cloud-init.yaml).
 VM_USER=volley
-# The tracking issue's label (one open issue carries it).
-TRACK_LABEL=install-tests
 FAILED=0
 TRANSCRIPT=''
 KEYDIR=''
@@ -410,29 +406,6 @@ summarize() {
     --out "$OUT/metrics.json" $TIMINGS "$@" || fail "a target was missed (summary.md)"
 }
 
-# A failing nightly: one open issue labelled install-tests, a comment on it per failure.
-track_failure() {
-  [ "${VM_TRACK_ISSUE:-}" = 1 ] || return 0
-  local run_url body number url
-  run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-kryptek/volley}/actions/runs/${GITHUB_RUN_ID:-local}"
-  body="$OUT/issue-comment.md"
-  {
-    printf '### Layer %s: %s failed\n\n%s\n\n' "$LAYER" "$LABEL" "$run_url"
-    cat "$OUT/failures.md"
-    [ -f "$OUT/summary.md" ] && printf '\n' && cat "$OUT/summary.md"
-  } >"$body"
-  gh label create "$TRACK_LABEL" --color B60205 \
-    --description "A nightly install test (Layers 2 and 4) failed" --force >/dev/null 2>&1
-  number=$(gh issue list --label "$TRACK_LABEL" --state open --json number --jq '.[0].number // empty')
-  if [ -z "$number" ]; then
-    url=$(gh issue create --label "$TRACK_LABEL" --title "Nightly install tests are failing" \
-      --body "The nightly install tests (scripts/install-tests/README.md, Layers 2 and 4) failed. Each failing run comments below; close this once a nightly passes.")
-    number=${url##*/}
-  fi
-  [ -n "$number" ] && gh issue comment "$number" --body-file "$body" >/dev/null ||
-    echo "WARN: could not comment on the tracking issue" >&2
-}
-
 finish() {
   metrics redact <"$TRANSCRIPT" >"$OUT/transcript.log" 2>/dev/null && rm -f "$TRANSCRIPT"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "$OUT/summary.md" ]; then
@@ -441,7 +414,6 @@ finish() {
   if [ "$FAILED" -ne 0 ]; then
     say "Layer $LAYER ($LABEL) failed. The run's output (redacted):"
     tail -n 200 "$OUT/transcript.log" 2>/dev/null
-    track_failure
     exit 1
   fi
   say "Layer $LAYER ($LABEL) passed."
