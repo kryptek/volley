@@ -30,7 +30,7 @@ import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { type Sharing, parseSharing } from "volleyd/claude/sharing";
 import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
-import { isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
+import { isGitEmail, isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
 import pkg from "../../package.json";
 import { parsePositiveInt, resolveBrokerUrl, resolveNamespace } from "../args";
 import { volleydHome } from "../auth/context";
@@ -1720,12 +1720,6 @@ interface Requirements {
   /** `requirements.repos`: the email each repository's commits are expected under (#638). */
   gitEmails: Record<string, string>;
 }
-
-/** An email as `repos.<owner/name>.git_email` admits it (config.schema.json). */
-export const isGitEmail = (v: unknown): v is string =>
-  typeof v === "string" &&
-  v.length <= 254 &&
-  /^[^\s@<>"'`$\\-][^\s@<>"'`$\\]*@[^\s@<>"'`$\\]+$/.test(v);
 
 /**
  * What the supervisor requires of this machine, from its retained readiness verdict, believed

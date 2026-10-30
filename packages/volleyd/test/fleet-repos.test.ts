@@ -63,7 +63,11 @@ afterEach(async () => {
  * the supervisor's clone of a/a in place. `f.repo` is the supervisor's checkout of b/b: a wave on
  * b/b names that path (the supervisor is not a b/b machine), and gh reads b/b there.
  */
+/** Each own doctor run: its clone and the expected email the daemon passed (#638). */
+let ownRuns: { repo: string | null; gitEmail?: { slug: string; email: string } }[] = [];
+
 async function setup(o: { legacy?: boolean } = {}): Promise<void> {
+  ownRuns = [];
   const base = realpathSync(tempDir("volleyd-fleet-repos-"));
   const repoRoot = join(base, "managed");
   localA = join(repoRoot, "a", "a");
@@ -74,8 +78,10 @@ async function setup(o: { legacy?: boolean } = {}): Promise<void> {
     repoRoot,
     ...(o.legacy === true ? {} : { boxRepo: null }),
     // The own doctor finds each clone it runs on (a/a's managed one, the checkout of b/b).
-    localDoctor: (repo) =>
-      repo !== null ? { ...GREEN_DOCTOR, repo: { path: repo, exists: true } } : GREEN_DOCTOR,
+    localDoctor: (repo, opts) => {
+      ownRuns.push({ repo, ...(opts?.gitEmail !== undefined ? { gitEmail: opts.gitEmail } : {}) });
+      return repo !== null ? { ...GREEN_DOCTOR, repo: { path: repo, exists: true } } : GREEN_DOCTOR;
+    },
   });
   live = true;
   f.exec
@@ -147,6 +153,28 @@ async function spawned(wave: string, task = "T1"): Promise<unknown> {
   });
   return spawnedOn(wave, task);
 }
+
+describe("#638: the own doctor learns a repository's expected email", () => {
+  it("runs with the email for a clone whose repository expects one, and without it otherwise", async () => {
+    await setup();
+    await addBoth([clone(A, BOX_A), clone(B, BOX_B)]);
+    expect(
+      await f.adminOp({ op: "repo_add", slug: A, git_email: "dev@example.com" }),
+    ).toMatchObject({ ok: true });
+    ownRuns = [];
+    await eventually(async () => {
+      await f.tick(30_000);
+      return ownRuns.some((r) => r.repo === localA);
+    });
+    expect(ownRuns.find((r) => r.repo === localA)?.gitEmail).toEqual({
+      slug: A,
+      email: "dev@example.com",
+    });
+    expect(ownRuns.filter((r) => r.repo !== localA).every((r) => r.gitEmail === undefined)).toBe(
+      true,
+    );
+  });
+});
 
 describe("two repositories on a supervisor and one paired box (#439)", () => {
   it("a/a's wave places on either machine; b/b's only on the box", async () => {

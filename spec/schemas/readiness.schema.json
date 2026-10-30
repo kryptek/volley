@@ -83,6 +83,24 @@
                   "maxLength": 64,
                   "description": "The lowest bun version the supervisor accepts."
                 },
+                "repos": {
+                  "type": "object",
+                  "description": "What the supervisor expects of each repository's clone (spec section 4.6.15): its repos.<owner/name>.git_email, which the machine's doctor checks repo.identity against. Only repositories config expects an email for; absent when none does.",
+                  "propertyNames": {
+                    "$ref": "config.schema.json#/$defs/tunableProperties/properties/repos/propertyNames"
+                  },
+                  "maxProperties": 64,
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["git_email"],
+                    "properties": {
+                      "git_email": {
+                        "$ref": "config.schema.json#/$defs/tunableProperties/properties/repos/additionalProperties/properties/git_email"
+                      }
+                    }
+                  }
+                },
                 "sharing": {
                   "type": "object",
                   "additionalProperties": false,

@@ -172,6 +172,32 @@ describe("a record's repositories (#435)", () => {
   });
 });
 
+describe("realLocalDoctor's argv (#638)", () => {
+  it("passes --git-email <owner/name>=<email> only when the clone's repository expects one", async () => {
+    const seen: string[][] = [];
+    const doctor = realLocalDoctor(async (argv) => {
+      seen.push([...argv]);
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    });
+    const signal = new AbortController().signal;
+    await doctor("/path/to/a", signal, { gitEmail: { slug: "a/a", email: "dev@example.com" } });
+    await doctor("/path/to/b", signal);
+    expect(seen).toEqual([
+      [
+        "volley",
+        "peer",
+        "doctor",
+        "--json",
+        "--repo",
+        "/path/to/a",
+        "--git-email",
+        "a/a=dev@example.com",
+      ],
+      ["volley", "peer", "doctor", "--json", "--repo", "/path/to/b"],
+    ]);
+  });
+});
+
 describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)", () => {
   const report = (path: string, origin: string, ok = true): DoctorReport => ({
     checks: [

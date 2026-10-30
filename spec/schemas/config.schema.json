@@ -387,6 +387,12 @@
                     "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" }
                   }
                 ]
+              },
+              "git_email": {
+                "type": "string",
+                "maxLength": 254,
+                "pattern": "^[^\\s@<>\"'`$\\\\-][^\\s@<>\"'`$\\\\]*@[^\\s@<>\"'`$\\\\]+$",
+                "description": "The email the repository's commits are expected under (spec section 4.6.4): a machine whose clone would commit under another (compared case-insensitively) is blocked for it, its repo.identity check failing. Absent: any identity git resolves."
               }
             }
           }

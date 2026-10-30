@@ -471,6 +471,40 @@ describe("machineBlock and the closing line", () => {
     expect(trust[0]).toMatchObject({ repo: SLUG, detail: "Claude Code does not trust /c yet" });
     expect(trust[0]?.fix).toBe("run claude in /c once and accept the trust dialog");
   });
+
+  it("#638: a record's repo.identity failing the expected email shows with the email fix", () => {
+    const b = machineBlock(
+      SLUG,
+      {
+        ...record([
+          {
+            id: "repo.identity",
+            ok: false,
+            severity: "block" as const,
+            repo: SLUG,
+            detail: "commits as Dev <other@example.com>, expected dev@example.com",
+          },
+        ]),
+        repos: [
+          {
+            slug: SLUG,
+            path: "/c",
+            exists: true,
+            managed: true,
+            fetched_at: null,
+            toolchain: { ok: true, missing: [], outdated: [] },
+          },
+        ],
+      },
+      undefined,
+      { ready: true, reasons: [] },
+      { state: "blocked", path: "/c", reasons: [] },
+      { from: "record" },
+    );
+    expect(b.checks.find((c) => c.id === "repo.identity")?.fix).toBe(
+      "git -C /c config user.email dev@example.com",
+    );
+  });
 });
 
 const peer = (name: string, over: Partial<Candidate> = {}): Candidate => ({

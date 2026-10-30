@@ -464,7 +464,8 @@ export class ConfigStore {
 
   /**
    * `repo_add` / `repo_remove` (SPEC §4.6.21): set `repos.<slug>.machines` (null: drop the
-   * repository) and each `hosts.<m>.repos.<slug>` in `paths` (`fleet.repos.<slug>` for the
+   * repository, its `git_email` too), its `git_email` when `gitEmail` is given (null: clear it;
+   * undefined: keep it), and each `hosts.<m>.repos.<slug>` in `paths` (`fleet.repos.<slug>` for the
    * supervisor's own machine; null: drop the adopted path), the slug as config already spells
    * it. config_set cannot delete a key, so this writes the layer itself; journaled as one
    * `config_changed` whose removals read as null leaves.
@@ -474,10 +475,14 @@ export class ConfigStore {
     machines: RepoMachines | null,
     paths: Record<string, string | null>,
     by: string,
+    gitEmail?: string | null,
   ): PatchResult {
     const key = slugKey(this.fileLayer.repos, slug) ?? slugKey(this.global.repos, slug) ?? slug;
-    const { [key]: _old, ...otherRepos } = this.fileLayer.repos ?? {};
-    const repos = machines === null ? otherRepos : { ...otherRepos, [key]: { machines } };
+    const { [key]: old, ...otherRepos } = this.fileLayer.repos ?? {};
+    // The expected email (#638): kept unless given, cleared by null.
+    const email = gitEmail === undefined ? old?.git_email : (gitEmail ?? undefined);
+    const entry = { machines, ...(email !== undefined ? { git_email: email } : {}) };
+    const repos = machines === null ? otherRepos : { ...otherRepos, [key]: entry };
     const local = this.localName();
     const hosts = { ...this.fileLayer.hosts };
     const hostPatch: Record<string, { repos: Record<string, string | null> }> = {};
@@ -516,7 +521,12 @@ export class ConfigStore {
     const rejected = tunablesErrors(nextGlobal, this.hostname);
     if (rejected.length > 0) return { applied: false, rejected };
     const patch = {
-      repos: { [key]: machines === null ? null : { machines } },
+      repos: {
+        [key]:
+          machines === null
+            ? null
+            : { machines, ...(gitEmail !== undefined ? { git_email: gitEmail } : {}) },
+      },
       ...(Object.keys(hostPatch).length > 0 ? { hosts: hostPatch } : {}),
       ...(fleetPatch !== undefined ? { fleet: fleetPatch } : {}),
     } as unknown as TunablesPatch;

@@ -152,6 +152,49 @@ describe("repo_add (admin)", () => {
     ]);
   });
 
+  it("#638 git_email on a configured repository is stored, journaled once and published as requirements.repos; null clears; a malformed one is refused first", async () => {
+    await setup();
+    expect(await f.adminOp({ op: "repo_add", slug: SLUG })).toMatchObject({ ok: true });
+    const changes = () => systemTypes("config_changed").length;
+    const before = changes();
+    const bad = await f.adminOp({ op: "repo_add", slug: SLUG, git_email: "no email" });
+    expect(bad).toMatchObject({ ok: false });
+    expect(bad?.error).toMatch(/^git_email/);
+    expect(changes()).toBe(before);
+
+    expect(
+      await f.adminOp({ op: "repo_add", slug: SLUG, git_email: "dev@example.com" }),
+    ).toMatchObject({ ok: true });
+    expect(changes()).toBe(before + 1);
+    const cfg = await f.client.request("config_get", { path: "repos" });
+    expect(cfg.result).toEqual({ [SLUG]: { machines: "all", git_email: "dev@example.com" } });
+    await eventually(async () => {
+      await f.tick(0);
+      const p = await f.verdict(PEER);
+      return (p?.requirements as { repos?: unknown } | undefined)?.repos !== undefined;
+    });
+    expect((await f.verdict(PEER))?.requirements).toMatchObject({
+      repos: { [SLUG]: { git_email: "dev@example.com" } },
+    });
+    const listed = await f.client.request("repo_list", {});
+    expect(listed.result).toMatchObject({ repos: [{ slug: SLUG, git_email: "dev@example.com" }] });
+    // The same again: nothing changes.
+    await f.adminOp({ op: "repo_add", slug: SLUG, git_email: "dev@example.com" });
+    expect(changes()).toBe(before + 1);
+
+    expect(await f.adminOp({ op: "repo_add", slug: SLUG, git_email: null })).toMatchObject({
+      ok: true,
+    });
+    expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({
+      [SLUG]: { machines: "all" },
+    });
+    await eventually(async () => {
+      await f.tick(0);
+      const p = await f.verdict(PEER);
+      return p !== null && (p.requirements as { repos?: unknown }).repos === undefined;
+    });
+  });
+
   it("carries the repository's workflows as ci: { workflows } (#602); absent when unreadable", async () => {
     await setup();
     f.exec.on(["gh", "api", `repos/${SLUG}/actions/workflows?per_page=100`], {

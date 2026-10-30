@@ -1840,7 +1840,7 @@ describe("volley peer run (the service)", () => {
     const seen = ups.map((p) => p.last_seen ?? "");
     expect(seen.length).toBeGreaterThanOrEqual(3);
     // Records resume after the loss, with a newer last_seen.
-    expect(seen.at(-1)! > seen[0]!).toBe(true);
+    expect((seen.at(-1) ?? "") > (seen[0] ?? "")).toBe(true);
     expect(stderr.match(/broker connection lost/g)?.length).toBe(1);
     expect(stderr.match(/broker connected/g)?.length).toBe(2);
     expect(stderr).not.toContain("peer-secret");
