@@ -33,8 +33,15 @@ export interface ControlLink {
   session: DynsecSession;
   sysVersion: () => Promise<string | null>;
   connected: () => boolean;
+  /** Milliseconds since the broker last sent anything on it (a PINGRESP at least each keepalive). */
+  idleMs?: () => number;
+  /** Close it as dead (a broker that stopped answering without closing the socket). */
+  kill?: (why: string) => void;
   close: () => Promise<void>;
 }
+
+/** No packet from the broker for this long: the link is dead even if its socket looks open. */
+const STALE_MS = DAEMON_DEFAULTS.broker_keepalive_s * 1000 * DAEMON_DEFAULTS.broker_stale_factor;
 
 /** Log in to `url` as the dynsec admin (TCP_NODELAY is the broker's `set_tcp_nodelay`). */
 export function brokerControl(url: string, admin: BrokerAuth): () => Promise<ControlLink> {
@@ -44,6 +51,7 @@ export function brokerControl(url: string, admin: BrokerAuth): () => Promise<Con
       url,
       agentId: `volleyd-dynsec-${randomBytes(3).toString("hex")}`,
       ...admin,
+      keepaliveSeconds: DAEMON_DEFAULTS.broker_keepalive_s,
       connectTimeoutMs: DAEMON_DEFAULTS.dynsec_timeout_ms,
     });
     const session = await DynsecSession.open(brokerTransport(b), DAEMON_DEFAULTS.dynsec_timeout_ms);
@@ -51,6 +59,8 @@ export function brokerControl(url: string, admin: BrokerAuth): () => Promise<Con
       session,
       sysVersion: () => sysVersion(b, DAEMON_DEFAULTS.probe_ms),
       connected: () => b.connected,
+      idleMs: () => b.inboundIdleMs(),
+      kill: (why) => b.kill(why),
       close: async () => {
         await session.close();
         await b.disconnect().catch(() => {});
@@ -130,10 +140,19 @@ export class DynsecControl {
     }
   }
 
-  /** A dropped connection fails what was in flight on it, once; the next use reconnects. */
+  /**
+   * A dropped connection fails what was in flight on it, once; the next use reconnects. A silent
+   * one (no packet for `STALE_MS`) is closed first, so it is dropped the same way.
+   */
   private check(): void {
     const link = this.link;
-    if (link === null || link.connected()) return;
+    if (link === null) return;
+    const idle = link.idleMs?.() ?? 0;
+    if (link.connected() && idle > STALE_MS) {
+      this.o.log?.(`dynsec: control connection silent for ${Math.round(idle / 1000)}s; closing it`);
+      link.kill?.(`no packet from the broker for ${Math.round(idle / 1000)}s`);
+    }
+    if (link.connected()) return;
     this.link = null;
     link.session.failAll("the broker dropped volleyd's control connection");
     void link.close().catch(() => {});

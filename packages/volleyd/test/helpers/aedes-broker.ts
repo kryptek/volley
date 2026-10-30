@@ -6,10 +6,24 @@ export interface TestBroker {
   port: number;
   /** Close a connected client from the broker side (a broker restart or network drop). */
   dropClient: (clientId: string) => boolean;
+  /**
+   * Stop serving a connected client without closing its socket (a broker that stopped reading):
+   * nothing it sends is read or answered, and the broker's own keepalive never closes it.
+   */
+  stallClient: (clientId: string) => boolean;
   /** The filters a client is subscribed to right now (SUBSCRIBE minus UNSUBSCRIBE), sorted. */
   subscriptions: (clientId: string) => string[];
   close: () => Promise<void>;
 }
+
+/** Aedes's live client map; its typings omit it and the per-client internals used here. */
+interface LiveClient {
+  close(): void;
+  conn: { removeAllListeners(event: string): void };
+  _keepaliveTimer: { clear(): void } | null;
+}
+const liveClients = (aedes: Aedes): Record<string, LiveClient> =>
+  (aedes as unknown as { clients: Record<string, LiveClient> }).clients;
 
 /**
  * Start an in-process Aedes MQTT broker on an OS-assigned free port. With `users`, every client
@@ -94,11 +108,17 @@ export async function startTestBroker(
     url: `mqtt://127.0.0.1:${port}`,
     port,
     dropClient: (clientId) => {
-      // Aedes's typings omit its live client map.
-      const clients = (aedes as unknown as { clients: Record<string, { close(): void }> }).clients;
-      const client = clients[clientId];
+      const client = liveClients(aedes)[clientId];
       client?.close();
       return client !== undefined;
+    },
+    stallClient: (clientId) => {
+      const client = liveClients(aedes)[clientId];
+      if (client === undefined) return false;
+      client._keepaliveTimer?.clear();
+      client._keepaliveTimer = null;
+      client.conn.removeAllListeners("readable");
+      return true;
     },
     subscriptions: (clientId) => [...(subs.get(clientId) ?? [])].sort(),
     close: () =>

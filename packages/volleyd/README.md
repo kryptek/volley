@@ -262,8 +262,19 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 - **One daemon per home**: `$VOLLEYD_HOME/volleyd.lock` (holding the pid) is taken before any
   journal is opened; a lock whose pid is gone is replaced. A second daemon is also refused while
   the broker shows a live `volleyd` status in the namespace.
-- **Broker loss is fatal**: if the broker connection drops, `volleyd daemon` exits 1 and launchd's
-  `KeepAlive` restarts it, which resumes the persistent session and restores every wave.
+- **Broker loss is survived**: if the broker connection drops (a broker restart, a kick, a network
+  blip), the daemon logs `broker connection lost: <reason>; reconnecting` with the broker's
+  DISCONNECT reason when it sent one (an MQTT 5 broker: 152 administrative action, 142 session
+  taken over, 139 server shutting down), reconnects with backoff (1 s doubling to 30 s), and once
+  back logs `broker connection restored after <n>s` and publishes its status, registry entry,
+  config and every wave's state again (the LWT marked it `reaped` meanwhile). A connection that
+  stays open but carries nothing from the broker for two keepalives (a broker that stopped
+  answering) is closed and reconnected the same way. Only five minutes without a connection
+  (`broker_reconnect_give_up_ms`) makes `volleyd daemon` exit 1, so launchd's `KeepAlive` (or
+  systemd) restarts it, which resumes the persistent session and restores every wave; it never
+  stays alive without a broker. A drop during a hand-over or broker move, or a session another
+  `volleyd` took over, still ends it as before. Never leave `DEBUG=mqttjs*` on in a service log:
+  mqtt.js prints the CONNECT packet, password included.
 
 ---
 

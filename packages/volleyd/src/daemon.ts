@@ -724,6 +724,8 @@ export interface DaemonOptions {
   /** Machine-pressure sampler, run once per tick. Default: the fenced src/pressure samplers. */
   pressure?: PressureSource;
   log?: (line: string) => void;
+  /** The daemon connection's MQTT keepalive (tests). Default `broker_keepalive_s`. */
+  keepaliveSeconds?: number;
   /**
    * MQTT protocol for the daemon's persistent session. Default 5, so `mailbox.session_expiry_s`
    * applies; 4 keeps the session until the broker's own expiry policy (and is what the
@@ -1415,8 +1417,10 @@ async function assertNotRunning(opts: DaemonOptions): Promise<void> {
  * control requests on its mailbox — kept in a persistent MQTT session on a stable clientId, so
  * requests sent while it is down are delivered on the next start — and publishes retained wave
  * state + the event mirror after every journal append. All work (control ops, ticks) runs
- * through one serial queue. A lost broker connection is fatal (`closed`): the service manager
- * restarts the process, which is simpler and safer than re-arming everything in-process.
+ * through one serial queue. A lost broker connection is reconnected with backoff (mqtt.js keeps
+ * the routes, the broker or mqtt.js the subscriptions) and the retained records it lost are
+ * published again; only `broker_reconnect_give_up_ms` without one is fatal (`closed`), so the
+ * service manager restarts the process instead of it idling alive.
  */
 export class Daemon {
   private readonly broker = new VolleyBroker();
@@ -1572,6 +1576,10 @@ export class Daemon {
   private queue: Promise<unknown> = Promise.resolve();
   private timer: TimerHandle | undefined;
   private watchdog: TimerHandle | undefined;
+  /** When this process first registered (its registry entry's `started_at`, kept on a reconnect). */
+  private registeredAt: string | undefined;
+  /** When the broker connection was lost (daemon clock), while it is down. */
+  private offlineSince: number | null = null;
   private screenTimer: TimerHandle | undefined;
   private running = false;
   /** Spawn launch halves and journal appends (with their publishes) in flight: `settled`. */
@@ -2203,8 +2211,18 @@ export class Daemon {
       protocolVersion: this.opts.protocolVersion ?? 5,
       willTopic: this.statusTopic,
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
+      keepaliveSeconds: this.opts.keepaliveSeconds ?? DAEMON_DEFAULTS.broker_keepalive_s,
+      reconnect: {
+        baseMs: DAEMON_DEFAULTS.broker_reconnect_base_ms,
+        maxMs: DAEMON_DEFAULTS.broker_reconnect_max_ms,
+        onOffline: (why) => this.brokerLost(why),
+        onReconnected: (sessionPresent) => this.brokerBack(sessionPresent),
+        onRefused: (e) => this.fail(e),
+      },
       ...authFields(this.opts.auth),
     });
+    // From the first packet on: a drop during the rest of start is noticed too.
+    this.watchdog = this.time.setInterval(() => this.checkBroker(), DAEMON_DEFAULTS.watchdog_ms);
     if (this.dynsec !== undefined) {
       // Refuse a broker older than 2.1 at start (BrokerVersionError ends `start`). Any other
       // failure only delays minting: the control connection reconnects on next use.
@@ -2229,18 +2247,7 @@ export class Daemon {
     this.running = true;
 
     await this.publish(this.statusTopic, this.envelope("status", "spawning", {}), true);
-    await this.publish(
-      registryTopic(DAEMON_AGENT_ID),
-      {
-        ...this.envelope("_system/registry", "registered", {
-          capabilities: ["supervisor"],
-          cwd: this.opts.home,
-          started_at: dateOf(this.time).toISOString(),
-        }),
-        namespace,
-      },
-      true,
-    );
+    await this.publishIdentity();
     await this.publish(this.statusTopic, this.envelope("status", "registered", {}), true);
 
     // Every namespace's progress through ONE filter: a wave's agents may live in the wave's own
@@ -2430,9 +2437,6 @@ export class Daemon {
         DAEMON_DEFAULTS.screen_tick_ms,
       );
     }
-    this.watchdog = this.time.setInterval(() => {
-      if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
-    }, DAEMON_DEFAULTS.watchdog_ms);
     const pruneMs =
       this.opts.tokenPruneMs ?? (this.opts.auth !== undefined ? DAEMON_DEFAULTS.token_prune_ms : 0);
     if (pruneMs > 0) {
@@ -2859,6 +2863,82 @@ export class Daemon {
     };
   };
 
+  /** volleyd's registry entry (retained; started_at is when this process started). */
+  private async publishIdentity(): Promise<void> {
+    this.registeredAt ??= dateOf(this.time).toISOString();
+    await this.publish(
+      registryTopic(DAEMON_AGENT_ID),
+      {
+        ...this.envelope("_system/registry", "registered", {
+          capabilities: ["supervisor"],
+          cwd: this.opts.home,
+          started_at: this.registeredAt,
+        }),
+        namespace: this.opts.namespace,
+      },
+      true,
+    );
+  }
+
+  /**
+   * The broker connection, each watchdog period: a live one that has been silent past
+   * `broker_stale_factor` keepalives is closed (mqtt.js only notices a socket that closes, and
+   * reconnects from there); one down longer than `broker_reconnect_give_up_ms` ends the daemon.
+   */
+  private checkBroker(): void {
+    if (this.broker.connected) {
+      const keepalive = this.opts.keepaliveSeconds ?? DAEMON_DEFAULTS.broker_keepalive_s;
+      const idle = this.broker.inboundIdleMs();
+      if (idle > keepalive * 1000 * DAEMON_DEFAULTS.broker_stale_factor) {
+        this.broker.kill(`no packet from the broker for ${Math.round(idle / 1000)}s`);
+      }
+      return;
+    }
+    this.offlineSince ??= this.time.now();
+    const offline = this.time.now() - this.offlineSince;
+    if (offline < DAEMON_DEFAULTS.broker_reconnect_give_up_ms) return;
+    this.fail(
+      new Error(
+        `broker unreachable for ${Math.round(offline / 1000)}s (gave up reconnecting after ${DAEMON_DEFAULTS.broker_reconnect_give_up_ms / 1000}s)`,
+      ),
+    );
+  }
+
+  /**
+   * The broker closed the connection (once per outage). It reconnects on its own, except during a
+   * hand-over or broker move: the move's end decides (`moveFinished`). A session another client
+   * took over (the same clientId) is another volleyd's: never fight it for the session.
+   */
+  private brokerLost(why: string): void {
+    this.offlineSince ??= this.time.now();
+    if (this.handingOver !== null || this.brokerMoving !== null || / 142 /.test(`${why} `)) {
+      this.broker.stopReconnecting();
+      this.fail(new Error(`broker connection lost: ${why}`));
+      return;
+    }
+    this.log(`broker connection lost: ${why}; reconnecting`);
+  }
+
+  /** The connection is back: republish what the outage lost (the LWT replaced the status). */
+  private brokerBack(sessionPresent: boolean): void {
+    const since = this.offlineSince ?? this.time.now();
+    this.offlineSince = null;
+    this.log(
+      `broker connection restored after ${Math.round((this.time.now() - since) / 1000)}s (session ${sessionPresent ? "kept" : "lost"})`,
+    );
+    if (!this.running) return;
+    void this.enqueue(async () => {
+      await this.publishIdentity();
+      await this.publishConfig();
+      for (const wave of this.waves.keys()) await this.publishState(wave);
+      await this.publish(
+        this.statusTopic,
+        this.envelope("status", "working", { waves: this.waves.size }),
+        true,
+      );
+    });
+  }
+
   /**
    * Hand each mailbox message (the daemon's mailbox in any namespace) to the serial queue, one at
    * a time, until the daemon stops.
@@ -2890,8 +2970,14 @@ export class Daemon {
           maxMessages: 1,
         });
       } catch (e) {
-        if (this.running) this.fail(e instanceof Error ? e : new Error(String(e)));
-        return;
+        // Offline: the drain resumes once the connection is back (the watchdog bounds the wait).
+        if (!this.running) return;
+        if ((e as { code?: unknown }).code !== "BROKER_DOWN") {
+          this.fail(e instanceof Error ? e : new Error(String(e)));
+          return;
+        }
+        await new Promise<void>((r) => this.time.setTimeout(r, DAEMON_DEFAULTS.watchdog_ms));
+        continue;
       }
       for (const m of msgs) void this.enqueue(() => handle(m));
     }
@@ -3052,6 +3138,9 @@ export class Daemon {
         this.envelope("status", "done", { reason: "shutdown" }),
         true,
       );
+      await this.broker.disconnect();
+    } else {
+      // Offline: stop reconnecting (the LWT already marked it gone).
       await this.broker.disconnect();
     }
     this.releaseLock();

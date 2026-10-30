@@ -9,7 +9,7 @@ import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { noOwnerWarning } from "../src/commands/run";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
-import { Daemon, daemonClientId } from "../src/daemon";
+import { Daemon } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { type DoctorReport, machineTopic } from "../src/machines";
 import type { ReadinessPayload } from "../src/readiness";
@@ -191,25 +191,31 @@ describe("volleyd daemon + control channel", () => {
     expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
   });
 
-  it("exits (closed resolves) when the broker drops its connection, freeing the home", async () => {
-    // The watchdog interval runs on the fake clock: each step is one virtual watchdog period.
+  it("exits (closed resolves) once the broker stays unreachable past broker_reconnect_give_up_ms, freeing the home", async () => {
+    // The give-up bound runs on the fake clock; the reconnect attempts on mqtt.js's own timers.
     const clock = fakeClock();
-    const d = await t.start({ clock });
+    const logs: string[] = [];
+    // On a broker of its own, which then goes away for good: every reconnect is refused.
+    const gone = await startTestBroker();
+    const d = await Daemon.start(
+      t.options({ brokerUrl: gone.url, clock, log: (l) => logs.push(l) }),
+    );
     let reason: Error | undefined;
     void d.closed.then((r) => {
       reason = r;
     });
-    expect(t.broker.dropClient(daemonClientId(NS))).toBe(true);
-    // The daemon's client sees the socket close on its own I/O: step the watchdog until it has.
+    await gone.close();
+    await eventually(() => logs.some((l) => l.startsWith("broker connection lost")));
+    // Inside the bound it keeps trying.
+    await clock.advance(DAEMON_DEFAULTS.broker_reconnect_give_up_ms - DAEMON_DEFAULTS.watchdog_ms);
+    expect(reason).toBeUndefined();
     await eventually(async () => {
       await clock.advance(DAEMON_DEFAULTS.watchdog_ms);
       return reason !== undefined;
     });
-    expect(reason?.message).toMatch(/broker connection lost/);
-    // The LWT marked it dead and the lock is free: a restart comes straight back.
-    expect(((await t.retained(`volley/${NS}/volleyd/status`)) as { type: string }).type).toBe(
-      "reaped",
-    );
+    expect(reason?.message).toMatch(/broker unreachable for 300s/);
+    expect(logs.some((l) => /^fatal: broker unreachable/.test(l))).toBe(true);
+    // The lock is free: a daemon on a reachable broker comes straight up.
     await t.start();
     expect((await runCli(["status", "--json"], t.env)).exitCode).toBe(0);
   });
