@@ -1575,9 +1575,6 @@ that row as closed.
 An inbox answer to either is carried out on the session's screen (`src/autopilot/carry.ts`),
 through its host adapter (cmux on this machine, tmux on a paired one), **before** it is accepted:
 
-A screen that cannot be read (its workspace is gone, or the read timed out) is refused `the
-session's screen cannot be read: it may have ended`, for either kind.
-
 - *picker*: read the screen; refuse `picker not on screen` unless it shows that same picker (the
   question's first line and every option label, in order); then press the keys that select the
   answer from the highlighted row (`src/autopilot/picker.ts`): `Down`/`Up` × k then `Enter`; for
@@ -1590,6 +1587,9 @@ session's screen cannot be read: it may have ended`, for either kind.
   idle prompt that is another session's is not typed into); then type the reply and press `Enter`. The input box must be empty: when Claude
   Code shows placeholder or suggestion text after `❯`, the answer is refused `prompt not idle`
   (fail safe; answer in the terminal).
+
+A screen that cannot be read (its workspace is gone, or the read timed out) is refused `the
+session's screen cannot be read: it may have ended`, for either kind.
 
 `Up`, `Down`, `Space` and the typed text pass the fence only with a `PickerToken` /
 `HandoffToken` minted for exactly that item version and answer (the text is typed once, one line,

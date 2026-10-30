@@ -356,6 +356,32 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     expect(s.host.texts).toEqual([]);
   });
 
+  it("a workspace whose registered session shut down cleanly (blocked, shutdown) is free again", async () => {
+    s = await makeSupervisedEnv();
+    await entry("coord-other", "workspace:7");
+    await s.agent.publish(
+      buildTopic(NS, "coord-other", "status"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "coord-other",
+          parentId: null,
+          channel: "status",
+          type: "blocked",
+          payload: { reason: "shutdown" },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await s.consumed();
+    const item = await handoff(32, "workspace:7");
+    s.host.screens = [asked()];
+    const r = await answer(item.id, "go");
+    expect(r.error).toBeUndefined();
+    expect(s.host.texts).toEqual([
+      expect.objectContaining({ workspace: "workspace:7", text: "go" }),
+    ]);
+  });
+
   /** A retained registry entry for `agent` naming `workspace`. */
   const entry = (agent: string, workspace: string) =>
     s.agent.publish(
@@ -536,11 +562,13 @@ describe("needs-you inbox: the items of a session that has ended (#637)", () => 
     s = await makeSupervisedEnv({ daemon: { clock } });
     const item = await handoff();
     s.host.screens = [asked()];
-    await clock.advance(GONE_MS + 1_000);
+    // Only the wall clock moves: no tick runs, so the sweep has not closed the item and the
+    // answer itself must find the session gone and refuse it.
+    clock.sleepHost(GONE_MS + 1_000);
     const reads = s.host.screenReads.length;
     const r = await answer(item.id, "go");
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/^(session ended|already answered on .*terminal)/);
+    expect(r.error).toBe("session ended: the item is closed, nothing was typed");
     expect(s.host.texts).toEqual([]);
     expect(s.host.screenReads.length).toBe(reads);
     expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject(SESSION_ENDED);
@@ -553,6 +581,29 @@ describe("needs-you inbox: the items of a session that has ended (#637)", () => 
     const r = await answer(item.id, "go");
     expect(r.error).toBe("the session's screen cannot be read: it may have ended");
     expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+  });
+
+  it("a picker whose screen cannot be read is refused as such, not as picker not on screen", async () => {
+    s = await makeSupervisedEnv();
+    await coord("picker_opened", 41, "PreToolUse", {
+      tool_use_id: "toolu_01Gone",
+      questions: [
+        {
+          question: "Which fruit do you want?",
+          header: "Fruit",
+          options: [{ label: "Apple" }, { label: "Banana" }],
+          multiSelect: false,
+        },
+      ],
+      workspace: "workspace:7",
+    });
+    const id = pickerItemId(COORD, "toolu_01Gone");
+    await s.until(() => s.daemon.inboxItem(id) !== undefined);
+    s.host.screens = [null];
+    const r = await answer(id, "Banana");
+    expect(r.error).toBe("the session's screen cannot be read: it may have ended");
+    expect(s.host.keys).toEqual([]);
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
   });
 
   it("a supervised agent's picker is not swept by the session-gone sweep", async () => {

@@ -3188,6 +3188,7 @@ export class Daemon {
           const name = this.namedEntries.get(holder)?.coordinator;
           // A session carrying a coordinator name keeps its status: `bindOwner` needs it. Each
           // coordinator restart adds one; registry reaping (clearing `namedEntries`) bounds them.
+          const reason = (env.payload as { reason?: unknown } | null)?.reason;
           if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder) && name === undefined) {
             // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
             this.statusOf.delete(holder);
@@ -3199,7 +3200,6 @@ export class Daemon {
               this.endedStatusOf.delete(this.endedStatusOf.keys().next().value as string);
           } else {
             this.endedStatusOf.delete(holder);
-            const reason = (env.payload as { reason?: unknown } | null)?.reason;
             this.statusOf.set(holder, {
               type: env.type,
               at: env.wall_time,
@@ -3221,7 +3221,6 @@ export class Daemon {
           }
           // A session that ended (SPEC §7.5: a terminal status, or a clean shutdown's
           // `blocked`) answers none of its open pickers or handoffs any more.
-          const reason = (env.payload as { reason?: unknown } | null)?.reason;
           if (
             presenceOf({ type: env.type, ...(reason === "shutdown" ? { reason } : {}) }) ===
             "offline"

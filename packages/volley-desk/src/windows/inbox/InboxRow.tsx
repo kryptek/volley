@@ -7,8 +7,9 @@
  * An answer is `inbox_answer { id, version, answer, where: { kind: "desk", device } }` through
  * the steer transport's `control()`; volleyd referees it. A refusal that closed the item
  * (`already answered on <where>`, or `session ended…` when its session is gone) is shown and the
- * row flips to answered; any other failure is shown and the buttons stay. The store applies the retained update either way. Without broker credentials (no
- * `control`) an option shows the `volleyd inbox answer <id> "<answer>"` command to copy instead.
+ * row flips to answered; any other failure is shown and the buttons stay. The store applies the
+ * retained update either way. Without broker credentials (no `control`) an option shows the
+ * `volleyd inbox answer <id> "<answer>"` command to copy instead.
  * An answered row shows `StatusMark` with where it was answered.
  *
  * A decision's row also offers **Hold · waiting on…** (SPEC §4.6.2): a picker of the wave's
