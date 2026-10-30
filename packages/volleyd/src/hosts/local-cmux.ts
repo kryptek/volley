@@ -134,11 +134,27 @@ export class LocalCmuxHost implements Host {
   }
 
   async sendKeys(workspace: string, key: string, tokens: TypedTextTokens = {}): Promise<void> {
-    await this.cmux(["cmux", "send-key", "--workspace", workspace, key], tokens);
+    await this.send("send-key", workspace, key, tokens);
   }
 
   async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {
-    await this.cmux(["cmux", "send", "--workspace", workspace, text], tokens);
+    await this.send("send", workspace, text, tokens);
+  }
+
+  /** Bounded: a hung cmux must not hold the daemon's queue (an inbox carry runs on it). */
+  private async send(
+    verb: "send" | "send-key",
+    workspace: string,
+    arg: string,
+    tokens: TypedTextTokens,
+  ): Promise<void> {
+    const r = await this.cmux(["cmux", verb, "--workspace", workspace, arg], {
+      ...tokens,
+      timeoutMs: DAEMON_DEFAULTS.send_keys_timeout_ms,
+    });
+    if (r.timedOut) throw new Error(`cmux ${verb} ${workspace} timed out`);
+    if (r.code !== 0)
+      throw new Error(`cmux ${verb} ${workspace} exit ${r.code}: ${r.stderr.trim()}`);
   }
 
   /** cmux has no verb to resize a workspace's terminal: its window's size is the user's. */

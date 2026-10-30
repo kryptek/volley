@@ -55,6 +55,26 @@ describe("LocalCmuxHost", () => {
     expect(await new LocalCmuxHost(fake.exec).readScreen("workspace:9", 10)).toBeNull();
   });
 
+  it("sendText and sendKeys are bounded: a send that times out throws (#637)", async () => {
+    const fake = fakeExec()
+      .on(["cmux", "send"], { timedOut: true })
+      .on(["cmux", "send-key"], { timedOut: true });
+    const host = new LocalCmuxHost(fake.exec);
+    await expect(host.sendKeys("workspace:3", "Enter")).rejects.toThrow(
+      "cmux send-key workspace:3 timed out",
+    );
+    await expect(
+      host.sendText("workspace:3", "go", {
+        handoff: mintHandoffToken({ item_id: "h-a-1", version: 1, text: "go" }),
+      }),
+    ).rejects.toThrow("cmux send workspace:3 timed out");
+    for (const c of fake.calls) expect(c.opts.timeoutMs).toBe(DAEMON_DEFAULTS.send_keys_timeout_ms);
+    fake.on(["cmux", "send-key"], { code: 1, stderr: "workspace not found\n" });
+    await expect(host.sendKeys("workspace:3", "Enter")).rejects.toThrow(
+      "cmux send-key workspace:3 exit 1: workspace not found",
+    );
+  });
+
   it("sendKeys('Enter') maps to cmux send-key; sendText to cmux send", async () => {
     const fake = fakeExec();
     const host = new LocalCmuxHost(fake.exec);

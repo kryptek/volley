@@ -1,5 +1,5 @@
 #!/bin/bash
-# Layer 4 of the install tests (README.md), as the nightly runs it on the Linux box's runner
+# Layer 4 of the install tests (README.md), as install-vm.yml runs it on the Linux box's runner
 # (label volley-linux-vm): the preflight, then vm-pair.sh.
 #
 #   run-layer4.sh [--version vX.Y.Z]

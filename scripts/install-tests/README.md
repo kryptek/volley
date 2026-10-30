@@ -2,15 +2,14 @@
 
 Layers of tests check the one-command install. Layer 1 runs on every PR on GitHub's hosted
 runners; Layers 2 and 4 run on fresh VMs on the paired Linux machine's self-hosted runner
-(`.github/workflows/install-vm.yml`), on demand through one command (`verify.sh`, below) and
-nightly.
+(`.github/workflows/install-vm.yml`), on demand only, through one command (`verify.sh`, below).
 
 | Layer | Where | What |
 | --- | --- | --- |
 | 1 | every PR: containers, a hosted Mac | install from nothing, `volley setup --yes`, the checks below |
-| 2 | on demand and nightly: fresh Ubuntu 24.04 and Debian 13 VMs (multipass) | real systemd services, the first wave, a wave on a repository with no CI, a reboot, reconnect |
+| 2 | on demand: fresh Ubuntu 24.04 and Debian 13 VMs (multipass) | real systemd services, the first wave, a wave on a repository with no CI, a reboot, reconnect |
 | 3 | retired | macOS on Tart, never run; macOS is Layer 1's hosted Mac and the owner smoke |
-| 4 | on demand and nightly: a hub VM and a peer VM (multipass) | `volley machine add`, readiness, a task placed on the peer, a repository added by slug and placed there, removal |
+| 4 | on demand: a hub VM and a peer VM (multipass) | `volley machine add`, readiness, a task placed on the peer, a repository added by slug and placed there, removal |
 
 Layer 3 (fresh macOS VMs) never booted a real VM and needed a second always-on Mac; it was
 removed. The pair layer keeps its number, 4, so its `LAYER=4` labels in metrics, artifacts and the
@@ -107,7 +106,7 @@ process that exits stays down, and `is-active` says so. Anything else exits 1 na
 | `run-layer2.sh`, `run-layer4.sh` | What the workflow runs: the preflight (multipass, bun, ssh), then the layer's script |
 | `vm-linux.sh <ubuntu-24.04\|debian-13>` | Layer 2: one fresh VM with systemd |
 | `vm-pair.sh` | Layer 4: a hub VM and a peer VM |
-| `lib.sh` | What they share: the VM names, the run's ssh key, the cleanup trap, the waits, a test wave's submission (`submit_wave`), the text check (`check_text`, `capture`), the metrics hand-off, the tracking issue |
+| `lib.sh` | What they share: the VM names, the run's ssh key, the cleanup trap, the waits, a test wave's submission (`submit_wave`), the text check (`check_text`, `capture`), the metrics hand-off |
 | `cloud-init.yaml` | The VMs' cloud-init: a user `volley` with password-less sudo in the stock cloud-image shape (group `sudo` plus a `NOPASSWD` drop-in), ssh with the run's key only |
 | `vm.test.ts`, `stubs/` | The tests: each script, `verify.sh` and the workflow end to end against stand-in `multipass`, `ssh` (the fake VM) and `gh` |
 
@@ -140,19 +139,17 @@ post-tag check.
 run starts at once. When its jobs are still queued after 5 minutes `verify.sh` says
 `no runner is online for volley-linux-vm: start the runner service on the paired Linux machine
 (scripts/install-tests/README.md, The Linux box)` and keeps waiting: starting the service makes
-the run proceed, no new dispatch needed. A dispatch during the nightly queues behind it (one
-runner, `concurrency: install-vm`).
+the run proceed, no new dispatch needed. A second dispatch queues behind the first (one runner,
+`concurrency: install-vm`).
 
 **The budget: 90 minutes from dispatch to table.** The jobs run one after another on the one
 runner: Layer 2 on Ubuntu and on Debian (launch, install and setup in 15 minutes, the no-CI wave,
 the reboot and its checks) at `timeout-minutes: 40` each, then Layer 4 (two VMs, pairing within 10
 minutes, two waves on the peer) at `timeout-minutes: 60`.
 
-Nothing runs by itself on a push or a PR, and no check is required: the owner decides when a
-fresh-VM verification is worth the machine's time. The nightly (07:41 UTC, the default branch)
-runs the same jobs to catch drift between asks and keeps multipass's images and the runner warm;
-only the schedule opens or comments on the `install-tests` tracking issue. A dispatched run answers
-whoever asked (the table, its step summaries, its artifacts) and touches no issue.
+Nothing runs by itself on a push, a PR or a schedule, and no check is required: the owner decides
+when a fresh-VM verification is worth the machine's time. A run answers whoever asked (the table,
+its step summaries, its artifacts) and touches no issue.
 
 Each script takes `--version vX.Y.Z` to install that release (`install.sh` through curl, from the
 tag) instead of this checkout, which it otherwise copies into the VM (tracked and untracked files,
@@ -229,15 +226,6 @@ Last, `volley peer remove peer --now` stops `volley-peer.service` on the peer.
   reboot), `failures.md`, `transcript.log` (the run's output, redacted), the captured CLI output
   and, per wave, `<wave>-status.json` and `<wave>-events.jsonl` (Layer 2's `wave-noci-*`). The
   workflow uploads them (never `transcript.raw`, never `key/`).
-- Under `VM_TRACK_ISSUE=1` (the scheduled nightly sets it; a dispatch never does) a failing run finds the one open issue labelled
-  `install-tests` (creating the label and the issue when there is none) and comments on it: the
-  layer, the run's URL, the failures and the table. One comment per failing run; close the issue
-  once a nightly passes. Two runners failing within the same seconds may each open one.
-- The workflow's `report` job (a hosted runner, after the other two, whatever they did) fails the
-  workflow when any job's result is not `success`, and on the schedule comments on the same issue
-  (same label, same title): a job that never found a runner, or stopped before the run's own
-  reporting, is reported too. A scheduled failure therefore gets two comments: the run's, with
-  the failures and the table, and the report's one-line results.
 
 ### Running the tests
 
@@ -280,7 +268,7 @@ about 50 GB of free disk.
    probe && multipass delete --purge probe`. The snap is confined: it reads only files under
    your home directory that are not under a hidden directory of it (`~/.cache`, `~/.local`), and
    never `/tmp`. Every file a run hands it lives under `$VM_OUT`, so keep `VM_OUT` (and the
-   runner's work directory, where the nightly puts it) under a non-hidden path of the home
+   runner's work directory, where a run puts it) under a non-hidden path of the home
    directory; with a snap multipass a run refuses any other `VM_OUT` up front (exit 2).
 2. Install bun (`curl -fsSL https://bun.sh/install | bash`), git and the GitHub CLI.
 3. Images: Ubuntu 24.04 is multipass's own. Debian 13 is its generic cloud image,
@@ -290,9 +278,9 @@ about 50 GB of free disk.
 4. Register the runner: in the repository's Settings → Actions → Runners → New self-hosted
    runner, follow the Linux steps as an ordinary user (not root) in the multipass group, and give
    it the label `volley-linux-vm` (`./config.sh --labels volley-linux-vm`). Install it as a
-   service: `sudo ./svc.sh install && sudo ./svc.sh start`. Registered, it runs the nightly and
-   every `verify.sh`; while it is not (or its service is stopped) the jobs sit queued, `verify.sh`
-   says so after 5 minutes, and on the schedule the `report` job tells the tracking issue.
+   service: `sudo ./svc.sh install && sudo ./svc.sh start`. Registered, it runs every
+   `verify.sh`; while it is not (or its service is stopped) the jobs sit queued and `verify.sh`
+   says so after 5 minutes; they start once its service is on.
 
 One runner runs one job at a time: Layer 2's two distributions and Layer 4 take turns.
 

@@ -40,6 +40,9 @@ function wantOf(item: InboxItem): PickerWant | string {
   return { question: item.question, options: item.options, multi: item.multi === true };
 }
 
+/** A screen read that failed: the session (or its workspace) may be gone. */
+export const SCREEN_UNREADABLE = "the session's screen cannot be read: it may have ended";
+
 async function press(d: CarryDeps, keys: readonly Key[], item: InboxItem): Promise<void> {
   const text = keys.find((k): k is { text: string } => typeof k === "object")?.text;
   const picker = mintPickerToken({
@@ -62,7 +65,9 @@ export async function carryPicker(
 ): Promise<string | null> {
   const want = wantOf(item);
   if (typeof want === "string") return want;
-  const parsed = parsePicker(await d.readScreen(d.workspace));
+  const screen = await d.readScreen(d.workspace);
+  if (screen === null) return SCREEN_UNREADABLE;
+  const parsed = parsePicker(screen);
   if (parsed === null || !matches(parsed, want)) return "picker not on screen";
   const keys = keysFor(parsed, choiceFor(answer, want));
   if (keys === null) return `the picker cannot take '${answer}'`;
@@ -96,6 +101,7 @@ export async function carryHandoff(
   const why = answerTextRefusal(answer);
   if (why !== null) return `a reply must be one line of plain text, not ${why}`;
   const screen = await d.readScreen(d.workspace);
+  if (screen === null) return SCREEN_UNREADABLE;
   if (!promptIdle(screen)) return "prompt not idle";
   if (!questionOnScreen(screen, item.question)) return "the question is not on screen";
   const handoff = mintHandoffToken({ item_id: item.id, version: item.version, text: answer });
