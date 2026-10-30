@@ -323,6 +323,23 @@ describe("the Needs you window", () => {
     ).toBeInTheDocument();
   });
 
+  it("a handoff refused session ended reads closed, with neither Other… nor Send to mailbox (#637)", async () => {
+    const error = "session ended: the item is closed, nothing was typed";
+    const control = vi.fn(async () => ({ ok: false, error }));
+    setup({ control, mailbox: vi.fn() });
+    const r = within(row(HANDOFF));
+    fireEvent.click(r.getByRole("button", { name: "Other…" }));
+    fireEvent.change(r.getByRole("textbox", { name: "Your answer" }), {
+      target: { value: "go" },
+    });
+    fireEvent.click(r.getByRole("button", { name: "Send" }));
+    expect(await r.findByText(error)).toBeInTheDocument();
+    expect(row(HANDOFF).querySelector(".status-mark")).not.toBeNull();
+    expect(r.queryByRole("alert")).toBeNull();
+    expect(r.queryByRole("button", { name: "Other…" })).toBeNull();
+    expect(r.queryByRole("button", { name: "Send to mailbox" })).toBeNull();
+  });
+
   it("no Send to mailbox for another failure, or without a mailbox", async () => {
     const control = vi.fn(async () => ({ ok: false, error: "prompt not idle" }));
     setup({ control, mailbox: vi.fn() });

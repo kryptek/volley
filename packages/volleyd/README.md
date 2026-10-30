@@ -1561,8 +1561,22 @@ coordinator sessions alike:
   opens `h-<agent_id>-<seq>`. The session's next prompt (`activity` `prompt received`, or that
   prompt's `resumed`) closes it with `where: terminal` when nobody answered through the inbox.
 
+A session that ends closes its open pickers and handoffs too, as `session ended` (`where:
+terminal`): when its status turns `done`, `failed` or `reaped`, or `blocked` with `reason:
+"shutdown"` (a clean shutdown, SPEC §7.5), and, for a session volleyd does not supervise, when it
+has no status and nothing was heard on its progress for `inbox_session_gone_ms` (2 minutes,
+counted from volleyd's own start too). The tick sweeps for those, so an item stranded by a
+session that exited, was killed or was replaced (a compaction, a resume) leaves Needs you within
+one bound, after a restart as well; each close is journaled (`inbox_answered`, in its wave or
+`_system`). An inbox answer to such an item is refused at once, `session ended: the item is
+closed, nothing was typed`, closes it the same way, and reads or types nothing; the Desk shows
+that row as closed.
+
 An inbox answer to either is carried out on the session's screen (`src/autopilot/carry.ts`),
 through its host adapter (cmux on this machine, tmux on a paired one), **before** it is accepted:
+
+A screen that cannot be read (its workspace is gone, or the read timed out) is refused `the
+session's screen cannot be read: it may have ended`, for either kind.
 
 - *picker*: read the screen; refuse `picker not on screen` unless it shows that same picker (the
   question's first line and every option label, in order); then press the keys that select the
@@ -1593,7 +1607,9 @@ The carry runs on the daemon's serial queue, like every other answer: reading th
 the keys and recording the answer are one step, so a terminal pick (`picker_answered`) or the next
 prompt can only confirm it, never race it. The cost is that a slow carry (a multi-select on a paired
 machine, one ssh round trip per key) holds the queue for its duration, bounded by the screen-read
-timeout and `picker_review_reads`.
+timeout and `picker_review_reads`. Every key and text send is bounded too: `send_keys_timeout_ms`
+(5 s) on this machine's cmux or tmux, `remote_exec_timeout_ms` over ssh; a send that times out or
+fails refuses the answer `could not carry out the answer: …` and leaves the item open.
 
 **What the screen looks like** (the spike against Claude Code 2.1, driven by hand in tmux;
 `scripts/spike-picker.ts` is the re-runnable cmux version; the captures are

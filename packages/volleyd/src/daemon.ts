@@ -1307,6 +1307,8 @@ function spawnDecisionAgent(d: DecisionRecord): string | undefined {
 }
 /** The `activity` line a UserPromptSubmit hook publishes for a new prompt (SPEC §4.3). */
 const PROMPT_RECEIVED = "prompt received";
+/** How a picker or handoff closes when its session has gone (`where: terminal`). */
+const SESSION_ENDED = "session ended";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
 /** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
@@ -3217,11 +3219,16 @@ export class Daemon {
             const past = hook || env.type === "working";
             this.heard(holder, this.sentAt(env.wall_time), !hook, past);
           }
-          // A session that ended answers none of its open pickers or handoffs any more.
-          if (OWNER_GONE.has(env.type))
+          // A session that ended (SPEC §7.5: a terminal status, or a clean shutdown's
+          // `blocked`) answers none of its open pickers or handoffs any more.
+          const reason = (env.payload as { reason?: unknown } | null)?.reason;
+          if (
+            presenceOf({ type: env.type, ...(reason === "shutdown" ? { reason } : {}) }) ===
+            "offline"
+          )
             void this.enqueue(async () => {
-              await this.closeOpenItems(holder, "picker", "session ended");
-              await this.closeOpenItems(holder, "handoff", "session ended");
+              await this.closeOpenItems(holder, "picker", SESSION_ENDED);
+              await this.closeOpenItems(holder, "handoff", SESSION_ENDED);
             });
         }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
@@ -3358,6 +3365,7 @@ export class Daemon {
     // A role move waiting for a quiet fleet (SPEC §4.6.24): planned and started beside the queue.
     if (this.roleOps.draining()) void this.roleOps.tick();
     await this.sweepInbox();
+    await this.closeGoneSessionItems();
     await this.sweepMachines();
     await this.machineDownPass();
     await this.removalSweep();
@@ -12411,6 +12419,11 @@ export class Daemon {
           state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
         if (notOwner !== null) return { refused: notOwner };
       }
+      // A session that has ended has no screen to type into: its item closes, nothing is typed.
+      if ((item.kind === "picker" || item.kind === "handoff") && this.sessionEnded(item.agent_id)) {
+        await this.closeInTerminal(id, SESSION_ENDED);
+        return { refused: `${SESSION_ENDED}: the item is closed, nothing was typed` };
+      }
       const handler = this.inboxHandlers.get(item.kind);
       if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
       else {
@@ -12642,8 +12655,12 @@ export class Daemon {
     }
     for (const [id, ws] of this.registryWorkspaces) {
       // Registry entries outlive their sessions: a gone session's workspace is free again.
-      const status = this.statusOf.get(id)?.type;
-      if (id !== agent && ws === workspace && (status === undefined || !OWNER_GONE.has(status)))
+      const status = this.statusOf.get(id);
+      if (
+        id !== agent &&
+        ws === workspace &&
+        (status === undefined || presenceOf(status) !== "offline")
+      )
         return id;
     }
     return null;
@@ -12704,6 +12721,44 @@ export class Daemon {
       by: r.by,
       where,
     });
+  }
+
+  /**
+   * `agent`'s session has gone (#637): not supervised (a wave agent's retire and status handle
+   * its items), its presence offline (SPEC §7.5: a terminal status, a clean shutdown, or no status
+   * at all), nothing heard on its progress for `inbox_session_gone_ms`, and this daemon up that
+   * long (so a retained status or a heartbeat had the time to arrive after a start).
+   */
+  private sessionGone(agent: string, now: number): boolean {
+    const bound = DAEMON_DEFAULTS.inbox_session_gone_ms;
+    if (this.supervised.has(agent)) return false;
+    if (presenceOf(this.statusOf.get(agent)) !== "offline") return false;
+    const seen = this.lastSeen.get(agent);
+    return (seen === undefined || now - seen >= bound) && now - this.startedAt >= bound;
+  }
+
+  /**
+   * An answer to `agent`'s item cannot reach its screen: its session left a terminal status or a
+   * clean shutdown, or (no status) it is gone by `sessionGone`. A session that has not published
+   * a status yet is not refused before then: it may be alive under another id (D3).
+   */
+  private sessionEnded(agent: string): boolean {
+    if (this.supervised.has(agent)) return false;
+    const status = this.statusOf.get(agent);
+    if (status !== undefined) return presenceOf(status) === "offline";
+    return this.endedStatusOf.has(agent) || this.sessionGone(agent, this.now());
+  }
+
+  /** Close the open pickers and handoffs of the sessions that have gone (`sessionGone`). */
+  private async closeGoneSessionItems(): Promise<void> {
+    const now = this.now();
+    for (const item of [...this.inbox.values()]) {
+      if (item.kind !== "picker" && item.kind !== "handoff") continue;
+      if (item.answered !== undefined) continue;
+      const opened = Date.parse(item.opened_at);
+      if (!Number.isNaN(opened) && now - opened < DAEMON_DEFAULTS.inbox_session_gone_ms) continue;
+      if (this.sessionGone(item.agent_id, now)) await this.closeInTerminal(item.id, SESSION_ENDED);
+    }
   }
 
   /** Clear the answered items whose `autopilot.inbox_answered_ttl_s` has passed. */

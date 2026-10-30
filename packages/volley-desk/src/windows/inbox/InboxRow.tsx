@@ -5,9 +5,9 @@
  * window's go-to / Show / Dismiss. An owner-only release item is wrapped in a `StarBorder`.
  *
  * An answer is `inbox_answer { id, version, answer, where: { kind: "desk", device } }` through
- * the steer transport's `control()`; volleyd referees it. A refusal (`already answered on
- * <where>`) is shown and the row flips to answered; any other failure is shown and the buttons
- * stay. The store applies the retained update either way. Without broker credentials (no
+ * the steer transport's `control()`; volleyd referees it. A refusal that closed the item
+ * (`already answered on <where>`, or `session ended…` when its session is gone) is shown and the
+ * row flips to answered; any other failure is shown and the buttons stay. The store applies the retained update either way. Without broker credentials (no
  * `control`) an option shows the `volleyd inbox answer <id> "<answer>"` command to copy instead.
  * An answered row shows `StatusMark` with where it was answered.
  *
@@ -50,6 +50,10 @@ import { ReleaseItem, type ReleaseItemProps } from "./ReleaseItem";
 import { whereLabel } from "./inboxFilters";
 
 const REFUSED_ANSWERED = /^already answered on (.+)$/;
+/** volleyd closed the item: its session has ended, nothing was typed (#637). */
+const REFUSED_CLOSED = /^session ended/;
+/** A refusal that means the item is closed, not that the answer can be retried. */
+const closedBy = (error: string) => REFUSED_ANSWERED.test(error) || REFUSED_CLOSED.test(error);
 /** volleyd could not reach the session's screen: another session's, or one it cannot see. */
 const REFUSED_SCREEN = /'s screen/;
 
@@ -163,7 +167,7 @@ export function InboxRow(p: InboxRowProps) {
         { id: m.id, version: m.version, answer, where: { kind: "desk", device: p.device } },
         answerCommand(m.id, answer),
       );
-      if (r.ok || REFUSED_ANSWERED.test(r.error ?? "")) answered.add(m.id);
+      if (r.ok || closedBy(r.error ?? "")) answered.add(m.id);
       else error ??= r.error ?? "volleyd refused the answer";
     }
     setDone(answered);
@@ -199,9 +203,7 @@ export function InboxRow(p: InboxRowProps) {
     }
     const error = r.error ?? "volleyd refused the answer";
     setSent(
-      REFUSED_ANSWERED.test(error)
-        ? { state: "answered", label: error }
-        : { state: "error", error, answer },
+      closedBy(error) ? { state: "answered", label: error } : { state: "error", error, answer },
     );
   };
 
