@@ -391,6 +391,7 @@ import {
   realMachineAddEnv,
   runMachineAdd,
 } from "./machine-add";
+import { MACHINE_SILENT_ALARM, machineNoticeId, silentMachineNotice } from "./machine-notice";
 import {
   type DoctorReport,
   MACHINES_FILTER,
@@ -3360,6 +3361,7 @@ export class Daemon {
     await this.sweepInbox();
     await this.sweepMachines();
     await this.machineDownPass();
+    await this.machineSilentPass();
     await this.removalSweep();
     await this.fleetTick();
     // The coordinator role: its ssh steps run beside the queue (a pass in flight is not repeated).
@@ -3910,6 +3912,90 @@ export class Daemon {
         }
       }
     }
+  }
+
+  /**
+   * Every tick (#638): a configured paired machine down for `placement.down_decision_after_s`
+   * that holds a clone of a running wave's repository opens the owner-only notice
+   * `n-machine-down-<name>` (naming it, the waves it would serve and its restart command) and
+   * journals `alarm_raised { alarm: machine_silent }` in `_system`, once per outage
+   * (`silentMachineNotice`). Its waves carry on without it; `onMachine` clears both when it is back.
+   */
+  private async machineSilentPass(): Promise<void> {
+    const waves = this.runningWaves().flatMap(([wave]) => {
+      const slug = this.slugOf(wave);
+      return slug !== undefined ? [{ wave, slug }] : [];
+    });
+    if (waves.length === 0) return;
+    const now = this.now();
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const boundMs = secondsMs(cfg.placement.down_decision_after_s);
+    for (const record of this.machines.all()) {
+      const name = record.name;
+      const downSince = this.machines.downSince(name);
+      if (name === local || downSince === undefined) continue;
+      const prior = this.inbox.get(machineNoticeId(name));
+      const spec = silentMachineNotice({
+        name,
+        os: record.os,
+        lastSeen: record.last_seen,
+        why: this.machines.whyDown(record),
+        downSince,
+        now,
+        boundMs,
+        paired: cfg.hosts[name] !== undefined,
+        waves,
+        holds: (slug) => holdersOf(cfg, local, slug).includes(name),
+        prior,
+      });
+      if (spec === null) continue;
+      const item = itemForNotice(
+        spec,
+        dateOf(this.time).toISOString(),
+        prior !== undefined ? prior.version + 1 : 1,
+      );
+      this.inbox.set(item.id, item);
+      await this.journalInbox(item, openedEvent(item));
+      await this.publishInboxItem(item);
+      this.silentAlarms.add(name);
+      await this.appendSystem({
+        type: "alarm_raised",
+        data: {
+          alarm: MACHINE_SILENT_ALARM,
+          host: name,
+          down_since: new Date(downSince).toISOString(),
+          last_seen: record.last_seen,
+          waves: waves
+            .filter((w) => holdersOf(cfg, local, w.slug).includes(name))
+            .map((w) => w.wave),
+          message: item.title,
+        },
+      });
+      this.log(`inbox ${item.id}: ${item.title}`);
+    }
+  }
+  /** The machines whose `machine_silent` alarm is raised and not cleared yet. */
+  private readonly silentAlarms = new Set<string>();
+
+  /** A silent machine is back: its notice is answered `superseded` and its alarm cleared. */
+  private async machineNotSilent(name: string): Promise<void> {
+    const item = this.inbox.get(machineNoticeId(name));
+    const open = item !== undefined && item.answered === undefined;
+    if (open) {
+      await this.recordInboxAnswer(item, {
+        version: item.version,
+        answer: "superseded",
+        by: DAEMON_AGENT_ID,
+        where: { kind: "autopilot" },
+      });
+    }
+    if (!open && !this.silentAlarms.has(name)) return;
+    this.silentAlarms.delete(name);
+    await this.appendSystem({
+      type: "alarm_cleared",
+      data: { alarm: MACHINE_SILENT_ALARM, host: name, message: `${name} is back` },
+    });
   }
 
   /**
@@ -8212,6 +8298,7 @@ export class Daemon {
     if (!this.running) return;
     if (status === "up") {
       await this.machineBack(name);
+      await this.machineNotSilent(name);
       // A repo_add that could not reach it runs again (SPEC §4.6.21).
       this.retryRepos(name);
     }
