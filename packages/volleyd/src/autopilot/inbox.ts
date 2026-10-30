@@ -441,6 +441,11 @@ export function itemForNotice(spec: NoticeSpec, openedAt: string, version = 1): 
     options: NOTICE_ANSWERS.map((label) => ({ label })),
     pointers: spec.link !== undefined ? { link: spec.link } : {},
     opened_at: openedAt,
-    source: { notice: spec.notice, machine: spec.machine, name: spec.name },
+    source: {
+      notice: spec.notice,
+      machine: spec.machine,
+      name: spec.name,
+      ...(spec.since !== undefined ? { since: spec.since } : {}),
+    },
   };
 }

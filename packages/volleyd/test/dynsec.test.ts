@@ -3,7 +3,7 @@ import { DynsecSession, brokerTransport, ensureClients, ensureRoles } from "voll
 import { VolleyBroker } from "volley-mcp/broker";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { DynsecControl, DynsecCredentials, brokerControl } from "../src/dynsec";
-import { mintCredentials } from "../src/identity";
+import { mintCredentials, releaseAgentId } from "../src/identity";
 import { SpawnError } from "../src/spawn-error";
 import { eventually } from "./helpers/broker-wait";
 import { type FakeClock, fakeClock, flushMicrotasks } from "./helpers/fake-clock";
@@ -175,5 +175,101 @@ describe("DynsecControl", () => {
   it("agentLogins lists only agent logins (never the desk or the admin)", async () => {
     await batched(creds.mint("w1-t1-implementer-1"));
     expect(await creds.agentLogins()).toEqual(["w1-t1-implementer-1"]);
+  });
+});
+
+describe("revoking an agent login (#635)", () => {
+  /** A connection that logs in as `username` and stays up. */
+  async function online(username: string, password: string): Promise<VolleyBroker> {
+    const b = new VolleyBroker();
+    await b.connect({ url: fake.url, agentId: `t-${username}`, username, password });
+    return b;
+  }
+
+  it.each([
+    ["a task agent", "w1-t1-implementer-1"],
+    ["a release-stage agent", releaseAgentId("w1", "bump", 1)],
+  ])(
+    "revoking %s kicks only that agent: the supervisor and the admin stay connected",
+    async (_, id) => {
+      fake.setPassword("volleyd", "vd-pw", ["agent"]);
+      const daemon = await online("volleyd", "vd-pw");
+      const c = await batched(creds.mint(id));
+      const agent = await online(c.username, c.password);
+      await batched(creds.agentLogins()); // the admin's control link is open
+      const edits = fake.roleEdits();
+      const before = fake.controlMessages.length;
+      expect(fake.connected()).toEqual([fake.admin.username, id, "volleyd"].sort());
+
+      expect(await batched(creds.revoke(id))).toBe(true);
+      await eventually(() => !agent.connected);
+      expect(fake.controlMessages.slice(before)).toMatchObject([
+        [{ command: "deleteClient", username: id }],
+      ]);
+      expect(fake.roleEdits()).toBe(edits);
+      expect(fake.connected()).toEqual([fake.admin.username, "volleyd"].sort());
+      expect(daemon.connected).toBe(true);
+      await daemon.disconnect();
+      agent.simulateCrash();
+    },
+  );
+
+  it("revoking a login that is already gone kicks nobody", async () => {
+    fake.setPassword("volleyd", "vd-pw", ["agent"]);
+    const daemon = await online("volleyd", "vd-pw");
+    const id = releaseAgentId("w1", "tag", 1);
+    await batched(creds.agentLogins());
+    const before = fake.controlMessages.length;
+    expect(await batched(creds.revoke(id))).toBe(true);
+    expect(fake.controlMessages.slice(before)).toMatchObject([
+      [{ command: "deleteClient", username: id }],
+    ]);
+    expect(fake.connected()).toEqual([fake.admin.username, "volleyd"].sort());
+    expect(daemon.connected).toBe(true);
+    await daemon.disconnect();
+  });
+});
+
+describe("DynsecControl liveness", () => {
+  it("a control link the broker stopped answering (connected, but silent) is closed and reopened on next use", async () => {
+    let idle = 0;
+    const killed: string[] = [];
+    let opened = 0;
+    const silent = new DynsecControl({
+      connect: async () => {
+        opened++;
+        const session = { failAll: () => {}, close: async () => {} } as unknown as DynsecSession;
+        let up = true;
+        return {
+          session,
+          sysVersion: async () => "mosquitto version 2.1.2",
+          connected: () => up,
+          idleMs: () => idle,
+          kill: (why: string) => {
+            killed.push(why);
+            up = false;
+          },
+          close: async () => {
+            up = false;
+          },
+        };
+      },
+      batchMs: () => 30,
+      clock,
+      log: (l) => logs.push(l),
+    });
+    try {
+      await silent.open();
+      await clock.advance(DAEMON_DEFAULTS.watchdog_ms);
+      expect(killed).toEqual([]);
+      idle = DAEMON_DEFAULTS.broker_keepalive_s * 1000 * DAEMON_DEFAULTS.broker_stale_factor + 1;
+      await clock.advance(DAEMON_DEFAULTS.watchdog_ms);
+      expect(killed).toHaveLength(1);
+      expect(logs.some((l) => /control connection silent/.test(l))).toBe(true);
+      await silent.open();
+      expect(opened).toBe(2);
+    } finally {
+      await silent.close();
+    }
   });
 });

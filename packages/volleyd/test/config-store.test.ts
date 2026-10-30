@@ -932,3 +932,38 @@ describe("ConfigStore.setRepo: the supervisor's own adopted clones (#616)", () =
     expect(r.rejected.map((e) => e.path)).toContain("fleet.repos.example-org/widgets");
   });
 });
+
+describe("ConfigStore.setRepo: a repository's expected git email (#638)", () => {
+  const YAML =
+    "fleet:\n  local_name: hub\nrepos:\n  example-org/widgets:\n    machines: [box-a]\nhosts:\n  box-a:\n    target: dev@box-a\n    volley_dir: /opt/volley\n";
+  const W = "example-org/widgets";
+
+  it("keeps it unless told, sets it, clears it with null; the schema refuses a value that is no email", () => {
+    writeFileSync(join(home, "config.yaml"), YAML);
+    const c = open();
+    expect(c.setRepo(W, ["box-a"], {}, "w", "dev@example.com").applied).toBe(true);
+    expect(c.effective().repos[W]).toEqual({ machines: ["box-a"], git_email: "dev@example.com" });
+    expect(open().effective().repos[W]?.git_email).toBe("dev@example.com");
+    // A machine change without the email keeps it.
+    expect(c.setRepo(W, ["box-a", "hub"], {}, "w").applied).toBe(true);
+    expect(c.effective().repos[W]?.git_email).toBe("dev@example.com");
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).toContain(
+      "git_email: dev@example.com",
+    );
+    const bad = c.setRepo(W, ["box-a"], {}, "w", "not an email");
+    expect(bad.applied).toBe(false);
+    expect(bad.rejected.map((e) => e.path).join(" ")).toContain("git_email");
+    expect(c.setRepo(W, ["box-a"], {}, "w", null).applied).toBe(true);
+    expect(c.effective().repos[W]).toEqual({ machines: ["box-a"] });
+    expect(open().effective().repos[W]?.git_email).toBeUndefined();
+  });
+
+  it("removing the repository drops the whole entry, email included", () => {
+    writeFileSync(join(home, "config.yaml"), YAML);
+    const c = open();
+    c.setRepo(W, ["box-a"], {}, "w", "dev@example.com");
+    expect(c.setRepo(W, null, {}, "w").applied).toBe(true);
+    expect(c.effective().repos[W]).toBeUndefined();
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).not.toContain("git_email");
+  });
+});

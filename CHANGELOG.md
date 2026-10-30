@@ -2,6 +2,59 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.15.0 — 2026-10-30
+
+### Fixed
+
+- **volleyd: the supervisor survives losing the broker.** A dropped connection (a broker restart,
+  a kick, a network blip) is logged with the broker's DISCONNECT reason when it sent one, then
+  reconnected with backoff in the same process: the mailbox answers again, `volleyd status` finds
+  the daemon, and its status, registry entry, config and every wave's state are published again.
+  A connection that stays open but carries nothing from the broker for two keepalives is closed
+  and reconnected the same way, and the check runs from the first packet of a start. Only five
+  minutes without a connection makes `volleyd daemon` exit 1 for launchd or systemd to restart
+  it; it never idles alive without a broker. The Dynamic Security control connection is closed
+  and reopened when it goes silent too. (#635)
+- **volley-mcp: an opt-in reconnect mode for long-lived clients.** `VolleyBroker.connect`'s
+  `reconnect` option reconnects with backoff and reports each outage and recovery; a publish on a
+  connection that came back is no longer failed by the earlier close. `inboundIdleMs()` and
+  `kill()` let a supervisor close a connection that went silent. The MCP server, the hooks and
+  the CLIs keep reconnecting by restarting. (#635)
+- **volleyd: a picker or handoff whose session has ended closes as `session ended`.** A clean
+  shutdown (`blocked`, `reason: "shutdown"`) now closes it like `done`, `failed` and `reaped`, and
+  the tick closes the items of a session volleyd does not supervise that has no status and has not
+  been heard for two minutes, after a restart too, so a stranded item leaves Needs you. Answering
+  one is refused at once with `session ended: the item is closed, nothing was typed`, closes it,
+  and types nothing; the Desk shows the row closed. An unreadable screen is refused as such, not
+  as `prompt not idle`, and key sends on this machine's cmux or tmux are bounded (5 s), so a hung
+  send no longer holds every Desk action. (#637)
+- **volley-mcp: `disconnect()` always settles.** A connection the broker closed under an
+  unacknowledged QoS 1 publish is ended with force, and a live one falls back to force after 2 s,
+  so a caller awaiting it never hangs. (#638)
+- **volley-cli: `volley peer run` reconnects, logs, and exits when it cannot.** A lost broker
+  connection is dropped and reopened on the next heartbeat, a heartbeat that has not finished in
+  60 s is given up, and after 10 minutes without a heartbeat out the service exits 1 so systemd or
+  launchd restarts it. It logs each connect, loss, reconnect attempt and tunnel start, never a
+  password; the tunnel's ssh no longer rides a shared ControlMaster. (#638)
+- **volleyd: a silent paired machine is told to the owner.** A paired machine that holds a
+  running wave's repository and has been down for `placement.down_decision_after_s` opens one
+  owner-only notice, `n-machine-down-<name>`, naming it, the waves it would serve and its restart
+  command (`alarm_raised { alarm: machine_silent }`); its next heartbeat clears it. (#638)
+- **volley-cli: `volley repo check` reports the repository under check.** `gh.auth` names the
+  sign-in only (push access is `repo.push`), and `claude.trust` is one line per repository naming
+  its clone, on peers and on the supervisor's own machine. (#638)
+- **volleyd: an expected git email per repository.** `volley repo add <owner/name> --git-email
+  <email>` (`none` clears it) sets `repos.<owner/name>.git_email`; a machine whose clone would
+  commit under another email is blocked for that repository, its `repo.identity` failing with
+  `git -C <clone> config user.email <email>`. (#638)
+
+### Removed
+
+- **install tests: the VM layers no longer run nightly.** Layers 2 and 4 (`install-vm.yml`) run
+  only on demand: the schedule, its `report` job and the `install-tests` tracking issue
+  (`VM_TRACK_ISSUE`) are gone, and a failing run calls no `gh` on the runner. `verify.sh` and the
+  workflow's dispatch stay as they were. (#636)
+
 ## 0.14.1 — 2026-10-27
 
 ### Fixed

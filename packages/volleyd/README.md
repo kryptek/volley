@@ -262,8 +262,19 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 - **One daemon per home**: `$VOLLEYD_HOME/volleyd.lock` (holding the pid) is taken before any
   journal is opened; a lock whose pid is gone is replaced. A second daemon is also refused while
   the broker shows a live `volleyd` status in the namespace.
-- **Broker loss is fatal**: if the broker connection drops, `volleyd daemon` exits 1 and launchd's
-  `KeepAlive` restarts it, which resumes the persistent session and restores every wave.
+- **Broker loss is survived**: if the broker connection drops (a broker restart, a kick, a network
+  blip), the daemon logs `broker connection lost: <reason>; reconnecting` with the broker's
+  DISCONNECT reason when it sent one (an MQTT 5 broker: 152 administrative action, 142 session
+  taken over, 139 server shutting down), reconnects with backoff (1 s doubling to 30 s), and once
+  back logs `broker connection restored after <n>s` and publishes its status, registry entry,
+  config and every wave's state again (the LWT marked it `reaped` meanwhile). A connection that
+  stays open but carries nothing from the broker for two keepalives (a broker that stopped
+  answering) is closed and reconnected the same way. Only five minutes without a connection
+  (`broker_reconnect_give_up_ms`) makes `volleyd daemon` exit 1, so launchd's `KeepAlive` (or
+  systemd) restarts it, which resumes the persistent session and restores every wave; it never
+  stays alive without a broker. A drop during a hand-over or broker move, or a session another
+  `volleyd` took over, still ends it as before. Never leave `DEBUG=mqttjs*` on in a service log:
+  mqtt.js prints the CONNECT packet, password included.
 
 ---
 
@@ -1498,6 +1509,7 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
 | `notice` | `n-coordinator-link`, `n-coordinator-failed` | the coordinator role's link changed, or it failed ([The coordinator role](#the-coordinator-role)) |
+| `notice` | `n-machine-down-<name>` | a paired machine holding a running wave's repository has been silent for `placement.down_decision_after_s`: its name, the waves it would serve and its restart command; `superseded` when its heartbeat resumes |
 
 A `notice` is volleyd's own (`owner_only: true`): it tells the owner something, never blocks a
 wave, carries its link in `pointers.link`, and takes only `open` (acknowledged: the owner opened
@@ -1561,6 +1573,17 @@ coordinator sessions alike:
   opens `h-<agent_id>-<seq>`. The session's next prompt (`activity` `prompt received`, or that
   prompt's `resumed`) closes it with `where: terminal` when nobody answered through the inbox.
 
+A session that ends closes its open pickers and handoffs too, as `session ended` (`where:
+terminal`): when its status turns `done`, `failed` or `reaped`, or `blocked` with `reason:
+"shutdown"` (a clean shutdown, SPEC §7.5), and, for a session volleyd does not supervise, when it
+has no status and nothing was heard on its progress for `inbox_session_gone_ms` (2 minutes,
+counted from volleyd's own start too). The tick sweeps for those, so an item stranded by a
+session that exited, was killed or was replaced (a compaction, a resume) leaves Needs you within
+one bound, after a restart as well; each close is journaled (`inbox_answered`, in its wave or
+`_system`). An inbox answer to such an item is refused at once, `session ended: the item is
+closed, nothing was typed`, closes it the same way, and reads or types nothing; the Desk shows
+that row as closed.
+
 An inbox answer to either is carried out on the session's screen (`src/autopilot/carry.ts`),
 through its host adapter (cmux on this machine, tmux on a paired one), **before** it is accepted:
 
@@ -1576,6 +1599,9 @@ through its host adapter (cmux on this machine, tmux on a paired one), **before*
   idle prompt that is another session's is not typed into); then type the reply and press `Enter`. The input box must be empty: when Claude
   Code shows placeholder or suggestion text after `❯`, the answer is refused `prompt not idle`
   (fail safe; answer in the terminal).
+
+A screen that cannot be read (its workspace is gone, or the read timed out) is refused `the
+session's screen cannot be read: it may have ended`, for either kind.
 
 `Up`, `Down`, `Space` and the typed text pass the fence only with a `PickerToken` /
 `HandoffToken` minted for exactly that item version and answer (the text is typed once, one line,
@@ -1593,7 +1619,9 @@ The carry runs on the daemon's serial queue, like every other answer: reading th
 the keys and recording the answer are one step, so a terminal pick (`picker_answered`) or the next
 prompt can only confirm it, never race it. The cost is that a slow carry (a multi-select on a paired
 machine, one ssh round trip per key) holds the queue for its duration, bounded by the screen-read
-timeout and `picker_review_reads`.
+timeout and `picker_review_reads`. Every key and text send is bounded too: `send_keys_timeout_ms`
+(5 s) on this machine's cmux or tmux, `remote_exec_timeout_ms` over ssh; a send that times out or
+fails refuses the answer `could not carry out the answer: …` and leaves the item open.
 
 **What the screen looks like** (the spike against Claude Code 2.1, driven by hand in tmux;
 `scripts/spike-picker.ts` is the re-runnable cmux version; the captures are
@@ -3446,7 +3474,16 @@ machine whose record stopped for 90 s down (republishing the record with
 `reason: heartbeat_timeout`). While a machine is down its spawns park with
 `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it
 (running ones too) carries `host_down` in the wave state, and each wave on it journals
-`MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage.
+`MACHINE_DOWN`. Running agents are left alone, as with any tunnel outage. A configured paired
+machine down for `placement.down_decision_after_s` (5 min) that holds a clone of a running wave's
+repository opens one owner-only notice, `n-machine-down-<name>` (Needs you, and the phone's push),
+even when no task waits there (the own machine took its work): `<name> has been silent for <n>
+min`, the waves it would serve and `systemctl --user restart volley-peer.service` (macOS:
+`launchctl kickstart -k gui/$(id -u)/systems.volley.peer`), with `alarm_raised { alarm:
+machine_silent }` in `_system`. Once per outage; its next heartbeat answers it `superseded` and
+journals `alarm_cleared`. A repository's `git_email` (`volley repo add --git-email`) is published
+to every machine as the verdict's `requirements.repos`, and a clone whose `repo.identity` commits
+under another email is `blocked` for it; the own doctor runs with `--git-email <owner/name>=<email>`.
 
 **What the machine's Claude profile gets.** The doctor (by hand, at join, in every heartbeat
 and on a Desk's Repair) also checks the machine's own Claude profile, `~/.claude` of the user

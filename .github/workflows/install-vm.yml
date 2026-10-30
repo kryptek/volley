@@ -8,20 +8,17 @@ name: Install (VMs)
 # VMs) is retired: macOS is Layer 1's hosted Mac and the owner's smoke. Each job's metrics table
 # lands in its step summary and its artifact; the VMs are deleted whatever happens.
 #
-# On demand: `bash scripts/install-tests/verify.sh [<branch>] [--version vX.Y.Z]` dispatches this on
-# a branch and prints one pass/fail table (`gh workflow run install-vm.yml --ref <branch>` and the
-# Actions tab's "Run workflow" button are the same run without the table). Nightly: the schedule
-# runs the same jobs on the default branch, and only it opens or comments on the one issue labelled
-# `install-tests`; a dispatched run answers whoever asked, through its table, step summaries and
-# artifacts, and touches no issue.
+# On demand only: `bash scripts/install-tests/verify.sh [<branch>] [--version vX.Y.Z]` dispatches
+# this on a branch and prints one pass/fail table (`gh workflow run install-vm.yml --ref <branch>`
+# and the Actions tab's "Run workflow" button are the same run without the table). A run answers
+# whoever asked, through its table, step summaries and artifacts.
 #
-# Never on pull_request or push: a public repository must not run a PR's code on a self-hosted
-# runner, and nothing here runs unasked. Jobs still queued mean the runner service on the paired
-# Linux machine is off (README.md: The Linux box); they start once it is on, no new dispatch needed.
+# Never on pull_request, push or a schedule: a public repository must not run a PR's code on a
+# self-hosted runner, and nothing here runs unasked. Jobs still queued mean the runner service on
+# the paired Linux machine is off (README.md: The Linux box); they start once it is on, no new
+# dispatch needed.
 
 on:
-  schedule:
-    - cron: "41 7 * * *"
   workflow_dispatch:
     inputs:
       version:
@@ -31,18 +28,14 @@ on:
 
 permissions:
   contents: read
-  # The tracking issue (lib.sh's track_failure), on the schedule only.
-  issues: write
 
-# One runner: a dispatch during the nightly queues behind it.
+# One runner: a second dispatch queues behind the first.
 concurrency:
   group: install-vm
   cancel-in-progress: false
 
 env:
   VERSION_INPUT: ${{ inputs.version }}
-  # The scheduled nightly reports to the tracking issue; a dispatch never does.
-  VM_TRACK_ISSUE: ${{ github.event_name == 'schedule' && '1' || '' }}
 
 jobs:
   linux-vm:
@@ -62,8 +55,6 @@ jobs:
       - name: A fresh VM, install, set up, a wave with no CI, reboot, check
         env:
           VM_OUT: ${{ runner.temp }}/layer2-${{ matrix.distro }}
-          # The tracking issue (lib.sh's track_failure): this step only, not the actions'.
-          GH_TOKEN: ${{ github.token }}
           DISTRO: ${{ matrix.distro }}
         run: |
           args=()
@@ -107,8 +98,6 @@ jobs:
       - name: A hub VM, a peer VM, pair, place a task, a repository by slug, remove
         env:
           VM_OUT: ${{ runner.temp }}/layer4
-          # The tracking issue (lib.sh's track_failure): this step only, not the actions'.
-          GH_TOKEN: ${{ github.token }}
         run: |
           args=()
           if [ -n "$VERSION_INPUT" ]; then
@@ -139,43 +128,3 @@ jobs:
             !${{ runner.temp }}/layer4/**/key
           if-no-files-found: ignore
           retention-days: 14
-
-  # A job that never started (the runner offline) or stopped before lib.sh's track_failure reports
-  # nowhere by itself: this one fails the run, and on the schedule tells the tracking issue too,
-  # on a hosted runner. Same label and title as lib.sh's, so the two share the one issue.
-  report:
-    name: Report
-    if: always() && github.repository == 'kryptek/volley'
-    needs: [linux-vm, pair]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Fail unless every job passed (and, on the schedule, tell the tracking issue)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          LINUX_VM: ${{ needs.linux-vm.result }}
-          PAIR: ${{ needs.pair.result }}
-          SCHEDULED: ${{ github.event_name == 'schedule' && '1' || '' }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ "$LINUX_VM" = success ] && [ "$PAIR" = success ]; then
-            echo "Every job passed."
-            exit 0
-          fi
-          body=$(printf '### The VM install tests did not pass\n\n%s\n\n| job | result |\n| --- | --- |\n| linux-vm (Layer 2) | %s |\n| pair (Layer 4) | %s |\n\nA job that is `cancelled` or `failure` with no log of its own likely never found a runner (scripts/install-tests/README.md: The Linux box).\n' \
-            "$RUN_URL" "$LINUX_VM" "$PAIR")
-          printf '%s\n' "$body" >>"$GITHUB_STEP_SUMMARY"
-          if [ "$SCHEDULED" = 1 ]; then
-            label=install-tests
-            gh label create "$label" --color B60205 \
-              --description "A nightly install test (Layers 2 and 4) failed" --force >/dev/null 2>&1 || true
-            number=$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')
-            if [ -z "$number" ]; then
-              url=$(gh issue create --label "$label" --title "Nightly install tests are failing" \
-                --body "The nightly install tests (scripts/install-tests/README.md, Layers 2 and 4) failed. Each failing run comments below; close this once a nightly passes.")
-              number=${url##*/}
-            fi
-            gh issue comment "$number" --body "$body" || echo "WARN: could not comment on the tracking issue" >&2
-          fi
-          exit 1

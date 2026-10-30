@@ -180,6 +180,8 @@ export interface RepoFacts {
   fetchedAt: string | null;
   /** `Name <email>` git commits as in this clone (repo > global > system); null: none, or no git. */
   identity: string | null;
+  /** The email the supervisor expects its commits under (`requirements.repos`, #638); null: none. */
+  expectedEmail: string | null;
   /**
    * GitHub's canonical `owner/name` for the configured slug and for the remote's (D6), asked only
    * when the two differ and gh is signed in; null otherwise (or when GitHub did not answer).
@@ -196,6 +198,8 @@ export interface RepoFacts {
   /** Where volleyd cuts its worktrees here, and whether it (or its nearest ancestor) is writable. */
   worktreeRoot: string;
   worktreeWritable: boolean;
+  /** Claude Code trusts its folder (claude.trust); null: ~/.claude.json could not be read. */
+  trusted: boolean | null;
 }
 
 export interface Memory {
@@ -257,6 +261,8 @@ export interface Facts {
     fetchedAt: string | null;
     /** `Name <email>` git commits as in the clone; null: none, or no git clone. */
     identity: string | null;
+    /** The email expected for its origin's repository (`gitEmails`); null: none. */
+    expectedEmail: string | null;
   };
   github: {
     present: boolean;
@@ -395,6 +401,11 @@ export interface DoctorOptions {
   release?: string;
   /** The supervisor's volley version (its readiness `requirements.volley`), when known. */
   requiredVolley?: string | null;
+  /**
+   * The email each repository's commits are expected under (`owner/name` → email: the readiness
+   * verdict's `requirements.repos`, or `--git-email`); `repo.identity` fails on another (#638).
+   */
+  gitEmails?: Record<string, string>;
   json?: boolean;
   fix?: boolean;
   yes?: boolean;
@@ -743,6 +754,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       }
     });
   const managedRoot = CONFIG_DEFAULTS.fleet.repo_root;
+  const expectedEmailOf = (s: string): string | null =>
+    Object.entries(opts.gitEmails ?? {}).find(([k]) => sameSlug(k, s))?.[1] ?? null;
   const repos: RepoFacts[] = [];
   for (const [repoSlug, repoPath] of configured) {
     const at = resolve(repoPath);
@@ -794,6 +807,9 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       permission: (await viewOf(repoSlug)).permission,
       worktreeRoot: wtRoot,
       worktreeWritable: nearDir && writable(near),
+      expectedEmail: expectedEmailOf(repoSlug),
+      // Filled in below, from the one read of ~/.claude.json.
+      trusted: null,
     });
   }
   // The tools a repository needs beyond the doctor's own: only those, each probed once.
@@ -834,6 +850,13 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
           : trustPaths.every((p) => isRepoTrusted(claudeJson, p))
             ? "ok"
             : "missing";
+  }
+  for (const r of repos) {
+    r.trusted = !existsSync(claudeJsonFile)
+      ? false
+      : claudeJson === undefined
+        ? null
+        : isRepoTrusted(claudeJson, r.path);
   }
   const identity = loginIdentity(
     typeof claudeJson === "object" && claudeJson !== null && !Array.isArray(claudeJson)
@@ -920,6 +943,10 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       fetchable,
       fetchedAt,
       identity: cloneIdentity,
+      expectedEmail: (() => {
+        const s = originToSlug(origin);
+        return s !== undefined ? expectedEmailOf(s) : null;
+      })(),
     },
     github: { present: ghPresent, signedIn, user, slug, permission, gitIdentity },
     claude: {

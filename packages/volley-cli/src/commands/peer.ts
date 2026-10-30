@@ -30,7 +30,7 @@ import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { type Sharing, parseSharing } from "volleyd/claude/sharing";
 import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
-import { isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
+import { isGitEmail, isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
 import pkg from "../../package.json";
 import { parsePositiveInt, resolveBrokerUrl, resolveNamespace } from "../args";
 import { volleydHome } from "../auth/context";
@@ -57,12 +57,15 @@ import {
   runDoctor,
 } from "../peer/doctor";
 import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
+import { LAUNCHD_LABEL, SYSTEMD_UNIT } from "../peer/units";
 import { PROBE_DEFAULTS, realUsageFetch } from "../peer/usage-probe";
 import { readNetworkRecord } from "../setup/journal";
 import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { realProbes } from "../supervisor/probes";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
+
+export { LAUNCHD_LABEL, SYSTEMD_UNIT };
 
 export { isRepoTrusted };
 
@@ -112,7 +115,7 @@ const HELP = `Usage:
                        [--repo-add <owner/name>[=<path>]]... [--repo-remove <owner/name>]...
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
                        [--sharing <json>] [--supervisor-volley-dir <path>]
-                       [--probe-login <profile>]
+                       [--git-email <owner/name>=<email>]... [--probe-login <profile>]
                                                Check this machine; --fix applies the safe fixes
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
@@ -176,6 +179,10 @@ doctor options:
                            The checkout the supervisor launches this machine's agents from
                            (its hosts.<name>.volley_dir; volleyd's Repair passes it): every
                            volley MCP entry must run it as well as this checkout
+  --git-email <owner/name>=<email>
+                           The email a repository's commits are expected under (repeatable;
+                           default: the supervisor's, read through the tunnel): repo.identity
+                           fails on a clone that would commit under another
   --probe-login <profile>  Only the usage probe of one Claude login (\`default\` or a profile
                            id), no checks: what volleyd runs to prime a login it signed in
 
@@ -213,6 +220,7 @@ const OPTIONS = {
   sharing: { type: "string" },
   "supervisor-volley-dir": { type: "string" },
   "probe-login": { type: "string" },
+  "git-email": { type: "string", multiple: true },
   ttl: { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
@@ -235,6 +243,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   sharing: ["doctor"],
   "supervisor-volley-dir": ["doctor"],
   "probe-login": ["doctor"],
+  "git-email": ["doctor"],
   for: ["invite"],
   replace: ["join"],
   tunnel: ["join", "retarget"],
@@ -284,12 +293,24 @@ export const PEER_DEFAULTS = {
    */
   republish_poll_ms: 2_000,
   republish_polls: 45,
+  /**
+   * `run`: one heartbeat (repos, connect, publish) that has not finished in this long is given up
+   * and its connection dropped, so a step that never settles cannot stop the service.
+   */
+  beat_timeout_ms: 60_000,
+  /** `run`: how long dropping a lost connection may take before it is abandoned. */
+  disconnect_timeout_ms: 2_000,
+  /**
+   * `run`: no heartbeat published for this long ends the service with exit 1, and the service
+   * manager (Restart=on-failure, KeepAlive) restarts it.
+   */
+  reconnect_give_up_ms: 600_000,
+  /** The record's agent count: how long `tmux list-sessions` may take. */
+  tmux_timeout_ms: 10_000,
 } as const;
 
-export const SYSTEMD_UNIT = "volley-peer.service";
 /** The broker's port on its own machine when nothing says otherwise (`join --tunnel none`). */
 const DEFAULT_BROKER_PORT = 1883;
-export const LAUNCHD_LABEL = "systems.volley.peer";
 const LIVE = new Set(["spawning", "registered", "working"]);
 const PROBE_MS = 1_000;
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -343,6 +364,8 @@ export interface PeerDeps extends DoctorDeps {
   which?: (cmd: string) => string | null;
   /** Whether this machine is a laptop (`isLaptop`: a battery); absent: not reported. */
   laptop?: () => Promise<boolean>;
+  /** `run`'s real-time bounds (default PEER_DEFAULTS' beat_timeout_ms, disconnect_timeout_ms). */
+  timeouts?: { beat_ms?: number; disconnect_ms?: number };
 }
 
 /** `~/.volley/peer.json`: what `run` needs (mode 0600: it holds the peer's password). */
@@ -1577,7 +1600,11 @@ export const machineTopic = (name: string) => `volley/_system/machines/${name}`;
 
 /** Agent sessions on this machine: its tmux sessions (0 when no tmux server runs). */
 async function agentCount(deps: PeerDeps): Promise<number> {
-  const r = await deps.exec(["tmux", "list-sessions", "-F", "#{session_name}"]).catch(() => null);
+  const r = await deps
+    .exec(["tmux", "list-sessions", "-F", "#{session_name}"], {
+      timeoutMs: PEER_DEFAULTS.tmux_timeout_ms,
+    })
+    .catch(() => null);
   if (r === null || r.code !== 0) return 0;
   return r.stdout.split("\n").filter((l) => l.trim() !== "").length;
 }
@@ -1687,24 +1714,39 @@ async function connectPeer(
   });
 }
 
+/** What the supervisor requires of this machine (`requirements`). */
+interface Requirements {
+  volley: string | null;
+  sharing: Sharing | null;
+  /** `requirements.repos`: the email each repository's commits are expected under (#638). */
+  gitEmails: Record<string, string>;
+}
+
 /**
  * What the supervisor requires of this machine, from its retained readiness verdict, believed
- * only from the supervisor's own identities (SPEC §4.6.15): `requirements.volley`, and the
- * sharing modes its doctor applies to the Claude profile (`requirements.sharing`, §4.6.11; null
- * when absent or invalid).
+ * only from the supervisor's own identities (SPEC §4.6.15): `requirements.volley`, the sharing
+ * modes its doctor applies to the Claude profile (`requirements.sharing`, §4.6.11; null when
+ * absent or invalid), and each repository's expected git email (`requirements.repos`).
  */
-async function requirements(
-  broker: VolleyBroker,
-  name: string,
-): Promise<{ volley: string | null; sharing: Sharing | null }> {
-  const none = { volley: null, sharing: null };
+async function requirements(broker: VolleyBroker, name: string): Promise<Requirements> {
+  const none = { volley: null, sharing: null, gitEmails: {} };
   const raw = await broker
     .queryRetained(`${machineTopic(name)}/readiness`, PEER_DEFAULTS.readiness_wait_ms)
     .catch(() => null);
   const e = raw !== null ? parseEnvelope(raw) : null;
   if (e === null || !["volleyd", "supervisor"].includes(e.agent_id)) return none;
-  const req = (e.payload as { requirements?: { volley?: unknown; sharing?: unknown } } | null)
-    ?.requirements;
+  const req = (
+    e.payload as {
+      requirements?: { volley?: unknown; sharing?: unknown; repos?: unknown };
+    } | null
+  )?.requirements;
+  const gitEmails: Record<string, string> = {};
+  if (typeof req?.repos === "object" && req.repos !== null && !Array.isArray(req.repos)) {
+    for (const [slug, r] of Object.entries(req.repos as Record<string, unknown>)) {
+      const email = (r as { git_email?: unknown } | null)?.git_email;
+      if (isSlug(slug) && isGitEmail(email)) gitEmails[slug] = email;
+    }
+  }
   const v = req?.volley;
   let sharing: Sharing | null = null;
   if (typeof req?.sharing === "object" && req.sharing !== null) {
@@ -1717,6 +1759,7 @@ async function requirements(
     // Never one that starts with "-": it ends up in a git argv.
     volley: typeof v === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(v) ? v : null,
     sharing,
+    gitEmails,
   };
 }
 
@@ -1743,6 +1786,7 @@ async function peerDoctor(
     ...repoOptions(cfg),
     requiredVolley: req?.volley ?? null,
     profile: peerProfile(cfg, req?.sharing ?? null, "supervisor"),
+    ...(req !== null && Object.keys(req.gitEmails).length > 0 ? { gitEmails: req.gitEmails } : {}),
   });
   return report;
 }
@@ -1798,7 +1842,10 @@ async function register(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport): Promi
   return false;
 }
 
-/** `ssh -N -L 127.0.0.1:<port>:<broker>`: this machine's port reaches the host's broker. */
+/**
+ * `ssh -N -L 127.0.0.1:<port>:<broker>`: this machine's port reaches the host's broker, over its
+ * own connection (no multiplexing), dropped after `ssh_alive_count_max` unanswered keepalives.
+ */
 export function tunnelArgv(cfg: PeerConfig): string[] {
   return [
     "ssh",
@@ -1812,7 +1859,14 @@ export function tunnelArgv(cfg: PeerConfig): string[] {
     "-o",
     `ServerAliveInterval=${PEER_DEFAULTS.ssh_alive_interval_s}`,
     "-o",
+    `ServerAliveCountMax=${PEER_DEFAULTS.ssh_alive_count_max}`,
+    "-o",
     `ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s}`,
+    // A dedicated connection: never a shared master whose forked process outlives this ssh.
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
     cfg.host,
   ];
 }
@@ -1842,10 +1896,24 @@ function doctorWatch(deps: PeerDeps): string {
   return JSON.stringify([...doctorInputs(deps.volleyDir), peerDoctorStamp(deps.home)].map(stat));
 }
 
+/** `p`, or a rejection with `why` once `ms` pass (the timer never keeps the process alive). */
+function bounded<T>(p: Promise<T>, ms: number, why: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(why)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * The service: keep the tunnel up (restarting ssh with backoff) and publish the machine record
- * every heartbeat through it. Ends with exit 0 when the broker refuses the peer account (it was
- * revoked: the service manager leaves it stopped), or when `signal` aborts (tests).
+ * every heartbeat through it. A lost connection is dropped (bounded) and reopened on the next
+ * heartbeat; every heartbeat is bounded by `beat_timeout_ms`. Ends with exit 1 when no heartbeat
+ * went out for `reconnect_give_up_ms` (the service manager restarts it), with exit 0 when the
+ * broker refuses the peer account (it was revoked: the service manager leaves it stopped), or
+ * when `signal` aborts (tests). Logs connects, losses, reconnect attempts and tunnel starts and
+ * exits, never a credential.
  */
 export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): Promise<ExitCode> {
   let cfg: PeerConfig;
@@ -1863,6 +1931,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
     let backoff: number = PEER_DEFAULTS.tunnel_restart_ms;
     while (peerTunnel(cfg) === "ssh" && !stop.signal.aborted) {
       const started = deps.now().getTime();
+      io.stderr(`volley peer run: tunnel: ssh started (${cfg.host})\n`);
       const r = await deps.exec(tunnelArgv(cfg), { signal: stop.signal }).catch((e: unknown) => ({
         code: -1,
         stdout: "",
@@ -1920,6 +1989,67 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
         doctoring = false;
       });
   };
+  const beatMs = deps.timeouts?.beat_ms ?? PEER_DEFAULTS.beat_timeout_ms;
+  const disconnectMs = deps.timeouts?.disconnect_ms ?? PEER_DEFAULTS.disconnect_timeout_ms;
+  // A lost connection: dropped within disconnectMs whatever state its socket is in.
+  const dropBroker = async () => {
+    const b = broker;
+    broker = null;
+    if (b === null) return;
+    await bounded(b.disconnect(), disconnectMs, "disconnect timed out").catch(() => {});
+  };
+  // When a heartbeat last went out (from the start, too): past reconnect_give_up_ms, exit 1.
+  let publishedAt = deps.monotonic();
+  let attempts = 0;
+  let beatNo = 0;
+  const beat = async (mine: number) => {
+    const repos = await freshRepos(deps, cfg);
+    // Given up while it read the repositories: the next beat owns `cfg` and the broker.
+    if (mine !== beatNo || stop.signal.aborted) return;
+    cfg = repos;
+    if (broker === null) {
+      const fresh = await connectPeer(deps, cfg, report);
+      // This beat was given up while it connected: the next one has its own connection.
+      if (mine !== beatNo || stop.signal.aborted) {
+        await bounded(fresh.disconnect(), disconnectMs, "disconnect timed out").catch(() => {});
+        return;
+      }
+      broker = fresh;
+      attempts = 0;
+      io.stderr(`volley peer run: broker connected (${brokerThroughTunnel(cfg)})\n`);
+    }
+    // Dropped from here on if this beat is given up: keep publishing on the one it started.
+    const b = broker;
+    const now = deps.monotonic();
+    const inputs = doctorWatch(deps);
+    if (
+      !doctoring &&
+      (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000 || inputs !== doctoredOn)
+    ) {
+      const first = doctorAt === Number.NEGATIVE_INFINITY;
+      doctorAt = now;
+      doctoredOn = inputs;
+      const run = startDoctor(b);
+      // The first run, at start: the first record waits a little for it, so readiness never
+      // carries the last run before this start (a stale install verdict after an upgrade).
+      if (first) {
+        const waited = new AbortController();
+        const stopWaiting = () => waited.abort();
+        stop.signal.addEventListener("abort", stopWaiting);
+        await Promise.race([
+          run,
+          deps.sleep(PEER_DEFAULTS.first_doctor_wait_ms, waited.signal).catch(() => {}),
+        ]);
+        waited.abort();
+        stop.signal.removeEventListener("abort", stopWaiting);
+      }
+    }
+    await b.publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up", report), {
+      qos: 1,
+      retain: true,
+    });
+    if (mine === beatNo) publishedAt = deps.monotonic();
+  };
   try {
     while (!stop.signal.aborted) {
       // heartbeat: false (the supervisor's own machine publishes its own record): only the tunnel.
@@ -1927,38 +2057,9 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
         await deps.sleep(PEER_DEFAULTS.heartbeat_ms, stop.signal);
         continue;
       }
+      const mine = ++beatNo;
       try {
-        cfg = await freshRepos(deps, cfg);
-        broker ??= await connectPeer(deps, cfg, report);
-        const now = deps.monotonic();
-        const inputs = doctorWatch(deps);
-        if (
-          !doctoring &&
-          (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000 || inputs !== doctoredOn)
-        ) {
-          const first = doctorAt === Number.NEGATIVE_INFINITY;
-          doctorAt = now;
-          doctoredOn = inputs;
-          const run = startDoctor(broker);
-          // The first run, at start: the first record waits a little for it, so readiness never
-          // carries the last run before this start (a stale install verdict after an upgrade).
-          if (first) {
-            const waited = new AbortController();
-            const stopWaiting = () => waited.abort();
-            stop.signal.addEventListener("abort", stopWaiting);
-            await Promise.race([
-              run,
-              deps.sleep(PEER_DEFAULTS.first_doctor_wait_ms, waited.signal).catch(() => {}),
-            ]);
-            waited.abort();
-            stop.signal.removeEventListener("abort", stopWaiting);
-          }
-        }
-        await broker.publish(
-          machineTopic(cfg.name),
-          await machineEnvelope(deps, cfg, "up", report),
-          { qos: 1, retain: true },
-        );
+        await bounded(beat(mine), beatMs, `heartbeat given up after ${beatMs} ms`);
       } catch (e) {
         if (e instanceof VolleyError && e.code === "AUTH_FAILED") {
           io.stderr(
@@ -1966,9 +2067,26 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
           );
           break;
         }
-        // The tunnel is down or restarting: the next heartbeat tries again.
-        await broker?.disconnect().catch(() => {});
-        broker = null;
+        // The VolleyError's message names the URL and the account, never the password.
+        const why = e instanceof Error ? e.message : String(e);
+        // The tunnel is down or restarting, or a step hung: the next heartbeat tries again.
+        if (broker !== null) {
+          io.stderr(`volley peer run: broker connection lost: ${why}; reconnecting\n`);
+        } else {
+          attempts++;
+          io.stderr(`volley peer run: reconnect attempt ${attempts} failed: ${why}\n`);
+        }
+        // The given-up beat stops at its next check of `beatNo`; until then it holds only `b`.
+        beatNo++;
+        await dropBroker();
+        const silent = deps.monotonic() - publishedAt;
+        if (silent >= PEER_DEFAULTS.reconnect_give_up_ms) {
+          io.stderr(
+            `volley peer run: no heartbeat went out for ${Math.round(silent / 1000)} s (the bound is ${PEER_DEFAULTS.reconnect_give_up_ms / 1000} s): exiting 1, the service manager restarts it\n`,
+          );
+          exit = EXIT.ERROR;
+          break;
+        }
       }
       await deps.sleep(PEER_DEFAULTS.heartbeat_ms, stop.signal);
     }
@@ -1979,15 +2097,16 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
     signal?.removeEventListener("abort", onAbort);
     stop.abort();
     await tunnel;
-    // A clean disconnect suppresses the LWT: say the tunnel is down ourselves.
-    if (broker !== null) {
-      await broker
+    // A clean disconnect suppresses the LWT: say the tunnel is down ourselves. (`beat` sets it.)
+    const last = broker as VolleyBroker | null;
+    if (last !== null) {
+      await last
         .publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "down", report), {
           qos: 1,
           retain: true,
         })
         .catch(() => {});
-      await broker.disconnect().catch(() => {});
+      await dropBroker();
     }
   }
   return exit;
@@ -2041,6 +2160,17 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
       return EXIT.USAGE;
     }
   }
+  const flagEmails: Record<string, string> = {};
+  for (const value of v["git-email"] ?? []) {
+    const at = value.indexOf("=");
+    const slug = value.slice(0, at);
+    const email = value.slice(at + 1);
+    if (at < 0 || !isSlug(slug) || !isGitEmail(email)) {
+      io.stderr(`volley peer doctor: --git-email "${value}" is not <owner/name>=<email>\n`);
+      return EXIT.USAGE;
+    }
+    flagEmails[slug] = email;
+  }
   const supervisorDir = v["supervisor-volley-dir"];
   if (supervisorDir !== undefined && !isAbsolute(supervisorDir)) {
     io.stderr("volley peer doctor: --supervisor-volley-dir must be an absolute path\n");
@@ -2085,7 +2215,7 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
       "volley peer doctor: this machine is not paired (no peer.json): --repo-add and --repo-remove apply to this run only\n",
     );
   }
-  let req: { volley: string | null; sharing: Sharing | null } = { volley: null, sharing: null };
+  let req: Requirements = { volley: null, sharing: null, gitEmails: {} };
   let tunnelUp = false;
   if (cfg !== null) {
     const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
@@ -2096,6 +2226,8 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     }
   }
   const required = req.volley;
+  // --git-email: by hand, or the supervisor's own doctor run; over the verdict's, per repository.
+  const gitEmails = { ...req.gitEmails, ...flagEmails };
   // --repo checks that one clone; else peer.json's repositories (or its legacy clone).
   const flagRepo = v.repo?.[0];
   const opts: DoctorOptions = {
@@ -2118,6 +2250,7 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     yes: v.yes === true,
     clone: v.clone === true,
     ...(supervisorDir !== undefined ? { volleyDir: supervisorDir } : {}),
+    ...(Object.keys(gitEmails).length > 0 ? { gitEmails } : {}),
     // A paired machine: whether it reaches its supervisor (online, the tunnel, volleyd live).
     ...(cfg !== null ? { reach: peerReach(cfg) } : {}),
   };

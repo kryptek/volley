@@ -22,6 +22,15 @@ const SLUG = new RegExp(SLUG_PATTERN);
 /** True for an `owner/name` slug (no URL, host, `.git` or whitespace). */
 export const isSlug = (s: string): boolean => SLUG.test(s);
 
+/**
+ * An email as `repos.<owner/name>.git_email` admits it (config.schema.json, #638): one `@`, no
+ * whitespace, angle bracket, quote, `$` or backslash (it is printed in a shell fix), no leading `-`.
+ */
+export const isGitEmail = (v: unknown): v is string =>
+  typeof v === "string" &&
+  v.length <= 254 &&
+  /^[^\s@<>"'`$\\-][^\s@<>"'`$\\]*@[^\s@<>"'`$\\]+$/.test(v);
+
 /** GitHub's names are case-insensitive: two slugs name one repository when they match so. */
 export const sameSlug = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 

@@ -192,7 +192,12 @@ export function repoChecks(f: Facts): Check[] {
     ];
   }
   const checks = cloneChecks(f, { ...r, path: r.path });
-  return r.isGit ? [...checks, identityCheck({ path: r.path, identity: r.identity })] : checks;
+  return r.isGit
+    ? [
+        ...checks,
+        identityCheck({ path: r.path, identity: r.identity, expectedEmail: r.expectedEmail }),
+      ]
+    : checks;
 }
 
 /** A repository's GitHub URL: what `--clone` clones and a repoint sets. */
@@ -338,13 +343,29 @@ function pushCheck(f: Facts, r: RepoFacts): Check {
 /**
  * `repo.identity` (#631): git can commit in this clone, its identity resolved as git does (the
  * clone's own config, then the global, then the system's). Blocks this repository only: a clone
- * with its own identity commits on a machine with no global one.
+ * with its own identity commits on a machine with no global one. With an expected email (#638),
+ * an identity under another email (compared case-insensitively) blocks it too.
  */
-function identityCheck(r: { path: string; identity: string | null }): Check {
+function identityCheck(r: {
+  path: string;
+  identity: string | null;
+  expectedEmail: string | null;
+}): Check {
+  const at = shellArg(r.path);
   if (r.identity !== null) {
+    const email = /<([^<>]*)>\s*$/.exec(r.identity)?.[1] ?? "";
+    if (r.expectedEmail !== null && email.toLowerCase() !== r.expectedEmail.toLowerCase()) {
+      return {
+        id: "repo.identity",
+        ok: false,
+        severity: "block",
+        detail: `commits as ${r.identity}, expected ${r.expectedEmail}`,
+        // The identity is the person's to set: printed, never applied by --fix.
+        fix: { command: `git -C ${at} config user.email ${shellArg(r.expectedEmail)}` },
+      };
+    }
     return { id: "repo.identity", ok: true, severity: "block", detail: `commits as ${r.identity}` };
   }
-  const at = shellArg(r.path);
   return {
     id: "repo.identity",
     ok: false,

@@ -116,9 +116,8 @@ export function ghChecks(f: Facts): Check[] {
       return [
         check(
           true,
-          g.slug !== null
-            ? `signed in as ${who}, with ${g.permission} access to ${g.slug}`
-            : `signed in as ${who} (no GitHub wave repo to check push access against)`,
+          // Push access is per repository (repo.push): this line names the sign-in only.
+          `signed in as ${who}`,
         ),
       ];
   }

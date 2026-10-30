@@ -457,6 +457,14 @@ Every machine reaches the broker through its own tunnel, kept in `~/.volley/peer
 ssh` (the default) keeps `ssh -N -L 127.0.0.1:<port>:<broker>` to `--to` up; `join --tunnel none`
 is for the machine the broker runs on, which reaches it at `127.0.0.1:<broker port>` with no ssh
 at all (the port volleyd answers; before that the doctor checks against `--port`, else 1883).
+`volley peer run` never sits idle: a lost broker connection is dropped and reopened on the next
+heartbeat (every 30 s), a heartbeat that has not finished in 60 s is given up, and after 10 minutes
+without a heartbeat out the service exits 1, which its unit restarts (`Restart=on-failure`;
+launchd's `KeepAlive`). A refused account (the machine was unpaired) still exits 0, and stays
+stopped. It logs (journalctl `--user -u volley-peer`, or the launchd log) each broker connect, loss
+and reconnect attempt and each tunnel start and exit, never a password. The tunnel's ssh is its
+own connection (`ControlMaster=no`, `ControlPath=none`) and gives up after
+`ServerAliveCountMax=3` unanswered keepalives.
 peer.json's `heartbeat: false` keeps the tunnel but publishes no machine record: the supervisor's
 own machine, which publishes its own. A peer.json without either key is `tunnel: ssh, heartbeat:
 true`.
@@ -558,11 +566,11 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `repo.push` | block, for that repository only | this machine's `gh` may push to the repository: `gh repo view <slug> --json nameWithOwner,viewerPermission` (the canonical read, one per repository per run) is WRITE, MAINTAIN or ADMIN; without gh signed in it fails with `gh.auth`'s fix |
 | `repo.worktrees` | block, for that repository only | the folder volleyd cuts the repository's worktrees under (`~/.volley/worktrees/<owner>/<name>` for a managed clone, `<clone>/../.volley-worktrees` for an adopted one) is writable, or its nearest existing ancestor is; `--fix` creates it (`mkdir -p`) |
 | `tool.<name>` (a repository's), `repo.requirements` | block, for that repository only | a tool the repository needs (its manifests and `.volley/requirements.yaml`; the volleyd README's "Repository toolchains") is installed and at least its minimum version; the file is valid |
-| `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
-| `repo.identity` | block, for that repository only | `git -C <clone> var GIT_COMMITTER_IDENT` succeeds in the clone (`commits as <name> <<email>>`), its identity resolved as git does: the clone's own config, then the global, then the system's (and `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the doctor's environment). Without one an agent's first commit there fails with "Author identity unknown"; the fix is `git -C <clone> config user.name "<name>" && git -C <clone> config user.email <email>` for that clone, or `volley setup --peer --step signin` for a global one. A block, so `volley peer join --repo …` without either stops on it before redeeming, as on `repo.push`. The legacy `--repo` clone has it untagged |
+| `gh.auth` | warn | `gh auth status` (`signed in as <login>`; push access is each repository's `repo.push`), and the first repository's `viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
+| `repo.identity` | block, for that repository only | `git -C <clone> var GIT_COMMITTER_IDENT` succeeds in the clone (`commits as <name> <<email>>`), its identity resolved as git does: the clone's own config, then the global, then the system's (and `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the doctor's environment). Without one an agent's first commit there fails with "Author identity unknown"; the fix is `git -C <clone> config user.name "<name>" && git -C <clone> config user.email <email>` for that clone, or `volley setup --peer --step signin` for a global one. A block, so `volley peer join --repo …` without either stops on it before redeeming, as on `repo.push`. The legacy `--repo` clone has it untagged. With an expected email for the repository (the supervisor's `volley repo add <owner/name> --git-email <email>`, read from its readiness verdict's `requirements.repos`; or `--git-email <owner/name>=<email>`, repeatable), an identity under another email (compared case-insensitively) fails too: `commits as <ident>, expected <email>`, fix `git -C <clone> config user.email <email>` (printed, never applied: the identity is yours to set) |
 | `git.identity` | warn | `git var GIT_COMMITTER_IDENT` succeeds in the home (`git commits as <name> <<email>>`: the global or the system's identity, what a new clone gets); the fix is `volley setup --peer --step signin`. A warn (a join is not held up), but readiness needs it while no clone has an identity of its own (`repo.identity`): the closing line names it then. With none global and every repository's clone setting its own, it says so (`every repository's clone sets its own, a new clone would not`) and holds nothing back |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`); while signed in, `auth.claude_email` / `auth.claude_org` are the login's identity from `~/.claude.json`'s `oauthAccount.emailAddress` / `organizationName` (the only two fields of it the doctor reports; identity, never a credential) |
-| `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
+| `claude.trust` | warn | `~/.claude.json` trusts the clone's folder or a parent: one line per repository in `peer.json`, naming its clone (`claude.trust (a/a)`), else the `--repo` clone's one line (`auth.trust`: `ok` only when every clone is trusted) |
 | `skills` | warn | `~/.claude/skills/volley` and `~/.claude/skills/volley-issues` link to this checkout's `packages/volley-skill` and `packages/volley-issues` (sharing `skills: copy`: they are there, copied or not; `own`: left as is) |
 | `hooks` | warn | `packages/volley-hooks/scripts/install.sh --dry-run`, run with `CLAUDE_SETTINGS=~/.claude/settings.json`, `--broker-url` at the tunnel's port and `--namespace` (when not `default`), prints exactly the profile's `settings.json` (what `volley setup` checks locally; `settings.json: own`: left as is) |
 | `mcp` | block (warn when only the broker, the namespace or the registration is off) | `~/.claude.json`'s `mcpServers.volley` runs this checkout's `packages/volley-mcp/src/index.ts` with bun, with `VOLLEY_BROKER_URL` at the tunnel's port and the peer's namespace (`mcp: own`: left as is); so does every other `volley` entry on the machine: each Claude account profile's under the Volley home (`~/.volley/claude/<acct>/.claude.json`, or `$VOLLEY_CLAUDE_DIR`) and the wave repo's `.mcp.json` (`account profile acct-b runs /path/to/old-checkout`; `--fix` re-points the entry at this checkout and keeps its other keys, except a `.mcp.json` git tracks, which is yours to update in the repo); and with `--supervisor-volley-dir` (volleyd's Repair passes the box's `volley_dir`), this checkout is that one (else the row names both and the fix is the doctor in that checkout) |
@@ -748,7 +756,16 @@ volley repo list [--json]
 #   example-org/widgets  box-a, control  adopted: control=/path/to/widgets
 volley repo remove example-org/widgets --machine box-a    # its clone is kept; the path is printed
 volley repo add example-org/demo --for-wave w1            # for wave w1 only: its cleanup removes it
+volley repo add example-org/widgets --git-email dev@example.com   # its commits go under this email
+volley repo add example-org/widgets --git-email none      # no expected email
 ```
+
+- `add <owner/name> --git-email <email>` (on a repository already added too): the email the
+  repository's commits are expected under (`repos.<owner/name>.git_email` in volleyd's config).
+  A machine whose clone would commit under another email is blocked for that repository at once,
+  and its next doctor run, `volley peer doctor` and `volley repo check` show `repo.identity`
+  failing with `git -C <clone> config user.email <email>`; `--git-email none` clears it. `list`
+  and `status` print it (`git email: <email>`).
 
 - `add <owner/name> [--machine <name>]... [--path <name>=<abs path>]... [--wait]`: volleyd checks
   the repository with `gh repo view` (one GitHub does not know is refused; GitHub's spelling of

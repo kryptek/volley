@@ -395,6 +395,60 @@ describe("readiness per (machine, repository) (#436)", () => {
     });
   });
 
+  describe("#638: a repository's expected git email", () => {
+    const commitsAs = (slug: string, who: string) => ({
+      id: "repo.identity",
+      ok: true,
+      severity: "block" as const,
+      detail: `commits as ${who}`,
+      repo: slug,
+    });
+
+    it("blocks a clone whose repo.identity commits under another; any case passes; none: unchanged", () => {
+      const rec = many(
+        [repo("a/a"), repo("b/b")],
+        [commitsAs("a/a", "Dev <other@example.com>"), commitsAs("b/b", "Dev <DEV@example.com>")],
+      );
+      const expected = { "a/a": "dev@example.com", "B/B": "dev@example.com" };
+      const r = readiness(
+        input({
+          record: rec,
+          repos: { ...reposOf(rec, ["a/a", "b/b"]), expected_emails: expected },
+        }),
+      );
+      expect(r.repos["a/a"]).toMatchObject({
+        state: "blocked",
+        reasons: ["repo.identity: commits as Dev <other@example.com>, expected dev@example.com"],
+      });
+      expect(r.repos["b/b"]?.state).toBe("ready");
+      expect(r.requirements.repos).toEqual({
+        "a/a": { git_email: "dev@example.com" },
+        "B/B": { git_email: "dev@example.com" },
+      });
+      // The machine itself stays ready: the block is that repository's.
+      expect(r.ready).toBe(true);
+      const plain = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b"]) }));
+      expect(plain.repos["a/a"]?.state).toBe("ready");
+      expect(plain.requirements).not.toHaveProperty("repos");
+    });
+
+    it("a repo.identity already failing adds nothing", () => {
+      const failing = {
+        ...commitsAs("a/a", "x"),
+        ok: false,
+        detail: "commits as Dev <o@example.com>, expected dev@example.com",
+      };
+      const rec = many([repo("a/a")], [failing]);
+      const r = readiness(
+        input({
+          record: rec,
+          repos: { ...reposOf(rec, ["a/a"]), expected_emails: { "a/a": "dev@example.com" } },
+        }),
+      );
+      expect(r.repos["a/a"]?.reasons).toEqual([`repo.identity: ${failing.detail}`]);
+    });
+  });
+
   it("a wanted slug the machine has no entry for is absent, and the machine stays ready", () => {
     const rec = many([repo("a/a")]);
     const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "c/c"]) }));

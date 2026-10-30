@@ -195,11 +195,22 @@ export class LocalTmuxHost implements Host {
   }
 
   async sendKeys(workspace: string, key: string, tokens: TypedTextTokens = {}): Promise<void> {
-    await this.exec(["tmux", "send-keys", "-t", pane(workspace), key], tokens);
+    await this.send(workspace, [key], tokens);
   }
 
   async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {
-    await this.exec(["tmux", "send-keys", "-t", pane(workspace), "-l", "--", text], tokens);
+    await this.send(workspace, ["-l", "--", text], tokens);
+  }
+
+  /** Bounded: a hung tmux must not hold the daemon's queue (an inbox carry runs on it). */
+  private async send(workspace: string, args: string[], tokens: TypedTextTokens): Promise<void> {
+    const r = await this.exec(["tmux", "send-keys", "-t", pane(workspace), ...args], {
+      ...tokens,
+      timeoutMs: DAEMON_DEFAULTS.send_keys_timeout_ms,
+    });
+    if (r.timedOut) throw new Error(`tmux send-keys ${workspace} timed out`);
+    if (r.code !== 0)
+      throw new Error(`tmux send-keys ${workspace} exit ${r.code}: ${r.stderr.trim()}`);
   }
 
   /** Kill the session; one already gone (or no tmux server at all) is closed. */

@@ -309,6 +309,8 @@ export interface FleetConfig {
 /** Config `repos.<owner/name>`: the machines holding a clone (`all`: every machine). */
 export interface RepoAssignment {
   machines: "all" | string[];
+  /** The email its commits are expected under (#638): `repo.identity` fails a clone using another. */
+  git_email?: string;
 }
 
 /** Config `fleet.fallback`. */

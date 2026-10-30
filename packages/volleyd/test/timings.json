@@ -69,6 +69,7 @@
   "test/daemon-merge.test.ts": 5.31,
   "test/daemon-picker.test.ts": 8.22,
   "test/daemon-pipeline.test.ts": 11.17,
+  "test/daemon-reconnect.test.ts": 9.44,
   "test/daemon-release.test.ts": 8.47,
   "test/daemon-roles.test.ts": 0.24,
   "test/daemon-spawn-retry.test.ts": 11.46,

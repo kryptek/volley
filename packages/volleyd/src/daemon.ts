@@ -391,6 +391,7 @@ import {
   realMachineAddEnv,
   runMachineAdd,
 } from "./machine-add";
+import { MACHINE_SILENT_ALARM, machineNoticeId, silentMachineNotice } from "./machine-notice";
 import {
   type DoctorReport,
   MACHINES_FILTER,
@@ -488,6 +489,7 @@ import {
   ghRepoContext,
   holdersOf,
   homeFromClones,
+  isGitEmail,
   isSlug,
   legacyOrigin,
   managedClonePath,
@@ -722,6 +724,8 @@ export interface DaemonOptions {
   /** Machine-pressure sampler, run once per tick. Default: the fenced src/pressure samplers. */
   pressure?: PressureSource;
   log?: (line: string) => void;
+  /** The daemon connection's MQTT keepalive (tests). Default `broker_keepalive_s`. */
+  keepaliveSeconds?: number;
   /**
    * MQTT protocol for the daemon's persistent session. Default 5, so `mailbox.session_expiry_s`
    * applies; 4 keeps the session until the broker's own expiry policy (and is what the
@@ -803,8 +807,15 @@ export interface DaemonOptions {
    * here), and the version a machine must run (default: this package's).
    */
   fleet?: {
-    /** Ends its run (its child process) once `signal` aborts: a stop waits for that. */
-    localDoctor?: (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null>;
+    /**
+     * Ends its run (its child process) once `signal` aborts: a stop waits for that. `gitEmail`:
+     * the email the clone's repository expects its commits under (`repos.<slug>.git_email`).
+     */
+    localDoctor?: (
+      repo: string | null,
+      signal: AbortSignal,
+      opts?: { gitEmail?: { slug: string; email: string } },
+    ) => Promise<DoctorReport | null>;
     /**
      * The own machine's usage probe of one Claude login (a prime: `realLocalProbe`); null when
      * it printed no report. Absent: a prime runs the whole own doctor instead.
@@ -989,6 +1000,8 @@ const secondsMs = (s: number) => s * 1000;
 export const laptopRefusal = (name: string) =>
   `${name} is a laptop: it sleeps and travels; set coordinator.allow_laptop: true to host the coordinator there anyway`;
 
+/** MQTT 5 DISCONNECT reason: another client connected with this clientId (`brokerLost`). */
+const SESSION_TAKEN_OVER = 142;
 /** `$VOLLEYD_HOME/<this>`: the owner stopped the coordinator role (`coordinator_stop`). */
 const COORDINATOR_STOPPED = "coordinator-stopped";
 /** `$VOLLEYD_HOME/<this>`: the coordinator sessions volleyd sent the handoff text, newest last. */
@@ -1156,9 +1169,21 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
  */
 export function realLocalDoctor(
   exec: ExecFn = realExec,
-): (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null> {
-  return async (repo, signal) => {
-    const argv = ["volley", "peer", "doctor", "--json", ...(repo !== null ? ["--repo", repo] : [])];
+): (
+  repo: string | null,
+  signal: AbortSignal,
+  opts?: { gitEmail?: { slug: string; email: string } },
+) => Promise<DoctorReport | null> {
+  return async (repo, signal, opts) => {
+    const e = opts?.gitEmail;
+    const argv = [
+      "volley",
+      "peer",
+      "doctor",
+      "--json",
+      ...(repo !== null ? ["--repo", repo] : []),
+      ...(e !== undefined ? ["--git-email", `${e.slug}=${e.email}`] : []),
+    ];
     const r = await exec(argv, {
       timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
       signal,
@@ -1307,6 +1332,8 @@ function spawnDecisionAgent(d: DecisionRecord): string | undefined {
 }
 /** The `activity` line a UserPromptSubmit hook publishes for a new prompt (SPEC §4.3). */
 const PROMPT_RECEIVED = "prompt received";
+/** How a picker or handoff closes when its session has gone (`where: terminal`). */
+const SESSION_ENDED = "session ended";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
 /** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
@@ -1392,8 +1419,10 @@ async function assertNotRunning(opts: DaemonOptions): Promise<void> {
  * control requests on its mailbox — kept in a persistent MQTT session on a stable clientId, so
  * requests sent while it is down are delivered on the next start — and publishes retained wave
  * state + the event mirror after every journal append. All work (control ops, ticks) runs
- * through one serial queue. A lost broker connection is fatal (`closed`): the service manager
- * restarts the process, which is simpler and safer than re-arming everything in-process.
+ * through one serial queue. A lost broker connection is reconnected with backoff (mqtt.js keeps
+ * the routes, the broker or mqtt.js the subscriptions) and the retained records it lost are
+ * published again; only `broker_reconnect_give_up_ms` without one is fatal (`closed`), so the
+ * service manager restarts the process instead of it idling alive.
  */
 export class Daemon {
   private readonly broker = new VolleyBroker();
@@ -1549,6 +1578,10 @@ export class Daemon {
   private queue: Promise<unknown> = Promise.resolve();
   private timer: TimerHandle | undefined;
   private watchdog: TimerHandle | undefined;
+  /** When this process first registered (its registry entry's `started_at`, kept on a reconnect). */
+  private registeredAt: string | undefined;
+  /** When the broker connection was lost (daemon clock), while it is down. */
+  private offlineSince: number | null = null;
   private screenTimer: TimerHandle | undefined;
   private running = false;
   /** Spawn launch halves and journal appends (with their publishes) in flight: `settled`. */
@@ -2180,8 +2213,18 @@ export class Daemon {
       protocolVersion: this.opts.protocolVersion ?? 5,
       willTopic: this.statusTopic,
       willPayload: JSON.stringify(this.envelope("status", "reaped", { reason: "disconnect" })),
+      keepaliveSeconds: this.opts.keepaliveSeconds ?? DAEMON_DEFAULTS.broker_keepalive_s,
+      reconnect: {
+        baseMs: DAEMON_DEFAULTS.broker_reconnect_base_ms,
+        maxMs: DAEMON_DEFAULTS.broker_reconnect_max_ms,
+        onOffline: (why, reasonCode) => this.brokerLost(why, reasonCode),
+        onReconnected: (sessionPresent) => this.brokerBack(sessionPresent),
+        onRefused: (e) => this.fail(e),
+      },
       ...authFields(this.opts.auth),
     });
+    // From the first packet on: a drop during the rest of start is noticed too.
+    this.watchdog = this.time.setInterval(() => this.checkBroker(), DAEMON_DEFAULTS.watchdog_ms);
     if (this.dynsec !== undefined) {
       // Refuse a broker older than 2.1 at start (BrokerVersionError ends `start`). Any other
       // failure only delays minting: the control connection reconnects on next use.
@@ -2206,18 +2249,7 @@ export class Daemon {
     this.running = true;
 
     await this.publish(this.statusTopic, this.envelope("status", "spawning", {}), true);
-    await this.publish(
-      registryTopic(DAEMON_AGENT_ID),
-      {
-        ...this.envelope("_system/registry", "registered", {
-          capabilities: ["supervisor"],
-          cwd: this.opts.home,
-          started_at: dateOf(this.time).toISOString(),
-        }),
-        namespace,
-      },
-      true,
-    );
+    await this.publishIdentity();
     await this.publish(this.statusTopic, this.envelope("status", "registered", {}), true);
 
     // Every namespace's progress through ONE filter: a wave's agents may live in the wave's own
@@ -2407,9 +2439,6 @@ export class Daemon {
         DAEMON_DEFAULTS.screen_tick_ms,
       );
     }
-    this.watchdog = this.time.setInterval(() => {
-      if (this.running && !this.broker.connected) this.fail(new Error("broker connection lost"));
-    }, DAEMON_DEFAULTS.watchdog_ms);
     const pruneMs =
       this.opts.tokenPruneMs ?? (this.opts.auth !== undefined ? DAEMON_DEFAULTS.token_prune_ms : 0);
     if (pruneMs > 0) {
@@ -2836,6 +2865,87 @@ export class Daemon {
     };
   };
 
+  /** volleyd's registry entry (retained; started_at is when this process started). */
+  private async publishIdentity(): Promise<void> {
+    this.registeredAt ??= dateOf(this.time).toISOString();
+    await this.publish(
+      registryTopic(DAEMON_AGENT_ID),
+      {
+        ...this.envelope("_system/registry", "registered", {
+          capabilities: ["supervisor"],
+          cwd: this.opts.home,
+          started_at: this.registeredAt,
+        }),
+        namespace: this.opts.namespace,
+      },
+      true,
+    );
+  }
+
+  /**
+   * The broker connection, each watchdog period: a live one that has been silent past
+   * `broker_stale_factor` keepalives is closed (mqtt.js only notices a socket that closes, and
+   * reconnects from there); one down longer than `broker_reconnect_give_up_ms` ends the daemon.
+   */
+  private checkBroker(): void {
+    if (this.broker.connected) {
+      const keepalive = this.opts.keepaliveSeconds ?? DAEMON_DEFAULTS.broker_keepalive_s;
+      const idle = this.broker.inboundIdleMs();
+      if (idle > keepalive * 1000 * DAEMON_DEFAULTS.broker_stale_factor) {
+        this.broker.kill(`no packet from the broker for ${Math.round(idle / 1000)}s`);
+      }
+      this.offlineSince = null;
+      return;
+    }
+    this.offlineSince ??= this.time.now();
+    const offline = this.time.now() - this.offlineSince;
+    if (offline < DAEMON_DEFAULTS.broker_reconnect_give_up_ms) return;
+    this.fail(
+      new Error(
+        `broker unreachable for ${Math.round(offline / 1000)}s (gave up reconnecting after ${DAEMON_DEFAULTS.broker_reconnect_give_up_ms / 1000}s)`,
+      ),
+    );
+  }
+
+  /**
+   * The broker closed the connection (once per outage). It reconnects on its own, except during a
+   * hand-over or broker move: the move's end decides (`moveFinished`). A session another client
+   * took over (the same clientId) is another volleyd's: never fight it for the session.
+   */
+  private brokerLost(why: string, reasonCode: number | undefined): void {
+    this.offlineSince ??= this.time.now();
+    if (
+      this.handingOver !== null ||
+      this.brokerMoving !== null ||
+      reasonCode === SESSION_TAKEN_OVER
+    ) {
+      this.broker.stopReconnecting();
+      this.fail(new Error(`broker connection lost: ${why}`));
+      return;
+    }
+    this.log(`broker connection lost: ${why}; reconnecting`);
+  }
+
+  /** The connection is back: republish what the outage lost (the LWT replaced the status). */
+  private brokerBack(sessionPresent: boolean): void {
+    const since = this.offlineSince ?? this.time.now();
+    this.offlineSince = null;
+    this.log(
+      `broker connection restored after ${Math.round((this.time.now() - since) / 1000)}s (session ${sessionPresent ? "kept" : "lost"})`,
+    );
+    if (!this.running) return;
+    void this.enqueue(async () => {
+      await this.publishIdentity();
+      await this.publishConfig();
+      for (const wave of this.waves.keys()) await this.publishState(wave);
+      await this.publish(
+        this.statusTopic,
+        this.envelope("status", "working", { waves: this.waves.size }),
+        true,
+      );
+    });
+  }
+
   /**
    * Hand each mailbox message (the daemon's mailbox in any namespace) to the serial queue, one at
    * a time, until the daemon stops.
@@ -2867,8 +2977,14 @@ export class Daemon {
           maxMessages: 1,
         });
       } catch (e) {
-        if (this.running) this.fail(e instanceof Error ? e : new Error(String(e)));
-        return;
+        // Offline: the drain resumes once the connection is back (the watchdog bounds the wait).
+        if (!this.running) return;
+        if ((e as { code?: unknown }).code !== "BROKER_DOWN") {
+          this.fail(e instanceof Error ? e : new Error(String(e)));
+          return;
+        }
+        await new Promise<void>((r) => this.time.setTimeout(r, DAEMON_DEFAULTS.watchdog_ms));
+        continue;
       }
       for (const m of msgs) void this.enqueue(() => handle(m));
     }
@@ -3030,6 +3146,9 @@ export class Daemon {
         true,
       );
       await this.broker.disconnect();
+    } else {
+      // Offline: stop reconnecting (the LWT already marked it gone).
+      await this.broker.disconnect();
     }
     this.releaseLock();
   }
@@ -3186,6 +3305,7 @@ export class Daemon {
           const name = this.namedEntries.get(holder)?.coordinator;
           // A session carrying a coordinator name keeps its status: `bindOwner` needs it. Each
           // coordinator restart adds one; registry reaping (clearing `namedEntries`) bounds them.
+          const reason = (env.payload as { reason?: unknown } | null)?.reason;
           if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder) && name === undefined) {
             // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
             this.statusOf.delete(holder);
@@ -3197,7 +3317,6 @@ export class Daemon {
               this.endedStatusOf.delete(this.endedStatusOf.keys().next().value as string);
           } else {
             this.endedStatusOf.delete(holder);
-            const reason = (env.payload as { reason?: unknown } | null)?.reason;
             this.statusOf.set(holder, {
               type: env.type,
               at: env.wall_time,
@@ -3217,11 +3336,15 @@ export class Daemon {
             const past = hook || env.type === "working";
             this.heard(holder, this.sentAt(env.wall_time), !hook, past);
           }
-          // A session that ended answers none of its open pickers or handoffs any more.
-          if (OWNER_GONE.has(env.type))
+          // A session that ended (SPEC §7.5: a terminal status, or a clean shutdown's
+          // `blocked`) answers none of its open pickers or handoffs any more.
+          if (
+            presenceOf({ type: env.type, ...(reason === "shutdown" ? { reason } : {}) }) ===
+            "offline"
+          )
             void this.enqueue(async () => {
-              await this.closeOpenItems(holder, "picker", "session ended");
-              await this.closeOpenItems(holder, "handoff", "session ended");
+              await this.closeOpenItems(holder, "picker", SESSION_ENDED);
+              await this.closeOpenItems(holder, "handoff", SESSION_ENDED);
             });
         }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
@@ -3358,8 +3481,10 @@ export class Daemon {
     // A role move waiting for a quiet fleet (SPEC §4.6.24): planned and started beside the queue.
     if (this.roleOps.draining()) void this.roleOps.tick();
     await this.sweepInbox();
+    await this.closeGoneSessionItems();
     await this.sweepMachines();
     await this.machineDownPass();
+    await this.machineSilentPass();
     await this.removalSweep();
     await this.fleetTick();
     // The coordinator role: its ssh steps run beside the queue (a pass in flight is not repeated).
@@ -3910,6 +4035,90 @@ export class Daemon {
         }
       }
     }
+  }
+
+  /**
+   * Every tick (#638): a configured paired machine down for `placement.down_decision_after_s`
+   * that holds a clone of a running wave's repository opens the owner-only notice
+   * `n-machine-down-<name>` (naming it, the waves it would serve and its restart command) and
+   * journals `alarm_raised { alarm: machine_silent }` in `_system`, once per outage
+   * (`silentMachineNotice`). Its waves carry on without it; `onMachine` clears both when it is back.
+   */
+  private async machineSilentPass(): Promise<void> {
+    const waves = this.runningWaves().flatMap(([wave]) => {
+      const slug = this.slugOf(wave);
+      return slug !== undefined ? [{ wave, slug }] : [];
+    });
+    if (waves.length === 0) return;
+    const now = this.now();
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const boundMs = secondsMs(cfg.placement.down_decision_after_s);
+    for (const record of this.machines.all()) {
+      const name = record.name;
+      const downSince = this.machines.downSince(name);
+      if (name === local || downSince === undefined) continue;
+      const prior = this.inbox.get(machineNoticeId(name));
+      const spec = silentMachineNotice({
+        name,
+        os: record.os,
+        lastSeen: record.last_seen,
+        why: this.machines.whyDown(record),
+        downSince,
+        now,
+        boundMs,
+        paired: cfg.hosts[name] !== undefined,
+        waves,
+        holds: (slug) => holdersOf(cfg, local, slug).includes(name),
+        prior,
+      });
+      if (spec === null) continue;
+      const item = itemForNotice(
+        spec,
+        dateOf(this.time).toISOString(),
+        prior !== undefined ? prior.version + 1 : 1,
+      );
+      this.inbox.set(item.id, item);
+      await this.journalInbox(item, openedEvent(item));
+      await this.publishInboxItem(item);
+      this.silentAlarms.add(name);
+      await this.appendSystem({
+        type: "alarm_raised",
+        data: {
+          alarm: MACHINE_SILENT_ALARM,
+          host: name,
+          down_since: new Date(downSince).toISOString(),
+          last_seen: record.last_seen,
+          waves: waves
+            .filter((w) => holdersOf(cfg, local, w.slug).includes(name))
+            .map((w) => w.wave),
+          message: item.title,
+        },
+      });
+      this.log(`inbox ${item.id}: ${item.title}`);
+    }
+  }
+  /** The machines whose `machine_silent` alarm is raised and not cleared yet. */
+  private readonly silentAlarms = new Set<string>();
+
+  /** A silent machine is back: its notice is answered `superseded` and its alarm cleared. */
+  private async machineNotSilent(name: string): Promise<void> {
+    const item = this.inbox.get(machineNoticeId(name));
+    const open = item !== undefined && item.answered === undefined;
+    if (open) {
+      await this.recordInboxAnswer(item, {
+        version: item.version,
+        answer: "superseded",
+        by: DAEMON_AGENT_ID,
+        where: { kind: "autopilot" },
+      });
+    }
+    if (!open && !this.silentAlarms.has(name)) return;
+    this.silentAlarms.delete(name);
+    await this.appendSystem({
+      type: "alarm_cleared",
+      data: { alarm: MACHINE_SILENT_ALARM, host: name, message: `${name} is back` },
+    });
   }
 
   /**
@@ -6330,7 +6539,12 @@ export class Daemon {
       const runs: { dir: string | null; report: DoctorReport }[] = [];
       const failed: string[] = [];
       for (const dir of dirs.length > 0 ? dirs : [null]) {
-        const report = await doctor(dir, this.localDoctorAbort.signal).catch((e: unknown) => {
+        const gitEmail = dir !== null ? this.expectedEmailOfDir(dir) : undefined;
+        const report = await doctor(
+          dir,
+          this.localDoctorAbort.signal,
+          gitEmail !== undefined ? { gitEmail } : undefined,
+        ).catch((e: unknown) => {
           this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
           return null;
         });
@@ -6846,6 +7060,7 @@ export class Daemon {
     const records = accountRecords(this.usage);
     const record = isLocal ? this.ownRecord : this.machines.record(name);
     const waves = this.waveSlugs();
+    const emails = this.expectedEmails(cfg);
     const spawn = isLocal ? {} : this.spawnPaths(name, cfg);
     // A spawn that found no clone stands while its spawn path does (a repo_add's run wins).
     const blocked = [...(this.spawnBlocked.get(name) ?? [])].filter(
@@ -6900,6 +7115,7 @@ export class Daemon {
         // The own doctor reports every running wave's clone; a repository config gives only to
         // other machines is checked out here for the supervisor, not for agents (#439).
         ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, name, waves) } : {}),
+        ...(Object.keys(emails).length > 0 ? { expected_emails: emails } : {}),
       },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
@@ -7000,6 +7216,24 @@ export class Daemon {
       }
     }
     return this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
+  }
+
+  /** The expected email of the repository the own clone at `dir` is of (#638), if config has one. */
+  private expectedEmailOfDir(dir: string): { slug: string; email: string } | undefined {
+    const slug = this.slugOfRepo(dir) ?? this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
+    if (slug === undefined) return undefined;
+    const repos = this.config.effective().repos;
+    const email = repos[slugKey(repos, slug) ?? slug]?.git_email;
+    return email !== undefined ? { slug, email } : undefined;
+  }
+
+  /** `repos.<slug>.git_email` by slug (readiness's `expected_emails`, #638). */
+  private expectedEmails(cfg: Tunables): Record<string, string> {
+    return Object.fromEntries(
+      Object.entries(cfg.repos).flatMap(([slug, r]) =>
+        r?.git_email !== undefined ? [[slug, r.git_email]] : [],
+      ),
+    );
   }
 
   /**
@@ -7365,6 +7599,10 @@ export class Daemon {
     const wave = p.wave;
     if (wave !== undefined && (typeof wave !== "string" || !this.isWaveFor(wave)))
       return refuse("wave: not a wave id, or an archived wave's");
+    // The email the repository's commits are expected under (#638): null clears it.
+    const gitEmail = p.git_email;
+    if (gitEmail !== undefined && gitEmail !== null && !isGitEmail(gitEmail))
+      return refuse("git_email must be an email (or null to clear it)");
     const local = this.config.localName();
     const hosts = this.config.effective().hosts;
     for (const [m, path] of Object.entries(paths)) {
@@ -7394,6 +7632,7 @@ export class Daemon {
             known !== null ? { ...given, [local]: known.root } : given,
             sender,
             typeof wave === "string" ? wave : undefined,
+            gitEmail as string | null | undefined,
           ),
         );
         if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
@@ -7493,17 +7732,30 @@ export class Daemon {
     paths: Record<string, string>,
     by: string,
     wave?: string,
+    gitEmail?: string | null,
   ): Promise<{ slug: string; machines: string[]; status: string[] } | string> {
     const cfg = this.config.effective();
     const key = slugKey(cfg.repos, slug);
     const current = key !== undefined ? cfg.repos[key]?.machines : undefined;
+    const currentEmail = key !== undefined ? cfg.repos[key]?.git_email : undefined;
+    const emailChanged = gitEmail !== undefined && (gitEmail ?? undefined) !== currentEmail;
     const next = withMachines(current, machines);
     const local = this.config.localName();
     const changed = Object.fromEntries(
       Object.entries(paths).filter(([m, path]) => adoptedPath(cfg, local, m, slug) !== path),
     );
-    if (JSON.stringify(next) !== JSON.stringify(current) || Object.keys(changed).length > 0) {
-      const r = this.config.setRepo(key ?? slug, next, changed, by);
+    if (
+      JSON.stringify(next) !== JSON.stringify(current) ||
+      Object.keys(changed).length > 0 ||
+      emailChanged
+    ) {
+      const r = this.config.setRepo(
+        key ?? slug,
+        next,
+        changed,
+        by,
+        emailChanged ? gitEmail : undefined,
+      );
       if (!r.applied) {
         return `repos.${slug} not set: ${r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ")}`;
       }
@@ -7970,10 +8222,12 @@ export class Daemon {
           return k !== undefined ? [[m, map[k] as string]] : [];
         }),
       );
+      const entry = cfg.repos[slugKey(cfg.repos, slug) ?? slug];
       return {
         slug,
-        machines: cfg.repos[slugKey(cfg.repos, slug) ?? slug]?.machines ?? [],
+        machines: entry?.machines ?? [],
         ...(Object.keys(adopted).length > 0 ? { paths: adopted } : {}),
+        ...(entry?.git_email !== undefined ? { git_email: entry.git_email } : {}),
       };
     });
     return { ok: true, result: { repos } };
@@ -7987,7 +8241,8 @@ export class Daemon {
     const want = p.slug;
     if (want !== undefined && (typeof want !== "string" || !isSlug(want)))
       return { ok: false, error: "slug must be a GitHub <owner/name>" };
-    const all = (this.repoList().result.repos as { slug: string }[]).map((r) => r.slug);
+    const listed = this.repoList().result.repos as { slug: string; git_email?: string }[];
+    const all = listed.map((r) => r.slug);
     const slugs = want === undefined ? all : all.filter((s) => sameSlug(s, want));
     if (want !== undefined && slugs.length === 0)
       return { ok: false, error: `${want} is not a configured repository` };
@@ -7997,7 +8252,13 @@ export class Daemon {
         assignedSlugs(cfg, this.config.localName(), m).some((s) => sameSlug(s, slug)),
       );
       const verdicts = this.repoVerdicts(slug, names);
-      return { slug, machines: verdicts, lines: names.map((m) => repoStateLine(m, verdicts[m])) };
+      const email = listed.find((r) => r.slug === slug)?.git_email;
+      return {
+        slug,
+        machines: verdicts,
+        lines: names.map((m) => repoStateLine(m, verdicts[m])),
+        ...(email !== undefined ? { git_email: email } : {}),
+      };
     });
     return { ok: true, result: { repos } };
   }
@@ -8090,6 +8351,8 @@ export class Daemon {
     const canonical = view !== null && typeof view !== "string" ? view.slug : slug;
     const blocks = await this.enqueue(async () => {
       const out: Record<string, MachineBlock> = {};
+      const repos = this.config.effective().repos;
+      const gitEmail = repos[slugKey(repos, canonical) ?? canonical]?.git_email;
       for (const [i, m] of names.entries()) {
         const run = runs[i] ?? { from: "record" as const };
         const r = this.readinessFor(m, canonical);
@@ -8103,6 +8366,7 @@ export class Daemon {
             from: run.from,
             ...(run.note !== undefined ? { note: run.note } : {}),
             ...(m === local ? { own: true } : {}),
+            ...(gitEmail !== undefined ? { gitEmail } : {}),
           },
         );
       }
@@ -8212,6 +8476,7 @@ export class Daemon {
     if (!this.running) return;
     if (status === "up") {
       await this.machineBack(name);
+      await this.machineNotSilent(name);
       // A repo_add that could not reach it runs again (SPEC §4.6.21).
       this.retryRepos(name);
     }
@@ -12411,6 +12676,11 @@ export class Daemon {
           state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
         if (notOwner !== null) return { refused: notOwner };
       }
+      // A session that has ended has no screen to type into: its item closes, nothing is typed.
+      if ((item.kind === "picker" || item.kind === "handoff") && this.sessionEnded(item.agent_id)) {
+        await this.closeInTerminal(id, SESSION_ENDED);
+        return { refused: `${SESSION_ENDED}: the item is closed, nothing was typed` };
+      }
       const handler = this.inboxHandlers.get(item.kind);
       if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
       else {
@@ -12642,8 +12912,12 @@ export class Daemon {
     }
     for (const [id, ws] of this.registryWorkspaces) {
       // Registry entries outlive their sessions: a gone session's workspace is free again.
-      const status = this.statusOf.get(id)?.type;
-      if (id !== agent && ws === workspace && (status === undefined || !OWNER_GONE.has(status)))
+      const status = this.statusOf.get(id);
+      if (
+        id !== agent &&
+        ws === workspace &&
+        (status === undefined || presenceOf(status) !== "offline")
+      )
         return id;
     }
     return null;
@@ -12704,6 +12978,44 @@ export class Daemon {
       by: r.by,
       where,
     });
+  }
+
+  /**
+   * `agent`'s session has gone (#637): not supervised (a wave agent's retire and status handle
+   * its items), its presence offline (SPEC §7.5: a terminal status, a clean shutdown, or no status
+   * at all), nothing heard on its progress for `inbox_session_gone_ms`, and this daemon up that
+   * long (so a retained status or a heartbeat had the time to arrive after a start).
+   */
+  private sessionGone(agent: string, now: number): boolean {
+    const bound = DAEMON_DEFAULTS.inbox_session_gone_ms;
+    if (this.supervised.has(agent)) return false;
+    if (presenceOf(this.statusOf.get(agent)) !== "offline") return false;
+    const seen = this.lastSeen.get(agent);
+    return (seen === undefined || now - seen >= bound) && now - this.startedAt >= bound;
+  }
+
+  /**
+   * An answer to `agent`'s item cannot reach its screen: its session left a terminal status or a
+   * clean shutdown, or (no status) it is gone by `sessionGone`. A session that has not published
+   * a status yet is not refused before then: it may be alive under another id (D3).
+   */
+  private sessionEnded(agent: string): boolean {
+    if (this.supervised.has(agent)) return false;
+    const status = this.statusOf.get(agent);
+    if (status !== undefined) return presenceOf(status) === "offline";
+    return this.endedStatusOf.has(agent) || this.sessionGone(agent, this.now());
+  }
+
+  /** Close the open pickers and handoffs of the sessions that have gone (`sessionGone`). */
+  private async closeGoneSessionItems(): Promise<void> {
+    const now = this.now();
+    for (const item of [...this.inbox.values()]) {
+      if (item.kind !== "picker" && item.kind !== "handoff") continue;
+      if (item.answered !== undefined) continue;
+      const opened = Date.parse(item.opened_at);
+      if (!Number.isNaN(opened) && now - opened < DAEMON_DEFAULTS.inbox_session_gone_ms) continue;
+      if (this.sessionGone(item.agent_id, now)) await this.closeInTerminal(item.id, SESSION_ENDED);
+    }
   }
 
   /** Clear the answered items whose `autopilot.inbox_answered_ttl_s` has passed. */

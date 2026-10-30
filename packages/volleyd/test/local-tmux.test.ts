@@ -208,6 +208,17 @@ describe("LocalTmuxHost", () => {
     expect(await host.readScreen(S, 2)).toBeNull();
   });
 
+  it("sendText and sendKeys are bounded: a send that times out throws (#637)", async () => {
+    const fake = fakeExec().on(["tmux", "send-keys"], { timedOut: true });
+    const host = new LocalTmuxHost(fake.exec);
+    await expect(host.sendKeys(S, "Enter")).rejects.toThrow(`tmux send-keys ${S} timed out`);
+    expect(fake.calls[0]?.opts.timeoutMs).toBe(DAEMON_DEFAULTS.send_keys_timeout_ms);
+    fake.on(["tmux", "send-keys"], { code: 1, stderr: "can't find pane\n" });
+    await expect(host.sendKeys(S, "Enter")).rejects.toThrow(
+      `tmux send-keys ${S} exit 1: can't find pane`,
+    );
+  });
+
   it("sendKeys and sendText type into the pane, with the tokens the fence needs", async () => {
     const fake = fakeExec();
     const host = new LocalTmuxHost(fake.exec);

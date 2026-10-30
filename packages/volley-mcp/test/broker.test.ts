@@ -1,7 +1,7 @@
 import { type Socket, createServer } from "node:net";
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { VolleyBroker } from "../src/broker";
+import { VolleyBroker, describeDisconnect } from "../src/broker";
 import { VolleyError } from "../src/errors";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 
@@ -105,8 +105,8 @@ describe("VolleyBroker connect / disconnect / LWT", () => {
 
     // Forcibly destroy the underlying socket without nulling `this.client`,
     // so requireClient() sees `client !== null` but `client.connected === false`.
-    // simulateCrash() nulls the client; _destroyForTest() leaves it set.
-    b._destroyForTest();
+    // simulateCrash() nulls the client; kill() leaves it set.
+    b.kill("test");
 
     await expect(b.queryRetained("volley/test/stale-aaaa/status", 500)).rejects.toMatchObject({
       code: "BROKER_DOWN",
@@ -146,6 +146,45 @@ describe("VolleyBroker connect / disconnect / LWT", () => {
     expect(gotWill).toBe(false);
     await observer.endAsync();
   });
+  it("disconnect() settles after the broker closed the socket under an unacknowledged QoS 1 publish", async () => {
+    tb.aedes.authorizePublish = (client, packet, done) => {
+      if (packet.topic === "volley/test/kick") {
+        client?.conn.destroy();
+        return;
+      }
+      done(null);
+    };
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "agent-kick" });
+    await expect(
+      b.publish("volley/test/kick", "{}", { qos: 1, retain: false }),
+    ).rejects.toMatchObject({ code: "BROKER_DOWN" });
+    const settled = await Promise.race([
+      b.disconnect().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    expect(settled).toBe("settled");
+    expect(b.connected).toBe(false);
+  });
+  it("disconnect() on a live connection with an unacknowledged QoS 1 publish forces the socket closed", async () => {
+    tb.aedes.authorizePublish = (_client, packet, done) => {
+      // Hold the publish: no PUBACK ever comes, the connection stays up.
+      if (packet.topic === "volley/test/hold") return;
+      done(null);
+    };
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "agent-hold" });
+    void b.publish("volley/test/hold", "{}", { qos: 1, retain: false }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    expect(tb.aedes.connectedClients).toBe(1);
+    const settled = await Promise.race([
+      b.disconnect().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 4000)),
+    ]);
+    expect(settled).toBe("settled");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(tb.aedes.connectedClients).toBe(0);
+  }, 10_000);
 });
 
 describe("VolleyBroker publish / queryRetained", () => {
@@ -406,7 +445,7 @@ describe("VolleyBroker subscribeStream", () => {
   });
 
   it("rejects with BROKER_DOWN when invoked against a disconnected client", async () => {
-    b._destroyForTest();
+    b.kill("test");
     await expect(b.subscribeStream("volley/test/dead/+", () => {})).rejects.toMatchObject({
       code: "BROKER_DOWN",
     });
@@ -774,5 +813,232 @@ describe("VolleyBroker authentication", () => {
       code: "AUTH_FAILED",
       message: expect.stringContaining("volley auth status"),
     });
+  });
+});
+
+/** Re-check `pred` on the real clock until it holds; past `ms` fail naming `what`. */
+async function until(pred: () => boolean, what: string, ms = 8000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() >= end) throw new Error(`waited ${ms} ms for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("VolleyBroker liveness (a broker that stops answering without closing)", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker();
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("a broker that goes silent without closing the socket is detected within the keepalive window, and nothing throws", async () => {
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "a", clientId: "volley-a-stall", keepaliveSeconds: 1 });
+    expect(tb.stallClient("volley-a-stall")).toBe(true);
+    // mqtt.js times the PINGRESP out after 1.5 keepalives; an unhandled `error` there would throw
+    // out of its timer (an uncaught exception fails the run) and leave the socket open.
+    await until(() => !b.connected, "the stalled connection to be noticed");
+    await b.disconnect();
+  });
+
+  it("publish() on a stalled connection rejects with BROKER_DOWN instead of hanging", async () => {
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-stall2",
+      cleanSession: false,
+      keepaliveSeconds: 1,
+    });
+    tb.stallClient("volley-a-stall2");
+    const e = await b.publish("volley/t/a/status", "{}", { qos: 1, retain: true }).then(
+      () => "acked",
+      (err: unknown) => err,
+    );
+    expect(e).toBeInstanceOf(VolleyError);
+    expect((e as VolleyError).code).toBe("BROKER_DOWN");
+    b.simulateCrash();
+  });
+
+  it("inboundIdleMs() grows while the broker is silent, and kill() makes connected false and fires onOffline", async () => {
+    const offline: string[] = [];
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-idle",
+      reconnect: { baseMs: 60_000, maxMs: 60_000, onOffline: (why) => offline.push(why) },
+    });
+    tb.stallClient("volley-a-idle");
+    const before = b.inboundIdleMs();
+    await sleep(120);
+    expect(b.inboundIdleMs()).toBeGreaterThanOrEqual(before + 100);
+    b.kill("no inbound traffic");
+    await until(() => !b.connected && offline.length === 1, "the kill to close the connection");
+    expect(offline[0]).toMatch(/no inbound traffic/);
+    await b.disconnect();
+  });
+});
+
+describe("VolleyBroker reconnect mode", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker();
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("with reconnect on, a dropped connection comes back: connected again, held filters still deliver, a later publish lands", async () => {
+    const offline: string[] = [];
+    const back: boolean[] = [];
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-rc",
+      reconnect: {
+        baseMs: 50,
+        maxMs: 200,
+        onOffline: (why) => offline.push(why),
+        onReconnected: (sessionPresent) => back.push(sessionPresent),
+      },
+    });
+    const got: string[] = [];
+    const stop = await b.subscribeStream("volley/t/+/progress", (m) => got.push(m.payload));
+    expect(tb.dropClient("volley-a-rc")).toBe(true);
+    await until(() => offline.length === 1, "onOffline");
+    expect(offline[0]).toMatch(/connection closed/);
+    await until(() => b.connected && back.length === 1, "the reconnect");
+    // A clean session was lost with the connection: mqtt.js re-subscribed the held filter.
+    expect(back).toEqual([false]);
+    const pub = new VolleyBroker();
+    await pub.connect({ url: tb.url, agentId: "p" });
+    await until(() => {
+      void pub.publish("volley/t/x/progress", "after", { qos: 1, retain: false });
+      return got.includes("after");
+    }, "delivery on the re-subscribed filter");
+    await pub.disconnect();
+    // A publish on the restored connection is acknowledged (the old close no longer fails it).
+    await b.publish("volley/t/a/status", "{}", { qos: 1, retain: true });
+    await stop();
+    await b.disconnect();
+  });
+
+  it("with reconnect on, onOffline gets the broker's DISCONNECT reason code as a number", async () => {
+    const offline: [string, number | undefined][] = [];
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-code",
+      reconnect: {
+        baseMs: 60_000,
+        maxMs: 60_000,
+        onOffline: (why, reasonCode) => offline.push([why, reasonCode]),
+      },
+    });
+    // Aedes speaks MQTT 3.1.1 (no reason codes): stand in for an MQTT 5 broker's DISCONNECT 142.
+    (b as unknown as { client: { emit(e: string, p: unknown): void } }).client.emit("disconnect", {
+      cmd: "disconnect",
+      reasonCode: 142,
+    });
+    tb.dropClient("volley-a-code");
+    await until(() => offline.length === 1, "onOffline");
+    expect(offline[0]).toEqual(["broker sent DISCONNECT 142 (Session taken over)", 142]);
+    await b.disconnect();
+  });
+
+  it("with reconnect on, a stalled connection is killed by the keepalive and comes back", async () => {
+    const back: boolean[] = [];
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-rc-stall",
+      keepaliveSeconds: 1,
+      reconnect: { baseMs: 50, maxMs: 200, onReconnected: (s) => back.push(s) },
+    });
+    tb.stallClient("volley-a-rc-stall");
+    await until(() => back.length === 1 && b.connected, "the reconnect after the stall");
+    await b.publish("volley/t/a/status", "{}", { qos: 1, retain: true });
+    await b.disconnect();
+  });
+
+  it("with reconnect on, a second holder of a filter still gets its retained message", async () => {
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-hold",
+      reconnect: { baseMs: 50, maxMs: 200 },
+    });
+    await b.publish("volley/t/x/status", "kept", { qos: 1, retain: true });
+    const stop = await b.subscribeStream("volley/t/x/status", () => {});
+    // mqtt.js skips a SUBSCRIBE for a filter it tracks for its re-subscribe; a hold must not.
+    expect(await b.queryRetained("volley/t/x/status", 1000)).toBe("kept");
+    await stop();
+    await b.disconnect();
+  });
+
+  it("with reconnect on, disconnect() and simulateCrash() stop reconnecting", async () => {
+    for (const end of ["disconnect", "crash"] as const) {
+      const b = new VolleyBroker();
+      await b.connect({
+        url: tb.url,
+        agentId: "a",
+        clientId: `volley-a-end-${end}`,
+        reconnect: { baseMs: 30, maxMs: 30 },
+      });
+      if (end === "disconnect") await b.disconnect();
+      else b.simulateCrash();
+      await until(() => tb.connectedClients() === 0, "the client to go");
+      await sleep(200);
+      expect(tb.connectedClients()).toBe(0);
+    }
+  });
+
+  it("with reconnect on, a broker that refuses the reconnect keeps the client offline (no throw) until disconnect()", async () => {
+    const offline: string[] = [];
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-gone",
+      reconnect: { baseMs: 30, maxMs: 60, onOffline: (why) => offline.push(why) },
+    });
+    await tb.close();
+    await until(() => offline.length >= 1, "onOffline");
+    await sleep(200);
+    expect(b.connected).toBe(false);
+    await expect(b.publish("volley/t/a/status", "{}", { qos: 1, retain: true })).rejects.toThrow(
+      /reconnecting/,
+    );
+    await b.disconnect();
+    tb = await startTestBroker();
+  });
+});
+
+describe("describeDisconnect", () => {
+  it("names the reasons a broker kicks a client for", () => {
+    expect(describeDisconnect(152, undefined)).toBe(
+      "broker sent DISCONNECT 152 (Administrative action)",
+    );
+    expect(describeDisconnect(142, undefined)).toBe(
+      "broker sent DISCONNECT 142 (Session taken over)",
+    );
+    expect(describeDisconnect(139, undefined)).toBe(
+      "broker sent DISCONNECT 139 (Server shutting down)",
+    );
+    expect(describeDisconnect(200, undefined)).toBe("broker sent DISCONNECT 200");
+    expect(describeDisconnect(undefined, new Error("Keepalive timeout"))).toBe(
+      "connection closed (Keepalive timeout)",
+    );
+    expect(describeDisconnect(undefined, undefined)).toBe("connection closed (no reason given)");
   });
 });
