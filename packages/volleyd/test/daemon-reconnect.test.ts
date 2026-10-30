@@ -111,6 +111,7 @@ describe("volleyd reconnects after losing the broker (#635)", () => {
     expect((await d.closed).message).toMatch(/broker connection lost: .*DISCONNECT 142/);
     expect(logs.some((l) => l.endsWith("; reconnecting"))).toBe(false);
     // Past the first retry (1 s): nothing came back to fight the new holder for the session.
+    // broker round-trip: a reconnect would run on mqtt.js's own timers; wait past its first retry.
     await new Promise((r) => setTimeout(r, 1500));
     expect(t.broker.dropClient(daemonClientId(NS))).toBe(false);
   });
