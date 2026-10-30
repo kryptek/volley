@@ -74,6 +74,9 @@ describe("volleyd reconnects after losing the broker (#635)", () => {
     await eventually(() => logs.some((l) => l.startsWith("broker connection lost")), {
       what: "the stall to be noticed",
     });
+    // mqtt.js's keepalive (1.5 keepalives) closes it first; checkBroker's own backstop (2
+    // keepalives, then kill()) is defensive and not what this test covers.
+    expect(logs.find((l) => l.startsWith("broker connection lost"))).toMatch(/Keepalive timeout/);
     await eventually(() => logs.some((l) => l.startsWith("broker connection restored")), BACK);
     await expectRecovered();
     expect(ended()).toBe(false);
@@ -95,6 +98,21 @@ describe("volleyd reconnects after losing the broker (#635)", () => {
       what: "the wave's state republished",
     });
     await expectRecovered();
+  });
+
+  it("a session another client took over (DISCONNECT 142) ends the daemon instead of reconnecting", async () => {
+    const d = await t.start({ log: (l) => logs.push(l) });
+    // Aedes speaks MQTT 3.1.1 (no reason codes): stand in for an MQTT 5 broker's DISCONNECT 142.
+    const internals = d as unknown as {
+      broker: { client: { emit(e: string, p: unknown): void } };
+    };
+    internals.broker.client.emit("disconnect", { cmd: "disconnect", reasonCode: 142 });
+    t.broker.dropClient(daemonClientId(NS));
+    expect((await d.closed).message).toMatch(/broker connection lost: .*DISCONNECT 142/);
+    expect(logs.some((l) => l.endsWith("; reconnecting"))).toBe(false);
+    // Past the first retry (1 s): nothing came back to fight the new holder for the session.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(t.broker.dropClient(daemonClientId(NS))).toBe(false);
   });
 
   it("a second drop after a recovery is recovered too", async () => {

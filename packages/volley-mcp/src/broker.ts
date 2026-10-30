@@ -60,8 +60,11 @@ export interface ReconnectOptions {
   /** The first retry's delay; each failed attempt doubles it, up to `maxMs`. */
   baseMs: number;
   maxMs: number;
-  /** Once per outage, when the connection is lost, with `describeDisconnect`'s reason. */
-  onOffline?: (why: string) => void;
+  /**
+   * Once per outage, when the connection is lost, with `describeDisconnect`'s reason and the
+   * broker's DISCONNECT reason code (MQTT 5; undefined when the broker sent none).
+   */
+  onOffline?: (why: string, reasonCode: number | undefined) => void;
   /** When the connection is back; `sessionPresent` is false when the broker lost the session. */
   onReconnected?: (sessionPresent: boolean) => void;
   /**
@@ -191,6 +194,8 @@ function connectClient(
 /**
  * Never reconnect `client` again: no retry after its next close, and none already armed (a plain
  * stream destroy keeps today's crash semantics: no DISCONNECT, and nothing flushed).
+ * `_clearReconnect` is private to mqtt.js: checked against 5.15.1 (the locked version); the
+ * reconnect-mode crash and disconnect tests fail if a later version drops it.
  */
 function stopReconnecting(client: MqttClient): void {
   client.options.reconnectPeriod = 0;
@@ -470,7 +475,10 @@ export class VolleyBroker {
       if (this.client !== client || client.disconnecting || offline) return;
       offline = true;
       const why = describeDisconnect(this.lastReason, this.lastError);
-      reconnect.onOffline?.(this.killedFor !== undefined ? `${this.killedFor}; ${why}` : why);
+      reconnect.onOffline?.(
+        this.killedFor !== undefined ? `${this.killedFor}; ${why}` : why,
+        this.lastReason,
+      );
     });
     client.on("connect", (connack) => {
       client.options.reconnectPeriod = reconnect.baseMs;

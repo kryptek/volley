@@ -17,8 +17,8 @@ import { ghIssueBody } from "../overlap";
 const HELP = `Usage: volleyd daemon [--broker-url <url>] [--namespace <ns>] [--no-spawn] [--no-mint]
 
 Run the supervisor in the foreground until SIGINT/SIGTERM. A lost broker connection is
-reconnected with backoff; after 5 minutes without one it exits 1 (launchd then restarts it). State lives in $VOLLEYD_HOME (default ~/.volley/volleyd);
-only one daemon may use a home at a time. \`volleyd install\` runs this under launchd instead.
+reconnected with backoff; after 5 minutes without one it exits 1 (launchd then restarts it).
+State lives in $VOLLEYD_HOME (default ~/.volley/volleyd); only one daemon may use a home at a time. \`volleyd install\` runs this under launchd instead.
 Broker credentials: $VOLLEYD_HOME/broker.json (mode 0600; \`volley auth init --volleyd-file\`),
 else VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD, else anonymous. Agent logins are minted and
 deleted with the broker's Dynamic Security admin login, $VOLLEYD_HOME/dynsec-admin.json (also

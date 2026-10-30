@@ -930,6 +930,30 @@ describe("VolleyBroker reconnect mode", () => {
     await b.disconnect();
   });
 
+  it("with reconnect on, onOffline gets the broker's DISCONNECT reason code as a number", async () => {
+    const offline: [string, number | undefined][] = [];
+    const b = new VolleyBroker();
+    await b.connect({
+      url: tb.url,
+      agentId: "a",
+      clientId: "volley-a-code",
+      reconnect: {
+        baseMs: 60_000,
+        maxMs: 60_000,
+        onOffline: (why, reasonCode) => offline.push([why, reasonCode]),
+      },
+    });
+    // Aedes speaks MQTT 3.1.1 (no reason codes): stand in for an MQTT 5 broker's DISCONNECT 142.
+    (b as unknown as { client: { emit(e: string, p: unknown): void } }).client.emit("disconnect", {
+      cmd: "disconnect",
+      reasonCode: 142,
+    });
+    tb.dropClient("volley-a-code");
+    await until(() => offline.length === 1, "onOffline");
+    expect(offline[0]).toEqual(["broker sent DISCONNECT 142 (Session taken over)", 142]);
+    await b.disconnect();
+  });
+
   it("with reconnect on, a stalled connection is killed by the keepalive and comes back", async () => {
     const back: boolean[] = [];
     const b = new VolleyBroker();

@@ -1000,6 +1000,8 @@ const secondsMs = (s: number) => s * 1000;
 export const laptopRefusal = (name: string) =>
   `${name} is a laptop: it sleeps and travels; set coordinator.allow_laptop: true to host the coordinator there anyway`;
 
+/** MQTT 5 DISCONNECT reason: another client connected with this clientId (`brokerLost`). */
+const SESSION_TAKEN_OVER = 142;
 /** `$VOLLEYD_HOME/<this>`: the owner stopped the coordinator role (`coordinator_stop`). */
 const COORDINATOR_STOPPED = "coordinator-stopped";
 /** `$VOLLEYD_HOME/<this>`: the coordinator sessions volleyd sent the handoff text, newest last. */
@@ -2215,7 +2217,7 @@ export class Daemon {
       reconnect: {
         baseMs: DAEMON_DEFAULTS.broker_reconnect_base_ms,
         maxMs: DAEMON_DEFAULTS.broker_reconnect_max_ms,
-        onOffline: (why) => this.brokerLost(why),
+        onOffline: (why, reasonCode) => this.brokerLost(why, reasonCode),
         onReconnected: (sessionPresent) => this.brokerBack(sessionPresent),
         onRefused: (e) => this.fail(e),
       },
@@ -2892,6 +2894,7 @@ export class Daemon {
       if (idle > keepalive * 1000 * DAEMON_DEFAULTS.broker_stale_factor) {
         this.broker.kill(`no packet from the broker for ${Math.round(idle / 1000)}s`);
       }
+      this.offlineSince = null;
       return;
     }
     this.offlineSince ??= this.time.now();
@@ -2909,9 +2912,13 @@ export class Daemon {
    * hand-over or broker move: the move's end decides (`moveFinished`). A session another client
    * took over (the same clientId) is another volleyd's: never fight it for the session.
    */
-  private brokerLost(why: string): void {
+  private brokerLost(why: string, reasonCode: number | undefined): void {
     this.offlineSince ??= this.time.now();
-    if (this.handingOver !== null || this.brokerMoving !== null || / 142 /.test(`${why} `)) {
+    if (
+      this.handingOver !== null ||
+      this.brokerMoving !== null ||
+      reasonCode === SESSION_TAKEN_OVER
+    ) {
       this.broker.stopReconnecting();
       this.fail(new Error(`broker connection lost: ${why}`));
       return;
