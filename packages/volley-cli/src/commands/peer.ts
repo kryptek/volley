@@ -112,7 +112,7 @@ const HELP = `Usage:
                        [--repo-add <owner/name>[=<path>]]... [--repo-remove <owner/name>]...
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
                        [--sharing <json>] [--supervisor-volley-dir <path>]
-                       [--probe-login <profile>]
+                       [--git-email <owner/name>=<email>]... [--probe-login <profile>]
                                                Check this machine; --fix applies the safe fixes
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
@@ -176,6 +176,10 @@ doctor options:
                            The checkout the supervisor launches this machine's agents from
                            (its hosts.<name>.volley_dir; volleyd's Repair passes it): every
                            volley MCP entry must run it as well as this checkout
+  --git-email <owner/name>=<email>
+                           The email a repository's commits are expected under (repeatable;
+                           default: the supervisor's, read through the tunnel): repo.identity
+                           fails on a clone that would commit under another
   --probe-login <profile>  Only the usage probe of one Claude login (\`default\` or a profile
                            id), no checks: what volleyd runs to prime a login it signed in
 
@@ -213,6 +217,7 @@ const OPTIONS = {
   sharing: { type: "string" },
   "supervisor-volley-dir": { type: "string" },
   "probe-login": { type: "string" },
+  "git-email": { type: "string", multiple: true },
   ttl: { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
@@ -235,6 +240,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   sharing: ["doctor"],
   "supervisor-volley-dir": ["doctor"],
   "probe-login": ["doctor"],
+  "git-email": ["doctor"],
   for: ["invite"],
   replace: ["join"],
   tunnel: ["join", "retarget"],
@@ -1707,24 +1713,45 @@ async function connectPeer(
   });
 }
 
+/** What the supervisor requires of this machine (`requirements`). */
+interface Requirements {
+  volley: string | null;
+  sharing: Sharing | null;
+  /** `requirements.repos`: the email each repository's commits are expected under (#638). */
+  gitEmails: Record<string, string>;
+}
+
+/** An email as `repos.<owner/name>.git_email` admits it (config.schema.json). */
+export const isGitEmail = (v: unknown): v is string =>
+  typeof v === "string" &&
+  v.length <= 254 &&
+  /^[^\s@<>"'`$\\-][^\s@<>"'`$\\]*@[^\s@<>"'`$\\]+$/.test(v);
+
 /**
  * What the supervisor requires of this machine, from its retained readiness verdict, believed
- * only from the supervisor's own identities (SPEC §4.6.15): `requirements.volley`, and the
- * sharing modes its doctor applies to the Claude profile (`requirements.sharing`, §4.6.11; null
- * when absent or invalid).
+ * only from the supervisor's own identities (SPEC §4.6.15): `requirements.volley`, the sharing
+ * modes its doctor applies to the Claude profile (`requirements.sharing`, §4.6.11; null when
+ * absent or invalid), and each repository's expected git email (`requirements.repos`).
  */
-async function requirements(
-  broker: VolleyBroker,
-  name: string,
-): Promise<{ volley: string | null; sharing: Sharing | null }> {
-  const none = { volley: null, sharing: null };
+async function requirements(broker: VolleyBroker, name: string): Promise<Requirements> {
+  const none = { volley: null, sharing: null, gitEmails: {} };
   const raw = await broker
     .queryRetained(`${machineTopic(name)}/readiness`, PEER_DEFAULTS.readiness_wait_ms)
     .catch(() => null);
   const e = raw !== null ? parseEnvelope(raw) : null;
   if (e === null || !["volleyd", "supervisor"].includes(e.agent_id)) return none;
-  const req = (e.payload as { requirements?: { volley?: unknown; sharing?: unknown } } | null)
-    ?.requirements;
+  const req = (
+    e.payload as {
+      requirements?: { volley?: unknown; sharing?: unknown; repos?: unknown };
+    } | null
+  )?.requirements;
+  const gitEmails: Record<string, string> = {};
+  if (typeof req?.repos === "object" && req.repos !== null && !Array.isArray(req.repos)) {
+    for (const [slug, r] of Object.entries(req.repos as Record<string, unknown>)) {
+      const email = (r as { git_email?: unknown } | null)?.git_email;
+      if (isSlug(slug) && isGitEmail(email)) gitEmails[slug] = email;
+    }
+  }
   const v = req?.volley;
   let sharing: Sharing | null = null;
   if (typeof req?.sharing === "object" && req.sharing !== null) {
@@ -1737,6 +1764,7 @@ async function requirements(
     // Never one that starts with "-": it ends up in a git argv.
     volley: typeof v === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(v) ? v : null,
     sharing,
+    gitEmails,
   };
 }
 
@@ -1763,6 +1791,7 @@ async function peerDoctor(
     ...repoOptions(cfg),
     requiredVolley: req?.volley ?? null,
     profile: peerProfile(cfg, req?.sharing ?? null, "supervisor"),
+    ...(req !== null && Object.keys(req.gitEmails).length > 0 ? { gitEmails: req.gitEmails } : {}),
   });
   return report;
 }
@@ -2133,6 +2162,17 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
       return EXIT.USAGE;
     }
   }
+  const flagEmails: Record<string, string> = {};
+  for (const value of v["git-email"] ?? []) {
+    const at = value.indexOf("=");
+    const slug = value.slice(0, at);
+    const email = value.slice(at + 1);
+    if (at < 0 || !isSlug(slug) || !isGitEmail(email)) {
+      io.stderr(`volley peer doctor: --git-email "${value}" is not <owner/name>=<email>\n`);
+      return EXIT.USAGE;
+    }
+    flagEmails[slug] = email;
+  }
   const supervisorDir = v["supervisor-volley-dir"];
   if (supervisorDir !== undefined && !isAbsolute(supervisorDir)) {
     io.stderr("volley peer doctor: --supervisor-volley-dir must be an absolute path\n");
@@ -2177,7 +2217,7 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
       "volley peer doctor: this machine is not paired (no peer.json): --repo-add and --repo-remove apply to this run only\n",
     );
   }
-  let req: { volley: string | null; sharing: Sharing | null } = { volley: null, sharing: null };
+  let req: Requirements = { volley: null, sharing: null, gitEmails: {} };
   let tunnelUp = false;
   if (cfg !== null) {
     const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
@@ -2188,6 +2228,8 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     }
   }
   const required = req.volley;
+  // --git-email: by hand, or the supervisor's own doctor run; over the verdict's, per repository.
+  const gitEmails = { ...req.gitEmails, ...flagEmails };
   // --repo checks that one clone; else peer.json's repositories (or its legacy clone).
   const flagRepo = v.repo?.[0];
   const opts: DoctorOptions = {
@@ -2210,6 +2252,7 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     yes: v.yes === true,
     clone: v.clone === true,
     ...(supervisorDir !== undefined ? { volleyDir: supervisorDir } : {}),
+    ...(Object.keys(gitEmails).length > 0 ? { gitEmails } : {}),
     // A paired machine: whether it reaches its supervisor (online, the tunnel, volleyd live).
     ...(cfg !== null ? { reach: peerReach(cfg) } : {}),
   };

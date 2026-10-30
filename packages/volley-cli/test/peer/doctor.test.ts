@@ -1613,6 +1613,44 @@ describe("volley peer doctor: many repositories (#435)", () => {
         expect(check(r, "git.identity")?.detail).toContain("every repository's clone sets its own");
       });
 
+      it("#638 an expected email: a clone committing under another fails the block check with the config fix; the same email (any case) passes; the legacy --repo run takes it too", async () => {
+        const m = machine();
+        const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+        addClone(m, repos["a/a"], {
+          origin: "git@github.com:a/a.git",
+          identity: "Dev <other@example.com>",
+        });
+        addClone(m, repos["b/b"], {
+          origin: "git@github.com:b/b.git",
+          identity: "Dev <Dev@Example.com>",
+        });
+        const r = await reportRepos(m, repos, {
+          gitEmails: { "A/A": "dev@example.com", "b/b": "dev@example.com" },
+        });
+        const a = forRepo(r, "repo.identity", "a/a");
+        expect(a).toMatchObject({ ok: false, severity: "block" });
+        expect(a?.detail).toBe("commits as Dev <other@example.com>, expected dev@example.com");
+        expect(a?.fix).toBe(`git -C ${repos["a/a"]} config user.email dev@example.com`);
+        expect(forRepo(r, "repo.identity", "b/b")).toMatchObject({ ok: true });
+        // The machine-level line is untouched.
+        expect(check(r, "git.identity")).toMatchObject({ ok: true });
+        // No expectation: unchanged.
+        expect(forRepo(await reportRepos(m, repos), "repo.identity", "a/a")).toMatchObject({
+          ok: true,
+        });
+        box?.cleanup();
+        const legacy = machine();
+        Object.assign(legacy.state, { identity: REPO_ID });
+        const l = await report(legacy, {
+          gitEmails: { "example-org/example-repo": "dev@example.com" },
+        });
+        expect(check(l, "repo.identity")).toMatchObject({
+          ok: false,
+          detail: `commits as ${REPO_ID}, expected dev@example.com`,
+          fix: `git -C ${legacy.repoPath} config user.email dev@example.com`,
+        });
+      });
+
       it("no git: no repo.identity line", async () => {
         const r = await report(machine({ tools: { git: { path: null, sshPath: null } } }));
         expect(r.checks.some((x) => x.id === "repo.identity")).toBe(false);

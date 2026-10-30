@@ -1795,6 +1795,29 @@ describe("volley peer run (the service)", () => {
     expect(f.calls.some((c) => c.argv[1] === "-N")).toBe(true);
   });
 
+  it("#638 the service's doctor applies the verdict's requirements.repos; another agent's verdict is ignored", async () => {
+    writeCfg({ repo: box.repoPath });
+    const identity = (records: string[]) =>
+      records
+        .map(
+          (r) =>
+            parseEnvelope(r)?.payload as { checks?: { id: string; ok: boolean; detail: string }[] },
+        )
+        .flatMap((p) => p?.checks ?? [])
+        .filter((c) => c.id === "repo.identity")
+        .at(-1);
+    const expects = { repos: { "example-org/example-repo": { git_email: "dev@example.com" } } };
+    // Not the supervisor's identity: not believed.
+    await readiness("someone-else", { requirements: { volley: "0.5.0", ...expects } });
+    const ignored = await heartbeats(2);
+    expect(identity(ignored.records)).toMatchObject({ ok: true });
+    await readiness("volleyd", { requirements: { volley: "0.5.0", ...expects } });
+    const { records } = await heartbeats(2);
+    const c = identity(records);
+    expect(c).toMatchObject({ ok: false });
+    expect(c?.detail).toContain("expected dev@example.com");
+  });
+
   const lastSeen = (raw: string) =>
     (parseEnvelope(raw)?.payload as { last_seen?: string; tunnel?: string } | undefined) ?? {};
 
