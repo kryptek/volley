@@ -548,6 +548,15 @@ describe("machineBlock and the closing line", () => {
     // No expectation in config: the generic identity fix, whatever the detail claims.
     const none = block("commits as X <x@y>, expected evil;rm@x", "/c");
     expect(none.find((c) => c.id === "repo.identity")?.fix).not.toContain("evil");
+    // No identity at all: setting the email alone does not fix it, even with one in config.
+    const missing = block(
+      "no commit identity in /c (user.name/user.email): …",
+      "/c",
+      "dev@example.com",
+    );
+    expect(missing.find((c) => c.id === "repo.identity")?.fix).toBe(
+      'git -C /c config user.name "<name>" && git -C /c config user.email <email>, or volley setup --peer --step signin',
+    );
   });
 });
 

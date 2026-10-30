@@ -240,11 +240,15 @@ function protectionCheck(f: RepoFacts, b: string): RepoCheck {
 const MACHINE_LINES = ["gh.auth", "git.identity", "claude.signin", "claude.trust"];
 
 /** A record carries no fix text: these are the ones a machine block names without a fresh doctor. */
-const RECORD_FIXES: Record<string, (slug: string, clone: string, gitEmail?: string) => string> = {
+const RECORD_FIXES: Record<
+  string,
+  (slug: string, clone: string, gitEmail: string | undefined, detail: string) => string
+> = {
   "git.identity": () => "volley setup --peer --step signin",
-  // Another email than the repository expects (#638): config's, never the record's text (a peer wrote it).
-  "repo.identity": (_slug, clone, gitEmail) =>
-    gitEmail !== undefined
+  // Another email than the repository expects (#638): config's, never the record's text (a peer wrote
+  // it). No identity at all ("no commit identity …") needs a name too: the generic fix.
+  "repo.identity": (_slug, clone, gitEmail, detail) =>
+    gitEmail !== undefined && detail.startsWith("commits as ")
       ? `git -C ${shellArg(clone)} config user.email ${shellArg(gitEmail)}`
       : identityFix(clone),
   "gh.auth": () => "gh auth login && gh auth setup-git",
@@ -316,7 +320,7 @@ export function machineBlock(
     const recordFix =
       from.own === true && c.id.startsWith("repo.") && c.id !== "repo.identity"
         ? OWN_FIX
-        : RECORD_FIXES[c.id]?.(slug, clonePathOf(record, slug), from.gitEmail);
+        : RECORD_FIXES[c.id]?.(slug, clonePathOf(record, slug), from.gitEmail, c.detail);
     const fix = c.fix ?? (!c.ok ? recordFix : undefined);
     return {
       id: c.id,
