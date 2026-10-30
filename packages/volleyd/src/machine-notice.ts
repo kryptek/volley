@@ -45,10 +45,7 @@ export interface SilentMachineInput {
   prior: InboxItem | undefined;
 }
 
-const minutes = (ms: number) => {
-  const m = Math.max(1, Math.round(ms / 60_000));
-  return m < 120 ? `${m} min` : `${Math.round(m / 60)} h`;
-};
+const minutes = (ms: number) => `${Math.max(1, Math.round(ms / 60_000))} min`;
 
 /** The notice to open for a silent machine, or null (not silent long enough, or already told). */
 export function silentMachineNotice(i: SilentMachineInput): NoticeSpec | null {
