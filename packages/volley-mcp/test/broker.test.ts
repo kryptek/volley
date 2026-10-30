@@ -146,6 +146,26 @@ describe("VolleyBroker connect / disconnect / LWT", () => {
     expect(gotWill).toBe(false);
     await observer.endAsync();
   });
+  it("disconnect() settles after the broker closed the socket under an unacknowledged QoS 1 publish", async () => {
+    tb.aedes.authorizePublish = (client, packet, done) => {
+      if (packet.topic === "volley/test/kick") {
+        client?.conn.destroy();
+        return;
+      }
+      done(null);
+    };
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "agent-kick" });
+    await expect(
+      b.publish("volley/test/kick", "{}", { qos: 1, retain: false }),
+    ).rejects.toMatchObject({ code: "BROKER_DOWN" });
+    const settled = await Promise.race([
+      b.disconnect().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    expect(settled).toBe("settled");
+    expect(b.connected).toBe(false);
+  });
 });
 
 describe("VolleyBroker publish / queryRetained", () => {

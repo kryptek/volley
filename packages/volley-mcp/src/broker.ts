@@ -131,6 +131,9 @@ function connectClient(
   });
 }
 
+/** How long a clean `disconnect()` waits for DISCONNECT to go out before it forces the end. */
+const DISCONNECT_FORCE_MS = 2000;
+
 /** Thin wrapper over an MQTT client — the only module in volley-mcp that imports `mqtt`. */
 export class VolleyBroker {
   private client: MqttClient | null = null;
@@ -282,11 +285,33 @@ export class VolleyBroker {
   }
 
   /** Clean disconnect — sends a DISCONNECT packet, which suppresses the LWT. */
+  /**
+   * End the connection; always settles. A live one sends DISCONNECT (so the broker does not
+   * fire the LWT), falling back to force after DISCONNECT_FORCE_MS. A dropped one is ended
+   * with force: mqtt.js's plain `end()` waits for its outgoing QoS 1 publishes to drain, which
+   * on a closed socket that never reconnects is never.
+   */
   async disconnect(): Promise<void> {
-    if (this.client === null) return;
-    await this.client.endAsync();
-    this.client = null;
-    this.resetConnectionState();
+    const client = this.client;
+    if (client === null) return;
+    try {
+      if (!client.connected) {
+        await client.endAsync(true);
+      } else {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const forced = new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            client.endAsync(true).then(resolve, () => resolve());
+          }, DISCONNECT_FORCE_MS);
+        });
+        await Promise.race([client.endAsync(), forced]).finally(() => clearTimeout(timer));
+      }
+    } finally {
+      if (this.client === client) {
+        this.client = null;
+        this.resetConnectionState();
+      }
+    }
   }
 
   /** Test/crash helper: destroy the socket with no DISCONNECT so the broker fires the LWT. */

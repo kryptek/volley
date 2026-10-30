@@ -1438,11 +1438,12 @@ describe("volley peer run (the service)", () => {
     const unsubscribe = await reader.subscribeStream(machineTopic("box-a"), ({ payload }) => {
       records.push(payload);
     });
-    const code = await runService(makeBufferIO(), d, stop.signal);
+    const io = makeBufferIO();
+    const code = await runService(io, d, stop.signal);
     await new Promise((r) => setTimeout(r, 100));
     await unsubscribe();
     await reader.disconnect();
-    return { code, records, f };
+    return { code, records, f, stderr: io.readStderr() };
   }
 
   it("embeds the doctor in every heartbeat; the record validates against machine.schema.json", async () => {
@@ -1792,6 +1793,105 @@ describe("volley peer run (the service)", () => {
     expect(code).toBe(0);
     expect(io.readStderr()).toContain("unpaired");
     expect(f.calls.some((c) => c.argv[1] === "-N")).toBe(true);
+  });
+
+  const lastSeen = (raw: string) =>
+    (parseEnvelope(raw)?.payload as { last_seen?: string; tunnel?: string } | undefined) ?? {};
+
+  it("a connection lost mid-publish is dropped, logged and reopened on the next beat", async () => {
+    writeCfg();
+    // The broker closes the peer's connection under its second heartbeat (no PUBACK ever comes).
+    let peerPublishes = 0;
+    tb.aedes.authorizePublish = (client, packet, done) => {
+      if (client?.id.startsWith("volley-peer-test") && packet.topic === machineTopic("box-a")) {
+        if (++peerPublishes === 2) {
+          client.conn.destroy();
+          return;
+        }
+      }
+      done(null);
+    };
+    const { code, records, stderr } = await heartbeats(5);
+    expect(code).toBe(0);
+    const ups = records.map(lastSeen).filter((p) => p.tunnel === "up");
+    const seen = ups.map((p) => p.last_seen ?? "");
+    expect(seen.length).toBeGreaterThanOrEqual(3);
+    // Records resume after the loss, with a newer last_seen.
+    expect(seen.at(-1)! > seen[0]!).toBe(true);
+    expect(stderr.match(/broker connection lost/g)?.length).toBe(1);
+    expect(stderr.match(/broker connected/g)?.length).toBe(2);
+    expect(stderr).not.toContain("peer-secret");
+  });
+
+  it("no heartbeat published for reconnect_give_up_ms ends the service with exit 1", async () => {
+    writeCfg();
+    let t = 0;
+    let sleeps = 0;
+    const stop = new AbortController();
+    const d = deps(fakeExec(() => ({})).exec, {
+      monotonic: () => t,
+      connect: async () => {
+        throw new VolleyError("BROKER_DOWN", "could not connect to mqtt://127.0.0.1:21883");
+      },
+      sleep: async (ms) => {
+        if (ms !== PEER_DEFAULTS.heartbeat_ms) return;
+        // A safety net: the service must end on its own long before this.
+        if (++sleeps > 100) stop.abort();
+        t += ms;
+        await new Promise((r) => setTimeout(r, 1));
+      },
+    });
+    const io = makeBufferIO();
+    const code = await runService(io, d, stop.signal);
+    expect(code).toBe(EXIT.ERROR);
+    expect(sleeps).toBeLessThan(100);
+    expect(t).toBeGreaterThanOrEqual(PEER_DEFAULTS.reconnect_give_up_ms);
+    expect(io.readStderr()).toContain(`${PEER_DEFAULTS.reconnect_give_up_ms / 1000} s`);
+    expect(io.readStderr()).toContain("the service manager restarts it");
+    expect(io.readStderr()).toMatch(/reconnect attempt 1 failed: could not connect/);
+    expect(io.readStderr()).not.toContain("peer-secret");
+  });
+
+  it("a step that never settles is given up after the beat bound and the service goes on", async () => {
+    writeCfg();
+    let connects = 0;
+    const real = deps(fakeExec(() => ({})).exec);
+    const { code, records, stderr } = await heartbeats(
+      4,
+      fakeExec(() => ({})),
+      {
+        over: {
+          timeouts: { beat_ms: 200 },
+          connect: (url, auth, will) => {
+            if (++connects === 1) return new Promise<never>(() => {});
+            return real.connect(url, auth, will);
+          },
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(stderr).toContain("heartbeat given up after 200 ms");
+    expect(records.map(lastSeen).some((p) => p.tunnel === "up")).toBe(true);
+  });
+
+  it("tunnelArgv disables ssh multiplexing and bounds keepalives", () => {
+    const argv = tunnelArgv(cfg);
+    expect(argv).toContain("ControlMaster=no");
+    expect(argv).toContain("ControlPath=none");
+    expect(argv).toContain(`ServerAliveCountMax=${PEER_DEFAULTS.ssh_alive_count_max}`);
+    expect(argv.at(-1)).toBe(cfg.host);
+  });
+
+  it("the record's agent count is bounded", async () => {
+    const seen: (number | undefined)[] = [];
+    const exec: PeerExec = async (argv, opts = {}) => {
+      if (argv[0] === "tmux") seen.push(opts.timeoutMs);
+      return { code: 0, stdout: "a\nb\n", stderr: "" };
+    };
+    const env = await machineEnvelope(deps(exec), cfg, "up");
+    expect((parseEnvelope(env)?.payload as { agents?: number }).agents).toBe(2);
+    expect(seen.length).toBeGreaterThan(0);
+    for (const ms of seen) expect(ms).toBeGreaterThan(0);
   });
 
   it("without peer.json there is nothing to run", async () => {

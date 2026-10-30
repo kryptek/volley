@@ -284,6 +284,20 @@ export const PEER_DEFAULTS = {
    */
   republish_poll_ms: 2_000,
   republish_polls: 45,
+  /**
+   * `run`: one heartbeat (repos, connect, publish) that has not finished in this long is given up
+   * and its connection dropped, so a step that never settles cannot stop the service.
+   */
+  beat_timeout_ms: 60_000,
+  /** `run`: how long dropping a lost connection may take before it is abandoned. */
+  disconnect_timeout_ms: 2_000,
+  /**
+   * `run`: no heartbeat published for this long ends the service with exit 1, and the service
+   * manager (Restart=on-failure, KeepAlive) restarts it.
+   */
+  reconnect_give_up_ms: 600_000,
+  /** The record's agent count: how long `tmux list-sessions` may take. */
+  tmux_timeout_ms: 10_000,
 } as const;
 
 export const SYSTEMD_UNIT = "volley-peer.service";
@@ -343,6 +357,8 @@ export interface PeerDeps extends DoctorDeps {
   which?: (cmd: string) => string | null;
   /** Whether this machine is a laptop (`isLaptop`: a battery); absent: not reported. */
   laptop?: () => Promise<boolean>;
+  /** `run`'s real-time bounds (default PEER_DEFAULTS' beat_timeout_ms, disconnect_timeout_ms). */
+  timeouts?: { beat_ms?: number; disconnect_ms?: number };
 }
 
 /** `~/.volley/peer.json`: what `run` needs (mode 0600: it holds the peer's password). */
@@ -1577,7 +1593,11 @@ export const machineTopic = (name: string) => `volley/_system/machines/${name}`;
 
 /** Agent sessions on this machine: its tmux sessions (0 when no tmux server runs). */
 async function agentCount(deps: PeerDeps): Promise<number> {
-  const r = await deps.exec(["tmux", "list-sessions", "-F", "#{session_name}"]).catch(() => null);
+  const r = await deps
+    .exec(["tmux", "list-sessions", "-F", "#{session_name}"], {
+      timeoutMs: PEER_DEFAULTS.tmux_timeout_ms,
+    })
+    .catch(() => null);
   if (r === null || r.code !== 0) return 0;
   return r.stdout.split("\n").filter((l) => l.trim() !== "").length;
 }
@@ -1798,7 +1818,10 @@ async function register(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport): Promi
   return false;
 }
 
-/** `ssh -N -L 127.0.0.1:<port>:<broker>`: this machine's port reaches the host's broker. */
+/**
+ * `ssh -N -L 127.0.0.1:<port>:<broker>`: this machine's port reaches the host's broker, over its
+ * own connection (no multiplexing), dropped after `ssh_alive_count_max` unanswered keepalives.
+ */
 export function tunnelArgv(cfg: PeerConfig): string[] {
   return [
     "ssh",
@@ -1812,7 +1835,14 @@ export function tunnelArgv(cfg: PeerConfig): string[] {
     "-o",
     `ServerAliveInterval=${PEER_DEFAULTS.ssh_alive_interval_s}`,
     "-o",
+    `ServerAliveCountMax=${PEER_DEFAULTS.ssh_alive_count_max}`,
+    "-o",
     `ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s}`,
+    // A dedicated connection: never a shared master whose forked process outlives this ssh.
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
     cfg.host,
   ];
 }
@@ -1842,10 +1872,24 @@ function doctorWatch(deps: PeerDeps): string {
   return JSON.stringify([...doctorInputs(deps.volleyDir), peerDoctorStamp(deps.home)].map(stat));
 }
 
+/** `p`, or a rejection with `why` once `ms` pass (the timer never keeps the process alive). */
+function bounded<T>(p: Promise<T>, ms: number, why: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(why)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * The service: keep the tunnel up (restarting ssh with backoff) and publish the machine record
- * every heartbeat through it. Ends with exit 0 when the broker refuses the peer account (it was
- * revoked: the service manager leaves it stopped), or when `signal` aborts (tests).
+ * every heartbeat through it. A lost connection is dropped (bounded) and reopened on the next
+ * heartbeat; every heartbeat is bounded by `beat_timeout_ms`. Ends with exit 1 when no heartbeat
+ * went out for `reconnect_give_up_ms` (the service manager restarts it), with exit 0 when the
+ * broker refuses the peer account (it was revoked: the service manager leaves it stopped), or
+ * when `signal` aborts (tests). Logs connects, losses, reconnect attempts and tunnel starts and
+ * exits, never a credential.
  */
 export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): Promise<ExitCode> {
   let cfg: PeerConfig;
@@ -1863,6 +1907,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
     let backoff: number = PEER_DEFAULTS.tunnel_restart_ms;
     while (peerTunnel(cfg) === "ssh" && !stop.signal.aborted) {
       const started = deps.now().getTime();
+      io.stderr(`volley peer run: tunnel: ssh started (${cfg.host})\n`);
       const r = await deps.exec(tunnelArgv(cfg), { signal: stop.signal }).catch((e: unknown) => ({
         code: -1,
         stdout: "",
@@ -1920,6 +1965,64 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
         doctoring = false;
       });
   };
+  const beatMs = deps.timeouts?.beat_ms ?? PEER_DEFAULTS.beat_timeout_ms;
+  const disconnectMs = deps.timeouts?.disconnect_ms ?? PEER_DEFAULTS.disconnect_timeout_ms;
+  // A lost connection: dropped within disconnectMs whatever state its socket is in.
+  const dropBroker = async () => {
+    const b = broker;
+    broker = null;
+    if (b === null) return;
+    await bounded(b.disconnect(), disconnectMs, "disconnect timed out").catch(() => {});
+  };
+  // When a heartbeat last went out (from the start, too): past reconnect_give_up_ms, exit 1.
+  let publishedAt = deps.monotonic();
+  let attempts = 0;
+  let beatNo = 0;
+  const beat = async (mine: number) => {
+    cfg = await freshRepos(deps, cfg);
+    if (broker === null) {
+      const fresh = await connectPeer(deps, cfg, report);
+      // This beat was given up while it connected: the next one has its own connection.
+      if (mine !== beatNo || stop.signal.aborted) {
+        await bounded(fresh.disconnect(), disconnectMs, "disconnect timed out").catch(() => {});
+        return;
+      }
+      broker = fresh;
+      attempts = 0;
+      io.stderr(`volley peer run: broker connected (${brokerThroughTunnel(cfg)})\n`);
+    }
+    // Dropped from here on if this beat is given up: keep publishing on the one it started.
+    const b = broker;
+    const now = deps.monotonic();
+    const inputs = doctorWatch(deps);
+    if (
+      !doctoring &&
+      (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000 || inputs !== doctoredOn)
+    ) {
+      const first = doctorAt === Number.NEGATIVE_INFINITY;
+      doctorAt = now;
+      doctoredOn = inputs;
+      const run = startDoctor(b);
+      // The first run, at start: the first record waits a little for it, so readiness never
+      // carries the last run before this start (a stale install verdict after an upgrade).
+      if (first) {
+        const waited = new AbortController();
+        const stopWaiting = () => waited.abort();
+        stop.signal.addEventListener("abort", stopWaiting);
+        await Promise.race([
+          run,
+          deps.sleep(PEER_DEFAULTS.first_doctor_wait_ms, waited.signal).catch(() => {}),
+        ]);
+        waited.abort();
+        stop.signal.removeEventListener("abort", stopWaiting);
+      }
+    }
+    await b.publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "up", report), {
+      qos: 1,
+      retain: true,
+    });
+    if (mine === beatNo) publishedAt = deps.monotonic();
+  };
   try {
     while (!stop.signal.aborted) {
       // heartbeat: false (the supervisor's own machine publishes its own record): only the tunnel.
@@ -1927,38 +2030,9 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
         await deps.sleep(PEER_DEFAULTS.heartbeat_ms, stop.signal);
         continue;
       }
+      const mine = ++beatNo;
       try {
-        cfg = await freshRepos(deps, cfg);
-        broker ??= await connectPeer(deps, cfg, report);
-        const now = deps.monotonic();
-        const inputs = doctorWatch(deps);
-        if (
-          !doctoring &&
-          (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000 || inputs !== doctoredOn)
-        ) {
-          const first = doctorAt === Number.NEGATIVE_INFINITY;
-          doctorAt = now;
-          doctoredOn = inputs;
-          const run = startDoctor(broker);
-          // The first run, at start: the first record waits a little for it, so readiness never
-          // carries the last run before this start (a stale install verdict after an upgrade).
-          if (first) {
-            const waited = new AbortController();
-            const stopWaiting = () => waited.abort();
-            stop.signal.addEventListener("abort", stopWaiting);
-            await Promise.race([
-              run,
-              deps.sleep(PEER_DEFAULTS.first_doctor_wait_ms, waited.signal).catch(() => {}),
-            ]);
-            waited.abort();
-            stop.signal.removeEventListener("abort", stopWaiting);
-          }
-        }
-        await broker.publish(
-          machineTopic(cfg.name),
-          await machineEnvelope(deps, cfg, "up", report),
-          { qos: 1, retain: true },
-        );
+        await bounded(beat(mine), beatMs, `heartbeat given up after ${beatMs} ms`);
       } catch (e) {
         if (e instanceof VolleyError && e.code === "AUTH_FAILED") {
           io.stderr(
@@ -1966,9 +2040,26 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
           );
           break;
         }
-        // The tunnel is down or restarting: the next heartbeat tries again.
-        await broker?.disconnect().catch(() => {});
-        broker = null;
+        // The VolleyError's message names the URL and the account, never the password.
+        const why = e instanceof Error ? e.message : String(e);
+        // The tunnel is down or restarting, or a step hung: the next heartbeat tries again.
+        if (broker !== null) {
+          io.stderr(`volley peer run: broker connection lost: ${why}; reconnecting\n`);
+        } else {
+          attempts++;
+          io.stderr(`volley peer run: reconnect attempt ${attempts} failed: ${why}\n`);
+        }
+        // Whatever the beat still runs belongs to no beat now.
+        beatNo++;
+        await dropBroker();
+        const silent = deps.monotonic() - publishedAt;
+        if (silent >= PEER_DEFAULTS.reconnect_give_up_ms) {
+          io.stderr(
+            `volley peer run: no heartbeat went out for ${Math.round(silent / 1000)} s (the bound is ${PEER_DEFAULTS.reconnect_give_up_ms / 1000} s): exiting 1, the service manager restarts it\n`,
+          );
+          exit = EXIT.ERROR;
+          break;
+        }
       }
       await deps.sleep(PEER_DEFAULTS.heartbeat_ms, stop.signal);
     }
@@ -1979,15 +2070,16 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
     signal?.removeEventListener("abort", onAbort);
     stop.abort();
     await tunnel;
-    // A clean disconnect suppresses the LWT: say the tunnel is down ourselves.
-    if (broker !== null) {
-      await broker
+    // A clean disconnect suppresses the LWT: say the tunnel is down ourselves. (`beat` sets it.)
+    const last = broker as VolleyBroker | null;
+    if (last !== null) {
+      await last
         .publish(machineTopic(cfg.name), await machineEnvelope(deps, cfg, "down", report), {
           qos: 1,
           retain: true,
         })
         .catch(() => {});
-      await broker.disconnect().catch(() => {});
+      await dropBroker();
     }
   }
   return exit;
