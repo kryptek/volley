@@ -1846,6 +1846,61 @@ describe("volley peer run (the service)", () => {
     expect(stderr).not.toContain("peer-secret");
   });
 
+  it("a tunnel that drops mid-service is restarted with backoff, logged, and the heartbeats resume", async () => {
+    writeCfg();
+    // The first ssh -N runs until the test drops it; every later one runs until the stop.
+    let dropTunnel = () => {};
+    let tunnels = 0;
+    const backoffs: number[] = [];
+    const base = fakeExec(() => ({}));
+    const exec: PeerExec = async (argv, opts = {}) => {
+      if (argv[0] === "ssh" && argv[1] === "-N" && ++tunnels === 1) {
+        base.calls.push({ argv });
+        await new Promise<void>((r) => {
+          dropTunnel = r;
+          opts.signal?.addEventListener("abort", () => r());
+        });
+        return { code: 255, stdout: "", stderr: "client_loop: send disconnect: Broken pipe" };
+      }
+      return base.exec(argv, opts);
+    };
+    const { code, records, stderr } = await heartbeats(
+      6,
+      { exec, calls: base.calls },
+      {
+        between: (beat) => {
+          if (beat !== 2) return;
+          // The tunnel goes, and the broker connection that ran through it with it.
+          dropTunnel();
+          for (const c of Object.values(tb.aedes.clients)) {
+            if (c.id.startsWith("volley-peer-test")) c.conn.destroy();
+          }
+        },
+        deps: (d) => {
+          const sleep = d.sleep;
+          d.sleep = async (ms, signal) => {
+            if (ms === PEER_DEFAULTS.tunnel_restart_ms) backoffs.push(ms);
+            return sleep(ms, signal);
+          };
+        },
+      },
+    );
+    expect(code).toBe(0);
+    expect(tunnels).toBe(2);
+    expect(backoffs).toEqual([PEER_DEFAULTS.tunnel_restart_ms]);
+    expect(stderr.match(/tunnel: ssh started/g)?.length).toBe(2);
+    expect(stderr).toContain("tunnel exited 255: client_loop: send disconnect: Broken pipe");
+    // The order: started, exited, started again; then the broker is reconnected.
+    const exited = stderr.indexOf("tunnel exited 255");
+    expect(stderr.indexOf("tunnel: ssh started", exited)).toBeGreaterThan(exited);
+    expect(stderr.match(/broker connected/g)?.length).toBeGreaterThanOrEqual(2);
+    const ups = records.map(lastSeen).filter((p) => p.tunnel === "up");
+    const seen = ups.map((p) => p.last_seen ?? "");
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    expect((seen.at(-1) ?? "") > (seen[1] ?? "")).toBe(true);
+    expect(stderr).not.toContain("peer-secret");
+  });
+
   it("no heartbeat published for reconnect_give_up_ms ends the service with exit 1", async () => {
     writeCfg();
     let t = 0;
