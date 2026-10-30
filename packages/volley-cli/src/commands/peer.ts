@@ -57,12 +57,15 @@ import {
   runDoctor,
 } from "../peer/doctor";
 import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
+import { LAUNCHD_LABEL, SYSTEMD_UNIT } from "../peer/units";
 import { PROBE_DEFAULTS, realUsageFetch } from "../peer/usage-probe";
 import { readNetworkRecord } from "../setup/journal";
 import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { realProbes } from "../supervisor/probes";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
+
+export { LAUNCHD_LABEL, SYSTEMD_UNIT };
 
 export { isRepoTrusted };
 
@@ -306,10 +309,8 @@ export const PEER_DEFAULTS = {
   tmux_timeout_ms: 10_000,
 } as const;
 
-export const SYSTEMD_UNIT = "volley-peer.service";
 /** The broker's port on its own machine when nothing says otherwise (`join --tunnel none`). */
 const DEFAULT_BROKER_PORT = 1883;
-export const LAUNCHD_LABEL = "systems.volley.peer";
 const LIVE = new Set(["spawning", "registered", "working"]);
 const PROBE_MS = 1_000;
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;

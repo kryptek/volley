@@ -1852,6 +1852,19 @@ describe("volley peer run (the service)", () => {
     let dropTunnel = () => {};
     let tunnels = 0;
     const backoffs: number[] = [];
+    let kick = false;
+    tb.aedes.authorizePublish = (client, packet, done) => {
+      if (
+        kick &&
+        client?.id.startsWith("volley-peer-test") &&
+        packet.topic === machineTopic("box-a")
+      ) {
+        kick = false;
+        client.conn.destroy();
+        return;
+      }
+      done(null);
+    };
     const base = fakeExec(() => ({}));
     const exec: PeerExec = async (argv, opts = {}) => {
       if (argv[0] === "ssh" && argv[1] === "-N" && ++tunnels === 1) {
@@ -1872,9 +1885,7 @@ describe("volley peer run (the service)", () => {
           if (beat !== 2) return;
           // The tunnel goes, and the broker connection that ran through it with it.
           dropTunnel();
-          for (const c of Object.values(tb.aedes.clients)) {
-            if (c.id.startsWith("volley-peer-test")) c.conn.destroy();
-          }
+          kick = true;
         },
         deps: (d) => {
           const sleep = d.sleep;

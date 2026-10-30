@@ -26,6 +26,7 @@
     "./peer/cleanup": "./src/peer/cleanup.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
     "./peer/repo": "./src/peer/checks/repo.ts",
+    "./peer/units": "./src/peer/units.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
     "./setup/first-wave": "./src/setup/first-wave.ts",
     "./setup/first-wave-repo": "./src/setup/first-wave-repo.ts",

@@ -1,3 +1,4 @@
+import { LAUNCHD_LABEL, SYSTEMD_UNIT } from "volley-cli/peer/units";
 import type { InboxItem } from "./autopilot/inbox";
 import type { NoticeSpec } from "./coordinator/notices";
 
@@ -19,8 +20,8 @@ export const machineNoticeId = (name: string) => `n-${machineNoticeKind(name)}`;
 /** The command that restarts `volley peer run` on a machine of `os`. */
 export function peerRestartHint(os: string): string {
   return os === "darwin"
-    ? "launchctl kickstart -k gui/$(id -u)/systems.volley.peer"
-    : "systemctl --user restart volley-peer.service";
+    ? `launchctl kickstart -k gui/$(id -u)/${LAUNCHD_LABEL}`
+    : `systemctl --user restart ${SYSTEMD_UNIT}`;
 }
 
 export interface SilentMachineInput {
