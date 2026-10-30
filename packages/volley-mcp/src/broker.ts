@@ -300,6 +300,11 @@ export class VolleyBroker {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const forced = new Promise<void>((resolve) => {
           timer = setTimeout(() => {
+            // The graceful end set `disconnecting` and waits on `outgoingEmpty`; while that
+            // flag is set mqtt.js answers a second end() without ending anything. Drop the
+            // wait and the flag so the forced end really closes the socket.
+            client.removeAllListeners("outgoingEmpty");
+            client.disconnecting = false;
             client.endAsync(true).then(resolve, () => resolve());
           }, DISCONNECT_FORCE_MS);
         });
