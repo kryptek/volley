@@ -158,6 +158,27 @@ function topicMatches(filter: string, topic: string): boolean {
   return f.length === t.length;
 }
 
+/** MQTT 5 Retain Handling: 0 sends retained messages on subscribe, 1 only on a new one, 2 never. */
+export type RetainHandling = 0 | 1 | 2;
+
+/** Per-subscribe options for `subscribeCollect` / `subscribeUntil`. */
+export interface SubscribeOptions {
+  /**
+   * MQTT 5 Retain Handling for this SUBSCRIBE (default 0: the retained message is delivered).
+   * Ignored on MQTT 3.1.1, which has no such option: a caller that must not see a retained
+   * message there filters it itself.
+   */
+  retainHandling?: RetainHandling;
+}
+
+/** The SUBSCRIBE options for `protocolVersion`: QoS 1, plus the v5 flags. */
+export function subscribeOptions(
+  protocolVersion: number | undefined,
+  retainHandling: RetainHandling = 0,
+): IClientSubscribeOptions {
+  return protocolVersion === 5 ? { qos: 1, nl: false, rap: false, rh: retainHandling } : { qos: 1 };
+}
+
 /**
  * `mqtt.connectAsync(url, options, false)`, plus a hook that runs on the client before the
  * connection completes so listeners are attached ahead of the first inbound packet.
@@ -539,11 +560,14 @@ export class VolleyBroker {
     this.drainWaiters = new Set();
   }
 
-  private sendSubscribe(client: MqttClient, filter: string): Promise<void> {
+  private sendSubscribe(
+    client: MqttClient,
+    filter: string,
+    retainHandling: RetainHandling = 0,
+  ): Promise<void> {
     // `resubscribe` makes mqtt.js send it even for a filter it already tracks: in reconnect mode
     // it skips one it holds for its own re-subscribe, and every hold must re-SUBSCRIBE.
-    const opts: IClientSubscribeOptions =
-      client.options.protocolVersion === 5 ? { qos: 1, nl: false, rap: false, rh: 0 } : { qos: 1 };
+    const opts = subscribeOptions(client.options.protocolVersion, retainHandling);
     const subscription = { [filter]: opts } as ISubscriptionMap;
     subscription.resubscribe = true;
     return new Promise((resolve, reject) => {
@@ -563,9 +587,13 @@ export class VolleyBroker {
    * that filter). The SUBSCRIBE packet is written synchronously, ahead of any later
    * PUBLISH on this client.
    */
-  private holdFilter(client: MqttClient, filter: string): Promise<void> {
+  private holdFilter(
+    client: MqttClient,
+    filter: string,
+    retainHandling: RetainHandling = 0,
+  ): Promise<void> {
     this.filterHolds.set(filter, (this.filterHolds.get(filter) ?? 0) + 1);
-    return this.sendSubscribe(client, filter);
+    return this.sendSubscribe(client, filter, retainHandling);
   }
 
   /** Release one hold; UNSUBSCRIBE only when no local holder remains. */
@@ -594,11 +622,12 @@ export class VolleyBroker {
     client: MqttClient,
     filter: string,
     deliver: (msg: BrokerMessage) => void,
+    retainHandling: RetainHandling = 0,
   ): { ready: Promise<void>; close: () => Promise<void> } {
     const route: Route = { filter, deliver };
     this.routes.add(route);
     let closed = false;
-    const ready = this.holdFilter(client, filter);
+    const ready = this.holdFilter(client, filter, retainHandling);
     return {
       ready,
       close: async () => {
@@ -760,22 +789,29 @@ export class VolleyBroker {
    * Subscribe to a topic pattern and collect messages until `maxMessages` arrive or
    * `timeoutMs` elapses, whichever comes first. Retained messages arrive immediately on
    * subscribe; live messages arrive as published. Always releases its subscription and
-   * resolves with whatever was collected (never rejects on timeout).
+   * resolves with whatever was collected (never rejects on timeout). `opts.retainHandling` 2
+   * (MQTT 5) leaves the retained messages out.
    */
   async subscribeCollect(
     topicPattern: string,
     maxMessages: number,
     timeoutMs: number,
+    opts: SubscribeOptions = {},
   ): Promise<{ topic: string; payload: string }[]> {
     const client = this.requireClient();
     return new Promise((resolve, reject) => {
       const collected: { topic: string; payload: string }[] = [];
       let settled = false;
-      const sub = this.attachRoute(client, topicPattern, (m) => {
-        if (settled) return;
-        collected.push(m);
-        if (collected.length >= maxMessages) finish();
-      });
+      const sub = this.attachRoute(
+        client,
+        topicPattern,
+        (m) => {
+          if (settled) return;
+          collected.push(m);
+          if (collected.length >= maxMessages) finish();
+        },
+        opts.retainHandling,
+      );
       const finish = () => {
         if (settled) return;
         settled = true;
@@ -804,22 +840,29 @@ export class VolleyBroker {
    * wait, the broker never re-delivers the retained payload — non-matching messages
    * (retained or live) are silently skipped. This is the right primitive for
    * "block until predicate true," vs. `subscribeCollect` which is "block until N
-   * messages arrive or time runs out."
+   * messages arrive or time runs out." `opts.retainHandling` 2 (MQTT 5) waits on live
+   * messages only.
    */
   async subscribeUntil(
     topicPattern: string,
     predicate: (payload: string, topic: string) => boolean,
     timeoutMs: number,
     signal?: AbortSignal,
+    opts: SubscribeOptions = {},
   ): Promise<{ topic: string; payload: string } | null> {
     const client = this.requireClient();
     if (signal?.aborted) return null;
     return new Promise((resolve, reject) => {
       let settled = false;
-      const sub = this.attachRoute(client, topicPattern, (m) => {
-        if (settled) return;
-        if (predicate(m.payload, m.topic)) finish(m);
-      });
+      const sub = this.attachRoute(
+        client,
+        topicPattern,
+        (m) => {
+          if (settled) return;
+          if (predicate(m.payload, m.topic)) finish(m);
+        },
+        opts.retainHandling,
+      );
       const finish = (result: { topic: string; payload: string } | null) => {
         if (settled) return;
         settled = true;
