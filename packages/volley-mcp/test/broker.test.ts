@@ -1,7 +1,7 @@
 import { type Socket, createServer } from "node:net";
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { VolleyBroker, describeDisconnect } from "../src/broker";
+import { VolleyBroker, describeDisconnect, subscribeOptions } from "../src/broker";
 import { VolleyError } from "../src/errors";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 
@@ -274,6 +274,42 @@ describe("VolleyBroker subscribeCollect", () => {
   it("resolves with a partial collection when the timeout elapses first", async () => {
     const msgs = await b.subscribeCollect("volley/test/empty/+", 5, 400);
     expect(msgs).toEqual([]);
+  });
+
+  it("still delivers the retained message by default and with retainHandling 0", async () => {
+    await b.publish("volley/test/rh/status", "kept", { qos: 1, retain: true });
+    expect(
+      (await b.subscribeCollect("volley/test/rh/status", 1, 600)).map((m) => m.payload),
+    ).toEqual(["kept"]);
+    const opt = await b.subscribeCollect("volley/test/rh/status", 1, 600, { retainHandling: 0 });
+    expect(opt.map((m) => m.payload)).toEqual(["kept"]);
+  });
+
+  it("subscribeStream marks a retained replay retain: true and a live message retain: false", async () => {
+    await b.publish("volley/test/rf/status", "old", { qos: 1, retain: true });
+    const seen: { payload: string; retain: boolean | undefined }[] = [];
+    const stop = await b.subscribeStream("volley/test/rf/status", (m) =>
+      seen.push({ payload: m.payload, retain: m.retain }),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    await b.publish("volley/test/rf/status", "new", { qos: 1, retain: true });
+    await new Promise((r) => setTimeout(r, 200));
+    await stop();
+    expect(seen).toEqual([
+      { payload: "old", retain: true },
+      { payload: "new", retain: false },
+    ]);
+  });
+});
+
+describe("subscribeOptions (MQTT 5 retain handling)", () => {
+  it("is rh 0 by default on MQTT 5 and carries retainHandling when given", () => {
+    expect(subscribeOptions(5)).toEqual({ qos: 1, nl: false, rap: false, rh: 0 });
+    expect(subscribeOptions(5, 2)).toEqual({ qos: 1, nl: false, rap: false, rh: 2 });
+  });
+
+  it("is plain QoS 1 on MQTT 3.1.1, where retain handling does not exist", () => {
+    expect(subscribeOptions(4, 2)).toEqual({ qos: 1 });
   });
 });
 

@@ -756,6 +756,10 @@ function reduceAgent(
       ...optional("workspace", str(payload.workspace)),
       ...optional("notificationType", str(payload.notification_type)),
       ...(payload.background_wait === true ? { backgroundWait: true } : {}),
+      ...(payload.background_wait === true &&
+      (payload.wait === "background_task" || payload.wait === "owner_wake")
+        ? { wait: payload.wait }
+        : {}),
     };
   }
   if (env.type === "resumed") {
@@ -1165,6 +1169,8 @@ function withCoordinators(state: DeskState): DeskState {
         id,
         waves: [w.id],
         state: sup.state,
+        // volleyd's `coordinator.wait` (owner wake, or a background task): idle on events.
+        ...(sup.state === "working" && sup.wait !== undefined ? { waitingOnEvents: true } : {}),
         ...fallbacks,
         ...optional("question", sup.question),
       };

@@ -49,8 +49,8 @@ The full surface is in [`SKILL.md`](./SKILL.md). Two dispatch paths:
 
 - **Volleyd path** (default when `volleyd status` succeeds): the skill turns
   the issues into a wave file at `.volley/waves/<date>-<theme>.yaml`
-  (`after:` lists come from `Depends on:` / `deps:` lines in the issue
-  bodies), runs `volleyd validate` then
+  (`after:` lists come from `Depends on` clauses / `deps:` lines in the
+  issue bodies), runs `volleyd validate` then
   `volleyd run --owner "$VOLLEY_COORDINATOR"` (the stable coordinator name),
   and **leaves**: under autopilot volleyd answers routine decisions and merges
   gated PRs itself, and what still needs the owner reaches the Desk's
@@ -79,9 +79,11 @@ bun run scripts/wave-from-issues.ts issues.json --wave 2026-10-18-example \
 Each issue becomes a task named by its title's task tag (`O0: …` → `O0`), else `i<N>`; `Depends on: #101` becomes `after: [i101]` (or the tag of #101).
 `--repo-slug <owner/repo>` also accepts `owner/repo#N` references and issue
 URLs for this repository. A dependency outside the set is an error naming it,
-unless it is listed in `--satisfied` (already merged); so is a dependency line
+unless it is listed in `--satisfied` (already merged); so is a dependency clause
 the helper cannot read (`Depends on: T3`): a dependency is never silently
-dropped. Issues with no dependency line are reported on stderr so their order
+dropped. A `Depends on` clause may sit anywhere on a line, colon optional, and
+ends at the first sentence break or `Blocks:` (the grammar is in SKILL.md
+Step 2). Issues with no dependency clause are reported on stderr so their order
 can be confirmed. `--merge auto|manual` writes `merge:` (default `auto`:
 volleyd merges each gated PR); `--autopilot on|off` writes
 `config: { autopilot: { enabled } }` and `--branch-update merge|rebase`

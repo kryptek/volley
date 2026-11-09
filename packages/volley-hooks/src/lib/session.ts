@@ -200,7 +200,15 @@ export interface Activity {
    * Cleared when the session works again.
    */
   background_wait?: boolean;
+  /**
+   * What the session waits on when `background_wait` is set (SPEC §4.3): `background_task` for
+   * a live Stop `background_tasks` entry, `owner_wake` for an armed owner wake.
+   */
+  wait?: WaitKind;
 }
+
+/** SPEC §4.3 `wait`: what a session idling with `background_wait` waits on. */
+export type WaitKind = "background_task" | "owner_wake";
 
 /** Background task states that are over; anything else (or no status) is still running. */
 const FINISHED_TASK =

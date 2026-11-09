@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { QUESTION_MAX, boundQuestion, clip, questionOf } from "../src/lib/hook-io";
+import { QUESTION_MAX, boundQuestion, clip, questionOf, resultOutput } from "../src/lib/hook-io";
 
 describe("questionOf", () => {
   it("is the whole last paragraph when the text ends in a question", () => {
@@ -25,5 +25,25 @@ describe("questionOf", () => {
     expect(bounded.endsWith(" ok?")).toBe(true);
     expect(bounded.length).toBeLessThan(QUESTION_MAX + 100);
     expect(boundQuestion("short?")).toBe("short?");
+  });
+});
+
+describe("resultOutput decision / reason", () => {
+  it("is Stop's top-level block shape on Stop", () => {
+    expect(
+      JSON.parse(resultOutput("Stop", { decision: "block", reason: "wave w1 is in flight" })),
+    ).toEqual({
+      decision: "block",
+      reason: "wave w1 is in flight",
+    });
+  });
+
+  it("drops the fields on any other event", () => {
+    expect(resultOutput("PostToolUse", { decision: "block", reason: "no" })).toBe("");
+    expect(
+      JSON.parse(
+        resultOutput("PostToolUse", { decision: "block", reason: "no", additionalContext: "ctx" }),
+      ),
+    ).toEqual({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: "ctx" } });
   });
 });

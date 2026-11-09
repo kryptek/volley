@@ -47,6 +47,27 @@ describe.skipIf(!RUN)("volley-mcp against real mosquitto", () => {
   });
 });
 
+describe.skipIf(!RUN)("retain handling against real mosquitto (MQTT v5)", () => {
+  it("subscribeCollect with retainHandling 2 does not deliver the retained message; the default does", async () => {
+    const suffix = randomBytes(4).toString("hex");
+    const topic = `volley/integration/rh-${suffix}/digest`;
+    const b = new VolleyBroker();
+    await b.connect({ url: BROKER_URL, agentId: `rh-${suffix}`, protocolVersion: 5 });
+    try {
+      await b.publish(topic, "old", { qos: 1, retain: true });
+      expect(await b.subscribeCollect(topic, 1, 800, { retainHandling: 2 })).toEqual([]);
+      const live = b.subscribeUntil(topic, () => true, 3000, undefined, { retainHandling: 2 });
+      await new Promise((r) => setTimeout(r, 200));
+      await b.publish(topic, "new", { qos: 1, retain: true });
+      expect((await live)?.payload).toBe("new");
+      expect((await b.subscribeCollect(topic, 1, 800)).map((m) => m.payload)).toEqual(["new"]);
+      await b.publish(topic, "", { qos: 1, retain: true });
+    } finally {
+      await b.disconnect();
+    }
+  });
+});
+
 describe.skipIf(!RUN)("persistent mailbox sessions against real mosquitto (MQTT v5)", () => {
   it.each([
     ["an explicit sessionExpirySeconds", { sessionExpirySeconds: 60 }, 60],

@@ -172,6 +172,9 @@
 #   delete_branch: false         # autopilot merges also delete the PR's head branch
 #   reconnect_grace_s: 900       # a wave owned by a coordinator name whose session went away reads
 #                                # coordinator.state "reconnecting" this long (60..86400), then "gone"
+#   owner_wake_grace_s: 120      # an owner idle at its prompt with nothing to wake it (no hooks'
+#                                # owner wake, no background wait) this long (10..86400) opens
+#                                # the notice n-owner-asleep-<wave>
 
 # --- Archiving (README "Archiving") ---
 # archive_ended_after_h: 24      # archive a stopped / complete wave this many hours after it ended; 0: never

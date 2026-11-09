@@ -135,6 +135,16 @@ most once per `autopilot.digest_min_interval_s`). The push reads like:
 w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 waiting for you (release_go)
 ```
 
+The same digest reaches **your session, if it has the hooks**: the Claude Code session that
+submitted the wave is woken, as a resumed turn, with
+`` [volley owner-wake] wave w1: wave_complete — w1 complete: 27 shipped, … Run `volleyd digest w1` … ``,
+so it carries the wave on (the release merge, the next wave) without you prompting it, and without
+it having to remember to arm a wait. A session without the hooks is told at `volleyd run`
+(`warning: owner … has no Volley hooks in this session …`), and if it then sits idle for two
+minutes with nothing armed, the notice `<wave>: your session will not be woken` rings your phone
+once with the one command that arms a wait.
+([The owner wake](../packages/volley-hooks/README.md#owner-wake))
+
 `volleyd digest <wave>` prints it in full, and the Desk shows it as a card in the wave window:
 
 - **Shipped**: each merged task with its PR, merge commit and who merged it (`supervisor`,

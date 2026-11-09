@@ -133,6 +133,7 @@ if (MODE !== "uninstall") {
   for (const [event, groups] of Object.entries(template.hooks)) {
     const resolved = groups.map((g) => ({
       ...g,
+      // Every key of an entry is kept: the owner-wake waiter needs async, asyncRewake, timeout.
       hooks: g.hooks.map((h) => ({
         ...h,
         command: prefix + h.command.replaceAll("$VOLLEY_HOOKS_DIR", quoted),

@@ -148,7 +148,8 @@ export function formatLocalAgents(l: LocalAgentsView): string {
 }
 
 /**
- * The owner line's presence suffix (SPEC §4.6.1 `coordinator`): `· online`, `· reconnecting`,
+ * The owner line's presence suffix (SPEC §4.6.1 `coordinator`): `· online` (`· online · waiting
+ * on wave events` while its `wait` is set), `· reconnecting`,
  * `· away (autopilot) · last seen 2h ago` (`· away` with autopilot off) or `· gone` with what
  * waits for the owner: the open escalated decisions of the wave, when `decisions` has them, else
  * `something waits for you` (a gate under `merge: manual` or an owner-only inbox item).
@@ -156,7 +157,9 @@ export function formatLocalAgents(l: LocalAgentsView): string {
 function ownerPresence(s: WaveState, decisions: readonly DecisionPayload[], now: number): string {
   const c = s.coordinator;
   if (c === undefined) return "";
-  if (c.presence === "online") return " · online";
+  // Owner wake (SPEC §4.6.16): idle, but something armed will wake it when the wave needs it.
+  if (c.presence === "online")
+    return c.wait !== undefined ? " · online · waiting on wave events" : " · online";
   if (c.state === "reconnecting") return " · reconnecting";
   if (c.state === "gone") {
     const autopilotOn = s.autopilot?.enabled ?? true;

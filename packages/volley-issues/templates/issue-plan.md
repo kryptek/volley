@@ -60,8 +60,8 @@ The repository's gate commands, e.g. `bun install`, `bun run lint`, `bun run typ
 `bun run test`. Add `changes/<issue>.<type>.md`; never edit `CHANGELOG.md`.
 ```
 
-`Depends on:` is one line of `#N` references (or `Depends on: none`); the helper turns it into
-the task's `after:` and rejects a line it cannot read.
+`Depends on:` lists `#N` references (or `none`/`nothing`), anywhere on a line, colon optional, up to
+the first sentence break or `Blocks:`; the helper turns it into `after:` (grammar: SKILL.md Step 2).
 
 ## The Files list is the footprint
 

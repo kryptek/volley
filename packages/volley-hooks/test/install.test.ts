@@ -88,6 +88,16 @@ describe("scripts/install.sh", () => {
     expect(merged.hooks.Stop?.[0]?.hooks[0]?.command).toBe("say done");
     const stop = merged.hooks.Stop?.[1]?.hooks[0]?.command;
     expect(stop).toBe(`VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/stop.ts"`);
+    // The owner-wake waiter: the second entry of the Stop group, its async flags kept.
+    const wake = merged.hooks.Stop?.[1]?.hooks[1] as Record<string, unknown> | undefined;
+    expect(merged.hooks.Stop?.[1]?.hooks).toHaveLength(2);
+    expect(wake).toEqual({
+      type: "command",
+      command: `VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/owner-wake.ts"`,
+      async: true,
+      asyncRewake: true,
+      timeout: 14700,
+    });
     expect(merged.hooks.PostToolUse?.map((g) => g.matcher)).toEqual(["", "AskUserQuestion"]);
     // PreToolUse: the Bash lease hook, the activity hook on every tool, then the picker hook.
     expect(merged.hooks.PreToolUse?.map((g) => g.matcher)).toEqual(["Bash", "", "AskUserQuestion"]);

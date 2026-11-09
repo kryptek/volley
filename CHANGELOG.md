@@ -2,6 +2,32 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.16.0 — 2026-11-09
+
+### Added
+
+- **volley-hooks + volleyd: the session that owns a wave is woken when the wave needs it.** A Stop
+  hook with `asyncRewake` holds one subscription on the wave's digest and wakes the owning Claude
+  Code session, as a resumed turn, on completion, stop, `release_go` or an escalation; one waiter
+  per session, no wake missed while it arms (it subscribes before it reads the wave states), no
+  replay of a digest already delivered, no clock compare on a live digest, a 4 h fallback wake,
+  nothing for the coordinator to remember. A session with no wake path and a wave in flight is blocked once at Stop with the one
+  command that arms a wait; `volleyd run` warns when the owner's session has no hooks, and volleyd
+  notices an owner that went idle unwakeable (`n-owner-asleep-<wave>`, after
+  `autopilot.owner_wake_grace_s`). The wave state's `coordinator.wait` and `volleyd status`
+  (`· waiting on wave events`) show an armed wake; `subscribeCollect` / `subscribeUntil` /
+  `subscribeStream` take MQTT 5 `retainHandling`, and `subscribeStream`'s messages carry `retain`.
+  (#649)
+
+### Fixed
+
+- **volley-issues: a `Depends on` clause is read anywhere on a line, with or without its colon,
+  and `nothing` declares none.** The parser reads references from the label up to the first
+  sentence break or `Blocks:`, ignores prose past that point and before the label, and fails with
+  the issue, line and leftover text on a clause it cannot read; a batch whose dependency clauses
+  sit in the opening paragraph is no longer planned as independent and bundled across its stages.
+  (#648)
+
 ## 0.15.1 — 2026-10-30
 
 ### Fixed

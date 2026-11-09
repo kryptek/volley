@@ -212,7 +212,7 @@ reboot_wait() {
     return 1
   }
   vm_ssh "$addr" 'sudo reboot' </dev/null >/dev/null 2>&1
-  # shellcheck disable=SC2317 # called through poll
+  # shellcheck disable=SC2317,SC2329 # called through poll
   booted() {
     local b
     b=$(boot_id "$addr") && [ -n "$b" ] && [ "$b" != "$before" ]
@@ -303,7 +303,7 @@ check_git_identity() {
 check_after_reboot() {
   local addr=$1 t0
   t0=$(now_ms)
-  # shellcheck disable=SC2317 # called through poll
+  # shellcheck disable=SC2317,SC2329 # called through poll
   check() { on_sim "$addr" 'volley setup --check --json' >"$OUT/check.json" 2>>"$TRANSCRIPT"; }
   poll 120 check || fail "volley setup --check was not green within 2 min of the reboot (check.json)"
   timing reboot_check_ms $(($(now_ms) - t0))

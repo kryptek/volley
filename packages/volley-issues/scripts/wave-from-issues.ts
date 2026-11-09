@@ -364,12 +364,13 @@ const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <i
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
 Each issue becomes a task named by its title's task tag ("O0: ...", "T3b - ..." -> O0, T3b),
 or i<number> when the title has none or starts with a product name ("S3: ..."); issues that
-share a tag fall back to i<number>, with a warning. A "Depends on: #N" or "deps: #N" line in
-its body becomes after: [<id of #N>] (also "owner/repo#N" and issue URLs when --repo-slug
-names this repository, and "- #N" list items under an empty label). A dependency outside the
-set is an error unless listed in --satisfied; so is a dependency line it cannot read.
-Writes the wave YAML to --out (default stdout). Issues with no dependency line are listed on
-stderr: confirm their order with the human before submitting.
+share a tag fall back to i<number>, with a warning. A "Depends on: #N" clause (anywhere on a
+line, colon optional, up to the first sentence break or "Blocks:"; "none"/"nothing" declare
+none) or a "deps: #N" line in its body becomes after: [<id of #N>] (also "owner/repo#N" and
+issue URLs when --repo-slug names this repository, and "- #N" list items under an empty
+label). A dependency outside the set is an error unless listed in --satisfied; so is a
+dependency clause it cannot read. Writes the wave YAML to --out (default stdout). Issues with
+no dependency clause are listed on stderr: confirm their order with the human before submitting.
 The wave file names a brief preface (--brief-preface, default .volley/brief-preface.md in the
 repo) that volleyd puts at the top of every agent's brief. When --repo is a directory on this
 machine and that file does not exist, it is written from templates/brief-preface.md (public-repo
@@ -543,7 +544,7 @@ function main(argv: string[]): number {
     for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
     if (undeclared.length > 0) {
       process.stderr.write(
-        `note: no Depends on:/deps: line in ${undeclared.map((n) => `#${n}`).join(", ")}; confirm their order before submitting\n`,
+        `note: no Depends on clause (or deps: line) in ${undeclared.map((n) => `#${n}`).join(", ")}; confirm their order before submitting\n`,
       );
     }
     process.stderr.write(`${noTree}${planBlock}${playbookText}`);
