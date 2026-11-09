@@ -32,9 +32,11 @@
  *
  * **Idle with a background wait**: an `awaiting_input` the hooks flagged
  * `background_wait: true` (the session ended its turn with a background task
- * armed) waits on the wave's events, not on a person: a coordinator in that
- * state is `working` and the wave is info `idle — waiting on wave events`
- * unless a decision or gate is open. A `permission_prompt` always needs you.
+ * armed, or the hooks' owner wake armed: `wait`) waits on the wave's events,
+ * not on a person, and so does a `coordinator` volleyd publishes `working`
+ * with `wait`: a coordinator in that state is `working` and the wave is info
+ * `idle — waiting on wave events` unless a decision or gate is open. A
+ * `permission_prompt` always needs you.
  *
  * **No progress reported**: a dispatched agent (not a session) that has been
  * `working` for `STALE_PROGRESS_MS` (10 min) without a `progress` message of
@@ -246,8 +248,8 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
   let state: CoordinatorState = view?.state ?? sup?.state ?? "gone";
   const question = view?.question ?? sup?.question;
   // Only the harness's generic idle prompt, and nothing pending for the owner: the turn
-  // ended without a question, so the next wave event wakes it (design point ii). This is
-  // what a cold load sees, since volleyd's retained `coordinator` drops `background_wait`.
+  // ended without a question, so the next wave event wakes it (design point ii). A cold load
+  // from an older volleyd sees only this; a newer one carries `coordinator.wait` (below).
   const idleOnly =
     state === "awaiting_input" &&
     a?.attention?.notificationType !== "permission_prompt" &&
@@ -256,7 +258,10 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     pendingDecisions(w).length === 0 &&
     (s?.gates.length ?? 0) === 0;
   if (idleOnly) state = "working";
-  const waitingOnEvents = state === "working" && (idleOnly || view?.waitingOnEvents === true);
+  // volleyd's own reading (SPEC §4.3 `wait`): an owner wake or a background task is armed.
+  const supWait = view === undefined && sup?.state === "working" && sup.wait !== undefined;
+  const waitingOnEvents =
+    state === "working" && (idleOnly || view?.waitingOnEvents === true || supWait);
   const sessionUrl = view?.sessionUrl ?? sup?.session_url;
   const workspace = view?.workspace ?? sup?.workspace;
   return {

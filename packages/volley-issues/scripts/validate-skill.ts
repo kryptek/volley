@@ -67,6 +67,9 @@ export const REQUIRED_VOLLEYD_PATH = [
   "--owner",
   "volley sub --pattern",
   "volley/_waves/",
+  // The owner wake (#649): the hooks wake the owning session; the sub is the fallback.
+  "**The owner wake: the hooks wake this session.**",
+  "[volley owner-wake]",
   "volleyd decisions",
   "volleyd resolve",
   "volleyd cleanup",

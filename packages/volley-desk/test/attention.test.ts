@@ -273,6 +273,43 @@ describe("tierFor(wave)", () => {
     expect(coordinatorFor(gone, cold).state).toBe("gone");
   });
 
+  it("a cold load reads volleyd's coordinator.wait: idle — waiting on wave events, not needs-you", () => {
+    const owned = wave({
+      owner: "coord-main",
+      coordinator: {
+        agent_id: "coord-a1",
+        presence: "online",
+        state: "working",
+        wait: "owner_wake",
+        last_seen: iso(NOW - 2 * MIN),
+      },
+    });
+    const cold = ctx({ coordinators: {}, agents: {} });
+    expect(coordinatorFor(owned, cold)).toMatchObject({ state: "working", waitingOnEvents: true });
+    expect(waveAttention(owned, cold)).toMatchObject({
+      tier: "info",
+      reason: "idle — waiting on wave events",
+    });
+    // Through the store too: the owner view built from the retained state carries it.
+    const state = reduceAll(initialState(), [
+      {
+        topic: "volley/_waves/w1/state",
+        envelope: {
+          schema_version: "0.1",
+          agent_id: "volleyd",
+          parent_id: null,
+          wall_time: iso(NOW),
+          channel: "_waves/state",
+          type: "wave_state",
+          payload: owned.state,
+          correlation_id: null,
+        },
+        receivedAt: NOW,
+      },
+    ]);
+    expect(state.coordinators["coord-main"]).toMatchObject({ waitingOnEvents: true });
+  });
+
   it("keeps awaiting_input over staleness: the coordinator waits quietly for an answer", () => {
     const c = ctx({
       coordinators: { "coord-1": coord("awaiting_input") },

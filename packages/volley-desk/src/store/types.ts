@@ -236,6 +236,8 @@ export interface WaveCoordinator {
   question?: string;
   session_url?: string;
   workspace?: string;
+  /** What a `working` owner waits on (SPEC §4.3 `wait`): a background task or the owner wake. */
+  wait?: "background_task" | "owner_wake";
   last_seen: string;
 }
 
@@ -954,6 +956,8 @@ export interface AgentAttention {
    * ended its turn waiting on events, not on a person.
    */
   backgroundWait?: boolean;
+  /** What it waits on (SPEC §4.3 `wait`), beside `backgroundWait`. */
+  wait?: "background_task" | "owner_wake";
   /** The Notification hook's `notification_type` (`idle_prompt`, `permission_prompt`, …). */
   notificationType?: string;
 }

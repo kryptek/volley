@@ -99,6 +99,13 @@
             "type": "command",
             "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/stop.ts\"",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/owner-wake.ts\"",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 14700
           }
         ]
       }

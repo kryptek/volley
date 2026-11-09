@@ -1,13 +1,17 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
 import type { Envelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
+import { coordinatorStateDir } from "../src/lib/identity";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import {
   collect,
   connectClient,
   fixture,
   makeWorkdir,
+  publishEnvelope,
   publishRegistry,
   runHook,
   tick,
@@ -161,6 +165,11 @@ describe("notification", () => {
       });
     });
 
+    it("idle_prompt carries the wait's kind (background_task)", async () => {
+      const envs = await notify("notification-idle-prompt.json", coordDir, env, "coordinator-ab12");
+      expect(first(envs).payload).toMatchObject({ wait: "background_task" });
+    });
+
     it("a permission_prompt never carries it", async () => {
       const envs = await notify(
         "notification-permission-prompt.json",
@@ -193,6 +202,45 @@ describe("notification", () => {
       const envs = await notify("notification-idle-prompt.json", coordDir, env, "coordinator-ab12");
       expect(first(envs).payload).not.toHaveProperty("background_wait");
     });
+  });
+
+  it("coordinator: the idle_prompt after an owner-wake Stop carries wait owner_wake", async () => {
+    const coordDir = makeWorkdir();
+    const session = "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa";
+    const env = {
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
+    };
+    await publishRegistry(client, "coordinator-ab12", "default", {
+      capabilities: [],
+      cwd: coordDir,
+      started_at: "2026-10-18T10:00:00.000Z",
+    });
+    await publishEnvelope(
+      client,
+      "volley/_waves/w1/state",
+      {
+        agentId: "volleyd",
+        parentId: null,
+        channel: "_waves/state",
+        type: "wave_state",
+        payload: { wave: "w1", status: "running", coordinator: { agent_id: "coordinator-ab12" } },
+      },
+      { qos: 1, retain: true },
+    );
+    const stateDir = coordinatorStateDir(coordDir, env, `session:${session}`);
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "owner-wake.lock"),
+      JSON.stringify({ pid: process.pid, armed_at: new Date().toISOString() }),
+    );
+    await runHook("stop", fixture("stop-owner-wake.json", coordDir, { session_id: session }), {
+      cwd: coordDir,
+      env,
+    });
+    const envs = await notify("notification-idle-prompt.json", coordDir, env, "coordinator-ab12");
+    expect(first(envs).payload).toMatchObject({ background_wait: true, wait: "owner_wake" });
   });
 
   it("coordinator: agent_needs_input without a prior question uses the message", async () => {

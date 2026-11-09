@@ -288,7 +288,13 @@ import {
   steerTarget,
 } from "./controls";
 import { renderHandoff } from "./coordinator/handoff";
-import { noticesFor } from "./coordinator/notices";
+import {
+  HOOKS_INSTALL_URL,
+  noticesFor,
+  ownerAsleepNotice,
+  ownerAsleepNoticeId,
+  ownerWakeCommand,
+} from "./coordinator/notices";
 import { type CoordinatorTarget, localTarget, remoteTarget } from "./coordinator/prepare";
 import type { CoordinatorRolePayload } from "./coordinator/role";
 import { CoordinatorRunner } from "./coordinator/runner";
@@ -531,6 +537,7 @@ import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./
 import type {
   AgentMcp,
   CoordinatorAttention,
+  CoordinatorWait,
   Footprint,
   GitHubRepo,
   JournalEvent,
@@ -1558,6 +1565,14 @@ export class Daemon {
   private readonly namedEntries = new Map<string, RegistryEntry>();
   /** The workspace each registered session's entry names: whose screen a ref is (`carryInboxAnswer`). */
   private readonly registryWorkspaces = new Map<string, string>();
+  /** Every agent whose registry entry is retained, and those the hooks re-published (`model_source`). */
+  private readonly registeredAgents = new Set<string>();
+  private readonly hookedAgents = new Set<string>();
+  /**
+   * Owner wake (SPEC §4.6.16): since when (daemon ms) each owner has idled at its prompt with
+   * nothing armed to wake it (`awaiting_input`, no question, no `background_wait`).
+   */
+  private readonly asleepSince = new Map<string, number>();
   /**
    * Coordinator name → the agent bound to it (`bindOwner`); `gone_at` (daemon ms) once that agent
    * went away with no other bound, which starts `autopilot.reconnect_grace_s`.
@@ -2572,33 +2587,49 @@ export class Daemon {
   /**
    * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
    * question, session and workspace) until anything else but `idle` or `heartbeat` says it works
-   * again. Only a change re-publishes: presence comes from the owner's status (its will), so no
-   * timer keeps `last_seen` fresh.
+   * again. An `idle` or `awaiting_input` with `background_wait` is a session waiting on events,
+   * not on a person: `working`, with `wait` (`background_task`, or `owner_wake` for the hooks'
+   * owner wake). An `awaiting_input` with neither a question nor `background_wait` starts the
+   * owner's asleep clock (`n-owner-asleep-<wave>`); anything else but a heartbeat or a plain idle
+   * stops it. Only a change re-publishes: presence comes from the owner's status (its will), so
+   * no timer keeps `last_seen` fresh.
    */
   private noteAttention(agent: string, env: Envelope): void {
     // Only wave owners have a `coordinator`: other agents' attention would just pile up.
-    if (env.type === "idle" || !this.ownsAWave(agent)) return;
+    if (!this.ownsAWave(agent)) return;
     const p = (
       typeof env.payload === "object" && env.payload !== null ? env.payload : {}
     ) as Record<string, unknown>;
+    const wait: CoordinatorWait | undefined =
+      p.background_wait === true
+        ? p.wait === "owner_wake" || p.wait === "background_task"
+          ? p.wait
+          : "background_task"
+        : undefined;
+    if (env.type === "idle" && wait === undefined) return;
+    const question =
+      typeof p.question === "string" && p.question.trim() !== "" ? firstLines(p.question) : null;
+    if (env.type === "awaiting_input" && wait === undefined && question === null) {
+      if (!this.asleepSince.has(agent)) this.asleepSince.set(agent, this.now());
+    } else if (env.type !== "heartbeat") this.asleepSince.delete(agent);
     const next: Omit<CoordinatorAttention, "agent_id" | "last_seen" | "presence"> =
-      env.type === "awaiting_input"
-        ? {
-            state: "awaiting_input",
-            ...(typeof p.question === "string" && p.question.trim() !== ""
-              ? { question: firstLines(p.question) }
-              : {}),
-            ...(typeof p.session_url === "string" && URL.canParse(p.session_url)
-              ? { session_url: p.session_url }
-              : {}),
-            ...(typeof p.workspace === "string" && p.workspace !== ""
-              ? { workspace: p.workspace }
-              : {}),
-          }
-        : // A heartbeat only says the session is alive: it leaves `awaiting_input` standing.
-          env.type === "heartbeat"
-          ? (this.attentionOf.get(agent) ?? { state: "working" })
-          : { state: "working" };
+      wait !== undefined && (env.type === "idle" || env.type === "awaiting_input")
+        ? { state: "working", wait }
+        : env.type === "awaiting_input"
+          ? {
+              state: "awaiting_input",
+              ...(question !== null ? { question } : {}),
+              ...(typeof p.session_url === "string" && URL.canParse(p.session_url)
+                ? { session_url: p.session_url }
+                : {}),
+              ...(typeof p.workspace === "string" && p.workspace !== ""
+                ? { workspace: p.workspace }
+                : {}),
+            }
+          : // A heartbeat only says the session is alive: it leaves `awaiting_input` standing.
+            env.type === "heartbeat"
+            ? (this.attentionOf.get(agent) ?? { state: "working" })
+            : { state: "working" };
     const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
     this.attentionOf.set(agent, next);
     if (before !== JSON.stringify(next)) this.ownerChanged(agent);
@@ -2702,6 +2733,12 @@ export class Daemon {
           // Only the hooks' entry shows the session got past its screen.
           hooks = modelSource !== undefined;
           if (env !== null) this.heard(id, this.sentAt(env.wall_time), !hooks, hooks);
+          // Sticky: the MCP server's own re-register drops `model_source` until the hooks restore it.
+          this.registeredAgents.add(id);
+          if (hooks) this.hookedAgents.add(id);
+        } else if (m.payload === "") {
+          this.registeredAgents.delete(id);
+          this.hookedAgents.delete(id);
         }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
@@ -3485,6 +3522,7 @@ export class Daemon {
     await this.sweepMachines();
     await this.machineDownPass();
     await this.machineSilentPass();
+    await this.ownerAsleepPass();
     await this.removalSweep();
     await this.fleetTick();
     // The coordinator role: its ssh steps run beside the queue (a pass in flight is not repeated).
@@ -4098,6 +4136,63 @@ export class Daemon {
       this.log(`inbox ${item.id}: ${item.title}`);
     }
   }
+  /**
+   * Every tick (owner wake, SPEC §4.6.16): an online owner of a running or releasing wave that has
+   * idled with nothing to wake it for `autopilot.owner_wake_grace_s` opens the owner-only notice
+   * `n-owner-asleep-<wave>` (`ownerAsleepNotice`); a `background_wait`, the owner going offline
+   * or the wave ending answers it `superseded`.
+   */
+  private async ownerAsleepPass(): Promise<void> {
+    const graceMs = secondsMs(this.config.effective().autopilot.owner_wake_grace_s);
+    for (const [wave, log] of this.waves) {
+      const state = log.record.state;
+      if (state == null) continue;
+      const id = ownerAsleepNoticeId(wave);
+      const prior = this.inbox.get(id);
+      const inFlight = state.status === "running" || state.status === "releasing";
+      if (!inFlight && (prior === undefined || prior.answered !== undefined)) continue;
+      const owner = state.owner;
+      const agent = owner != null ? (this.bindings.get(owner)?.agent_id ?? owner) : null;
+      const attention = agent !== null ? this.attentionOf.get(agent) : undefined;
+      const actions = ownerAsleepNotice(
+        {
+          wave,
+          owner: owner ?? "-",
+          agentId: agent ?? "-",
+          machine: this.config.localName(),
+          online: agent !== null && presenceOf(this.statusOf.get(agent)) === "online",
+          inFlight: inFlight && owner != null,
+          asleepSince: agent !== null ? (this.asleepSince.get(agent) ?? null) : null,
+          ...(attention?.session_url !== undefined ? { sessionUrl: attention.session_url } : {}),
+          now: this.now(),
+          graceMs,
+        },
+        prior,
+      );
+      for (const sid of actions.supersede) {
+        const item = this.inbox.get(sid);
+        if (item === undefined || item.answered !== undefined) continue;
+        await this.recordInboxAnswer(item, {
+          version: item.version,
+          answer: "superseded",
+          by: DAEMON_AGENT_ID,
+          where: { kind: "autopilot" },
+        });
+      }
+      for (const spec of actions.open) {
+        const item = itemForNotice(
+          spec,
+          dateOf(this.time).toISOString(),
+          prior !== undefined ? prior.version + 1 : 1,
+        );
+        this.inbox.set(item.id, item);
+        await this.journalInbox(item, openedEvent(item));
+        await this.publishInboxItem(item);
+        this.log(`inbox ${item.id}: ${item.title}`);
+      }
+    }
+  }
+
   /** The machines whose `machine_silent` alarm is raised and not cleared yet. */
   private readonly silentAlarms = new Set<string>();
 
@@ -14522,6 +14617,8 @@ export class Daemon {
       });
       warnings.push(formatOverlap(w));
     }
+    const unwakeable = this.unwakeableOwner(wave.wave, owner);
+    if (unwakeable !== null) warnings.push(unwakeable);
     this.evaluate(); // its verdict from the last sample, before its first admission
     await this.tickNow();
     this.log(
@@ -14533,6 +14630,18 @@ export class Daemon {
       result: this.snapshot(wave.wave),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
+  }
+
+  /**
+   * Owner wake (SPEC §4.6.16): the `run` warning when the owner's bound session has a registry
+   * entry the hooks never re-published (no `model_source`): no hook runs there, so nothing will
+   * wake it when the wave ends. Null when it has hooks, or no registry entry is known.
+   */
+  private unwakeableOwner(wave: WaveId, owner: string | null): string | null {
+    if (owner === null) return null;
+    const agent = this.bindings.get(owner)?.agent_id ?? owner;
+    if (!this.registeredAgents.has(agent) || this.hookedAgents.has(agent)) return null;
+    return `owner ${owner} (${agent}) has no Volley hooks in this session: nothing will wake it when ${wave} ends (the Desk and phone still get the digest); install the Volley hooks (${HOOKS_INSTALL_URL}) to make it automatic, or arm a wait in that session: ${ownerWakeCommand(wave)} (in the background)`;
   }
 
   /**

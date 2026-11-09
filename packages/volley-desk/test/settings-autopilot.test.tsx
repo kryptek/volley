@@ -32,6 +32,7 @@ const config: ConfigPayload = {
     merge_transient_retry_max: 1,
     delete_branch: false,
     reconnect_grace_s: 900,
+    owner_wake_grace_s: 120,
     incident_wait_max_s: 14_400,
     fix_flake_max: 3,
     digest_min_interval_s: 1800,

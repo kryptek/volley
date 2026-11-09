@@ -7,8 +7,15 @@ import type { CoordinatorRolePayload } from "./role";
  * the superseded ones `superseded` and opens the new ones.
  */
 
-/** The coordinator's two, and a silent paired machine's (`machine-notice.ts`, #638). */
-export type NoticeKind = "coordinator-link" | "coordinator-failed" | `machine-down-${string}`;
+/**
+ * The coordinator's two, a silent paired machine's (`machine-notice.ts`, #638), and an owner
+ * session nothing will wake (`ownerAsleepNotice`, #649).
+ */
+export type NoticeKind =
+  | "coordinator-link"
+  | "coordinator-failed"
+  | `machine-down-${string}`
+  | `owner-asleep-${string}`;
 
 export const noticeItemId = (notice: NoticeKind) => `n-${notice}`;
 export const NOTICE_LINK = noticeItemId("coordinator-link");
@@ -98,4 +105,75 @@ export function noticesFor(
     }
   }
   return { supersede: [...supersede].filter(isOpen), open: opened };
+}
+
+/** `n-owner-asleep-<wave>`: the owner of `wave` idles where nothing will wake it. */
+export const ownerAsleepNoticeId = (wave: string) => noticeItemId(`owner-asleep-${wave}`);
+
+/** The hooks' install section, where the owner wake comes from. */
+export const HOOKS_INSTALL_URL =
+  "https://github.com/kryptek/volley/blob/main/packages/volley-hooks/README.md#install";
+
+/** The one command that arms a wait on `wave`'s digest (what the hooks' Stop block names). */
+export const ownerWakeCommand = (wave: string) =>
+  `volley sub --pattern "volley/_waves/${wave}/digest" --max-messages 1 --timeout 14400`;
+
+/** One owned wave's owner, as `ownerAsleepNotice` judges it. */
+export interface OwnerAsleepInput {
+  wave: string;
+  /** The wave's owner: a coordinator name or an agent id. */
+  owner: string;
+  /** The agent acting for it. */
+  agentId: string;
+  /** This supervisor's machine (the notice's `source.machine`). */
+  machine: string;
+  /** The owner's presence is online. */
+  online: boolean;
+  /** The wave is running or releasing. */
+  inFlight: boolean;
+  /**
+   * Since when (epoch ms) the owner has idled at its prompt with nothing to wake it
+   * (`awaiting_input` with no question and no `background_wait`); null when it is not.
+   */
+  asleepSince: number | null;
+  /** The owner's session (`pointers.link`), from its awaiting_input. */
+  sessionUrl?: string;
+  now: number;
+  /** `autopilot.owner_wake_grace_s`, in ms. */
+  graceMs: number;
+}
+
+/**
+ * Owner wake (SPEC §4.6.16): an online owner of a running wave that has idled with nothing to wake
+ * it for `graceMs` opens `n-owner-asleep-<wave>` (the phone rings once; nothing blocks). It is
+ * superseded when the owner arms a wait (`background_wait`), goes offline, or the wave ends.
+ * `prior` is the notice's item as it stands: one open, or answered for this same idle, is not
+ * opened again.
+ */
+export function ownerAsleepNotice(i: OwnerAsleepInput, prior?: InboxItem): NoticeActions {
+  const id = ownerAsleepNoticeId(i.wave);
+  const open = prior !== undefined && prior.answered === undefined;
+  const asleep = i.online && i.inFlight && i.asleepSince !== null;
+  if (!asleep) return { supersede: open ? [id] : [], open: [] };
+  const since = i.asleepSince as number;
+  if (i.now - since < i.graceMs || open) return { supersede: [], open: [] };
+  const answeredThisIdle =
+    prior?.answered !== undefined &&
+    prior.answered.answer !== "superseded" &&
+    Date.parse(prior.opened_at) >= since;
+  if (answeredThisIdle) return { supersede: [], open: [] };
+  return {
+    supersede: [],
+    open: [
+      {
+        notice: `owner-asleep-${i.wave}`,
+        machine: i.machine,
+        name: i.owner,
+        title: `${i.wave}: your session will not be woken`,
+        question: `${i.owner} (${i.agentId}) is idle and nothing will wake it when ${i.wave} ends: its session has no owner wake armed. In that session, run in the background: ${ownerWakeCommand(i.wave)} — or install the Volley hooks to make it automatic: ${HOOKS_INSTALL_URL}`,
+        ...(i.sessionUrl !== undefined ? { link: i.sessionUrl } : {}),
+        since: new Date(since).toISOString(),
+      },
+    ],
+  };
 }

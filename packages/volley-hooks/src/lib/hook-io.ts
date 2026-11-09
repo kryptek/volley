@@ -47,12 +47,16 @@ export interface HookContext {
 }
 
 /**
- * Structured hook output: `additionalContext` (events in CONTEXT_EVENTS) and, for PreToolUse,
- * `updatedInput` (the tool input Claude Code runs instead of the original).
+ * Structured hook output: `additionalContext` (events in CONTEXT_EVENTS), for PreToolUse
+ * `updatedInput` (the tool input Claude Code runs instead of the original), and for Stop
+ * `decision` / `reason` (the owner-wake backstop, SPEC §4.6.16).
  */
 export interface HookResult {
   additionalContext?: string;
   updatedInput?: Record<string, unknown>;
+  /** Stop only: `block` keeps Claude from ending the turn; `reason` tells it why and what to do. */
+  decision?: "block";
+  reason?: string;
 }
 
 /** Who the hook was connecting as, recorded before any connect so a refusal can be reported. */
@@ -82,6 +86,9 @@ export function contextOutput(event: string, text: string): string {
 
 /** The JSON stdout for a structured result; "" when it carries nothing the event accepts. */
 export function resultOutput(event: string, r: HookResult): string {
+  // Stop's decision control is top-level, not under hookSpecificOutput.
+  if (event === "Stop" && r.decision === "block" && r.reason !== undefined && r.reason !== "")
+    return JSON.stringify({ decision: "block", reason: r.reason });
   const out: Record<string, unknown> = {};
   if (r.updatedInput !== undefined && event === "PreToolUse") out.updatedInput = r.updatedInput;
   if (r.additionalContext !== undefined && r.additionalContext !== "" && CONTEXT_EVENTS.has(event))
@@ -278,7 +285,8 @@ export function reportAuthFailed(
  * (`VOLLEY_HOOKS_TIMEOUT_MS`, default 10 s) bounds how long Claude waits on us. The one
  * exception is a broker refusing the hooks' credentials (`AUTH_FAILED`): it is loud — a stderr
  * line, `hooks-error.json`, exit 1 (a non-blocking error: never 2, which would block the tool
- * call, and never 0, which would look like success). Coordinator hooks with no credentials at
+ * call, and never 0, which would look like success). The one blocking output is Stop's
+ * `decision: "block"` JSON (`resultOutput`), on exit 0. Coordinator hooks with no credentials at
  * all (`NOT_CONFIGURED`) are not that: they exit 0 with nothing printed.
  */
 export async function runHook(event: string, handler: HookHandler): Promise<void> {

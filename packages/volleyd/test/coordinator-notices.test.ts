@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { INBOX_CHANNEL, type InboxItem, itemForNotice } from "../src/autopilot/inbox";
-import { NOTICE_FAILED, NOTICE_LINK, noticesFor } from "../src/coordinator/notices";
+import {
+  NOTICE_FAILED,
+  NOTICE_LINK,
+  type OwnerAsleepInput,
+  noticesFor,
+  ownerAsleepNotice,
+  ownerAsleepNoticeId,
+} from "../src/coordinator/notices";
 import type { CoordinatorRolePayload } from "../src/coordinator/role";
 import { envelope, schemaErrors } from "./helpers/schema";
 
@@ -166,5 +173,78 @@ describe("itemForNotice (SPEC §4.6.18)", () => {
       schemaErrors("inbox-item.schema.json", envelope(INBOX_CHANNEL, "inbox_item", item)),
     ).toEqual([]);
     expect(itemForNotice(spec, AT, 3).version).toBe(3);
+  });
+});
+
+describe("ownerAsleepNotice (owner wake, SPEC §4.6.16)", () => {
+  const SESSION = "https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE0002";
+  const NOW = Date.parse(AT);
+  const asleep = (p: Partial<OwnerAsleepInput> = {}): OwnerAsleepInput => ({
+    wave: "w1",
+    owner: "coord-test",
+    agentId: "coordinator-ab12",
+    machine: "box-a",
+    online: true,
+    inFlight: true,
+    asleepSince: NOW - 121_000,
+    sessionUrl: SESSION,
+    now: NOW,
+    graceMs: 120_000,
+    ...p,
+  });
+
+  it("an owner idle with nothing to wake it past the grace opens n-owner-asleep-w1 with the command and its session", () => {
+    const got = ownerAsleepNotice(asleep());
+    expect(got.supersede).toEqual([]);
+    expect(got.open).toEqual([
+      {
+        notice: "owner-asleep-w1",
+        machine: "box-a",
+        name: "coord-test",
+        title: "w1: your session will not be woken",
+        question: expect.stringContaining(
+          'volley sub --pattern "volley/_waves/w1/digest" --max-messages 1 --timeout 14400',
+        ),
+        link: SESSION,
+        since: new Date(NOW - 121_000).toISOString(),
+      },
+    ]);
+    expect(got.open[0]?.question).toContain("packages/volley-hooks/README.md#install");
+    expect(ownerAsleepNoticeId("w1")).toBe("n-owner-asleep-w1");
+  });
+
+  it("inside the grace opens nothing", () => {
+    expect(ownerAsleepNotice(asleep({ asleepSince: NOW - 60_000 })).open).toEqual([]);
+  });
+
+  it("an open one is not opened twice", () => {
+    const open = openItem(ownerAsleepNoticeId("w1"), SESSION);
+    expect(ownerAsleepNotice(asleep(), open)).toEqual({ supersede: [], open: [] });
+  });
+
+  it("a background_wait (asleepSince null), the owner offline, or the wave ending supersedes an open one", () => {
+    const open = openItem(ownerAsleepNoticeId("w1"), SESSION);
+    for (const p of [{ asleepSince: null }, { online: false }, { inFlight: false }]) {
+      expect(ownerAsleepNotice(asleep(p), open)).toEqual({
+        supersede: [ownerAsleepNoticeId("w1")],
+        open: [],
+      });
+    }
+    // Nothing open: nothing to supersede.
+    expect(ownerAsleepNotice(asleep({ online: false }))).toEqual({ supersede: [], open: [] });
+  });
+
+  it("one answered for this same idle is not reopened; a later idle reopens it", () => {
+    const answered: InboxItem = {
+      ...openItem(ownerAsleepNoticeId("w1"), SESSION),
+      opened_at: new Date(NOW - 1000).toISOString(),
+      answered: { answer: "dismiss", by: "coord-test", where: { kind: "desk" }, at: AT },
+    };
+    expect(ownerAsleepNotice(asleep(), answered).open).toEqual([]);
+    const superseded: InboxItem = {
+      ...answered,
+      answered: { answer: "superseded", by: "volleyd", where: { kind: "autopilot" }, at: AT },
+    };
+    expect(ownerAsleepNotice(asleep(), superseded).open).toHaveLength(1);
   });
 });

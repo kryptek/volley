@@ -9,9 +9,24 @@
  * notification that follows: the session waits on events, not on a person. A question is
  * always one, background task or not. `idle` also carries `tool_calls` (this session's count
  * in the work log, whose pending tick is dropped). Heartbeat.
+ *
+ * Owner wake (SPEC §4.6.16): a coordinator that owns a wave still running or releasing, at a
+ * turn that did not end in a question, waits up to 2 s for the owner-wake waiter's live lock
+ * (the two Stop hooks run in parallel); with it, `idle` carries `background_wait: true, wait:
+ * "owner_wake"` (a live background task alone: `wait: "background_task"`). With neither, and
+ * `stop_hook_active` false, the turn is blocked once (`decision: "block"`) with a `reason` that
+ * names the wave and the one `volley sub` command that arms a wait; `idle` then has no flag.
  */
-import { type HookContext, clip, questionOf, runHook } from "../lib/hook-io";
+import { type HookContext, type HookResult, clip, questionOf, runHook } from "../lib/hook-io";
 import {
+  awaitLiveLock,
+  blockReason,
+  liveLock,
+  ownedWavesInFlight,
+  readWaveStates,
+} from "../lib/owner-waves";
+import {
+  type WaitKind,
   coordinatorFields,
   hasLiveBackgroundTask,
   openSession,
@@ -19,15 +34,15 @@ import {
 } from "../lib/session";
 import { sessionWorkLog, settleWorkLog, workLogSession } from "../lib/work-log";
 
-export async function handle(ctx: HookContext): Promise<string | null> {
+/** How long Stop waits for the owner-wake waiter (its parallel Stop hook) to take its lock. */
+export const LOCK_WAIT_MS = 2000;
+
+export async function handle(ctx: HookContext): Promise<HookResult | null> {
   const message = ctx.input.last_assistant_message;
   const text = clip(message, 500);
-  const question =
-    ctx.identity.mode === "coordinator" && typeof message === "string" ? questionOf(message) : null;
-  const wait =
-    question === null && hasLiveBackgroundTask(ctx.input.background_tasks)
-      ? { background_wait: true as const }
-      : {};
+  const coordinator = ctx.identity.mode === "coordinator";
+  const question = coordinator && typeof message === "string" ? questionOf(message) : null;
+  const backgroundTask = question === null && hasLiveBackgroundTask(ctx.input.background_tasks);
   const { stateDir } = ctx.identity;
   const sessionId = workLogSession(ctx.input, ctx.identity.agentId);
   // The work log is cosmetic: a stuck lock falls back to an unlocked read.
@@ -36,6 +51,20 @@ export async function handle(ctx: HookContext): Promise<string | null> {
   );
   const session = await openSession(ctx.identity, ctx.event, ctx.env);
   try {
+    let kind: WaitKind | null = backgroundTask ? "background_task" : null;
+    let block: HookResult | null = null;
+    if (coordinator && question === null) {
+      const owned = ownedWavesInFlight(await readWaveStates(session.broker), ctx.identity.agentId);
+      if (owned.length > 0) {
+        const armed = backgroundTask
+          ? liveLock(stateDir) !== null
+          : await awaitLiveLock(stateDir, LOCK_WAIT_MS);
+        if (armed) kind = "owner_wake";
+        else if (!backgroundTask && ctx.input.stop_hook_active !== true)
+          block = { decision: "block", reason: blockReason(owned) };
+      }
+    }
+    const wait = kind !== null ? { background_wait: true as const, wait: kind } : {};
     await session.progress("idle", {
       ...(text !== undefined ? { text } : {}),
       ...wait,
@@ -56,7 +85,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
       ...wait,
     });
     await session.heartbeat();
-    return null;
+    return block;
   } finally {
     await session.close();
   }

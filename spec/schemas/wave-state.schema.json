@@ -740,6 +740,10 @@
         "question": { "type": "string" },
         "session_url": { "type": "string", "format": "uri" },
         "workspace": { "type": "string" },
+        "wait": {
+          "enum": ["background_task", "owner_wake"],
+          "description": "What an online owner whose state is working waits on, from its progress events' background_wait and wait (spec section 4.3): a live background task, or the hooks' owner wake (spec section 4.6.16). Absent when it is not waiting on events."
+        },
         "last_seen": { "type": "string", "format": "date-time" }
       }
     }
