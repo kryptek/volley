@@ -893,14 +893,16 @@ export class VolleyBroker {
    *
    * Unlike `subscribeCollect`, this does NOT accumulate messages in memory —
    * it streams them through the callback. The right primitive for indefinite-
-   * runtime consumers like `volley notify`.
+   * runtime consumers like `volley notify`. `opts.retainHandling` 2 (MQTT 5) streams live
+   * messages only.
    */
   async subscribeStream(
     topicPattern: string,
     onMessage: (msg: { topic: string; payload: string }) => void,
+    opts: SubscribeOptions = {},
   ): Promise<() => Promise<void>> {
     const client = this.requireClient();
-    const sub = this.attachRoute(client, topicPattern, onMessage);
+    const sub = this.attachRoute(client, topicPattern, onMessage, opts.retainHandling);
     try {
       await sub.ready;
     } catch (e) {
