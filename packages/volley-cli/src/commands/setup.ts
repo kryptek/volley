@@ -82,9 +82,9 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *                Claude Code (`permissions.additionalDirectories`)
  *   6. Claude Code  the coordinator name, the volley MCP server registered without a secret,
  *                the skills, the hooks
- *   7. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
- *                socket checked the way the service reaches it) or tmux, put on record in
- *                config.yaml (`fleet.local_terminal`) and setup.json
+ *   7. Terminal  the terminal volleyd starts local agents in: Rex (when installed), cmux (macOS,
+ *                when installed; its socket checked the way the service reaches it) or tmux, put
+ *                on record in config.yaml (`fleet.local_terminal`) and setup.json
  *   8. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
  *   9. Phone     a one-time steer sign-in link as a QR code
@@ -776,10 +776,12 @@ before changing anything.
                registered at user scope with no password in it (its login is coordinator.json
                in the auth dir it names; an entry with settings of your own is left as is),
                the volley, volley-issues and volley-wait skills, the Volley hooks
-  7. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
-               way volleyd's service reaches it; the socket password it needs is asked for,
-               hidden), else tmux (stops, printing the install line, when tmux is missing);
-               recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
+  7. Terminal  where volleyd starts local agents: Rex when its command-line tool is
+               installed (Rex sessions; step 8 puts it on the services' PATH), else cmux on a
+               Mac that has it (checked the way volleyd's service reaches it; the socket
+               password it needs is asked for, hidden), else tmux (stops, printing the install
+               line, when tmux is missing); an installed terminal config.yaml already names is
+               kept; recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
   8. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
                PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
                --user), the Volley hooks for coordinator sessions (your status line keeps

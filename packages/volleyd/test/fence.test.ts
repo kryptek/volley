@@ -1161,6 +1161,127 @@ describe("exec", () => {
   });
 });
 
+describe("local Rex sessions (fleet.local_terminal: rex): exact shapes, pinned global flags", () => {
+  const script = renderLaunchScript({
+    hooksDir: "/opt/volley/packages/volley-hooks",
+    model: "claude-opus-5-5",
+    agentId: "w1-t1-implementer-1",
+    worktree: "/tmp/wt",
+  });
+  const G = ["--autostart=false", "--timeout", "10s"];
+  const rex = (...a: string[]) => ["rex", ...G, ...a];
+  const S = "session:11111111-2222-3333-4444-555555555555";
+  const B = "block:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const L = "volley-w1-T1-implementer";
+  const start = (label = L, cwd = "/tmp/wt") =>
+    rex("new", label, "-c", cwd, "--json", "--", "bash", ".volley/launch.sh");
+  const call = (...a: string[]) => rex("block", "call", "-s", S, "-b", B, ...a);
+  const FORMAT = '{"format":"text","trim":true,"max_bytes":65536}';
+
+  it("new runs the sealed launch script in its worktree, in a wave-shaped label", () => {
+    const launch = sealLaunchScript("/tmp/wt", script);
+    expect(() => assertAllowed(start(), { launch })).not.toThrow();
+    expect(() => assertAllowed(start(`${L}-2`), { launch })).not.toThrow();
+    expect(() => assertAllowed(start())).toThrow(FenceError);
+    expect(() => assertAllowed(start(L, "/tmp/attacker"), { launch })).toThrow(FenceError);
+    expect(() => assertAllowed(start(L, "relative"), { launch })).toThrow(FenceError);
+    for (const bad of ["agent-1", "volley-w1", "volley-signin-t1-x", "volley-coordinator-a-b"])
+      expect(() => assertAllowed(start(bad), { launch }), bad).toThrow(FenceError);
+    // Any other command, or no `--`.
+    expect(() =>
+      assertAllowed(rex("new", L, "-c", "/tmp/wt", "--json", "--", "bash", "-c", "id"), {
+        launch,
+      }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(rex("new", L, "-c", "/tmp/wt", "--json", "bash", ".volley/launch.sh"), {
+        launch,
+      }),
+    ).toThrow(FenceError);
+  });
+
+  it("reads, finds, sizes and types only in the shapes LocalRexHost sends", () => {
+    const picker = mintPickerToken({ item_id: "p-r", version: 1, keys: ["Up", "Down", "Space"] });
+    const ok: [string[], Parameters<typeof assertAllowed>[1]?][] = [
+      [rex("ls", "--json")],
+      [rex("session", "inspect", S, "--json")],
+      [call("format", FORMAT)],
+      [call("blob_read", '{"id":7,"offset":34464,"max_bytes":65536}')],
+      [call("size")],
+      [call("resize", '{"columns":120,"rows":40}')],
+      [rex("send-key", "-s", S, "-b", B, "enter")],
+      [rex("send-key", "-s", S, "-b", B, "esc")],
+      [rex("send-key", "-s", S, "-b", B, "up"), { picker }],
+      [rex("send-key", "-s", S, "-b", B, "down"), { picker }],
+      [rex("send-key", "-s", S, "-b", B, "space"), { picker }],
+    ];
+    for (const [argv, opts] of ok)
+      expect(() => assertAllowed(argv, opts), argv.join(" ")).not.toThrow();
+    const bad = [
+      // No pinned global flags, other globals, the server, scripting, raw API, events.
+      ["rex", "ls", "--json"],
+      ["rex", "--autostart=true", "--timeout", "10s", "ls", "--json"],
+      ["rex", "--autostart=false", "--timeout", "99s", "ls", "--json"],
+      rex("-S", "/tmp/evil.sock", "ls", "--json"),
+      ["rex", "-S", "/tmp/evil.sock", ...G, "ls", "--json"],
+      ["rex", "-C", "/tmp", ...G, "ls", "--json"],
+      rex("ls"),
+      rex("do", "-e", "os.execute('id')"),
+      rex("run", "--", "id"),
+      rex("api", "call", "block.send", "{}"),
+      rex("server", "stop"),
+      rex("server", "start"),
+      rex("events", "--json"),
+      rex("wait", S),
+      rex("split", S),
+      rex("capture", "-s", S),
+      // A label as a target; a bad id; a bad JSON argument.
+      rex("session", "inspect", L, "--json"),
+      rex("block", "call", "-s", L, "-b", B, "size"),
+      rex("block", "call", "-s", S, "-b", "block:x", "size"),
+      call("format", '{"format":"ansi","trim":true,"max_bytes":65536}'),
+      call("format", '{"format":"text","trim":true,"max_bytes":99999999}'),
+      call("blob_read", '{"id":"x","offset":0,"max_bytes":65536}'),
+      call("blob_read", '{"id":7,"offset":-1,"max_bytes":65536}'),
+      call("blob_read", '{"id":7,"offset":0,"max_bytes":65536,"path":"/etc/passwd"}'),
+      call("resize", '{"columns":5,"rows":40}'),
+      call("resize", '{"columns":120,"rows":40,"x":1}'),
+      call("resize", "not json"),
+      call("send", "{}"),
+      call("size", "extra"),
+      // Keys: only the mapped names; picker keys need the token; send needs -s and -b.
+      rex("send-key", "-s", S, "-b", B, "ctrl-c"),
+      rex("send-key", "-s", S, "-b", B, "Enter"),
+      rex("send-key", "-s", S, "-b", B, "down"),
+      rex("send-key", "-s", S, "enter"),
+      rex("send", "-s", S, "--", "/model x"),
+      rex("send", "-s", S, "-b", B, "--", "rm -rf /"),
+      rex("send", "-s", S, "-b", B, "rm -rf /"),
+      // A path as the program.
+      ["/tmp/rex", ...G, "ls", "--json"],
+    ];
+    for (const argv of bad) expect(() => assertAllowed(argv), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("typed text needs its token, as in cmux and tmux", () => {
+    const launch = sealLaunchScript("/tmp/wt", script);
+    const text = (t: string) => rex("send", "-s", S, "-b", B, "--", t);
+    expect(() => assertAllowed(text(LAUNCH_COMMAND))).toThrow(FenceError);
+    expect(() => assertAllowed(text(LAUNCH_COMMAND), { launch })).not.toThrow();
+    const modelSwitch = mintModelSwitchToken("claude-sonnet-5-5", "d-r");
+    expect(() => assertAllowed(text("/model claude-sonnet-5-5"), { modelSwitch })).not.toThrow();
+    expect(() => assertAllowed(text("/model claude-sonnet-5-5"))).toThrow(FenceError);
+  });
+
+  it("kill of a session needs consent, and takes only a session id", () => {
+    const consent = mintConsentToken("retire w1-t1-implementer-1");
+    expect(() => assertAllowed(rex("kill", S))).toThrow(/consent/);
+    expect(() => assertAllowed(rex("kill", S), { consent })).not.toThrow();
+    expect(() => assertAllowed(rex("kill", L), { consent })).toThrow(FenceError);
+    expect(() => assertAllowed(rex("kill", S, "--all"), { consent })).toThrow(FenceError);
+  });
+});
+
 describe("the README quotes the fence policy", () => {
   it("verbatim from the src/fence.ts header", () => {
     const src = readFileSync(new URL("../src/fence.ts", import.meta.url), "utf-8");

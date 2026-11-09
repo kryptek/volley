@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { REX_APP_BINS } from "../../src/setup/service-path";
 import { planServices, planServicesForDesk } from "../../src/setup/services";
 import type { ExecResult, SetupContext, StepPlan } from "../../src/setup/step";
 import { setupFence } from "../../src/setup/step";
@@ -19,14 +20,18 @@ import {
   CMUX_MODE_LABEL,
   CMUX_PASSWORD_STEPS,
   classifyCmux,
+  classifyRex,
   cmuxAdvice,
   cmuxCheckArgv,
   cmuxEnv,
   cmuxModeOf,
   cmuxSaid,
+  isLocalTerminal,
   parseCmuxCheck,
   planTerminal,
   readCmuxPassword,
+  rexAdvice,
+  rexInstalled,
   withLocalTerminal,
   writeCmuxPassword,
 } from "../../src/setup/terminal";
@@ -598,6 +603,158 @@ describe("setup: the terminal (cmux, tmux)", () => {
       expect(readFileSync(config(), "utf-8")).toBe("fleet: [unclosed\n");
     });
   });
+  describe("Rex", () => {
+    it("rex is a local terminal", () => {
+      expect(isLocalTerminal("rex")).toBe(true);
+      expect(withLocalTerminal("", "rex")).toBe("fleet:\n  local_terminal: rex\n");
+    });
+
+    it("rexInstalled: the Rex Server bundle's command-line tool, or rex on the services' PATH", () => {
+      const home = "/path/to/home";
+      const bin = REX_APP_BINS(home)[0] as string;
+      expect(bin).toBe(
+        "/path/to/home/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS",
+      );
+      const fs =
+        (...files: string[]) =>
+        (p: string) =>
+          files.includes(p);
+      expect(rexInstalled(home, "/usr/bin:/bin", fs(join(bin, "rex")))).toBe(true);
+      expect(rexInstalled(home, "/opt/x/bin:/usr/bin", fs("/opt/x/bin/rex"))).toBe(true);
+      expect(rexInstalled(home, "/usr/bin:/bin", fs("/usr/local/bin/rex"))).toBe(false);
+      expect(rexInstalled(home, "", fs())).toBe(false);
+    });
+
+    it("classifyRex: no server (exit 4), no rex (ENOENT, 127), anything else", () => {
+      const r = (code: number, stderr: string) => ({ code, stdout: "", stderr });
+      expect(classifyRex(r(0, ""))).toBe("ok");
+      expect(
+        classifyRex(
+          r(4, "error: no Rex server is running at /x/rex.sock, and autostart is disabled"),
+        ),
+      ).toBe("not_running");
+      expect(classifyRex(r(4, ""))).toBe("not_running");
+      expect(classifyRex(Object.assign(new Error("spawn rex ENOENT"), { code: "ENOENT" }))).toBe(
+        "missing",
+      );
+      expect(classifyRex(r(127, "sh: rex: command not found"))).toBe("missing");
+      expect(classifyRex(r(3, "session target x is ambiguous"))).toBe("unknown");
+    });
+
+    it("rexAdvice: open Rex; where rex lives and how to add it; never a raw error alone", () => {
+      expect(rexAdvice("not_running")).toContain("open Rex (or run `rex server start`)");
+      expect(rexAdvice("not_running")).toContain("nothing was created");
+      const missing = rexAdvice("missing", "/usr/bin:/bin");
+      expect(missing).toContain(
+        "~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/",
+      );
+      expect(missing).toContain("/usr/bin:/bin");
+      expect(missing).toContain("volley setup --step terminal");
+      expect(missing).toContain("--step services");
+      expect(rexAdvice("unknown")).toContain("Rex");
+    });
+
+    describe("the Terminal step with Rex installed", () => {
+      let dir: string;
+      let fake: FakeDynsec;
+      let m: FakeMachine;
+      const config = () => join(m.ctx.volleydHome, "config.yaml");
+      const rexBin = () => REX_APP_BINS(m.ctx.home)[0] as string;
+      const SWITCH = "volleyd config set fleet.local_terminal";
+      const start = async (
+        platform: NodeJS.Platform,
+        o: { rex?: boolean; cmux?: boolean } = {},
+      ) => {
+        dir = tempDir("volley-setup-rex-");
+        fake = await startFakeDynsec();
+        m = fakeMachine(fake, dir, { platform });
+        if (o.rex !== false) {
+          mkdirSync(rexBin(), { recursive: true });
+          writeFileSync(join(rexBin(), "rex"), "");
+        }
+        if (o.cmux === true) {
+          const bin = join(m.ctx.home, "Applications", "cmux.app", "Contents", "Resources", "bin");
+          mkdirSync(bin, { recursive: true });
+          writeFileSync(join(bin, "cmux"), "");
+        }
+      };
+      afterEach(async () => {
+        await fake.close();
+      });
+
+      it("on a Mac with Rex (and tmux): chooses rex, records it, prints the switch line", async () => {
+        await start("darwin");
+        const p = await planTerminal(m.ctx);
+        expect(p.blocked).toBeUndefined();
+        expect(p.found).toContain("Terminal: rex (volleyd starts local agents in Rex sessions)");
+        const sw = p.found.find((l) => l.includes(SWITCH));
+        expect(sw).toContain(`${SWITCH} tmux`);
+        expect(sw).toContain("next start");
+        expect(p.row).toBe(`rex (${join(rexBin(), "rex")})`);
+        expect(p.changes.map((c) => c.summary)).toEqual([
+          `Record the local terminal in ${config()} (fleet.local_terminal: rex)`,
+        ]);
+        for (const c of p.changes) await c.apply();
+        expect(readFileSync(config(), "utf-8")).toBe("fleet:\n  local_terminal: rex\n");
+        expect(m.ctx.terminal).toBe("rex");
+        const again = await planTerminal(m.ctx);
+        expect(again.changes).toEqual([]);
+        expect(again.found).toContain(`fleet.local_terminal: rex in ${config()}`);
+      });
+
+      it("on a Mac with Rex and cmux: rex first (rex → cmux → tmux), and no cmux socket check", async () => {
+        await start("darwin", { cmux: true });
+        const p = await planTerminal(m.ctx);
+        expect(p.found[0]).toBe("Terminal: rex (volleyd starts local agents in Rex sessions)");
+        const sw = p.found.find((l) => l.includes(SWITCH)) ?? "";
+        expect(sw).toContain(`${SWITCH} cmux`);
+        expect(sw).toContain("tmux");
+        expect(p.changes).toHaveLength(1);
+        expect(p.found.join("\n")).not.toContain("socket control mode");
+      });
+
+      it("keeps an explicit tmux (or cmux) in config.yaml, saying how to switch to rex", async () => {
+        await start("darwin", { cmux: true });
+        mkdirSync(m.ctx.volleydHome, { recursive: true });
+        writeFileSync(config(), "fleet:\n  local_terminal: tmux\n");
+        const p = await planTerminal(m.ctx);
+        expect(p.changes).toEqual([]);
+        expect(p.row).toBe("tmux (/usr/bin/tmux)");
+        expect(p.found.find((l) => l.includes(SWITCH))).toContain(`${SWITCH} rex`);
+        expect(m.ctx.terminal).toBe("tmux");
+      });
+
+      it("an explicit rex that is not installed falls back, saying why", async () => {
+        await start("darwin", { rex: false });
+        mkdirSync(m.ctx.volleydHome, { recursive: true });
+        writeFileSync(config(), "fleet:\n  local_terminal: rex\n");
+        const p = await planTerminal(m.ctx);
+        expect(p.found[0]).toBe(
+          `${config()} chose rex, which is not installed here: volleyd starts local agents in tmux instead`,
+        );
+        expect(p.row).toBe("tmux (/usr/bin/tmux)");
+      });
+
+      it("says when the installed volleyd service's PATH lacks Rex's directory", async () => {
+        await start("darwin");
+        const plist = join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.volleyd.plist");
+        mkdirSync(join(m.ctx.home, "Library", "LaunchAgents"), { recursive: true });
+        writeFileSync(plist, "<key>PATH</key><string>/usr/bin:/bin</string>");
+        const lacks = (p: StepPlan) => p.found.find((l) => l.includes("--step services"));
+        expect(lacks(await planTerminal(m.ctx))).toContain(rexBin());
+        writeFileSync(plist, `<key>PATH</key><string>/usr/bin:${rexBin()}:/bin</string>`);
+        expect(lacks(await planTerminal(m.ctx))).toBeUndefined();
+      });
+
+      it("the services' PATH carries Rex's directory, so volleyd finds rex by name", async () => {
+        await start("darwin");
+        const services = await planServices(m.ctx);
+        const words = services.changes.map((c) => c.detail ?? "").join("\n");
+        expect(words).toContain(rexBin());
+      });
+    });
+  });
+
   it("withLocalTerminal sets the key in any mapping, and refuses what volleyd would", () => {
     expect(withLocalTerminal("", "tmux")).toBe("fleet:\n  local_terminal: tmux\n");
     expect(withLocalTerminal("fleet:\n  local_terminal: cmux\n", "tmux")).toBe(

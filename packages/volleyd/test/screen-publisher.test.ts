@@ -5,6 +5,8 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Daemon } from "../src/daemon";
+import { REX_GLOBAL } from "../src/fence";
+import { LocalRexHost } from "../src/hosts/local-rex";
 import { SshTmuxHost } from "../src/hosts/ssh-tmux";
 import { retireAgent } from "../src/retire";
 import {
@@ -217,6 +219,34 @@ describe("ScreenPublisher", () => {
       "=w1-T1-implementer:",
       "-S-60",
     ]);
+  });
+
+  it("a Rex-hosted agent publishes source: 'rex', valid against screen.schema.json", async () => {
+    const seen = await collect(reader, SCREEN);
+    const SID = "session:11111111-2222-3333-4444-555555555555";
+    const BID = "block:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const rex = fakeExec()
+      .on(["rex", ...REX_GLOBAL, "session", "inspect"], {
+        stdout: JSON.stringify({
+          session_id: SID,
+          windows: [
+            {
+              layers: [{ blocks: [{ block_id: BID, creator_name: "com.superlogical.terminal" }] }],
+            },
+          ],
+        }),
+      })
+      .on(["rex", ...REX_GLOBAL, "block", "call"], {
+        stdout: JSON.stringify({ content: session }),
+      });
+    const host = new LocalRexHost(rex.exec);
+    const { source: _cmux, ...rest } = target();
+    publisher.track({ ...rest, workspace: SID, host });
+    await publisher.tick();
+    await eventually(() => seen.length === 1);
+    const msg = JSON.parse(seen[0] as string);
+    expect(msg.payload).toMatchObject({ workspace: SID, source: "rex" });
+    expect(schemaErrors("screen.schema.json", msg)).toEqual([]);
   });
 
   it("reads the interval on every capture (a config change applies without restart)", async () => {

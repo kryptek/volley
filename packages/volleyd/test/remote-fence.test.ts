@@ -1675,6 +1675,7 @@ describe("machine roles (#460, #466, #469): the REMOTE steps of peer_retarget an
     for (const a of [
       ["role", "receive", "supervisor", bundle, "--from", "studio"],
       ["role", "receive", "supervisor", bundle, "--from", "studio", "--local-terminal", "tmux"],
+      ["role", "receive", "supervisor", bundle, "--from", "studio", "--local-terminal", "rex"],
       [
         "role",
         "receive",

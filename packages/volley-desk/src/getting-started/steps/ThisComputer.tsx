@@ -77,11 +77,15 @@ export function installChecks(
       : { label: "Message broker", value: plan ? "not checked" : "checking…", state: "pending" };
 
   const cmux = plan?.steps.some((s) => s.found.some((f) => /\bcmux\b/.test(f))) === true;
-  const terminal: InstallCheck = v?.tmux
-    ? { label: "Terminal", value: `tmux ${v.tmux}`, state: "ok" }
-    : cmux
-      ? { label: "Terminal", value: "cmux", state: "ok" }
-      : tool("Terminal", "tmux", (ver) => `tmux ${ver}`);
+  // The Terminal step's found line names Rex when volleyd starts local agents there.
+  const rex = plan?.steps.some((s) => s.found.some((f) => /^Terminal: rex\b/.test(f))) === true;
+  const terminal: InstallCheck = rex
+    ? { label: "Terminal", value: "rex", state: "ok" }
+    : v?.tmux
+      ? { label: "Terminal", value: `tmux ${v.tmux}`, state: "ok" }
+      : cmux
+        ? { label: "Terminal", value: "cmux", state: "ok" }
+        : tool("Terminal", "tmux", (ver) => `tmux ${ver}`);
 
   const services = step("services");
   const volley: InstallCheck = starting

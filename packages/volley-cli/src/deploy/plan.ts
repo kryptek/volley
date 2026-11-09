@@ -1,6 +1,7 @@
 import { dirname, join, posix } from "node:path";
 import { LAUNCHD_LABEL, SYSTEMD_UNIT } from "../commands/peer";
 import { LOCK_MARKER } from "../peer/doctor";
+import { VOLLEYD_LABEL } from "../setup/service-path";
 import { DESK_LABEL } from "../setup/services";
 
 /**
@@ -20,7 +21,7 @@ export const DEPLOY = {
 } as const;
 
 /** volleyd's launchd label (volleyd's `SERVICE_LABEL`). */
-export const VOLLEYD_LABEL = "systems.volley.volleyd";
+export { VOLLEYD_LABEL };
 
 /** A release tag, with or without its `v`. */
 export const TAG_RE = /^v?\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/;
