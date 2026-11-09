@@ -106,6 +106,7 @@ export const REQUIRED_PLANNING = [
   "--no-plan",
   // (5) a strong pair the planner would chain
   "`Depends on:`",
+  "`Depends on #N`",
   "the chain is yours, not the planner's",
 ] as const;
 

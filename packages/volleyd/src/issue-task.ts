@@ -15,11 +15,71 @@ export interface IssueInput {
 /** Optional markdown emphasis around the label (`**Depends on:**`, `_deps_:`). */
 const EMPH = String.raw`(?:\*\*|__|[*_\`])?`;
 
-/** A `Depends on:` / `deps:` line; group 1 is the text after the label. */
-const DEPENDS_LINE = new RegExp(
-  String.raw`^\s*(?:[-*+]\s+)?${EMPH}\s*(?:depends on|deps)\s*${EMPH}\s*:\s*${EMPH}(.*)$`,
+/** A `deps:` line (line start or list item, colon required); group 1 is the text after it. */
+const DEPS_LINE = new RegExp(
+  String.raw`^\s*(?:[-*+]\s+)?${EMPH}\s*deps\s*${EMPH}\s*:\s*${EMPH}(.*)$`,
   "i",
 );
+
+/**
+ * A `Depends on` label anywhere on a line, emphasis allowed, colon optional (group 1 is the
+ * colon when present). The text after it is the clause's candidate.
+ */
+const DEPENDS_LABEL = new RegExp(
+  String.raw`(?<!\w)${EMPH}\s*depends\s+on\b\s*${EMPH}\s*(:)?\s*${EMPH}`,
+  "gi",
+);
+
+/** A `Blocks:` label (the inverse edge, never read here): one way a clause ends. */
+const BLOCKS_LABEL = new RegExp(String.raw`(?<!\w)${EMPH}\s*blocks\s*${EMPH}\s*:`, "iy");
+
+/** A reference at the start of the text (after whitespace): `;` before one separates, not ends. */
+const LEADING_REF = /^\s*(?:https?:\/\/github\.com\/|(?:[\w.-]+\/[\w.-]+)?#\d)/i;
+
+/**
+ * Where the clause starting at `text` ends: at a `Blocks:` label, or a sentence break (`.`, `;`
+ * or `!` followed by whitespace or the end of the line) outside parentheses and backtick spans,
+ * else at the end of the line. A `;` followed by a reference separates two references instead.
+ */
+function clauseEnd(text: string): number {
+  let depth = 0;
+  let code = false;
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k];
+    if (c === "`") code = !code;
+    if (code) continue;
+    if (c === "(") depth++;
+    else if (c === ")") depth = Math.max(0, depth - 1);
+    if (depth > 0) continue;
+    BLOCKS_LABEL.lastIndex = k;
+    if (BLOCKS_LABEL.test(text)) return k;
+    if ((c === "." || c === ";" || c === "!") && /^(?:\s|$)/.test(text.slice(k + 1, k + 2))) {
+      if (c === ";" && LEADING_REF.test(text.slice(k + 1))) continue;
+      return k;
+    }
+  }
+  return text.length;
+}
+
+/**
+ * Whether the `Depends on` label at `at` sits in an inline code span that quotes more than the
+ * label itself (`` `Depends on: #N` `` in prose is an example, not a clause; `` `Depends on`: ``
+ * is emphasis).
+ */
+function quoted(line: string, at: number): boolean {
+  // A code span opens with a run of backticks and closes at the next run of the same length.
+  const runs = [...line.matchAll(/`+/g)].map((r) => ({ at: r.index, len: r[0].length }));
+  for (let k = 0; k < runs.length; k++) {
+    const open = runs[k] as { at: number; len: number };
+    const close = runs.slice(k + 1).find((r) => r.len === open.len);
+    if (close === undefined) continue;
+    if (open.at < at && at < close.at) {
+      return !/^\s*depends\s+on\s*:?\s*$/i.test(line.slice(open.at + open.len, close.at));
+    }
+    k = runs.indexOf(close);
+  }
+  return false;
+}
 
 /** A markdown list item; group 1 is its text. */
 const LIST_ITEM = /^\s*[-*+]\s+(.*)$/;
@@ -32,7 +92,7 @@ export const ISSUE_REF =
   /https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+)\b|(?:\b([\w.-]+\/[\w.-]+))?#(\d+)\b/gi;
 
 /** Dependency-line text that declares no dependencies (after parentheticals and punctuation). */
-const NONE = new Set(["none", "n/a", "-", "—"]);
+const NONE = new Set(["none", "nothing", "n/a", "-", "—"]);
 
 /**
  * A task tag at the start of an issue title (`O0: …`, `T3b — …`, `D10 - …`); group 1 is the tag.
@@ -111,11 +171,15 @@ export function assignTaskIds(
 }
 
 /**
- * The issues named on the body's dependency lines. `declared: false` means there is no such
- * line at all (as opposed to `Depends on: none`). An empty label reads the list items on the
- * lines that follow. A reference to another repository is an error (a wave's tasks all live in
- * one repository; `repoSlug` names it), and so is any text that is neither a reference nor
- * `none`: a dependency is never silently dropped.
+ * The issues named on the body's dependency clauses. A `Depends on` clause may sit anywhere on a
+ * line, its colon optional: without one it is a clause only when a reference follows before it
+ * ends (otherwise it is prose and ignored). It runs from the label to the first sentence break or
+ * `Blocks:` label; text before the label and after the end is ignored. A `deps:` line opens its
+ * line (or list item) and needs its colon. `declared: false` means there is no clause at all (as
+ * opposed to `Depends on: none` / `nothing`). An empty label reads the list items on the lines
+ * that follow. A reference to another repository is an error (a wave's tasks all live in one
+ * repository; `repoSlug` names it), and so is any text in a clause that is neither a reference
+ * nor a none-word: a dependency is never silently dropped.
  */
 export function parseDependsOn(
   body: string,
@@ -123,12 +187,8 @@ export function parseDependsOn(
 ): { declared: boolean; refs: number[] } {
   let declared = false;
   const refs: number[] = [];
-  const unparseable = (line: string) =>
-    new Error(
-      `unparseable dependency line '${line.trim()}' (write it as 'Depends on: #N, #M' or 'Depends on: none')`,
-    );
-  /** Read the references in `text` (from `line`); anything else on it is an error. */
-  const read = (text: string, line: string) => {
+  /** Read the references in `text` (from `line`, 1-based `lineNo`); anything else is an error. */
+  const read = (text: string, line: string, lineNo: number) => {
     let found = 0;
     for (const [ref, urlRepo, urlN, repo, n] of text.matchAll(ISSUE_REF)) {
       const slug = urlRepo ?? repo;
@@ -144,42 +204,69 @@ export function parseDependsOn(
     const rest = text
       .replace(ISSUE_REF, " ")
       .replace(/\([^)]*\)/g, " ")
-      .replace(/\band\b|&/gi, " ")
-      .replace(/[\s,;.*_`]+/g, "");
-    if (rest !== "" || found === 0) throw unparseable(line);
+      .replace(/\band\b|&/gi, " ");
+    if (rest.replace(/[\s,;.*_`]+/g, "") === "" && found > 0) return;
+    const leftover = rest.replace(/^[\s,;.*_`]+|[\s,;.*_`]+$/g, "").replace(/\s+/g, " ");
+    throw new Error(
+      `unparseable dependency line '${line.trim()}' on line ${lineNo}: ${found > 0 ? "after the references, " : ""}'${leftover}' remains (write it as 'Depends on: #N, #M' or 'Depends on: none')`,
+    );
   };
   const lines = body.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? "";
-    const m = DEPENDS_LINE.exec(raw);
-    if (m === null) continue;
-    declared = true;
-    const text = (m[1] ?? "").trim();
-    const bare = text
-      .replace(/\([^)]*\)/g, "")
-      .replace(/[\s.,;:!*_`]+/g, "")
-      .toLowerCase();
-    if (NONE.has(bare)) continue;
-    if (bare !== "") {
-      read(text, raw);
-      continue;
+    /** The text of each clause on this line. */
+    const clauses: string[] = [];
+    const deps = DEPS_LINE.exec(raw);
+    if (deps !== null) {
+      const text = deps[1] ?? "";
+      clauses.push(text.slice(0, clauseEnd(text)));
+    } else {
+      DEPENDS_LABEL.lastIndex = 0;
+      for (let m = DEPENDS_LABEL.exec(raw); m !== null; m = DEPENDS_LABEL.exec(raw)) {
+        const after = raw.slice(m.index + m[0].length);
+        const end = clauseEnd(after);
+        const text = after.slice(0, end);
+        const colon = m[1] !== undefined;
+        DEPENDS_LABEL.lastIndex = m.index + m[0].length + Math.max(end, 1);
+        if (quoted(raw, m.index + m[0].search(/depends/i))) {
+          DEPENDS_LABEL.lastIndex = m.index + m[0].length;
+          continue;
+        }
+        // Without its colon the label is a clause only when a reference follows it.
+        if (!colon && !new RegExp(ISSUE_REF.source, "i").test(text.replace(/\([^)]*\)/g, " ")))
+          continue;
+        clauses.push(text);
+      }
     }
-    // Empty label: the references are the list items that follow (blank lines allowed before).
-    let j = i + 1;
-    while (j < lines.length && (lines[j] ?? "").trim() === "") j++;
-    let items = 0;
-    for (; j < lines.length; j++) {
-      const item = LIST_ITEM.exec(lines[j] ?? "");
-      if (item === null) break;
-      read(item[1] ?? "", lines[j] ?? "");
-      items++;
+    for (const clause of clauses) {
+      declared = true;
+      const text = clause.trim();
+      const bare = text
+        .replace(/\([^)]*\)/g, "")
+        .replace(/[\s.,;:!*_`]+/g, "")
+        .toLowerCase();
+      if (NONE.has(bare)) continue;
+      if (bare !== "") {
+        read(text, raw, i + 1);
+        continue;
+      }
+      // Empty label: the references are the list items that follow (blank lines allowed before).
+      let j = i + 1;
+      while (j < lines.length && (lines[j] ?? "").trim() === "") j++;
+      let items = 0;
+      for (; j < lines.length; j++) {
+        const item = LIST_ITEM.exec(lines[j] ?? "");
+        if (item === null) break;
+        read(item[1] ?? "", lines[j] ?? "", j + 1);
+        items++;
+      }
+      if (items === 0) {
+        throw new Error(
+          `empty dependency line '${raw.trim()}' (list the issues on it or as '- #N' items below it, or write 'none')`,
+        );
+      }
+      i = j - 1;
     }
-    if (items === 0) {
-      throw new Error(
-        `empty dependency line '${raw.trim()}' (list the issues on it or as '- #N' items below it, or write 'none')`,
-      );
-    }
-    i = j - 1;
   }
   return { declared, refs };
 }

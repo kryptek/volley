@@ -30,6 +30,92 @@ describe("parseDependsOn", () => {
     });
   });
 
+  describe("a clause in the opening paragraph, with or without its colon (#648)", () => {
+    const PRE = "Part of #100 (the epic). **T1 — title.** ";
+
+    it("reads references from the label up to the sentence break or Blocks:", () => {
+      expect(parseDependsOn(`${PRE}Depends on #101 (the wire field). Blocks: T6, T7.`)).toEqual({
+        declared: true,
+        refs: [101],
+      });
+      expect(
+        parseDependsOn(
+          `${PRE}Depends on #102 (renderer + parser), #103 (search endpoints), #104 (uploads). Blocks: T9.`,
+        ),
+      ).toEqual({ declared: true, refs: [102, 103, 104] });
+      expect(
+        parseDependsOn(
+          `${PRE}Depends on #107 (portal composer) and #108 (admin composer). Blocks: nothing (Phase N).`,
+        ),
+      ).toEqual({ declared: true, refs: [107, 108] });
+      expect(parseDependsOn("Depends on #5 Blocks: #9")).toEqual({ declared: true, refs: [5] });
+      expect(parseDependsOn("Depends on #5, #6")).toEqual({ declared: true, refs: [5, 6] });
+      // A `;` before a reference separates; before prose it ends the clause.
+      expect(parseDependsOn("Depends on: #5; #6")).toEqual({ declared: true, refs: [5, 6] });
+      expect(parseDependsOn("Depends on #5; see #9 for context")).toEqual({
+        declared: true,
+        refs: [5],
+      });
+    });
+
+    it("'nothing' declares none, and prose after the clause is ignored", () => {
+      expect(
+        parseDependsOn(
+          `${PRE}Depends on: nothing. Blocks: T1, T2, T8 (and through them every composer task).`,
+        ),
+      ).toEqual({ declared: true, refs: [] });
+      expect(
+        parseDependsOn(
+          `${PRE}Depends on: nothing (pure frontend restructuring). Blocks: T7. Lands **before** T1 touches \`X.vue\` (see merge order in #100).`,
+        ),
+      ).toEqual({ declared: true, refs: [] });
+    });
+
+    it("prose that says 'depends on' without a reference is not a clause", () => {
+      expect(parseDependsOn("Whether this ships depends on load testing.")).toEqual({
+        declared: false,
+        refs: [],
+      });
+      // A label quoted in a code span is an example, not a clause; a span holding only the
+      // label is emphasis.
+      for (const body of [
+        "Write `Depends on: #N, #M` in the body.",
+        "The note says `no Depends on:/deps: line in #…; confirm` today.",
+        "The helper reads `Depends on #5` here.",
+        "A pin, e.g. `` `Depends on #N` `` as is.",
+      ]) {
+        expect(parseDependsOn(body)).toEqual({ declared: false, refs: [] });
+      }
+      expect(parseDependsOn("`Depends on`: #5")).toEqual({ declared: true, refs: [5] });
+      expect(parseDependsOn("Quoted `Depends on: #N`, then Depends on #7.")).toEqual({
+        declared: true,
+        refs: [7],
+      });
+    });
+
+    it("fails closed, naming the line, its number and the leftover", () => {
+      const cases: [string, RegExp][] = [
+        ["Depends on #5 then #6", /'then'/],
+        ["Depends on: nothing, #5", /'nothing'/],
+        ["Depends on: T3, T4", /'T3, T4'/],
+        ["Depends on: #5, T3", /'T3'/],
+        ["The retry depends on #5 landing first.", /'landing first'/],
+      ];
+      for (const [line, leftover] of cases) {
+        let message = "";
+        try {
+          parseDependsOn(line);
+        } catch (e) {
+          message = (e as Error).message;
+        }
+        expect(message).toContain(`'${line}'`);
+        expect(message).toMatch(/line 1\b/);
+        expect(message).toMatch(leftover);
+      }
+      expect(() => parseDependsOn("Intro.\n\nDepends on #5 or #6")).toThrow(/line 3\b/);
+    });
+  });
+
   it("refuses a cross-repository reference", () => {
     expect(() => parseDependsOn("Depends on: other/repo#5", "owner/repo")).toThrow(
       /cross-repository dependency other\/repo#5/,
