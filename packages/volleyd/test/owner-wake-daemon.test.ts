@@ -259,6 +259,22 @@ describe("n-owner-asleep-<wave>", () => {
     expect(answered()[0]?.data).toMatchObject({ answer: "superseded" });
   });
 
+  it("the wave ending (stopped) supersedes it", async () => {
+    await idlePrompt();
+    await until(() => expect(coordinator()?.state).toBe("awaiting_input"));
+    clock.sleepHost(121_000);
+    await eventually(async () => {
+      await daemon.tick();
+      return opened().length === 1;
+    });
+    expect((await client.request("stop", { wave: WAVE, by: NAME })).error).toBeUndefined();
+    await eventually(async () => {
+      await daemon.tick();
+      return answered().length === 1;
+    });
+    expect(answered()[0]?.data).toMatchObject({ answer: "superseded" });
+  });
+
   it("an idle prompt that is a question never opens it", async () => {
     await progress("awaiting_input", {
       notification_type: "idle_prompt",
