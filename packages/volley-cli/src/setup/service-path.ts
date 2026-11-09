@@ -11,6 +11,9 @@ import type { SetupContext } from "./step";
  * machine gives the same PATH from any shell, and from its own output.
  */
 
+/** volleyd's launchd label (macOS): its plist is `~/Library/LaunchAgents/<label>.plist`. */
+export const VOLLEYD_LABEL = "systems.volley.volleyd";
+
 /** Where the cmux app keeps its command-line tool (the one a service can run). */
 export const CMUX_APP_BINS = (home: string) => [
   "/Applications/cmux.app/Contents/Resources/bin",

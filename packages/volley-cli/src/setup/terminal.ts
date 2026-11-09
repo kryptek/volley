@@ -20,7 +20,7 @@ import {
   keychainReadItemArgv,
   storeInKeychain,
 } from "./keychain";
-import { CMUX_APP_BINS, REX_APP_BINS, serviceEnv } from "./service-path";
+import { CMUX_APP_BINS, REX_APP_BINS, VOLLEYD_LABEL, serviceEnv } from "./service-path";
 import type { Change, ExecResult, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 
@@ -752,7 +752,7 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
  */
 function rexMissingFromService(ctx: SetupContext, rex: string): string | null {
   if (ctx.deps.platform !== "darwin") return null;
-  const plist = join(ctx.home, "Library", "LaunchAgents", "systems.volley.volleyd.plist");
+  const plist = join(ctx.home, "Library", "LaunchAgents", `${VOLLEYD_LABEL}.plist`);
   if (!existsSync(plist)) return null;
   const dir = dirname(rex);
   const path = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(readFileSync(plist, "utf-8"));

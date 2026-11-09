@@ -33,8 +33,9 @@ const BLOCK_ID = /^block:[0-9a-f-]{36}$/;
 const TERMINAL_CREATOR = "com.superlogical.terminal";
 
 /**
- * The Host's key names in Rex's key-binding syntax (`rex keymap`). `space` is Rex's name for the
- * space bar in that syntax, as `enter`, `esc`, `up` and `down` are.
+ * The Host's key names in Rex's key-binding syntax (`rex keymap`). `enter`, `esc`, `up` and
+ * `down` were read from `rex send-key --help`; `space` is NOT yet confirmed against a live Rex
+ * (the owner smoke presses Space in an inbox picker): if Rex names it otherwise, change it here.
  */
 const REX_KEYS: Record<string, string> = {
   Enter: "enter",
@@ -135,11 +136,12 @@ export class LocalRexHost implements Host {
     if (r.timedOut)
       throw fail("rex new failed: timed out", { candidate: label, outcome: "unknown" });
     if (r.code !== 0) {
-      const access = classifyRex(r);
-      const refused = access === "not_running" || access === "missing";
+      // Only exit 4 (no server) proves `new` created nothing (a missing rex rejected with ENOENT
+      // above); any other exit, whatever its text, may have made the session, so spawn reconciles.
+      const refused = r.code === 4;
       throw fail(
         refused
-          ? `volleyd cannot open a Rex session. ${this.advice(access)}${rexSaid(r.stderr || r.stdout)}`
+          ? `volleyd cannot open a Rex session. ${this.advice("not_running")}${rexSaid(r.stderr || r.stdout)}`
           : `rex new failed: exit ${r.code}${rexSaid(r.stderr || r.stdout)}`,
         {
           exit: r.code,
@@ -261,7 +263,9 @@ export class LocalRexHost implements Host {
       if (typeof first.content !== "string") return null;
       let text = first.content;
       if (typeof first.id === "number") {
-        const total = typeof first.total === "number" ? first.total : 0;
+        // No total, no tail offset: reading from 0 would show the screen's head.
+        if (typeof first.total !== "number") return null;
+        const total = first.total;
         const rest = await this.blockCall(
           workspace,
           "blob_read",

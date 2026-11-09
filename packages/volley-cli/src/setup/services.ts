@@ -16,7 +16,7 @@ import { deskPortListeners, portConflict } from "./desk-port";
 import { withSimulator } from "./first-wave";
 import { deskBrokerHost, readDeskPrivateUrl, readNetworkRecord } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
-import { serviceEnv, servicePath } from "./service-path";
+import { VOLLEYD_LABEL, serviceEnv, servicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 import { planServeChange, privateWsUrl } from "./tailscale-serve";
@@ -257,7 +257,7 @@ export function volleydUnitSpec(
 ): ServiceSpec {
   return {
     name: "volleyd",
-    label: "systems.volley.volleyd",
+    label: VOLLEYD_LABEL,
     description: "Volley wave supervisor (volleyd)",
     args: [bun, volleydCli, "daemon"],
     env,

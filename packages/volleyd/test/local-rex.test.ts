@@ -239,6 +239,9 @@ describe("LocalRexHost", () => {
         throw new FenceError("rex new", "not permitted for volleyd");
       }),
     ).toBe("refused");
+    // Only ENOENT and exit 4 prove nothing ran: an exit whose text merely mentions a missing
+    // command may still have created the session, so spawn reconciles.
+    expect(await outcome({ code: 1, stderr: "bash: claude: command not found" })).toBe("unknown");
   });
 
   it("serializes launches: one new in flight at a time", async () => {
@@ -336,6 +339,12 @@ describe("LocalRexHost", () => {
     expect(await host.readScreen(SID, 5)).toBeNull();
     fake.on(format, { stdout: JSON.stringify({ content: "", total: 9, id: 1 }) });
     fake.on([...REX, "block", "call", "-s", SID, "-b", BID, "blob_read"], { code: 1 });
+    expect(await host.readScreen(SID, 5)).toBeNull();
+    // A blob id with no total: the tail's offset is unknown, so no screen rather than its head.
+    fake.on(format, { stdout: JSON.stringify({ content: "", id: 1 }) });
+    fake.on([...REX, "block", "call", "-s", SID, "-b", BID, "blob_read"], {
+      stdout: JSON.stringify({ data: "head\n" }),
+    });
     expect(await host.readScreen(SID, 5)).toBeNull();
     // Not a Rex session ref at all.
     expect(await host.readScreen("workspace:3", 5)).toBeNull();
