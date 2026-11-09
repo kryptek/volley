@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type HTMLAttributes } from 'react';
+import { type HTMLAttributes, useEffect, useRef } from "react";
 
-import './Beams.css';
+import "./Beams.css";
 
 export interface BeamsProps extends HTMLAttributes<HTMLDivElement> {
   color?: string;
@@ -329,7 +329,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -347,7 +347,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
 };
 
 export const Beams = ({
-  color = '#ffffff',
+  color = "#ffffff",
   beamWidth = 140,
   rotation = 30,
   speed = 1,
@@ -370,7 +370,7 @@ export const Beams = ({
   backgroundColor,
   paused = false,
   dpr,
-  className = '',
+  className = "",
   style,
   ...rest
 }: BeamsProps) => {
@@ -399,7 +399,7 @@ export const Beams = ({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -407,17 +407,17 @@ export const Beams = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'high-performance'
+      powerPreference: "high-performance",
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
+    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
     const fieldProgram = link(gl, FIELD);
     const compositeProgram = link(gl, COMPOSITE);
     if (!fieldProgram || !compositeProgram) return undefined;
@@ -450,8 +450,8 @@ export const Beams = ({
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
     };
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const colorCache = new Map<string, number[]>();
     const toLinear = (value: string): number[] => {
       const cached = colorCache.get(value);
@@ -459,11 +459,11 @@ export const Beams = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#ffffff';
+        probe.fillStyle = "#ffffff";
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
-        rgb = [r, g, b].map(v => Math.pow(v / 255, 2.2));
+        rgb = [r, g, b].map((v) => Math.pow(v / 255, 2.2));
       }
       colorCache.set(value, rgb);
       return rgb;
@@ -477,7 +477,7 @@ export const Beams = ({
       reach: 0,
       x: 0,
       y: 0,
-      lightY: 0
+      lightY: 0,
     };
     let raf = 0;
     let last = 0;
@@ -485,7 +485,8 @@ export const Beams = ({
 
     const render = () => {
       const s = settingsRef.current;
-      const presence = state.intro * state.intro * state.intro * (state.intro * (state.intro * 6 - 15) + 10);
+      const presence =
+        state.intro * state.intro * state.intro * (state.intro * (state.intro * 6 - 15) + 10);
       gl.bindVertexArray(vao);
       sizeTarget(view.fieldWidth, view.fieldHeight);
 
@@ -509,7 +510,13 @@ export const Beams = ({
       gl.uniform1f(f.uFill, s.fillLight);
       gl.uniform3f(f.uLight, 0, 3 + sweep + state.lightY * reach, 10);
       gl.uniform1f(f.uCamera, view.height * 1.866);
-      gl.uniform4f(f.uPointer, state.x, view.height - state.y, reach, Math.max(view.height, view.width) * 0.28);
+      gl.uniform4f(
+        f.uPointer,
+        state.x,
+        view.height - state.y,
+        reach,
+        Math.max(view.height, view.width) * 0.28,
+      );
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.generateMipmap(gl.TEXTURE_2D);
@@ -518,7 +525,7 @@ export const Beams = ({
       const tint = toLinear(s.color);
       const tone = 0.2126 * tint[0] + 0.7152 * tint[1] + 0.0722 * tint[2];
       const shadeDepth = Math.min(1, 0.18 / Math.max(tone, 0.001));
-      const ink = tint.map(v => Math.pow(Math.min(1, v * shadeDepth), 1 / 2.2));
+      const ink = tint.map((v) => Math.pow(Math.min(1, v * shadeDepth), 1 / 2.2));
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(compositeProgram.program);
@@ -557,7 +564,8 @@ export const Beams = ({
       const follow = 1 - Math.exp(-dt * 7);
       state.x += (pointer.x - state.x) * follow;
       state.y += (pointer.y - state.y) * follow;
-      state.reach += ((engaged ? 1 : 0) - state.reach) * (1 - Math.exp(-dt * (engaged ? 3.2 : 1.8)));
+      state.reach +=
+        ((engaged ? 1 : 0) - state.reach) * (1 - Math.exp(-dt * (engaged ? 3.2 : 1.8)));
       const turn = (s.rotation * Math.PI) / 180;
       const offsetX = state.x - view.width / 2;
       const offsetY = view.height / 2 - state.y;
@@ -600,7 +608,8 @@ export const Beams = ({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside =
+        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       wake();
     };
 
@@ -616,17 +625,17 @@ export const Beams = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastQuality = settingsRef.current.quality;
@@ -648,16 +657,16 @@ export const Beams = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       if (texture) gl.deleteTexture(texture);
       gl.deleteFramebuffer(framebuffer);
       gl.deleteProgram(fieldProgram.program);
       gl.deleteProgram(compositeProgram.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -668,7 +677,7 @@ export const Beams = ({
   return (
     <div
       ref={containerRef}
-      className={`beams-container${className ? ` ${className}` : ''}`}
+      className={`beams-container${className ? ` ${className}` : ""}`}
       style={backgroundColor ? { background: backgroundColor, ...style } : style}
       {...rest}
     >

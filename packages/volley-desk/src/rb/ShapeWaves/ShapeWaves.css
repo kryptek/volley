@@ -18,7 +18,7 @@
   pointer-events: none;
 }
 
-.shape-waves[data-ready='true'] .shape-waves__canvas {
+.shape-waves[data-ready="true"] .shape-waves__canvas {
   opacity: 1;
 }
 

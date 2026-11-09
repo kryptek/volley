@@ -40,7 +40,7 @@
 }
 
 .grid-motion__tile::after {
-  content: '';
+  content: "";
   position: absolute;
   inset: 0;
   border-radius: inherit;

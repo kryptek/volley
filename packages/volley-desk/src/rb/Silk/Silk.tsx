@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties } from 'react';
+import { type CSSProperties, useEffect, useRef } from "react";
 
-import './Silk.css';
+import "./Silk.css";
 
 export interface SilkProps {
   speed?: number;
@@ -262,7 +262,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -274,7 +274,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace(/\[0\]$/, '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace(/\[0\]$/, "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
@@ -282,8 +282,8 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
 const Silk = ({
   speed = 5,
   scale = 1,
-  color = '#7B7481',
-  sheenColor = '#ffffff',
+  color = "#7B7481",
+  sheenColor = "#ffffff",
   noiseIntensity = 1.5,
   rotation = 0,
   sheen = 0.5,
@@ -300,8 +300,8 @@ const Silk = ({
   lightMode = false,
   paused = false,
   dpr,
-  className = '',
-  style
+  className = "",
+  style,
 }: SilkProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -327,19 +327,19 @@ const Silk = ({
     fade: clamp(fade, 0, 1),
     lightMode,
     paused,
-    dpr
+    dpr,
   };
 
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'high-performance'
+      powerPreference: "high-performance",
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -372,14 +372,14 @@ const Silk = ({
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
     };
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const colorCache = new Map<string, number[]>();
     const toRgb = (value: string): number[] => {
       if (colorCache.has(value)) return colorCache.get(value) as number[];
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#ffffff';
+        probe.fillStyle = "#ffffff";
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -389,7 +389,7 @@ const Silk = ({
       return rgb;
     };
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const view = { width: 1, height: 1, ratio: 1 };
     const pointer = { x: 0, y: 0, inside: false };
     const waves: Wave[] = [];
@@ -403,13 +403,19 @@ const Silk = ({
       dragX: 0,
       dragY: 0,
       lightX: DEFAULT_LIGHT[0],
-      lightY: DEFAULT_LIGHT[1]
+      lightY: DEFAULT_LIGHT[1],
     };
     let raf = 0;
     let last = 0;
     let visible = true;
 
-    const setShared = (uniforms: Uniforms, width: number, height: number, s: Settings, unfold: number) => {
+    const setShared = (
+      uniforms: Uniforms,
+      width: number,
+      height: number,
+      s: Settings,
+      unfold: number,
+    ) => {
       const [shiftX, shiftY] = variationShift(s.variation);
       gl.uniform2f(uniforms.uView, width, height);
       gl.uniform1f(uniforms.uScale, s.scale);
@@ -424,7 +430,7 @@ const Silk = ({
         state.x / view.width,
         1 - state.y / view.height,
         state.touch * s.interactionStrength,
-        0.32
+        0.32,
       );
       gl.uniform2f(uniforms.uDrag, state.dragX, state.dragY);
       gl.uniform4fv(uniforms.uWaves, waveData);
@@ -438,11 +444,17 @@ const Silk = ({
 
       waveData.fill(0);
       waves.slice(-4).forEach((item, index) => {
-        waveData.set([item.x, item.y, item.age * 0.6, Math.exp(-item.age / (WAVE_LIFE * 0.45))], index * 4);
+        waveData.set(
+          [item.x, item.y, item.age * 0.6, Math.exp(-item.age / (WAVE_LIFE * 0.45))],
+          index * 4,
+        );
       });
 
       if (s.glow > 0) {
-        sizeTarget(Math.max(1, Math.round(canvas.width / 4)), Math.max(1, Math.round(canvas.height / 4)));
+        sizeTarget(
+          Math.max(1, Math.round(canvas.width / 4)),
+          Math.max(1, Math.round(canvas.height / 4)),
+        );
         gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
         gl.viewport(0, 0, target.width, target.height);
         gl.useProgram(fieldProgram.program);
@@ -500,7 +512,8 @@ const Silk = ({
       const dragBlend = 1 - Math.exp(-dt * 4);
       state.dragX += (clamp(velX * 0.03, -0.06, 0.06) - state.dragX) * dragBlend;
       state.dragY += (clamp(-velY * 0.03, -0.06, 0.06) - state.dragY) * dragBlend;
-      state.touch += ((engaged ? 1 : 0) - state.touch) * (1 - Math.exp(-dt * (engaged ? 3.5 : 1.4)));
+      state.touch +=
+        ((engaged ? 1 : 0) - state.touch) * (1 - Math.exp(-dt * (engaged ? 3.5 : 1.4)));
 
       let lightGoalX = DEFAULT_LIGHT[0];
       let lightGoalY = DEFAULT_LIGHT[1];
@@ -593,18 +606,18 @@ const Silk = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -624,17 +637,17 @@ const Silk = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       gl.deleteTexture(texture);
       gl.deleteFramebuffer(framebuffer);
       gl.deleteProgram(fieldProgram.program);
       gl.deleteProgram(compositeProgram.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -643,7 +656,11 @@ const Silk = ({
   });
 
   return (
-    <div ref={containerRef} className={`silk-container${className ? ` ${className}` : ''}`} style={style}>
+    <div
+      ref={containerRef}
+      className={`silk-container${className ? ` ${className}` : ""}`}
+      style={style}
+    >
       <canvas ref={canvasRef} className="silk-canvas" aria-hidden="true" />
     </div>
   );

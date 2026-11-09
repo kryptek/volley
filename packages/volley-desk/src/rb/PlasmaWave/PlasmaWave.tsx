@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type HTMLAttributes } from 'react';
+import { type HTMLAttributes, useEffect, useRef } from "react";
 
-import './PlasmaWave.css';
+import "./PlasmaWave.css";
 
 export interface PlasmaWaveProps extends HTMLAttributes<HTMLDivElement> {
   colors?: string[];
@@ -62,7 +62,12 @@ type Settings = {
 
 type Program = { program: WebGLProgram; uniforms: Record<string, WebGLUniformLocation | null> };
 
-type Target = { texture: WebGLTexture | null; framebuffer: WebGLFramebuffer | null; width: number; height: number };
+type Target = {
+  texture: WebGLTexture | null;
+  framebuffer: WebGLFramebuffer | null;
+  width: number;
+  height: number;
+};
 
 const QUAD_VERTEX = `#version 300 es
 in vec2 aPosition;
@@ -287,7 +292,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -305,7 +310,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
 };
 
 export default function PlasmaWave({
-  colors = ['#A855F7', '#06B6D4'],
+  colors = ["#A855F7", "#06B6D4"],
   speed = 1,
   speed1 = 0.05,
   speed2 = 0.05,
@@ -329,15 +334,15 @@ export default function PlasmaWave({
   lightMode = false,
   paused = false,
   dpr,
-  className = '',
+  className = "",
   ...rest
 }: PlasmaWaveProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const settings: Settings = {
-    color1: String(colors?.[0] ?? '#A855F7'),
-    color2: String(colors?.[1] ?? colors?.[0] ?? '#06B6D4'),
+    color1: String(colors?.[0] ?? "#A855F7"),
+    color2: String(colors?.[1] ?? colors?.[0] ?? "#06B6D4"),
     speed,
     speed1,
     speed2,
@@ -360,7 +365,7 @@ export default function PlasmaWave({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -368,26 +373,26 @@ export default function PlasmaWave({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'high-performance'
+      powerPreference: "high-performance",
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
+    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
     const range = floatTargets ? 1 : 0.25;
     const programs = {
       coarse: link(gl, COARSE),
       fine: link(gl, FINE),
       down: link(gl, DOWN),
       up: link(gl, UP),
-      composite: link(gl, COMPOSITE)
+      composite: link(gl, COMPOSITE),
     } as Record<string, Program>;
-    if (Object.values(programs).some(entry => !entry)) return undefined;
+    if (Object.values(programs).some((entry) => !entry)) return undefined;
 
     const buffer = gl.createBuffer();
     const vao = gl.createVertexArray();
@@ -401,7 +406,7 @@ export default function PlasmaWave({
       texture: gl.createTexture(),
       framebuffer: gl.createFramebuffer(),
       width: 0,
-      height: 0
+      height: 0,
     });
     const sizeTarget = (target: Target, width: number, height: number) => {
       if (target.width === width && target.height === height) return;
@@ -418,15 +423,21 @@ export default function PlasmaWave({
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target.texture, 0);
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        target.texture,
+        0,
+      );
     };
     const coarse = createTarget();
     const fine = createTarget();
     const down = Array.from({ length: BLOOM_LEVELS + 1 }, createTarget);
     const up = Array.from({ length: BLOOM_LEVELS }, createTarget);
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const colorCache = new Map<string, number[]>();
     const toLinear = (value: string): number[] => {
       const cached = colorCache.get(value);
@@ -434,17 +445,24 @@ export default function PlasmaWave({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
-        rgb = [r, g, b].map(v => Math.pow(v / 255, 2.2));
+        rgb = [r, g, b].map((v) => Math.pow(v / 255, 2.2));
       }
       colorCache.set(value, rgb);
       return rgb;
     };
 
-    const view = { width: 1, height: 1, fineWidth: 1, fineHeight: 1, coarseWidth: 1, coarseHeight: 1 };
+    const view = {
+      width: 1,
+      height: 1,
+      fineWidth: 1,
+      fineHeight: 1,
+      coarseWidth: 1,
+      coarseHeight: 1,
+    };
     const pointer = { x: 0, y: 0, inside: false };
     const state = {
       time: 0,
@@ -453,7 +471,7 @@ export default function PlasmaWave({
       heatVelocity: 0,
       heatX: 0,
       lensX: 0,
-      lensY: 0
+      lensY: 0,
     };
     let raf = 0;
     let last = 0;
@@ -466,7 +484,12 @@ export default function PlasmaWave({
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
 
-    const bindTexture = (entry: Program, name: string, unit: number, texture: WebGLTexture | null) => {
+    const bindTexture = (
+      entry: Program,
+      name: string,
+      unit: number,
+      texture: WebGLTexture | null,
+    ) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(entry.uniforms[name], unit);
@@ -501,15 +524,23 @@ export default function PlasmaWave({
       sizeTarget(fine, view.fineWidth, view.fineHeight);
 
       setScene(programs.coarse, s, presence);
-      gl.uniform2f(programs.coarse.uniforms.uScale, view.width / view.coarseWidth, view.height / view.coarseHeight);
+      gl.uniform2f(
+        programs.coarse.uniforms.uScale,
+        view.width / view.coarseWidth,
+        view.height / view.coarseHeight,
+      );
       run(programs.coarse, coarse, view.coarseWidth, view.coarseHeight);
 
       const refine = programs.fine;
       setScene(refine, s, presence);
-      gl.uniform2f(refine.uniforms.uScale, view.width / view.fineWidth, view.height / view.fineHeight);
+      gl.uniform2f(
+        refine.uniforms.uScale,
+        view.width / view.fineWidth,
+        view.height / view.fineHeight,
+      );
       gl.uniform2f(refine.uniforms.uCoarseSize, view.coarseWidth, view.coarseHeight);
       gl.uniform2f(refine.uniforms.uFineSize, view.fineWidth, view.fineHeight);
-      bindTexture(refine, 'uCoarse', 0, coarse.texture);
+      bindTexture(refine, "uCoarse", 0, coarse.texture);
       run(refine, fine, view.fineWidth, view.fineHeight);
 
       let source = fine;
@@ -521,7 +552,7 @@ export default function PlasmaWave({
         gl.useProgram(programs.down.program);
         gl.uniform2f(programs.down.uniforms.uTexel, 1 / source.width, 1 / source.height);
         gl.uniform2f(programs.down.uniforms.uTarget, target.width, target.height);
-        bindTexture(programs.down, 'uSource', 0, source.texture);
+        bindTexture(programs.down, "uSource", 0, source.texture);
         run(programs.down, target, target.width, target.height);
         source = target;
       }
@@ -532,8 +563,8 @@ export default function PlasmaWave({
         gl.useProgram(programs.up.program);
         gl.uniform2f(programs.up.uniforms.uTexel, 1 / from.width, 1 / from.height);
         gl.uniform2f(programs.up.uniforms.uTarget, target.width, target.height);
-        bindTexture(programs.up, 'uSource', 0, from.texture);
-        bindTexture(programs.up, 'uBase', 1, down[level].texture);
+        bindTexture(programs.up, "uSource", 0, from.texture);
+        bindTexture(programs.up, "uBase", 1, down[level].texture);
         run(programs.up, target, target.width, target.height);
       }
 
@@ -554,10 +585,10 @@ export default function PlasmaWave({
         c.uLens,
         (state.lensX * canvas.width) / view.width,
         ((view.height - state.lensY) * canvas.height) / view.height,
-        state.heat
+        state.heat,
       );
-      bindTexture(composite, 'uLight', 0, fine.texture);
-      bindTexture(composite, 'uBloom', 1, up[1].texture);
+      bindTexture(composite, "uLight", 0, fine.texture);
+      bindTexture(composite, "uBloom", 1, up[1].texture);
       run(composite, null, canvas.width, canvas.height);
     };
 
@@ -582,12 +613,14 @@ export default function PlasmaWave({
       else if (state.intro < 1) state.intro = Math.min(1, state.intro + dt / INTRO_SECONDS);
       const target = heatTarget(s);
       if (target !== null) state.heatX += (target - state.heatX) * (1 - Math.exp(-dt * 6));
-      state.heatVelocity += (120 * ((target === null ? 0 : 1) - state.heat) - 19 * state.heatVelocity) * dt;
+      state.heatVelocity +=
+        (120 * ((target === null ? 0 : 1) - state.heat) - 19 * state.heatVelocity) * dt;
       state.heat = clamp(state.heat + state.heatVelocity * dt, 0, 1.15);
       state.lensX += (pointer.x - state.lensX) * (1 - Math.exp(-dt * 8));
       state.lensY += (pointer.y - state.lensY) * (1 - Math.exp(-dt * 8));
       render();
-      const settling = state.intro < 1 || state.heat > 0.001 || Math.abs(state.heatVelocity) > 0.001;
+      const settling =
+        state.intro < 1 || state.heat > 0.001 || Math.abs(state.heatVelocity) > 0.001;
       if (moving || settling) raf = requestAnimationFrame(frame);
       else last = 0;
     };
@@ -606,7 +639,8 @@ export default function PlasmaWave({
       canvas.width = Math.max(1, Math.round(width * ratio));
       canvas.height = Math.max(1, Math.round(height * ratio));
       let scale = s.quality;
-      if (width * height * scale * scale > MAX_LIGHT_PIXELS) scale = Math.sqrt(MAX_LIGHT_PIXELS / (width * height));
+      if (width * height * scale * scale > MAX_LIGHT_PIXELS)
+        scale = Math.sqrt(MAX_LIGHT_PIXELS / (width * height));
       view.fineWidth = Math.max(1, Math.round(width * scale));
       view.fineHeight = Math.max(1, Math.round(height * scale));
       view.coarseWidth = Math.max(1, Math.round(view.fineWidth / COARSE_RATIO));
@@ -619,7 +653,8 @@ export default function PlasmaWave({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside =
+        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       wake();
     };
 
@@ -635,17 +670,17 @@ export default function PlasmaWave({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastQuality = settingsRef.current.quality;
@@ -667,9 +702,9 @@ export default function PlasmaWave({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       for (const target of [coarse, fine, ...down, ...up]) {
         gl.deleteTexture(target.texture);
         gl.deleteFramebuffer(target.framebuffer);
@@ -677,7 +712,7 @@ export default function PlasmaWave({
       for (const entry of Object.values(programs)) gl.deleteProgram(entry.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -686,7 +721,11 @@ export default function PlasmaWave({
   });
 
   return (
-    <div ref={containerRef} className={`plasma-wave-container${className ? ` ${className}` : ''}`} {...rest}>
+    <div
+      ref={containerRef}
+      className={`plasma-wave-container${className ? ` ${className}` : ""}`}
+      {...rest}
+    >
       <canvas ref={canvasRef} className="plasma-wave-canvas" aria-hidden="true" />
     </div>
   );

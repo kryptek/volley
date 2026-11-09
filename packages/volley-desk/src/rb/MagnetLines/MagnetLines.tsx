@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import './MagnetLines.css';
+import { type CSSProperties, useEffect, useRef, useState } from "react";
+import "./MagnetLines.css";
 
-type Mode = 'orbit' | 'attract' | 'spiral' | 'dipole';
-type Shape = 'line' | 'arrow' | 'needle';
+type Mode = "orbit" | "attract" | "spiral" | "dipole";
+type Shape = "line" | "arrow" | "needle";
 type Matrix = number[];
 
 export interface MagnetLinesProps {
@@ -266,7 +266,7 @@ void main() {
   fragColor = vec4(color * alpha, alpha);
 }`;
 
-const MODES = ['orbit', 'attract', 'spiral', 'dipole'];
+const MODES = ["orbit", "attract", "spiral", "dipole"];
 const SHAPES: Record<Shape, number> = { line: 0, arrow: 1, needle: 2 };
 const TAU = Math.PI * 2;
 const PULSE_SPEED = 520;
@@ -293,21 +293,22 @@ const seedFor = (column: number, row: number) => {
 };
 
 const parseColor = (value: string): number[] => {
-  const text = String(value || '').trim();
+  const text = String(value || "").trim();
   const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
   if (hex) {
-    const full = hex[1].length === 3 ? hex[1].replace(/./g, digit => digit + digit) : hex[1];
-    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) / 255);
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, (digit) => digit + digit) : hex[1];
+    return [0, 2, 4].map((index) => Number.parseInt(full.slice(index, index + 2), 16) / 255);
   }
   const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(text);
-  if (rgb) return [rgb[1], rgb[2], rgb[3]].map(channel => clamp(parseFloat(channel) / 255, 0, 1));
-  if (typeof document !== 'undefined') {
-    const context = document.createElement('canvas').getContext('2d');
+  if (rgb)
+    return [rgb[1], rgb[2], rgb[3]].map((channel) => clamp(Number.parseFloat(channel) / 255, 0, 1));
+  if (typeof document !== "undefined") {
+    const context = document.createElement("canvas").getContext("2d");
     if (context) {
-      context.fillStyle = '#000000';
+      context.fillStyle = "#000000";
       context.fillStyle = text;
       const normal = String(context.fillStyle);
-      if (normal !== '#000000' || /^(#0{3}|#0{6}|black)$/i.test(text)) return parseColor(normal);
+      if (normal !== "#000000" || /^(#0{3}|#0{6}|black)$/i.test(text)) return parseColor(normal);
     }
   }
   return [0.94, 0.94, 0.94];
@@ -347,7 +348,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
     gl.deleteProgram(program);
     return null;
   }
-  const uniforms: Program['uniforms'] = {};
+  const uniforms: Program["uniforms"] = {};
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let index = 0; index < count; index++) {
     const info = gl.getActiveUniform(program, index);
@@ -372,9 +373,17 @@ const invert = (m: Matrix): Matrix => {
   const B = f * g - d * i;
   const C = d * h - e * g;
   const det = a * A + b * B + c * C;
-  return [A, c * h - b * i, b * f - c * e, B, a * i - c * g, c * d - a * f, C, b * g - a * h, a * e - b * d].map(
-    value => value / det
-  );
+  return [
+    A,
+    c * h - b * i,
+    b * f - c * e,
+    B,
+    a * i - c * g,
+    c * d - a * f,
+    C,
+    b * g - a * h,
+    a * e - b * d,
+  ].map((value) => value / det);
 };
 
 const apply = (m: Matrix, x: number, y: number) => {
@@ -382,7 +391,13 @@ const apply = (m: Matrix, x: number, y: number) => {
   return [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w, w];
 };
 
-const viewFor = (tiltX: number, tiltY: number, width: number, height: number, fill: boolean): View => {
+const viewFor = (
+  tiltX: number,
+  tiltY: number,
+  width: number,
+  height: number,
+  fill: boolean,
+): View => {
   const ax = (tiltX * Math.PI) / 180;
   const ay = (tiltY * Math.PI) / 180;
   const depth = Math.max(width, height) * 1.25;
@@ -395,7 +410,7 @@ const viewFor = (tiltX: number, tiltY: number, width: number, height: number, fi
     0,
     (Math.sin(ay) * Math.cos(ax)) / depth,
     -Math.sin(ax) / depth,
-    1
+    1,
   ];
   if (fill) {
     const forward = multiply([1, 0, width / 2, 0, 1, height / 2, 0, 0, 1], tilt);
@@ -405,10 +420,10 @@ const viewFor = (tiltX: number, tiltY: number, width: number, height: number, fi
     [-width / 2, -height / 2],
     [width / 2, -height / 2],
     [width / 2, height / 2],
-    [-width / 2, height / 2]
+    [-width / 2, height / 2],
   ].map(([x, y]) => apply(tilt, x, y));
-  const xs = corners.map(point => point[0]);
-  const ys = corners.map(point => point[1]);
+  const xs = corners.map((point) => point[0]);
+  const ys = corners.map((point) => point[1]);
   const spanX = Math.max(...xs) - Math.min(...xs);
   const spanY = Math.max(...ys) - Math.min(...ys);
   const fit = Math.min(1, width / Math.max(1, spanX), height / Math.max(1, spanY));
@@ -416,18 +431,29 @@ const viewFor = (tiltX: number, tiltY: number, width: number, height: number, fi
   const midY = (Math.max(...ys) + Math.min(...ys)) / 2;
   const place = [fit, 0, width / 2 - midX * fit, 0, fit, height / 2 - midY * fit, 0, 0, 1];
   const forward = multiply(place, tilt);
-  const scales = corners.map(point => fit / Math.abs(point[2]));
-  return { forward, inverse: invert(forward), minScale: Math.min(...scales), maxScale: Math.max(...scales) };
+  const scales = corners.map((point) => fit / Math.abs(point[2]));
+  return {
+    forward,
+    inverse: invert(forward),
+    minScale: Math.min(...scales),
+    maxScale: Math.max(...scales),
+  };
 };
 
-const visibleRange = (view: View, width: number, height: number, cellX: number, cellY: number): Range | null => {
+const visibleRange = (
+  view: View,
+  width: number,
+  height: number,
+  cellX: number,
+  cellY: number,
+): Range | null => {
   const inverse = view.inverse;
   const edge = Math.max(cellX, cellY) * 2;
   const corners = [
     [-edge, -edge],
     [width + edge, -edge],
     [width + edge, height + edge],
-    [-edge, height + edge]
+    [-edge, height + edge],
   ];
   const depthOf = ([x, y]: number[]) => inverse[6] * x + inverse[7] * y + inverse[8] - 1 / FAR;
   const hull: number[][] = [];
@@ -442,10 +468,10 @@ const visibleRange = (view: View, width: number, height: number, cellX: number, 
     }
   });
   if (hull.length < 3) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
   for (const [x, y] of hull) {
     const point = apply(inverse, x, y);
     minX = Math.min(minX, point[0]);
@@ -457,7 +483,7 @@ const visibleRange = (view: View, width: number, height: number, cellX: number, 
     fromColumn: Math.floor((minX + width / 2) / cellX - 0.5) - 1,
     toColumn: Math.ceil((maxX + width / 2) / cellX - 0.5) + 1,
     fromRow: Math.floor((minY + height / 2) / cellY - 0.5) - 1,
-    toRow: Math.ceil((maxY + height / 2) / cellY - 0.5) + 1
+    toRow: Math.ceil((maxY + height / 2) / cellY - 0.5) + 1,
   };
 };
 
@@ -466,13 +492,13 @@ const MagnetLines = ({
   rows,
   columns,
   containerSize,
-  lineColor = '#efefef',
+  lineColor = "#efefef",
   accentColor,
   lineWidth = 2,
   lineHeight = 18,
   baseAngle = -10,
-  mode = 'orbit',
-  shape = 'line',
+  mode = "orbit",
+  shape = "line",
   rainbow = false,
   radius = 200,
   fade = 0.65,
@@ -489,8 +515,8 @@ const MagnetLines = ({
   tiltX = 0,
   tiltY = 0,
   maxDevicePixelRatio = 2,
-  className = '',
-  style
+  className = "",
+  style,
 }: MagnetLinesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -498,7 +524,7 @@ const MagnetLines = ({
   const wakeRef = useRef<(() => void) | null>(null);
   const [generation, setGeneration] = useState(0);
 
-  const size = typeof containerSize === 'number' ? `${containerSize}px` : containerSize;
+  const size = typeof containerSize === "number" ? `${containerSize}px` : containerSize;
   const square = Boolean(size);
   const color = parseColor(lineColor);
   const accent = accentColor ? parseColor(accentColor) : null;
@@ -510,10 +536,10 @@ const MagnetLines = ({
     lineWidth,
     lineHeight,
     baseAngle: (baseAngle * Math.PI) / 180,
-    mode: MODES.includes(mode) ? mode : 'orbit',
-    shape: SHAPES[shape] !== undefined ? shape : 'line',
+    mode: MODES.includes(mode) ? mode : "orbit",
+    shape: SHAPES[shape] !== undefined ? shape : "line",
     color,
-    accent: accent ?? (shape === 'needle' ? parseColor('#f43f5e') : color),
+    accent: accent ?? (shape === "needle" ? parseColor("#f43f5e") : color),
     accentMix: accent ? 1 : 0,
     rainbow,
     tone: clamp(lightness(color), 0.42, 0.66),
@@ -531,7 +557,7 @@ const MagnetLines = ({
     idle,
     tiltX: clamp(tiltX, -70, 70),
     tiltY: clamp(tiltY, -70, 70),
-    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3)
+    maxRatio: clamp(maxDevicePixelRatio, 0.5, 3),
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -546,18 +572,18 @@ const MagnetLines = ({
     const probe = probeRef.current;
     if (!container || !canvas || !probe) return;
 
-    const gl = canvas.getContext('webgl2', {
+    const gl = canvas.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: 'default'
+      powerPreference: "default",
     });
     const program = gl ? link(gl) : null;
     if (!gl || !program) return;
 
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
@@ -593,7 +619,7 @@ const MagnetLines = ({
       maxScale: 1,
       introSpeed: INTRO_SPEED,
       bounds: [0, 0, 0, 0],
-      key: ''
+      key: "",
     };
     const pointer = { x: 0, y: 0, vx: 0, vy: 0, time: 0, seen: false, inside: false, away: 0 };
     const target = { x: 0, y: 0, heading: 0 };
@@ -616,12 +642,12 @@ const MagnetLines = ({
     let last = 0;
     let clock = 0;
     let visible = true;
-    let pageVisible = document.visibilityState !== 'hidden';
+    let pageVisible = document.visibilityState !== "hidden";
     let lost = false;
     let dirty = true;
 
     const measure = (value: number | string) => {
-      if (typeof value === 'number') return value;
+      if (typeof value === "number") return value;
       probe.style.width = String(value);
       return probe.getBoundingClientRect().width;
     };
@@ -632,7 +658,7 @@ const MagnetLines = ({
       view: View,
       columnCount: number,
       rowCount: number,
-      tiled: boolean
+      tiled: boolean,
     ) => {
       const cellX = width / columnCount;
       const cellY = height / rowCount;
@@ -650,10 +676,22 @@ const MagnetLines = ({
             if (tiled) {
               if (w <= 0 || w > FAR) continue;
               const margin = (0.49 * Math.min(cellX, cellY)) / w;
-              if (screenX < -margin || screenX > width + margin || screenY < -margin || screenY > height + margin)
+              if (
+                screenX < -margin ||
+                screenX > width + margin ||
+                screenY < -margin ||
+                screenY > height + margin
+              )
                 continue;
             }
-            found.push({ x, y, column, row, w, distance: Math.hypot(screenX - origin[0], screenY - origin[1]) });
+            found.push({
+              x,
+              y,
+              column,
+              row,
+              w,
+              distance: Math.hypot(screenX - origin[0], screenY - origin[1]),
+            });
           }
         }
       }
@@ -663,7 +701,8 @@ const MagnetLines = ({
       }
 
       const previous = new Map<number, number>();
-      for (let index = 0; index < count; index++) previous.set(cells[index * 2] * 65536 + cells[index * 2 + 1], index);
+      for (let index = 0; index < count; index++)
+        previous.set(cells[index * 2] * 65536 + cells[index * 2 + 1], index);
       const total = found.length;
       const next = {
         centers: new Float32Array(total * 2),
@@ -675,12 +714,17 @@ const MagnetLines = ({
         speeds: new Float32Array(total),
         seenX: new Float32Array(total),
         seenY: new Float32Array(total),
-        pending: new Uint8Array(total)
+        pending: new Uint8Array(total),
       };
       let farthest = 0;
-      let nearest = Infinity;
+      let nearest = Number.POSITIVE_INFINITY;
       let deepest = 0;
-      const bounds = [Infinity, Infinity, -Infinity, -Infinity];
+      const bounds = [
+        Number.POSITIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ];
       found.forEach((item, index) => {
         next.centers[index * 2] = item.x;
         next.centers[index * 2 + 1] = item.y;
@@ -731,8 +775,14 @@ const MagnetLines = ({
       const view = viewFor(s.tiltX, s.tiltY, width, height, fill);
       const ratio = Math.min(window.devicePixelRatio || 1, s.maxRatio);
 
-      let columnCount = Math.max(1, Math.round(s.columns || (s.rows ? (s.rows * width) / height : width / s.spacing)));
-      let rowCount = Math.max(1, Math.round(s.rows || (s.columns ? (s.columns * height) / width : height / s.spacing)));
+      let columnCount = Math.max(
+        1,
+        Math.round(s.columns || (s.rows ? (s.rows * width) / height : width / s.spacing)),
+      );
+      let rowCount = Math.max(
+        1,
+        Math.round(s.rows || (s.columns ? (s.columns * height) / width : height / s.spacing)),
+      );
       if (columnCount * rowCount > MAX_LINES) {
         const shrink = Math.sqrt((columnCount * rowCount) / MAX_LINES);
         columnCount = Math.max(1, Math.floor(columnCount / shrink));
@@ -745,8 +795,8 @@ const MagnetLines = ({
         rowCount,
         width.toFixed(1),
         height.toFixed(1),
-        tiled ? `${s.tiltX},${s.tiltY}` : ''
-      ].join('|');
+        tiled ? `${s.tiltX},${s.tiltY}` : "",
+      ].join("|");
       if (key !== field.key) {
         field.key = key;
         layout(width, height, view, columnCount, rowCount, tiled);
@@ -754,7 +804,9 @@ const MagnetLines = ({
 
       const minScale = fill ? field.minScale : view.minScale;
       const maxScale = fill ? field.maxScale : view.maxScale;
-      const pad = fill ? 0 : Math.ceil((length * (1 + s.stretch) + thickness * 2) * Math.max(1, maxScale) + 8);
+      const pad = fill
+        ? 0
+        : Math.ceil((length * (1 + s.stretch) + thickness * 2) * Math.max(1, maxScale) + 8);
       const canvasWidth = width + pad * 2;
       const canvasHeight = height + pad * 2;
       canvas.style.left = `${-pad}px`;
@@ -776,14 +828,14 @@ const MagnetLines = ({
         length,
         thickness,
         fill,
-        edgePad: 2 / (ratio * Math.max(0.05, minScale))
+        edgePad: 2 / (ratio * Math.max(0.05, minScale)),
       });
     };
 
     const fieldAngle = (s: Settings, index: number, px: number, py: number) => {
       const dx = px - centers[index * 2];
       const dy = py - centers[index * 2 + 1];
-      if (s.mode === 'dipole') {
+      if (s.mode === "dipole") {
         const distance = Math.hypot(dx, dy) || 1;
         const rx = -dx / distance;
         const ry = -dy / distance;
@@ -793,8 +845,8 @@ const MagnetLines = ({
         return Math.atan2(3 * dot * ry - my, 3 * dot * rx - mx);
       }
       const toward = Math.atan2(dy, dx);
-      if (s.mode === 'attract') return toward;
-      if (s.mode === 'spiral') return toward + Math.PI / 4;
+      if (s.mode === "attract") return toward;
+      if (s.mode === "spiral") return toward + Math.PI / 4;
       return toward + Math.PI / 2;
     };
 
@@ -808,9 +860,10 @@ const MagnetLines = ({
       if (dirty) rebuild();
       dirty = false;
 
-      const period = s.shape === 'line' ? Math.PI : TAU;
+      const period = s.shape === "line" ? Math.PI : TAU;
       const spread = s.scatter * Math.PI * 0.5;
-      for (let index = 0; index < count; index++) rests[index] = s.baseAngle + Math.PI / 2 + seeds[index] * spread;
+      for (let index = 0; index < count; index++)
+        rests[index] = s.baseAngle + Math.PI / 2 + seeds[index] * spread;
 
       const wandering = s.idle && !reduced && (!pointer.seen || pointer.away > 1.2);
       if (pointer.seen && !pointer.inside) pointer.away += dt;
@@ -833,10 +886,11 @@ const MagnetLines = ({
       pointer.vy *= Math.exp(-dt / 0.12);
 
       if (introLive && introStart < 0) introStart = clock;
-      const introTime = introLive ? clock - introStart : Infinity;
+      const introTime = introLive ? clock - introStart : Number.POSITIVE_INFINITY;
       let introBusy = false;
 
-      const stiffness = s.inertia <= 0 || reduced ? 0 : Math.pow(6 + 42 * Math.pow(1 - s.inertia, 2), 2);
+      const stiffness =
+        s.inertia <= 0 || reduced ? 0 : Math.pow(6 + 42 * Math.pow(1 - s.inertia, 2), 2);
       const damping = stiffness ? 2 * Math.sqrt(stiffness) * (1 - 0.75 * s.bounce) : 0;
       const steps = stiffness ? Math.max(1, Math.ceil(dt / (1 / 240))) : 0;
       const h = steps ? dt / steps : 0;
@@ -864,7 +918,8 @@ const MagnetLines = ({
           const k = tau > 0 ? 1 - Math.exp(-dt / tau) : 1;
           seenX[index] += (target.x - seenX[index]) * k;
           seenY[index] += (target.y - seenY[index]) * k;
-          if (Math.abs(target.x - seenX[index]) + Math.abs(target.y - seenY[index]) > 0.05) moving = true;
+          if (Math.abs(target.x - seenX[index]) + Math.abs(target.y - seenY[index]) > 0.05)
+            moving = true;
         }
         const sx = seenX[index];
         const sy = seenY[index];
@@ -938,7 +993,7 @@ const MagnetLines = ({
         gl.uniform2f(u.uOffset, field.pad, field.pad);
         gl.uniform2f(u.uLine, field.length / 2, field.thickness / 2);
         gl.uniform1f(u.uStretch, s.stretch);
-        gl.uniform1f(u.uHead, s.shape === 'needle' ? 0.16 : s.shape === 'arrow' ? 0.32 : 0);
+        gl.uniform1f(u.uHead, s.shape === "needle" ? 0.16 : s.shape === "arrow" ? 0.32 : 0);
         gl.uniform1f(u.uPad, field.edgePad);
         gl.uniform1f(u.uFar, field.fill ? FAR : 1e6);
         gl.uniform3fv(u.uColor, s.color);
@@ -977,7 +1032,11 @@ const MagnetLines = ({
       const rect = container.getBoundingClientRect();
       const [x, y, w] = apply(field.view.inverse, clientX - rect.left, clientY - rect.top);
       if (w <= 0) return null;
-      const inside = clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+      const inside =
+        clientX >= rect.left &&
+        clientX <= rect.right &&
+        clientY >= rect.top &&
+        clientY <= rect.bottom;
       return { x, y, inside };
     };
 
@@ -1014,13 +1073,13 @@ const MagnetLines = ({
         Math.hypot(spot.x - minX, spot.y - minY),
         Math.hypot(spot.x - maxX, spot.y - minY),
         Math.hypot(spot.x - minX, spot.y - maxY),
-        Math.hypot(spot.x - maxX, spot.y - maxY)
+        Math.hypot(spot.x - maxX, spot.y - maxY),
       );
       pulses.push({
         x: spot.x,
         y: spot.y,
         start: clock,
-        life: Math.min(6, farthest / PULSE_SPEED + PULSE_SPIN + 0.1)
+        life: Math.min(6, farthest / PULSE_SPEED + PULSE_SPIN + 0.1),
       });
       if (pulses.length > 6) pulses.shift();
       wake();
@@ -1031,9 +1090,9 @@ const MagnetLines = ({
       wake();
     };
 
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onLeave);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onLeave);
 
     const onLost = (event: Event) => {
       event.preventDefault();
@@ -1041,9 +1100,9 @@ const MagnetLines = ({
       cancelAnimationFrame(raf);
       raf = 0;
     };
-    const onRestored = () => setGeneration(value => value + 1);
-    canvas.addEventListener('webglcontextlost', onLost);
-    canvas.addEventListener('webglcontextrestored', onRestored);
+    const onRestored = () => setGeneration((value) => value + 1);
+    canvas.addEventListener("webglcontextlost", onLost);
+    canvas.addEventListener("webglcontextrestored", onRestored);
 
     const resizeObserver = new ResizeObserver(() => {
       dirty = true;
@@ -1054,19 +1113,19 @@ const MagnetLines = ({
       dirty = true;
       wake();
     };
-    window.addEventListener('resize', onResize);
+    window.addEventListener("resize", onResize);
 
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       wake();
     });
     intersection.observe(container);
 
     const onVisibility = () => {
-      pageVisible = document.visibilityState !== 'hidden';
+      pageVisible = document.visibilityState !== "hidden";
       wake();
     };
-    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener("visibilitychange", onVisibility);
 
     wake();
 
@@ -1075,13 +1134,13 @@ const MagnetLines = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('resize', onResize);
-      document.documentElement.removeEventListener('pointerleave', onLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
-      canvas.removeEventListener('webglcontextlost', onLost);
-      canvas.removeEventListener('webglcontextrestored', onRestored);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("resize", onResize);
+      document.documentElement.removeEventListener("pointerleave", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
+      canvas.removeEventListener("webglcontextlost", onLost);
+      canvas.removeEventListener("webglcontextrestored", onRestored);
       if (!gl.isContextLost()) {
         gl.deleteBuffer(cornerBuffer);
         gl.deleteBuffer(centerBuffer);
@@ -1095,7 +1154,7 @@ const MagnetLines = ({
   return (
     <div
       ref={containerRef}
-      className={`magnet-lines${square ? ' magnet-lines--square' : ''}${className ? ` ${className}` : ''}`}
+      className={`magnet-lines${square ? " magnet-lines--square" : ""}${className ? ` ${className}` : ""}`}
       style={square ? { width: size, ...style } : style}
     >
       <canvas ref={canvasRef} className="magnet-lines__canvas" aria-hidden="true" />

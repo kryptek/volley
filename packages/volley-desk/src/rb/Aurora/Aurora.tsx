@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties } from 'react';
-import './Aurora.css';
+import { type CSSProperties, useEffect, useRef } from "react";
+import "./Aurora.css";
 
 export interface AuroraProps {
   colorStops?: string[];
@@ -15,7 +15,7 @@ export interface AuroraProps {
   glow?: number;
   brightness?: number;
   layers?: number;
-  direction?: 'top' | 'bottom';
+  direction?: "top" | "bottom";
   mouseInteraction?: boolean;
   intro?: boolean;
   opacity?: number;
@@ -203,23 +203,23 @@ void main() {
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 const toOklch = (rgb: number[]): number[] => {
-  const [r, g, b] = rgb.map(c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+  const [r, g, b] = rgb.map((c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
   const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
   const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
   const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
   const lab = [
     0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
     1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
-    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
   ];
   return [lab[0], Math.hypot(lab[1], lab[2]), Math.atan2(lab[2], lab[1])];
 };
 
 const unwrapHues = (stops: number[][]): number[][] => {
-  const known = stops.findIndex(stop => stop[1] > 0.02);
+  const known = stops.findIndex((stop) => stop[1] > 0.02);
   const anchor = known === -1 ? 0 : stops[known][2];
   let previous = anchor;
-  return stops.map(stop => {
+  return stops.map((stop) => {
     let hue = stop[1] > 0.02 ? stop[2] : previous;
     while (hue - previous > Math.PI) hue -= Math.PI * 2;
     while (hue - previous < -Math.PI) hue += Math.PI * 2;
@@ -245,7 +245,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -257,13 +257,13 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
 const Aurora = ({
-  colorStops = ['#5227FF', '#7cff67', '#5227FF'],
+  colorStops = ["#5227FF", "#7cff67", "#5227FF"],
   amplitude = 1,
   blend = 0.5,
   speed = 1,
@@ -273,22 +273,30 @@ const Aurora = ({
   glow = 0.6,
   brightness = 1,
   layers = 1,
-  direction = 'top',
+  direction = "top",
   mouseInteraction = true,
   intro = true,
   opacity = 1,
   lightMode = false,
   paused = false,
   dpr,
-  className = '',
-  style
+  className = "",
+  style,
 }: AuroraProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
-  const stops = (Array.isArray(colorStops) ? colorStops : []).filter(Boolean).map(String).slice(0, MAX_STOPS);
+  const stops = (Array.isArray(colorStops) ? colorStops : [])
+    .filter(Boolean)
+    .map(String)
+    .slice(0, MAX_STOPS);
   const settings: Settings = {
-    stops: stops.length >= 2 ? stops : stops.length === 1 ? [stops[0], stops[0]] : ['#5227FF', '#7cff67'],
+    stops:
+      stops.length >= 2
+        ? stops
+        : stops.length === 1
+          ? [stops[0], stops[0]]
+          : ["#5227FF", "#7cff67"],
     amplitude: Math.max(0, amplitude),
     blend: clamp(blend, 0, 1),
     speed,
@@ -298,13 +306,13 @@ const Aurora = ({
     glow: Math.max(0, glow),
     brightness: Math.max(0, brightness),
     layers: clamp(Math.round(layers), 1, MAX_LAYERS),
-    flip: direction === 'bottom' ? 1 : 0,
+    flip: direction === "bottom" ? 1 : 0,
     mouseInteraction,
     intro,
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -312,12 +320,12 @@ const Aurora = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -333,8 +341,8 @@ const Aurora = ({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const cache = new Map<string, number[]>();
     const parse = (value: string): number[] => {
       const cached = cache.get(value);
@@ -342,7 +350,7 @@ const Aurora = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#ffffff';
+        probe.fillStyle = "#ffffff";
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -360,7 +368,7 @@ const Aurora = ({
       px: 0,
       py: 0.5,
       reach: 0,
-      reveal: settingsRef.current.intro && !reduce ? 0 : 1
+      reveal: settingsRef.current.intro && !reduce ? 0 : 1,
     };
     let raf = 0;
     let last = 0;
@@ -368,7 +376,9 @@ const Aurora = ({
 
     const render = () => {
       const s = settingsRef.current;
-      unwrapHues(s.stops.map(value => toOklch(parse(value)))).forEach((stop, index) => palette.set(stop, index * 3));
+      unwrapHues(s.stops.map((value) => toOklch(parse(value)))).forEach((stop, index) =>
+        palette.set(stop, index * 3),
+      );
       const reveal = state.reveal;
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(program.program);
@@ -414,7 +424,8 @@ const Aurora = ({
         state.px += (tx - state.px) * follow;
         state.py += (ty - state.py) * follow;
       }
-      state.reach += ((engaged ? 1 : 0) - state.reach) * (1 - Math.exp(-dt / (engaged ? 0.9 : 1.4)));
+      state.reach +=
+        ((engaged ? 1 : 0) - state.reach) * (1 - Math.exp(-dt / (engaged ? 0.9 : 1.4)));
       if (!s.intro || reduce) state.reveal = 1;
       else if (state.reveal < 1) state.reveal = Math.min(1, state.reveal + dt / INTRO_SECONDS);
       render();
@@ -443,17 +454,20 @@ const Aurora = ({
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
       const wasInside = pointer.inside;
-      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside =
+        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       if (pointer.inside && !wasInside) {
         const s = settingsRef.current;
         state.px = (pointer.x - rect.width / 2) / Math.max(1, rect.height);
-        state.py = s.flip ? 1 - pointer.y / Math.max(1, rect.height) : pointer.y / Math.max(1, rect.height);
+        state.py = s.flip
+          ? 1 - pointer.y / Math.max(1, rect.height)
+          : pointer.y / Math.max(1, rect.height);
       }
       if (!settingsRef.current.paused) wake();
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== 'mouse') pointer.inside = false;
+      if (event.pointerType !== "mouse") pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -467,20 +481,20 @@ const Aurora = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerMove, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerMove, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -500,16 +514,16 @@ const Aurora = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       gl.deleteProgram(program.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -518,7 +532,11 @@ const Aurora = ({
   });
 
   return (
-    <div ref={containerRef} className={`aurora-container${className ? ` ${className}` : ''}`} style={style}>
+    <div
+      ref={containerRef}
+      className={`aurora-container${className ? ` ${className}` : ""}`}
+      style={style}
+    >
       <canvas ref={canvasRef} className="aurora-canvas" aria-hidden="true" />
     </div>
   );

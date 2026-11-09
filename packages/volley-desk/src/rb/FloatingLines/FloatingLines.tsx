@@ -1,10 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties, type HTMLAttributes } from 'react';
-import './FloatingLines.css';
+import { type CSSProperties, type HTMLAttributes, useEffect, useRef } from "react";
+import "./FloatingLines.css";
 
-export type WaveName = 'top' | 'middle' | 'bottom';
+export type WaveName = "top" | "middle" | "bottom";
 
 export type WavePosition = {
   x?: number;
@@ -12,9 +12,9 @@ export type WavePosition = {
   rotate?: number;
 };
 
-export type LineStyle = 'solid' | 'dotted' | 'dashed';
+export type LineStyle = "solid" | "dotted" | "dashed";
 
-export interface FloatingLinesProps extends Omit<HTMLAttributes<HTMLDivElement>, 'style'> {
+export interface FloatingLinesProps extends Omit<HTMLAttributes<HTMLDivElement>, "style"> {
   linesGradient?: string[];
   enabledWaves?: WaveName[];
   lineCount?: number | number[];
@@ -38,7 +38,7 @@ export interface FloatingLinesProps extends Omit<HTMLAttributes<HTMLDivElement>,
   parallaxStrength?: number;
   clickSwirl?: boolean;
   intro?: boolean;
-  mixBlendMode?: CSSProperties['mixBlendMode'];
+  mixBlendMode?: CSSProperties["mixBlendMode"];
   backgroundColor?: string;
   lightMode?: boolean;
   opacity?: number;
@@ -85,11 +85,11 @@ const MAX_LINES = 24;
 const MAX_STOPS = 8;
 const MAX_CLICKS = 3;
 const INTRO_SECONDS = 1.8;
-const WAVES: WaveName[] = ['top', 'middle', 'bottom'];
+const WAVES: WaveName[] = ["top", "middle", "bottom"];
 const WAVE_DEFAULTS: Record<WaveName, { x: number; y: number; rotate: number }> = {
   top: { x: 10, y: 0.5, rotate: -0.4 },
   middle: { x: 5, y: 0, rotate: 0.2 },
-  bottom: { x: 2, y: -0.7, rotate: -1 }
+  bottom: { x: 2, y: -0.7, rotate: -1 },
 };
 const WAVE_SHAPE: Record<
   WaveName,
@@ -97,7 +97,7 @@ const WAVE_SHAPE: Record<
 > = {
   top: { offset: 1, step: 0.2, light: 0.2, flip: 1, depth: 1, drift: 0.6 },
   middle: { offset: 2, step: 0.15, light: 1, flip: 0, depth: 0, drift: 1 },
-  bottom: { offset: 1.5, step: 0.2, light: 0.32, flip: 0, depth: 0.6, drift: 1.4 }
+  bottom: { offset: 1.5, step: 0.2, light: 0.32, flip: 0, depth: 0.6, drift: 1.4 },
 };
 
 const VERTEX = `#version 300 es
@@ -287,7 +287,7 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.bindAttribLocation(program, 0, "aPosition");
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -299,21 +299,26 @@ const link = (gl: WebGL2RenderingContext): Program | null => {
   const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS);
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
-    if (info) uniforms[info.name.replace('[0]', '')] = gl.getUniformLocation(program, info.name);
+    if (info) uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(program, info.name);
   }
   return { program, uniforms };
 };
 
-const perWave = (value: number | number[] | undefined, waves: WaveName[], wave: WaveName, fallback: number) => {
-  if (typeof value === 'number') return value;
+const perWave = (
+  value: number | number[] | undefined,
+  waves: WaveName[],
+  wave: WaveName,
+  fallback: number,
+) => {
+  if (typeof value === "number") return value;
   if (!Array.isArray(value) || value.length === 0) return fallback;
   const index = waves.indexOf(wave);
   return value[index] ?? value[value.length - 1] ?? fallback;
 };
 
 const FloatingLines = ({
-  linesGradient = ['#e945f5', '#ffffff'],
-  enabledWaves = ['top', 'middle', 'bottom'],
+  linesGradient = ["#e945f5", "#ffffff"],
+  enabledWaves = ["top", "middle", "bottom"],
   lineCount = 10,
   lineDistance = 6,
   topWavePosition,
@@ -322,7 +327,7 @@ const FloatingLines = ({
   animationSpeed = 1,
   amplitude = 1,
   lineWidth = 1,
-  lineStyle = 'solid',
+  lineStyle = "solid",
   glow = 1,
   brightness = 1,
   depthOfField = 0.5,
@@ -335,37 +340,46 @@ const FloatingLines = ({
   parallaxStrength = 0.2,
   clickSwirl = true,
   intro = true,
-  mixBlendMode = 'screen',
+  mixBlendMode = "screen",
   backgroundColor,
   lightMode = false,
   opacity = 1,
   dpr,
-  className = '',
+  className = "",
   style,
   ...rest
 }: FloatingLinesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
-  const waves = Array.isArray(enabledWaves) ? enabledWaves.filter(wave => WAVES.includes(wave)) : WAVES;
+  const waves = Array.isArray(enabledWaves)
+    ? enabledWaves.filter((wave) => WAVES.includes(wave))
+    : WAVES;
   const settings: Settings = {
-    stops: Array.isArray(linesGradient) && linesGradient.length ? linesGradient.slice(0, MAX_STOPS) : ['#ffffff'],
-    waves: WAVES.map(wave => {
+    stops:
+      Array.isArray(linesGradient) && linesGradient.length
+        ? linesGradient.slice(0, MAX_STOPS)
+        : ["#ffffff"],
+    waves: WAVES.map((wave) => {
       const on = waves.includes(wave);
       const position = {
         ...WAVE_DEFAULTS[wave],
-        ...(wave === 'top' ? topWavePosition : wave === 'middle' ? middleWavePosition : bottomWavePosition)
+        ...(wave === "top"
+          ? topWavePosition
+          : wave === "middle"
+            ? middleWavePosition
+            : bottomWavePosition),
       };
       return {
         count: on ? clamp(Math.round(perWave(lineCount, waves, wave, 10)), 0, MAX_LINES) : 0,
         distance: perWave(lineDistance, waves, wave, 6) * 0.01,
-        position
+        position,
       };
     }),
     animationSpeed: Math.max(0, animationSpeed),
     amplitude: Math.max(0, amplitude),
     lineWidth: Math.max(0.1, lineWidth),
-    style: lineStyle === 'dashed' ? 2 : lineStyle === 'dotted' ? 1 : 0,
+    style: lineStyle === "dashed" ? 2 : lineStyle === "dotted" ? 1 : 0,
     glow: Math.max(0, glow),
     brightness: Math.max(0, brightness),
     depthOfField: clamp(depthOfField, 0, 1),
@@ -381,7 +395,7 @@ const FloatingLines = ({
     backgroundColor,
     lightMode,
     opacity: clamp(opacity, 0, 1),
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -389,12 +403,12 @@ const FloatingLines = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', {
+    const gl = canvas?.getContext("webgl2", {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false
+      stencil: false,
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -410,7 +424,7 @@ const FloatingLines = ({
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
     const cache = new Map<string, number[]>();
     const parse = (value: string | undefined, fallback: number[]): number[] => {
       if (!value) return fallback;
@@ -420,7 +434,7 @@ const FloatingLines = ({
       let rgb = fallback;
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = '#000000';
+        probe.fillStyle = "#000000";
         probe.fillStyle = key;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
@@ -430,7 +444,7 @@ const FloatingLines = ({
       return rgb;
     };
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const pointer = { x: 0, y: 0, nx: 0, ny: 0, vx: 0, inside: false };
     const mouse = { x: 0, y: 0, influence: 0, px: 0, py: 0 };
     const clicks: Click[] = [];
@@ -454,7 +468,9 @@ const FloatingLines = ({
       const height = canvas.height;
       const eased = reveal * reveal * (3 - 2 * reveal);
       const ratio = width / Math.max(1, container.clientWidth);
-      const stops = s.stops.map(value => parse(value, [1, 1, 1]).map(channel => Math.pow(channel, 2.2)));
+      const stops = s.stops.map((value) =>
+        parse(value, [1, 1, 1]).map((channel) => Math.pow(channel, 2.2)),
+      );
       const mouseX = (2 * mouse.x - width) / height;
       const mouseY = -(2 * mouse.y - height) / height;
       s.waves.forEach((wave, index) => {
@@ -480,11 +496,14 @@ const FloatingLines = ({
           const to = Math.min(from + 1, stops.length - 1);
           const f = clamp(scaled - from, 0, 1);
           const e = f * f * (3 - 2 * f);
-          for (let c = 0; c < 3; c++) colorData[slot * 3 + c] = stops[from][c] + (stops[to][c] - stops[from][c]) * e;
+          for (let c = 0; c < 3; c++)
+            colorData[slot * 3 + c] = stops[from][c] + (stops[to][c] - stops[from][c]) * e;
         }
       });
       clickData.fill(0);
-      clicks.forEach((click, index) => clickData.set([click.x, click.y, click.age, click.spin], index * 4));
+      clicks.forEach((click, index) =>
+        clickData.set([click.x, click.y, click.age, click.spin], index * 4),
+      );
 
       gl.viewport(0, 0, width, height);
       gl.useProgram(program.program);
@@ -598,7 +617,7 @@ const FloatingLines = ({
     };
 
     const onPointerUp = (event: PointerEvent) => {
-      if (event.pointerType !== 'mouse') pointer.inside = false;
+      if (event.pointerType !== "mouse") pointer.inside = false;
     };
 
     const onPointerLeave = () => {
@@ -612,20 +631,20 @@ const FloatingLines = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const intersection = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    window.addEventListener('pointerup', onPointerUp, { passive: true });
-    window.addEventListener('pointercancel', onPointerUp, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
-    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    window.addEventListener("pointercancel", onPointerUp, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
+    document.addEventListener("visibilitychange", onVisibility);
     resize();
 
     let lastDpr = settingsRef.current.dpr;
@@ -645,16 +664,16 @@ const FloatingLines = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       gl.deleteProgram(program.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
     };
   }, []);
 
@@ -665,8 +684,8 @@ const FloatingLines = ({
   return (
     <div
       ref={containerRef}
-      className={`floating-lines-container${className ? ` ${className}` : ''}`}
-      style={{ ...style, mixBlendMode: lightMode || backgroundColor ? 'normal' : mixBlendMode }}
+      className={`floating-lines-container${className ? ` ${className}` : ""}`}
+      style={{ ...style, mixBlendMode: lightMode || backgroundColor ? "normal" : mixBlendMode }}
       {...rest}
     >
       <canvas ref={canvasRef} className="floating-lines-canvas" aria-hidden="true" />

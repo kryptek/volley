@@ -1,12 +1,13 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import React, { useEffect, useRef } from 'react';
-import * as THREE from 'three';
+import type React from "react";
+import { useEffect, useRef } from "react";
+import * as THREE from "three";
 
-import './Hyperspeed.css';
+import "./Hyperspeed.css";
 
-export type HyperspeedCurve = 'straight' | 'gentle' | 'winding' | 'hills' | 'racing' | 'deep';
+export type HyperspeedCurve = "straight" | "gentle" | "winding" | "hills" | "racing" | "deep";
 
 export type HyperspeedProps = {
   curve?: HyperspeedCurve;
@@ -34,7 +35,7 @@ export type HyperspeedProps = {
   roadOpacity?: number;
   lineColor?: string;
   background?: string;
-  theme?: 'dark' | 'light';
+  theme?: "dark" | "light";
   interactive?: boolean;
   boosting?: boolean;
   onBoostStart?: () => void;
@@ -94,27 +95,27 @@ const MAX_CARS = 160;
 const MAX_POLES = 80;
 const MAX_DUST = 1500;
 const MAX_COLORS = 8;
-const CURVES: HyperspeedCurve[] = ['straight', 'gentle', 'winding', 'hills', 'racing', 'deep'];
+const CURVES: HyperspeedCurve[] = ["straight", "gentle", "winding", "hills", "racing", "deep"];
 
-const THEMES: Record<'dark' | 'light', Palette> = {
+const THEMES: Record<"dark" | "light", Palette> = {
   dark: {
-    background: 'transparent',
-    road: '#08080a',
-    lines: '#25252d',
-    tail: ['#d856bf', '#6750a2', '#c247ac'],
-    head: ['#03b3c3', '#0e5ea5', '#324555'],
-    poles: ['#03b3c3'],
-    dust: '#ffffff'
+    background: "transparent",
+    road: "#08080a",
+    lines: "#25252d",
+    tail: ["#d856bf", "#6750a2", "#c247ac"],
+    head: ["#03b3c3", "#0e5ea5", "#324555"],
+    poles: ["#03b3c3"],
+    dust: "#ffffff",
   },
   light: {
-    background: 'transparent',
-    road: '#efeff2',
-    lines: '#d0d0d7',
-    tail: ['#d856bf', '#6750a2', '#c247ac'],
-    head: ['#03b3c3', '#0e5ea5', '#324555'],
-    poles: ['#03b3c3'],
-    dust: '#18181b'
-  }
+    background: "transparent",
+    road: "#efeff2",
+    lines: "#d0d0d7",
+    tail: ["#d856bf", "#6750a2", "#c247ac"],
+    head: ["#03b3c3", "#0e5ea5", "#324555"],
+    poles: ["#03b3c3"],
+    dust: "#18181b",
+  },
 };
 
 const BEND = /* glsl */ `
@@ -452,13 +453,13 @@ const BLOOM_FRAGMENT = /* glsl */ `
 let colorContext: CanvasRenderingContext2D | null = null;
 
 const toRgb = (color: string): Vec3 => {
-  colorContext = colorContext ?? document.createElement('canvas').getContext('2d');
+  colorContext = colorContext ?? document.createElement("canvas").getContext("2d");
   if (!colorContext) return [1, 1, 1];
-  colorContext.fillStyle = '#000000';
+  colorContext.fillStyle = "#000000";
   colorContext.fillStyle = color;
   const value = String(colorContext.fillStyle);
-  if (value.startsWith('#')) {
-    const hex = parseInt(value.slice(1, 7), 16);
+  if (value.startsWith("#")) {
+    const hex = Number.parseInt(value.slice(1, 7), 16);
     return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
   }
   const parts = value.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0];
@@ -466,7 +467,7 @@ const toRgb = (color: string): Vec3 => {
 };
 
 const fillPalette = (uniform: Swatches, count: { value: number }, colors: string[]) => {
-  const list = colors.length ? colors : ['#ffffff'];
+  const list = colors.length ? colors : ["#ffffff"];
   for (let i = 0; i < MAX_COLORS; i++) uniform.value[i].fromArray(toRgb(list[i % list.length]));
   count.value = Math.min(list.length, MAX_COLORS);
 };
@@ -474,13 +475,17 @@ const fillPalette = (uniform: Swatches, count: { value: number }, colors: string
 const instanced = (source: THREE.BufferGeometry) => {
   const geometry = new THREE.InstancedBufferGeometry();
   geometry.setIndex(source.index);
-  Object.entries(source.attributes).forEach(([name, attribute]) => geometry.setAttribute(name, attribute));
+  Object.entries(source.attributes).forEach(([name, attribute]) =>
+    geometry.setAttribute(name, attribute),
+  );
   return geometry;
 };
 
 const nsin = (value: number) => Math.sin(value) * 0.5 + 0.5;
-const windX = (q: number, t: number) => Math.cos(Math.PI * q * 4 + t) * 25 + Math.cos(Math.PI * q * 8 + t * 2) ** 2 * 5;
-const windY = (q: number, t: number) => -nsin(Math.PI * q * 8 + t) * 10 - nsin(Math.PI * q + t / 8) ** 5 * 10;
+const windX = (q: number, t: number) =>
+  Math.cos(Math.PI * q * 4 + t) * 25 + Math.cos(Math.PI * q * 8 + t * 2) ** 2 * 5;
+const windY = (q: number, t: number) =>
+  -nsin(Math.PI * q * 8 + t) * 10 - nsin(Math.PI * q + t / 8) ** 5 * 10;
 const deepX = (q: number, t: number) => Math.sin(q * Math.PI * 4 + t) * 10;
 const deepY = (q: number, t: number) => Math.abs(q * 10) ** 2 + Math.sin(q * Math.PI * 8 + t) * 20;
 
@@ -490,20 +495,20 @@ const curveShapes = (p: number, t: number): Vec3[] => {
     [
       cos(p * PI * 5 + t) * 25 - cos(0.02 * PI * 5 + t) * 25,
       sin(p * PI * 2 + PI * 0.5 + t) * 15 - sin(0.02 * PI * 2 + PI * 0.5 + t) * 15,
-      0
+      0,
     ],
     [windX(p, t) - windX(0.0125, t), windY(p, t) - windY(0.0125, t), 0],
     [
       cos(p * PI * 3 + t) * 30 - cos(0.02 * PI * 3 + t) * 30,
       nsin(p * PI * 6 + t) * 30 - nsin(0.02 * PI * 6 + t) * 30,
-      nsin(p * PI * 10 + t) * 20 - nsin(0.02 * PI * 10 + t) * 20
+      nsin(p * PI * 10 + t) * 20 - nsin(0.02 * PI * 10 + t) * 20,
     ],
     [
       sin(p * PI * 2 + t) * 35 - sin(0.0125 * PI * 2 + t) * 35,
       sin(p * PI * 3 + t) * 10 - sin(0.0125 * PI * 3 + t) * 10,
-      0
+      0,
     ],
-    [deepX(p, t) - deepX(0.02, t), deepY(p, t) - deepY(0.02, t), 0]
+    [deepX(p, t) - deepX(0.02, t), deepY(p, t) - deepY(0.02, t), 0],
   ];
 };
 
@@ -512,15 +517,23 @@ const lookShapes = (t: number, curvature: number): Vec3[] => {
   const [gentle, , hills, racing] = curveShapes(p, t);
   return [
     [gentle[0] * curvature * 2, gentle[1] * curvature * 0.4, -3],
-    [(windX(p, t) - windX(p + 0.007, t)) * curvature * -2, (windY(p, t) - windY(p + 0.007, t)) * curvature * -5, -10],
+    [
+      (windX(p, t) - windX(p + 0.007, t)) * curvature * -2,
+      (windY(p, t) - windY(p + 0.007, t)) * curvature * -5,
+      -10,
+    ],
     [hills[0] * curvature * 2, hills[1] * curvature * 2, hills[2] * curvature * 2 - 5],
     [racing[0] * curvature, racing[1] * curvature, -5],
-    [(deepX(p, t) - deepX(p + 0.01, t)) * curvature * -2, (deepY(p, t) - deepY(p + 0.01, t)) * curvature * -4, -10]
+    [
+      (deepX(p, t) - deepX(p + 0.01, t)) * curvature * -2,
+      (deepY(p, t) - deepY(p + 0.01, t)) * curvature * -4,
+      -10,
+    ],
   ];
 };
 
 const Hyperspeed = ({
-  curve = 'winding',
+  curve = "winding",
   curvature = 1,
   speed = 1,
   boost = 3,
@@ -545,19 +558,19 @@ const Hyperspeed = ({
   roadOpacity = 0.1,
   lineColor,
   background,
-  theme = 'dark',
+  theme = "dark",
   interactive = true,
   boosting = false,
   onBoostStart,
   onBoostEnd,
-  className = '',
-  style
+  className = "",
+  style,
 }: HyperspeedProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const palette = THEMES[theme] ?? THEMES.dark;
   const settings: Settings = {
-    light: theme === 'light',
-    curve: CURVES.includes(curve) ? curve : 'winding',
+    light: theme === "light",
+    curve: CURVES.includes(curve) ? curve : "winding",
     curvature: Math.max(0, curvature),
     speed: Math.max(0, speed),
     boost: Math.max(1, boost),
@@ -584,7 +597,7 @@ const Hyperspeed = ({
     background: background ?? palette.background,
     dustColor: palette.dust,
     interactive,
-    boosting
+    boosting,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -595,8 +608,12 @@ const Hyperspeed = ({
     const container = containerRef.current;
     if (!container) return undefined;
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: "high-performance",
+    });
     renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     renderer.autoClear = false;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -615,7 +632,7 @@ const Hyperspeed = ({
       uFogFar: { value: TRAVEL * 0.95 },
       uTravel: { value: TRAVEL },
       uStretch: { value: 0 },
-      uPixel: { value: 0.001 }
+      uPixel: { value: 0.001 },
     };
     const disposables: { dispose: () => void }[] = [];
     const effectMaterials: THREE.ShaderMaterial[] = [];
@@ -624,7 +641,7 @@ const Hyperspeed = ({
       vertexShader: string,
       fragmentShader: string,
       uniforms: Record<string, THREE.IUniform>,
-      options: THREE.ShaderMaterialParameters = {}
+      options: THREE.ShaderMaterialParameters = {},
     ) => {
       const created = new THREE.ShaderMaterial({
         vertexShader,
@@ -632,14 +649,14 @@ const Hyperspeed = ({
         uniforms: { ...shared, ...uniforms },
         transparent: true,
         depthWrite: false,
-        ...options
+        ...options,
       });
       disposables.push(created);
       return created;
     };
 
     const swatches = (): Swatches => ({
-      value: Array.from({ length: MAX_COLORS }, () => new THREE.Vector3(1, 1, 1))
+      value: Array.from({ length: MAX_COLORS }, () => new THREE.Vector3(1, 1, 1)),
     });
 
     const roadGeometry = new THREE.PlaneGeometry(1, TRAVEL, 1, 220);
@@ -655,9 +672,12 @@ const Hyperspeed = ({
       uMedian: { value: 2 },
       uLanes: { value: 3 },
       uTransparent: { value: 0 },
-      uOpacity: { value: 1 }
+      uOpacity: { value: 1 },
     };
-    const roadMaterial = material(ROAD_VERTEX, ROAD_FRAGMENT, roadUniforms, { transparent: true, depthWrite: true });
+    const roadMaterial = material(ROAD_VERTEX, ROAD_FRAGMENT, roadUniforms, {
+      transparent: true,
+      depthWrite: true,
+    });
     const road = new THREE.Mesh(roadGeometry, roadMaterial);
     road.frustumCulled = false;
     road.renderOrder = 0;
@@ -669,11 +689,15 @@ const Hyperspeed = ({
       24,
       1,
       7,
-      false
+      false,
     );
     disposables.push(tube);
 
-    const streakGroup = (direction: number, fade: [number, number], speedRange: [number, number]) => {
+    const streakGroup = (
+      direction: number,
+      fade: [number, number],
+      speedRange: [number, number],
+    ) => {
       const geometry = instanced(tube);
       const seedA = new Float32Array(MAX_CARS * 2 * 4);
       const seedB = new Float32Array(MAX_CARS * 2 * 4);
@@ -691,10 +715,10 @@ const Hyperspeed = ({
           tone[index] = shade;
         }
       }
-      geometry.setAttribute('aSeedA', new THREE.InstancedBufferAttribute(seedA, 4));
-      geometry.setAttribute('aSeedB', new THREE.InstancedBufferAttribute(seedB, 4));
-      geometry.setAttribute('aPair', new THREE.InstancedBufferAttribute(pair, 1));
-      geometry.setAttribute('aTone', new THREE.InstancedBufferAttribute(tone, 1));
+      geometry.setAttribute("aSeedA", new THREE.InstancedBufferAttribute(seedA, 4));
+      geometry.setAttribute("aSeedB", new THREE.InstancedBufferAttribute(seedB, 4));
+      geometry.setAttribute("aPair", new THREE.InstancedBufferAttribute(pair, 1));
+      geometry.setAttribute("aTone", new THREE.InstancedBufferAttribute(tone, 1));
       geometry.instanceCount = 0;
       disposables.push(geometry);
       const uniforms = {
@@ -707,7 +731,7 @@ const Hyperspeed = ({
         uSize: { value: 1 },
         uColors: swatches(),
         uColorCount: { value: 1 },
-        uFade: { value: new THREE.Vector2(...fade) }
+        uFade: { value: new THREE.Vector2(...fade) },
       };
       const layer = (radiusScale: number, sharp: number, mirror: number, order: number) => {
         const layerMaterial = material(
@@ -719,9 +743,9 @@ const Hyperspeed = ({
             uSharp: { value: sharp },
             uMirror: { value: mirror },
             uIntensity: { value: 1 },
-            uCore: { value: 0 }
+            uCore: { value: 0 },
           },
-          { depthTest: !mirror }
+          { depthTest: !mirror },
         );
         effectMaterials.push(layerMaterial);
         const mesh = new THREE.Mesh(geometry, layerMaterial);
@@ -735,7 +759,7 @@ const Hyperspeed = ({
         geometry,
         uniforms,
         reflection: layer(2.1, 1.2, 1, 1),
-        core: layer(1, 0.85, 0, 3)
+        core: layer(1, 0.85, 0, 3),
       };
     };
 
@@ -756,9 +780,9 @@ const Hyperspeed = ({
         poleSide[index] = side ? 1 : -1;
       }
     }
-    poleGeometry.setAttribute('aSeed', new THREE.InstancedBufferAttribute(poleSeed, 4));
-    poleGeometry.setAttribute('aIndex', new THREE.InstancedBufferAttribute(poleIndex, 1));
-    poleGeometry.setAttribute('aSide', new THREE.InstancedBufferAttribute(poleSide, 1));
+    poleGeometry.setAttribute("aSeed", new THREE.InstancedBufferAttribute(poleSeed, 4));
+    poleGeometry.setAttribute("aIndex", new THREE.InstancedBufferAttribute(poleIndex, 1));
+    poleGeometry.setAttribute("aSide", new THREE.InstancedBufferAttribute(poleSide, 1));
     poleGeometry.instanceCount = 0;
     disposables.push(poleGeometry);
     const poleUniforms = {
@@ -766,7 +790,7 @@ const Hyperspeed = ({
       uEdge: { value: 11 },
       uHeight: { value: 1 },
       uColors: swatches(),
-      uColorCount: { value: 1 }
+      uColorCount: { value: 1 },
     };
     const poleLayer = (radiusScale: number, sharp: number, mirror: number, order: number) => {
       const layerMaterial = material(
@@ -778,9 +802,9 @@ const Hyperspeed = ({
           uSharp: { value: sharp },
           uMirror: { value: mirror },
           uIntensity: { value: 1 },
-          uCore: { value: 0 }
+          uCore: { value: 0 },
         },
-        { depthTest: !mirror }
+        { depthTest: !mirror },
       );
       effectMaterials.push(layerMaterial);
       const mesh = new THREE.Mesh(poleGeometry, layerMaterial);
@@ -792,7 +816,7 @@ const Hyperspeed = ({
     };
     const polesLayers = {
       reflection: poleLayer(2.4, 1.2, 1, 1),
-      core: poleLayer(1, 0.8, 0, 3)
+      core: poleLayer(1, 0.8, 0, 3),
     };
 
     const dustGeometry = new THREE.BufferGeometry();
@@ -804,15 +828,18 @@ const Hyperspeed = ({
       dustSeed.set(seed, i * 8 + 4);
       dustEnd[i * 2 + 1] = 1;
     }
-    dustGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_DUST * 2 * 3), 3));
-    dustGeometry.setAttribute('aSeed', new THREE.BufferAttribute(dustSeed, 4));
-    dustGeometry.setAttribute('aEnd', new THREE.BufferAttribute(dustEnd, 1));
+    dustGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(new Float32Array(MAX_DUST * 2 * 3), 3),
+    );
+    dustGeometry.setAttribute("aSeed", new THREE.BufferAttribute(dustSeed, 4));
+    dustGeometry.setAttribute("aEnd", new THREE.BufferAttribute(dustEnd, 1));
     dustGeometry.setDrawRange(0, 0);
     disposables.push(dustGeometry);
     const dustUniforms = {
       uSpread: { value: 140 },
       uColor: { value: new THREE.Vector3(1, 1, 1) },
-      uIntensity: { value: 0.5 }
+      uIntensity: { value: 0.5 },
     };
     const dustMaterial = material(DUST_VERTEX, DUST_FRAGMENT, dustUniforms);
     effectMaterials.push(dustMaterial);
@@ -822,11 +849,12 @@ const Hyperspeed = ({
     scene.add(dustLines);
 
     const floatTargets =
-      renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float');
+      renderer.extensions.has("EXT_color_buffer_float") ||
+      renderer.extensions.has("EXT_color_buffer_half_float");
     const levels = Array.from({ length: 5 }, (_, index) => {
       const target = new THREE.WebGLRenderTarget(1, 1, {
         type: floatTargets ? THREE.HalfFloatType : THREE.UnsignedByteType,
-        depthBuffer: index === 0
+        depthBuffer: index === 0,
       });
       disposables.push(target);
       return target;
@@ -847,11 +875,11 @@ const Hyperspeed = ({
           uTexel: { value: new THREE.Vector2() },
           uStrength: { value: 1 },
           uCeiling: { value: 1 },
-          uLight: { value: 0 }
+          uLight: { value: 0 },
         },
         depthTest: false,
         depthWrite: false,
-        ...options
+        ...options,
       });
       disposables.push(created);
       return created;
@@ -862,13 +890,16 @@ const Hyperspeed = ({
       blendSrc: THREE.OneFactor,
       blendDst: THREE.OneFactor,
       blendSrcAlpha: THREE.OneFactor,
-      blendDstAlpha: THREE.OneFactor
+      blendDstAlpha: THREE.OneFactor,
     });
-    const bloomMaterial = blur(BLOOM_FRAGMENT, { blending: THREE.CustomBlending, blendSrc: THREE.OneFactor });
+    const bloomMaterial = blur(BLOOM_FRAGMENT, {
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+    });
     const pass = (
       passMaterial: THREE.ShaderMaterial,
       source: THREE.WebGLRenderTarget,
-      target: THREE.WebGLRenderTarget | null
+      target: THREE.WebGLRenderTarget | null,
     ) => {
       quad.material = passMaterial;
       passMaterial.uniforms.uTexture.value = source.texture;
@@ -890,9 +921,9 @@ const Hyperspeed = ({
       pointerX: 0,
       pointerY: 0,
       weights: [0, 0, 0, 0, 0],
-      visible: true
+      visible: true,
     };
-    const keys = { tail: '', head: '', poles: '', surface: '', light: null as boolean | null };
+    const keys = { tail: "", head: "", poles: "", surface: "", light: null as boolean | null };
     const lookTarget = new THREE.Vector3();
     let raf = 0;
     let last = performance.now();
@@ -920,7 +951,7 @@ const Hyperspeed = ({
         roadUniforms.uRoadColor.value.fromArray(toRgb(s.roadColor));
         roadUniforms.uLineColor.value.fromArray(toRgb(s.lineColor));
         dustUniforms.uColor.value.fromArray(toRgb(s.dustColor));
-        const transparent = s.background === 'transparent';
+        const transparent = s.background === "transparent";
         const backdrop: Vec3 = transparent ? [0, 0, 0] : toRgb(s.background);
         roadUniforms.uBackground.value.fromArray(backdrop);
         roadUniforms.uTransparent.value = transparent ? 1 : 0;
@@ -929,7 +960,7 @@ const Hyperspeed = ({
       }
       if (keys.light !== s.light) {
         keys.light = s.light;
-        effectMaterials.forEach(item => {
+        effectMaterials.forEach((item) => {
           item.blending = s.light ? THREE.NormalBlending : THREE.AdditiveBlending;
           item.needsUpdate = true;
         });
@@ -947,8 +978,8 @@ const Hyperspeed = ({
       levels.forEach((target, index) =>
         target.setSize(
           Math.max(1, Math.round(width / 2 ** (index + 1))),
-          Math.max(1, Math.round(height / 2 ** (index + 1)))
-        )
+          Math.max(1, Math.round(height / 2 ** (index + 1))),
+        ),
       );
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
@@ -964,7 +995,8 @@ const Hyperspeed = ({
       syncColors(s);
 
       const wanted = (state.held && s.interactive) || s.boosting ? 1 : 0;
-      state.boost += (wanted - state.boost) * (1 - Math.exp(-dt / (wanted > state.boost ? 0.28 : 0.85)));
+      state.boost +=
+        (wanted - state.boost) * (1 - Math.exp(-dt / (wanted > state.boost ? 0.28 : 0.85)));
       const pace = s.speed * (reduce ? 0.3 : 1) * (1 + (s.boost - 1) * state.boost);
       shared.uTime.value += dt * pace;
       shared.uStretch.value = state.boost * 1.1;
@@ -972,8 +1004,15 @@ const Hyperspeed = ({
 
       const target = CURVES.indexOf(s.curve) - 1;
       const blend = 1 - Math.exp(-dt / 0.6);
-      state.weights = state.weights.map((weight, index) => weight + ((index === target ? 1 : 0) - weight) * blend);
-      shared.uCurveA.value.set(state.weights[0], state.weights[1], state.weights[2], state.weights[3]);
+      state.weights = state.weights.map(
+        (weight, index) => weight + ((index === target ? 1 : 0) - weight) * blend,
+      );
+      shared.uCurveA.value.set(
+        state.weights[0],
+        state.weights[1],
+        state.weights[2],
+        state.weights[3],
+      );
       shared.uCurveB.value = state.weights[4];
 
       const halfRoad = s.roadWidth / 2 + s.medianWidth / 2;
@@ -987,7 +1026,8 @@ const Hyperspeed = ({
         group.uniforms.uSize.value = s.lightSize;
         group.core.uniforms.uIntensity.value = s.light ? 0.95 : 1 + 0.35 * state.boost;
         group.core.uniforms.uCore.value = s.light ? 0 : 0.75;
-        group.reflection.uniforms.uIntensity.value = s.reflections * (s.light ? 0.22 : 0.42) * surface;
+        group.reflection.uniforms.uIntensity.value =
+          s.reflections * (s.light ? 0.22 : 0.42) * surface;
       });
 
       poleGeometry.instanceCount = s.poles * 2;
@@ -996,7 +1036,8 @@ const Hyperspeed = ({
       poleUniforms.uHeight.value = s.poleHeight;
       polesLayers.core.uniforms.uIntensity.value = s.light ? 0.9 : 1;
       polesLayers.core.uniforms.uCore.value = s.light ? 0 : 0.6;
-      polesLayers.reflection.uniforms.uIntensity.value = s.reflections * (s.light ? 0.2 : 0.38) * surface;
+      polesLayers.reflection.uniforms.uIntensity.value =
+        s.reflections * (s.light ? 0.2 : 0.38) * surface;
 
       dustGeometry.setDrawRange(0, s.dust * 2);
       dustUniforms.uIntensity.value = (s.light ? 0.35 : 0.45) * (1 + state.boost);
@@ -1013,7 +1054,8 @@ const Hyperspeed = ({
       state.fovVelocity += ((fovTarget - state.fov) * 90 - state.fovVelocity * 13) * dt;
       state.fov += state.fovVelocity * dt;
       camera.fov = state.fov;
-      shared.uPixel.value = (2 * Math.tan((state.fov * Math.PI) / 360)) / Math.max(1, renderer.domElement.height);
+      shared.uPixel.value =
+        (2 * Math.tan((state.fov * Math.PI) / 360)) / Math.max(1, renderer.domElement.height);
 
       const steerBlend = 1 - Math.exp(-dt / 0.35);
       const follow = s.interactive ? s.steer : 0;
@@ -1076,7 +1118,7 @@ const Hyperspeed = ({
     };
 
     const onDown = (event: PointerEvent) => {
-      if (event.button !== 0 && event.pointerType === 'mouse') return;
+      if (event.button !== 0 && event.pointerType === "mouse") return;
       setHeld(true);
     };
     const onUp = () => setHeld(false);
@@ -1095,18 +1137,18 @@ const Hyperspeed = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const visibility = new IntersectionObserver(entries => {
-      state.visible = entries.some(entry => entry.isIntersecting);
+    const visibility = new IntersectionObserver((entries) => {
+      state.visible = entries.some((entry) => entry.isIntersecting);
       if (state.visible) wake();
     });
     visibility.observe(container);
-    container.addEventListener('pointerdown', onDown);
-    container.addEventListener('pointermove', onMove);
-    container.addEventListener('pointerleave', onLeave);
-    container.addEventListener('contextmenu', onMenu);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
-    window.addEventListener('blur', onUp);
+    container.addEventListener("pointerdown", onDown);
+    container.addEventListener("pointermove", onMove);
+    container.addEventListener("pointerleave", onLeave);
+    container.addEventListener("contextmenu", onMenu);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onUp);
     resize();
 
     return () => {
@@ -1114,20 +1156,26 @@ const Hyperspeed = ({
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
       visibility.disconnect();
-      container.removeEventListener('pointerdown', onDown);
-      container.removeEventListener('pointermove', onMove);
-      container.removeEventListener('pointerleave', onLeave);
-      container.removeEventListener('contextmenu', onMenu);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-      window.removeEventListener('blur', onUp);
-      disposables.forEach(item => item.dispose());
+      container.removeEventListener("pointerdown", onDown);
+      container.removeEventListener("pointermove", onMove);
+      container.removeEventListener("pointerleave", onLeave);
+      container.removeEventListener("contextmenu", onMenu);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("blur", onUp);
+      disposables.forEach((item) => item.dispose());
       renderer.dispose();
       renderer.domElement.remove();
     };
   }, []);
 
-  return <div ref={containerRef} className={`hyperspeed${className ? ` ${className}` : ''}`} style={style} />;
+  return (
+    <div
+      ref={containerRef}
+      className={`hyperspeed${className ? ` ${className}` : ""}`}
+      style={style}
+    />
+  );
 };
 
 export default Hyperspeed;

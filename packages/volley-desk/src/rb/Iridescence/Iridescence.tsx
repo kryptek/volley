@@ -1,9 +1,10 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import React, { useEffect, useRef } from 'react';
+import type React from "react";
+import { useEffect, useRef } from "react";
 
-import './Iridescence.css';
+import "./Iridescence.css";
 
 export interface IridescenceProps {
   color?: string | [number, number, number];
@@ -175,13 +176,13 @@ const Iridescence = ({
   opacity = 1,
   resolution = 1,
   paused = false,
-  className = '',
-  style
+  className = "",
+  style,
 }: IridescenceProps) => {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
-  const colorKey = Array.isArray(color) ? color.join(',') : String(color);
+  const colorKey = Array.isArray(color) ? color.join(",") : String(color);
   const settings = {
     colorKey,
     color,
@@ -203,7 +204,7 @@ const Iridescence = ({
     fade: clamp(fade, 0, 1),
     opacity: clamp(opacity, 0, 1),
     resolution: clamp(resolution, 0.1, 2),
-    paused
+    paused,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -211,7 +212,11 @@ const Iridescence = ({
   useEffect(() => {
     const root = rootRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false });
+    const gl = canvas?.getContext("webgl2", {
+      alpha: true,
+      premultipliedAlpha: true,
+      antialias: false,
+    });
     if (!root || !canvas || !gl) return undefined;
 
     const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX);
@@ -227,34 +232,34 @@ const Iridescence = ({
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-    const position = gl.getAttribLocation(program, 'aPosition');
+    const position = gl.getAttribLocation(program, "aPosition");
     gl.enableVertexAttribArray(position);
     gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
 
     const uniforms: Record<string, WebGLUniformLocation | null> = {};
     for (const name of [
-      'uResolution',
-      'uTime',
-      'uColor',
-      'uMouse',
-      'uAmplitude',
-      'uScale',
-      'uRotation',
-      'uDetail',
-      'uWarp',
-      'uHue',
-      'uSaturation',
-      'uBrightness',
-      'uContrast',
-      'uGrain',
-      'uSeed',
-      'uFade',
-      'uOpacity',
-      'uField',
-      'uStir',
-      'uPointer',
-      'uSheen',
-      'uSwirls'
+      "uResolution",
+      "uTime",
+      "uColor",
+      "uMouse",
+      "uAmplitude",
+      "uScale",
+      "uRotation",
+      "uDetail",
+      "uWarp",
+      "uHue",
+      "uSaturation",
+      "uBrightness",
+      "uContrast",
+      "uGrain",
+      "uSeed",
+      "uFade",
+      "uOpacity",
+      "uField",
+      "uStir",
+      "uPointer",
+      "uSheen",
+      "uSwirls",
     ]) {
       uniforms[name] = gl.getUniformLocation(program, name);
     }
@@ -268,11 +273,11 @@ const Iridescence = ({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.uniform1i(uniforms.uField, 0);
 
-    const probe = document.createElement('canvas');
+    const probe = document.createElement("canvas");
     probe.width = 1;
     probe.height = 1;
-    const probeCtx = probe.getContext('2d', { willReadFrequently: true });
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const probeCtx = probe.getContext("2d", { willReadFrequently: true });
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const pointer = { x: 0.5, y: 0.5, px: 0, py: 0, inside: false, tracked: false };
     const state = {
       width: 1,
@@ -281,14 +286,14 @@ const Iridescence = ({
       mouse: [0.5, 0.5] as number[],
       presence: 0,
       color: [1, 1, 1] as number[],
-      colorKey: '',
+      colorKey: "",
       cols: 0,
       rows: 0,
       field: new Float32Array(0),
       scratch: new Float32Array(0),
       fieldActive: false,
       swirls: [] as Swirl[],
-      seed: 0
+      seed: 0,
     };
     const swirlData = new Float32Array(MAX_SWIRLS * 4);
     let raf = 0;
@@ -301,12 +306,12 @@ const Iridescence = ({
       state.colorKey = s.colorKey;
       if (Array.isArray(s.color)) {
         const rgb = s.color as number[];
-        state.color = [0, 1, 2].map(i => clamp(Number(rgb[i] ?? 1), 0, 1));
+        state.color = [0, 1, 2].map((i) => clamp(Number(rgb[i] ?? 1), 0, 1));
         return;
       }
       if (!probeCtx) return;
       probeCtx.clearRect(0, 0, 1, 1);
-      probeCtx.fillStyle = '#ffffff';
+      probeCtx.fillStyle = "#ffffff";
       probeCtx.fillStyle = String(s.color);
       probeCtx.fillRect(0, 0, 1, 1);
       const [r, g, b] = probeCtx.getImageData(0, 0, 1, 1).data;
@@ -365,7 +370,8 @@ const Iridescence = ({
           const u = (Math.max(0, row - 1) * cols + col) * 2;
           const b = (Math.min(rows - 1, row + 1) * cols + col) * 2;
           for (let c = 0; c < 2; c++) {
-            const value = (field[i + c] * 12 + field[l + c] + field[r + c] + field[u + c] + field[b + c]) / 16;
+            const value =
+              (field[i + c] * 12 + field[l + c] + field[r + c] + field[u + c] + field[b + c]) / 16;
             scratch[i + c] = value * decay;
             peak = Math.max(peak, Math.abs(scratch[i + c]));
           }
@@ -385,7 +391,17 @@ const Iridescence = ({
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, fieldTexture);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, state.cols, state.rows, gl.RG, gl.FLOAT, state.field);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        state.cols,
+        state.rows,
+        gl.RG,
+        gl.FLOAT,
+        state.field,
+      );
       swirlData.fill(0);
       state.swirls.forEach((swirl, k) => {
         const radius = 0.21 * (1 + 0.4 * swirl.age);
@@ -433,14 +449,15 @@ const Iridescence = ({
       state.mouse[1] += (target[1] - state.mouse[1]) * follow;
       state.presence += ((pointer.inside ? 1 : 0) - state.presence) * (1 - Math.exp(-dt * 4));
       if (state.fieldActive) relaxField(dt);
-      state.swirls = state.swirls.filter(swirl => (swirl.age += dt) < SWIRL_LIFE);
+      state.swirls = state.swirls.filter((swirl) => (swirl.age += dt) < SWIRL_LIFE);
       if (s.grain > 0 && moving) state.seed = Math.floor(now / 42) % 997;
       render();
       const settling =
         Math.abs(target[0] - state.mouse[0]) > 0.0005 ||
         Math.abs(target[1] - state.mouse[1]) > 0.0005 ||
         Math.abs((pointer.inside ? 1 : 0) - state.presence) > 0.002;
-      if (moving || settling || state.fieldActive || state.swirls.length) raf = requestAnimationFrame(frame);
+      if (moving || settling || state.fieldActive || state.swirls.length)
+        raf = requestAnimationFrame(frame);
       else last = 0;
     };
 
@@ -453,7 +470,7 @@ const Iridescence = ({
       const rect = root.getBoundingClientRect();
       return {
         x: (event.clientX - rect.left) / Math.max(1, rect.width),
-        y: 1 - (event.clientY - rect.top) / Math.max(1, rect.height)
+        y: 1 - (event.clientY - rect.top) / Math.max(1, rect.height),
       };
     };
 
@@ -509,17 +526,17 @@ const Iridescence = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(root);
-    const visibility = new IntersectionObserver(entries => {
-      visible = entries.some(entry => entry.isIntersecting);
+    const visibility = new IntersectionObserver((entries) => {
+      visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     visibility.observe(root);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onPointerDown, { passive: true });
-    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    document.documentElement.addEventListener("pointerleave", onPointerLeave);
     resize();
 
     return () => {
@@ -528,9 +545,9 @@ const Iridescence = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       visibility.disconnect();
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onPointerDown);
-      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
       gl.deleteTexture(fieldTexture);
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
@@ -544,7 +561,11 @@ const Iridescence = ({
   });
 
   return (
-    <div ref={rootRef} className={`iridescence-container${className ? ` ${className}` : ''}`} style={style}>
+    <div
+      ref={rootRef}
+      className={`iridescence-container${className ? ` ${className}` : ""}`}
+      style={style}
+    >
       <canvas ref={canvasRef} className="iridescence-canvas" aria-hidden="true" />
     </div>
   );

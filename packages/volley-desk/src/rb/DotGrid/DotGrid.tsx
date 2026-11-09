@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import { useEffect, useRef, type CSSProperties } from 'react';
+import { type CSSProperties, useEffect, useRef } from "react";
 
-import './DotGrid.css';
+import "./DotGrid.css";
 
 const VERTEX = `#version 300 es
 precision highp float;
@@ -94,7 +94,7 @@ void main() {
 }
 `;
 
-type Shape = 'circle' | 'square';
+type Shape = "circle" | "square";
 
 interface DotGridProps {
   dotSize?: number;
@@ -132,8 +132,12 @@ interface Shock {
 const toRgb = (color: string): [number, number, number] => {
   const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(color).trim());
   if (!match) return [1, 1, 1];
-  const hex = match[1].length === 3 ? match[1].replace(/./g, digit => digit + digit) : match[1];
-  return [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255) as [number, number, number];
+  const hex = match[1].length === 3 ? match[1].replace(/./g, (digit) => digit + digit) : match[1];
+  return [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16) / 255) as [
+    number,
+    number,
+    number,
+  ];
 };
 
 const smootherstep = (t: number) => {
@@ -157,8 +161,8 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
 const DotGrid = ({
   dotSize = 5,
   gap = 18,
-  baseColor = '#3a3446',
-  activeColor = '#ffffff',
+  baseColor = "#3a3446",
+  activeColor = "#ffffff",
   proximity = 140,
   strength = 1,
   bounce = 0.6,
@@ -169,7 +173,7 @@ const DotGrid = ({
   swell = 0.8,
   stretch = 0.5,
   glow = 0.5,
-  shape = 'circle',
+  shape = "circle",
   fade = 0,
   opacity = 1,
   intro = true,
@@ -177,8 +181,8 @@ const DotGrid = ({
   clickShock = true,
   paused = false,
   dpr,
-  className = '',
-  style
+  className = "",
+  style,
 }: DotGridProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<{ rebuild: () => void; refresh: () => void } | null>(null);
@@ -204,7 +208,7 @@ const DotGrid = ({
     mouseInteraction,
     clickShock,
     paused,
-    dpr
+    dpr,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -212,7 +216,11 @@ const DotGrid = ({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false });
+    const gl = canvas.getContext("webgl2", {
+      alpha: true,
+      premultipliedAlpha: true,
+      antialias: false,
+    });
     if (!gl) return;
 
     const program = gl.createProgram() as WebGLProgram;
@@ -223,16 +231,16 @@ const DotGrid = ({
 
     const uniforms: Record<string, WebGLUniformLocation | null> = {};
     for (const name of [
-      'uResolution',
-      'uSize',
-      'uSwell',
-      'uStretch',
-      'uGlow',
-      'uBase',
-      'uActive',
-      'uOpacity',
-      'uFade',
-      'uShape'
+      "uResolution",
+      "uSize",
+      "uSwell",
+      "uStretch",
+      "uGlow",
+      "uBase",
+      "uActive",
+      "uOpacity",
+      "uFade",
+      "uShape",
     ]) {
       uniforms[name] = gl.getUniformLocation(program, name);
     }
@@ -254,7 +262,7 @@ const DotGrid = ({
     gl.vertexAttribDivisor(2, 1);
     gl.bindVertexArray(null);
 
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const view = { width: 0, height: 0, left: 0, top: 0, ratio: 1 };
     const grid = { count: 0, cols: 1, rows: 1, cell: 1, centerX: 0, centerY: 0, reach: 1 };
     let rest = new Float32Array(0);
@@ -302,7 +310,7 @@ const DotGrid = ({
         cell,
         centerX: view.width / 2,
         centerY: view.height / 2,
-        reach: Math.hypot(view.width, view.height) / 2
+        reach: Math.hypot(view.width, view.height) / 2,
       });
       gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, instances.byteLength, gl.DYNAMIC_DRAW);
@@ -329,12 +337,15 @@ const DotGrid = ({
       const damping = 2 * zeta * omega;
       const radius = Math.max(1, s.proximity);
       const speed = Math.hypot(pointer.vx, pointer.vy);
-      const drive = s.mouseInteraction && pointer.inside ? 6500 * Math.tanh(speed / 900) * s.strength * motion : 0;
+      const drive =
+        s.mouseInteraction && pointer.inside
+          ? 6500 * Math.tanh(speed / 900) * s.strength * motion
+          : 0;
       const dirX = speed > 0.001 ? pointer.vx / speed : 0;
       const dirY = speed > 0.001 ? pointer.vy / speed : 0;
       const width = grid.cell * 1.4;
       const travel = 650;
-      const active = shocks.map(shock => {
+      const active = shocks.map((shock) => {
         const front = ((now - shock.start) / 1000) * travel;
         const power = smootherstep(1 - front / Math.max(1, s.shockRadius));
         return { ...shock, front, amplitude: power * s.shockStrength * grid.cell * 0.24 * motion };
@@ -401,7 +412,8 @@ const DotGrid = ({
           for (let col = 0; col < cols; col++) {
             const index = (row * cols + col) * 2;
             let ax = force[index] - stiffness * offset[index] - damping * velocity[index];
-            let ay = force[index + 1] - stiffness * offset[index + 1] - damping * velocity[index + 1];
+            let ay =
+              force[index + 1] - stiffness * offset[index + 1] - damping * velocity[index + 1];
             if (coupling > 0) {
               let lx = -4 * offset[index];
               let ly = -4 * offset[index + 1];
@@ -448,8 +460,12 @@ const DotGrid = ({
         const target = i * 4;
         energy[i] = Math.min(
           1,
-          (Math.hypot(velocity[index] + wave[target + 2], velocity[index + 1] + wave[target + 3]) / 380) * 0.85 +
-            (Math.hypot(offset[index] + wave[target], offset[index + 1] + wave[target + 1]) / (grid.cell * 2.2)) * 0.35
+          (Math.hypot(velocity[index] + wave[target + 2], velocity[index + 1] + wave[target + 3]) /
+            380) *
+            0.85 +
+            (Math.hypot(offset[index] + wave[target], offset[index + 1] + wave[target + 1]) /
+              (grid.cell * 2.2)) *
+              0.35,
         );
       }
       for (let i = shocks.length - 1; i >= 0; i--) {
@@ -465,7 +481,12 @@ const DotGrid = ({
     const render = (now: number) => {
       const s = settingsRef.current;
       const radius = Math.max(1, s.proximity);
-      const introAge = introStart === null ? Infinity : introStart < 0 ? 0 : (now - introStart) / 1000;
+      const introAge =
+        introStart === null
+          ? Number.POSITIVE_INFINITY
+          : introStart < 0
+            ? 0
+            : (now - introStart) / 1000;
       const introFront = introAge * grid.reach * 1.25;
       const introBand = grid.cell * 4;
       for (let i = 0; i < grid.count; i++) {
@@ -477,7 +498,10 @@ const DotGrid = ({
         if (pointer.presence > 0.001) {
           const distance = Math.hypot(x - pointer.x, y - pointer.y);
           if (distance < radius)
-            glowing = Math.max(glowing, smootherstep(1 - distance / radius) * 0.4 * pointer.presence);
+            glowing = Math.max(
+              glowing,
+              smootherstep(1 - distance / radius) * 0.4 * pointer.presence,
+            );
         }
         let scale = 1;
         if (introStart !== null) {
@@ -511,7 +535,7 @@ const DotGrid = ({
       gl.uniform3f(uniforms.uActive, accent[0], accent[1], accent[2]);
       gl.uniform1f(uniforms.uOpacity, Math.min(1, Math.max(0, s.opacity)));
       gl.uniform1f(uniforms.uFade, Math.min(1, Math.max(0, s.fade)));
-      gl.uniform1i(uniforms.uShape, s.shape === 'square' ? 1 : 0);
+      gl.uniform1i(uniforms.uShape, s.shape === "square" ? 1 : 0);
       gl.bindVertexArray(vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, instances);
@@ -601,10 +625,10 @@ const DotGrid = ({
       wake();
     };
 
-    window.addEventListener('pointermove', onMove, { passive: true });
-    window.addEventListener('pointerdown', onDown, { passive: true });
-    window.addEventListener('pointerout', onOut);
-    window.addEventListener('blur', onLeave);
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerdown", onDown, { passive: true });
+    window.addEventListener("pointerout", onOut);
+    window.addEventListener("blur", onLeave);
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
@@ -626,7 +650,7 @@ const DotGrid = ({
         wake();
       }
     };
-    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener("visibilitychange", onVisibility);
 
     resize();
     wake();
@@ -640,18 +664,18 @@ const DotGrid = ({
       refresh: () => {
         render(performance.now());
         wake();
-      }
+      },
     };
 
     return () => {
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerdown', onDown);
-      window.removeEventListener('pointerout', onOut);
-      window.removeEventListener('blur', onLeave);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointerout", onOut);
+      window.removeEventListener("blur", onLeave);
+      document.removeEventListener("visibilitychange", onVisibility);
       gl.deleteBuffer(cornerBuffer);
       gl.deleteBuffer(instanceBuffer);
       gl.deleteVertexArray(vao);
@@ -666,7 +690,19 @@ const DotGrid = ({
 
   useEffect(() => {
     engineRef.current?.refresh();
-  }, [baseColor, activeColor, swell, stretch, glow, shape, fade, opacity, paused, proximity, mouseInteraction]);
+  }, [
+    baseColor,
+    activeColor,
+    swell,
+    stretch,
+    glow,
+    shape,
+    fade,
+    opacity,
+    paused,
+    proximity,
+    mouseInteraction,
+  ]);
 
   return (
     <div className={`dot-grid ${className}`.trim()} style={style}>

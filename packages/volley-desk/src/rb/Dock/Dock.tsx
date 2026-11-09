@@ -1,12 +1,13 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-'use client';
+"use client";
 
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import type React from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
-import './Dock.css';
+import "./Dock.css";
 
-export type DockSide = 'bottom' | 'top' | 'left' | 'right';
+export type DockSide = "bottom" | "top" | "left" | "right";
 
 export type DockMenuItem = {
   label?: React.ReactNode;
@@ -39,7 +40,7 @@ export type DockSpring = {
 export type DockProps = {
   items?: DockItemData[];
   position?: DockSide;
-  theme?: 'dark' | 'light';
+  theme?: "dark" | "light";
   baseItemSize?: number;
   magnification?: number;
   distance?: number;
@@ -116,7 +117,7 @@ type Actions = {
 
 type Press = { id: number; x: number; y: number; timer: number; cleanup: () => void };
 
-const SIDES: DockSide[] = ['bottom', 'top', 'left', 'right'];
+const SIDES: DockSide[] = ["bottom", "top", "left", "right"];
 const EDGE = 12;
 const HOP = 0.4;
 const HOP_TIME = 0.38;
@@ -126,60 +127,66 @@ const TAIL_HALF = 9;
 const MENU_RADIUS = 10;
 const MENU_GAP = 8;
 const MARGIN = 8;
-const POP = 'cubic-bezier(0.2, 1.25, 0.4, 1)';
+const POP = "cubic-bezier(0.2, 1.25, 0.4, 1)";
 
-const THEMES: Record<'dark' | 'light', Tokens> = {
+const THEMES: Record<"dark" | "light", Tokens> = {
   dark: {
-    '--dock-panel': 'rgba(38, 35, 46, 0.66)',
-    '--dock-panel-edge': 'rgba(255, 255, 255, 0.08)',
-    '--dock-panel-highlight': 'rgba(255, 255, 255, 0.07)',
-    '--dock-panel-shadow': '0 22px 44px -20px rgba(0, 0, 0, 0.8), 0 6px 16px -8px rgba(0, 0, 0, 0.5)',
-    '--dock-tile': 'linear-gradient(180deg, #3a3644 0%, #27242f 100%)',
-    '--dock-tile-edge': 'rgba(255, 255, 255, 0.07)',
-    '--dock-tile-highlight': 'rgba(255, 255, 255, 0.12)',
-    '--dock-tile-shadow': '0 4px 10px -4px rgba(0, 0, 0, 0.7)',
-    '--dock-ink': '#f4f4f5',
-    '--dock-label': '#2a2731',
-    '--dock-label-ink': '#f4f4f5',
-    '--dock-dot': 'rgba(255, 255, 255, 0.72)',
-    '--dock-separator': 'rgba(255, 255, 255, 0.12)',
-    '--dock-press': 'brightness(0.75)',
-    '--dock-menu': 'rgba(40, 37, 47, 0.8)',
-    '--dock-menu-edge': 'rgba(255, 255, 255, 0.13)',
-    '--dock-menu-ink': '#f4f4f5',
-    '--dock-menu-muted': 'rgba(244, 244, 245, 0.42)',
-    '--dock-menu-separator': 'rgba(255, 255, 255, 0.1)',
-    '--dock-menu-shadow': '0 18px 40px -12px rgba(0, 0, 0, 0.65), 0 3px 10px rgba(0, 0, 0, 0.3)'
+    "--dock-panel": "rgba(38, 35, 46, 0.66)",
+    "--dock-panel-edge": "rgba(255, 255, 255, 0.08)",
+    "--dock-panel-highlight": "rgba(255, 255, 255, 0.07)",
+    "--dock-panel-shadow":
+      "0 22px 44px -20px rgba(0, 0, 0, 0.8), 0 6px 16px -8px rgba(0, 0, 0, 0.5)",
+    "--dock-tile": "linear-gradient(180deg, #3a3644 0%, #27242f 100%)",
+    "--dock-tile-edge": "rgba(255, 255, 255, 0.07)",
+    "--dock-tile-highlight": "rgba(255, 255, 255, 0.12)",
+    "--dock-tile-shadow": "0 4px 10px -4px rgba(0, 0, 0, 0.7)",
+    "--dock-ink": "#f4f4f5",
+    "--dock-label": "#2a2731",
+    "--dock-label-ink": "#f4f4f5",
+    "--dock-dot": "rgba(255, 255, 255, 0.72)",
+    "--dock-separator": "rgba(255, 255, 255, 0.12)",
+    "--dock-press": "brightness(0.75)",
+    "--dock-menu": "rgba(40, 37, 47, 0.8)",
+    "--dock-menu-edge": "rgba(255, 255, 255, 0.13)",
+    "--dock-menu-ink": "#f4f4f5",
+    "--dock-menu-muted": "rgba(244, 244, 245, 0.42)",
+    "--dock-menu-separator": "rgba(255, 255, 255, 0.1)",
+    "--dock-menu-shadow": "0 18px 40px -12px rgba(0, 0, 0, 0.65), 0 3px 10px rgba(0, 0, 0, 0.3)",
   },
   light: {
-    '--dock-panel': 'rgba(240, 240, 243, 0.8)',
-    '--dock-panel-edge': 'rgba(24, 24, 27, 0.07)',
-    '--dock-panel-highlight': 'rgba(255, 255, 255, 0.95)',
-    '--dock-panel-shadow': '0 22px 44px -22px rgba(24, 24, 27, 0.3), 0 6px 16px -10px rgba(24, 24, 27, 0.16)',
-    '--dock-tile': 'linear-gradient(180deg, #ffffff 0%, #f6f6f8 100%)',
-    '--dock-tile-edge': 'rgba(24, 24, 27, 0.08)',
-    '--dock-tile-highlight': 'rgba(255, 255, 255, 1)',
-    '--dock-tile-shadow': '0 4px 10px -5px rgba(24, 24, 27, 0.25)',
-    '--dock-ink': '#27272a',
-    '--dock-label': '#ffffff',
-    '--dock-label-ink': '#18181b',
-    '--dock-dot': 'rgba(24, 24, 27, 0.55)',
-    '--dock-separator': 'rgba(24, 24, 27, 0.12)',
-    '--dock-press': 'brightness(0.9)',
-    '--dock-menu': 'rgba(248, 248, 250, 0.86)',
-    '--dock-menu-edge': 'rgba(24, 24, 27, 0.1)',
-    '--dock-menu-ink': '#18181b',
-    '--dock-menu-muted': 'rgba(24, 24, 27, 0.4)',
-    '--dock-menu-separator': 'rgba(24, 24, 27, 0.1)',
-    '--dock-menu-shadow': '0 18px 40px -14px rgba(24, 24, 27, 0.3), 0 3px 10px rgba(24, 24, 27, 0.1)'
-  }
+    "--dock-panel": "rgba(240, 240, 243, 0.8)",
+    "--dock-panel-edge": "rgba(24, 24, 27, 0.07)",
+    "--dock-panel-highlight": "rgba(255, 255, 255, 0.95)",
+    "--dock-panel-shadow":
+      "0 22px 44px -22px rgba(24, 24, 27, 0.3), 0 6px 16px -10px rgba(24, 24, 27, 0.16)",
+    "--dock-tile": "linear-gradient(180deg, #ffffff 0%, #f6f6f8 100%)",
+    "--dock-tile-edge": "rgba(24, 24, 27, 0.08)",
+    "--dock-tile-highlight": "rgba(255, 255, 255, 1)",
+    "--dock-tile-shadow": "0 4px 10px -5px rgba(24, 24, 27, 0.25)",
+    "--dock-ink": "#27272a",
+    "--dock-label": "#ffffff",
+    "--dock-label-ink": "#18181b",
+    "--dock-dot": "rgba(24, 24, 27, 0.55)",
+    "--dock-separator": "rgba(24, 24, 27, 0.12)",
+    "--dock-press": "brightness(0.9)",
+    "--dock-menu": "rgba(248, 248, 250, 0.86)",
+    "--dock-menu-edge": "rgba(24, 24, 27, 0.1)",
+    "--dock-menu-ink": "#18181b",
+    "--dock-menu-muted": "rgba(24, 24, 27, 0.4)",
+    "--dock-menu-separator": "rgba(24, 24, 27, 0.1)",
+    "--dock-menu-shadow":
+      "0 18px 40px -14px rgba(24, 24, 27, 0.3), 0 3px 10px rgba(24, 24, 27, 0.1)",
+  },
 };
 
-const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-const hasBadge = (badge: React.ReactNode) => badge !== undefined && badge !== null && badge !== false;
-const usable = (row?: DockMenuItem | null): row is DockMenuItem => !!row && !row.separator && !row.disabled;
-const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+const hasBadge = (badge: React.ReactNode) =>
+  badge !== undefined && badge !== null && badge !== false;
+const usable = (row?: DockMenuItem | null): row is DockMenuItem =>
+  !!row && !row.separator && !row.disabled;
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), Math.max(min, max));
 
 const menuPath = (width: number, height: number, side: DockSide | null, at: number) => {
   const r = MENU_RADIUS;
@@ -190,15 +197,15 @@ const menuPath = (width: number, height: number, side: DockSide | null, at: numb
   };
   return [
     `M ${p(r, 0)}`,
-    side === 'top' ? tail(at, 0, 1, 0, 0, -1) : '',
+    side === "top" ? tail(at, 0, 1, 0, 0, -1) : "",
     `L ${p(width - r, 0)} A ${r} ${r} 0 0 1 ${p(width, r)}`,
-    side === 'right' ? tail(width, at, 0, 1, 1, 0) : '',
+    side === "right" ? tail(width, at, 0, 1, 1, 0) : "",
     `L ${p(width, height - r)} A ${r} ${r} 0 0 1 ${p(width - r, height)}`,
-    side === 'bottom' ? tail(at, height, -1, 0, 0, 1) : '',
+    side === "bottom" ? tail(at, height, -1, 0, 0, 1) : "",
     `L ${p(r, height)} A ${r} ${r} 0 0 1 ${p(0, height - r)}`,
-    side === 'left' ? tail(0, at, 0, -1, -1, 0) : '',
-    `L ${p(0, r)} A ${r} ${r} 0 0 1 ${p(r, 0)} Z`
-  ].join(' ');
+    side === "left" ? tail(0, at, 0, -1, -1, 0) : "",
+    `L ${p(0, r)} A ${r} ${r} 0 0 1 ${p(r, 0)} Z`,
+  ].join(" ");
 };
 
 const CheckGlyph = () => (
@@ -228,7 +235,7 @@ function DockMenu({
   onDismiss,
   onBack,
   onEnter,
-  onExited
+  onExited,
 }: DockMenuProps) {
   const outerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -246,7 +253,7 @@ function DockMenu({
   const [sub, setSub] = useState<SubMenu | null>(null);
   const [blink, setBlink] = useState(false);
   const [chosen, setChosen] = useState(false);
-  const checks = rows.some(row => row && !row.separator && row.checked !== undefined);
+  const checks = rows.some((row) => row && !row.separator && row.checked !== undefined);
 
   callbacks.current = { onSelect, onDismiss, onBack, onExited };
 
@@ -257,12 +264,12 @@ function DockMenu({
     const shape = pathRef.current;
     if (!outer || !list || !glass || !shape) return undefined;
     aliveRef.current = true;
-    const layers = [outer.firstElementChild, glass, shapeRef.current, list].filter((layer): layer is Element =>
-      Boolean(layer)
+    const layers = [outer.firstElementChild, glass, shapeRef.current, list].filter(
+      (layer): layer is Element => Boolean(layer),
     );
     const { x, y } = point ?? { x: 0, y: 0 };
     const box = edge ?? { left: 0, right: 0, top: 0 };
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     reduceRef.current = reduce;
     const width = list.offsetWidth;
     const height = list.offsetHeight;
@@ -272,39 +279,44 @@ function DockMenu({
     let top: number;
     let at = 0;
     let origin: string;
-    if (side === 'bottom' || side === 'top') {
+    if (side === "bottom" || side === "top") {
       left = clamp(x - width / 2, MARGIN, vw - MARGIN - width);
-      top = side === 'bottom' ? y - TAIL - height : y + TAIL;
+      top = side === "bottom" ? y - TAIL - height : y + TAIL;
       at = clamp(x - left, MENU_RADIUS + TAIL_HALF, width - MENU_RADIUS - TAIL_HALF);
-      origin = `${at}px ${side === 'bottom' ? height + TAIL : -TAIL}px`;
-    } else if (side === 'left' || side === 'right') {
+      origin = `${at}px ${side === "bottom" ? height + TAIL : -TAIL}px`;
+    } else if (side === "left" || side === "right") {
       top = clamp(y - height / 2, MARGIN, vh - MARGIN - height);
-      left = side === 'right' ? x - TAIL - width : x + TAIL;
+      left = side === "right" ? x - TAIL - width : x + TAIL;
       at = clamp(y - top, MENU_RADIUS + TAIL_HALF, height - MENU_RADIUS - TAIL_HALF);
-      origin = `${side === 'right' ? width + TAIL : -TAIL}px ${at}px`;
+      origin = `${side === "right" ? width + TAIL : -TAIL}px ${at}px`;
     } else {
       const flip = box.right - 4 + width > vw - MARGIN && box.left + 4 - width >= MARGIN;
       left = flip ? box.left + 4 - width : box.right - 4;
       top = clamp(box.top - 5, MARGIN, vh - MARGIN - height);
-      origin = flip ? 'right top' : 'left top';
+      origin = flip ? "right top" : "left top";
     }
     const path = menuPath(width, height, side, at);
     frameRef.current = { left, top, width, height };
     outer.style.left = `${left}px`;
     outer.style.top = `${top}px`;
     outer.style.transformOrigin = origin;
-    outer.style.visibility = 'visible';
+    outer.style.visibility = "visible";
     glass.style.clipPath = `path('${path}')`;
-    shape.setAttribute('d', path);
+    shape.setAttribute("d", path);
     if (reduce) {
-      layers.forEach(layer => layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 120, easing: 'ease-out' }));
+      layers.forEach((layer) =>
+        layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 120, easing: "ease-out" }),
+      );
     } else {
-      outer.animate([{ transform: `scale(${nested ? 0.94 : 0.82})` }, { transform: 'scale(1)' }], {
+      outer.animate([{ transform: `scale(${nested ? 0.94 : 0.82})` }, { transform: "scale(1)" }], {
         duration: nested ? 220 : 340,
-        easing: POP
+        easing: POP,
       });
-      layers.forEach(layer =>
-        layer.animate([{ opacity: 0 }, { opacity: 1 }], { duration: nested ? 120 : 160, easing: 'ease-out' })
+      layers.forEach((layer) =>
+        layer.animate([{ opacity: 0 }, { opacity: 1 }], {
+          duration: nested ? 120 : 160,
+          easing: "ease-out",
+        }),
       );
     }
     const first = rows.findIndex(usable);
@@ -323,9 +335,12 @@ function DockMenu({
   useEffect(() => {
     if (!closing) return undefined;
     const outer = outerRef.current;
-    const layers = [outer?.firstElementChild, glassRef.current, shapeRef.current, listRef.current].filter(
-      (layer): layer is Element => Boolean(layer)
-    );
+    const layers = [
+      outer?.firstElementChild,
+      glassRef.current,
+      shapeRef.current,
+      listRef.current,
+    ].filter((layer): layer is Element => Boolean(layer));
     const duration = reduceRef.current ? 100 : 150;
     let done = false;
     const finish = () => {
@@ -334,14 +349,18 @@ function DockMenu({
       callbacks.current.onExited?.();
     };
     if (outer && !reduceRef.current) {
-      outer.animate([{ transform: 'scale(1)' }, { transform: 'scale(0.96)' }], {
+      outer.animate([{ transform: "scale(1)" }, { transform: "scale(0.96)" }], {
         duration,
-        easing: 'ease-in',
-        fill: 'forwards'
+        easing: "ease-in",
+        fill: "forwards",
       });
     }
-    layers.forEach(layer =>
-      layer.animate([{ opacity: 1 }, { opacity: 0 }], { duration, easing: 'ease-in', fill: 'forwards' })
+    layers.forEach((layer) =>
+      layer.animate([{ opacity: 1 }, { opacity: 0 }], {
+        duration,
+        easing: "ease-in",
+        fill: "forwards",
+      }),
     );
     const timer = window.setTimeout(finish, duration);
     return () => window.clearTimeout(timer);
@@ -352,18 +371,18 @@ function DockMenu({
     if (!highlight) return;
     const row = rowRefs.current[active];
     if (!row || blink) {
-      if (blink) highlight.style.transition = 'none';
-      highlight.style.opacity = '0';
+      if (blink) highlight.style.transition = "none";
+      highlight.style.opacity = "0";
       return;
     }
-    const jump = highlight.style.opacity !== '1' || reduceRef.current;
-    if (jump) highlight.style.transition = 'none';
+    const jump = highlight.style.opacity !== "1" || reduceRef.current;
+    if (jump) highlight.style.transition = "none";
     highlight.style.transform = `translateY(${row.offsetTop}px)`;
     highlight.style.height = `${row.offsetHeight}px`;
-    highlight.style.opacity = '1';
+    highlight.style.opacity = "1";
     if (jump) {
       void highlight.offsetHeight;
-      highlight.style.transition = '';
+      highlight.style.transition = "";
     }
   }, [active, blink]);
 
@@ -380,7 +399,7 @@ function DockMenu({
     setSub({
       index,
       keyboard,
-      edge: { left: frame.left, right: frame.left + frame.width, top: frame.top + row.offsetTop }
+      edge: { left: frame.left, right: frame.left + frame.width, top: frame.top + row.offsetTop },
     });
   };
 
@@ -409,7 +428,8 @@ function DockMenu({
     activate(index);
     window.clearTimeout(timerRef.current);
     if (rows[index].items?.length) {
-      if (sub?.index !== index) timerRef.current = window.setTimeout(() => openSub(index, false), 120);
+      if (sub?.index !== index)
+        timerRef.current = window.setTimeout(() => openSub(index, false), 120);
     } else if (sub) {
       timerRef.current = window.setTimeout(closeSub, 220);
     }
@@ -420,21 +440,21 @@ function DockMenu({
     const { key } = event;
     const order = rows.flatMap((row, i) => (usable(row) ? [i] : []));
     let handled = true;
-    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
+    if (key === "ArrowDown" || key === "ArrowUp" || key === "Home" || key === "End") {
       if (order.length) {
         const at = order.indexOf(active);
         let next = order[0];
-        if (key === 'End') next = order[order.length - 1];
-        else if (key === 'ArrowDown') next = order[(at + 1) % order.length];
-        else if (key === 'ArrowUp') next = order[at <= 0 ? order.length - 1 : at - 1];
+        if (key === "End") next = order[order.length - 1];
+        else if (key === "ArrowDown") next = order[(at + 1) % order.length];
+        else if (key === "ArrowUp") next = order[at <= 0 ? order.length - 1 : at - 1];
         if (sub) closeSub();
         activate(next);
       }
-    } else if (key === 'ArrowRight' && rows[active]?.items?.length) {
+    } else if (key === "ArrowRight" && rows[active]?.items?.length) {
       openSub(active, true);
-    } else if ((key === 'ArrowLeft' || key === 'Escape') && nested) {
+    } else if ((key === "ArrowLeft" || key === "Escape") && nested) {
       callbacks.current.onBack?.();
-    } else if (key === 'Escape' || key === 'Tab') {
+    } else if (key === "Escape" || key === "Tab") {
       callbacks.current.onDismiss?.(true);
     } else {
       handled = false;
@@ -450,7 +470,12 @@ function DockMenu({
   return (
     <>
       {createPortal(
-        <div ref={outerRef} className="dock-menu" style={tokens as React.CSSProperties} data-dock-menu="">
+        <div
+          ref={outerRef}
+          className="dock-menu"
+          style={tokens as React.CSSProperties}
+          data-dock-menu=""
+        >
           <span className="dock-menu-shadow" />
           <span ref={glassRef} className="dock-menu-glass" />
           <svg ref={shapeRef} className="dock-menu-shape" aria-hidden="true">
@@ -473,38 +498,41 @@ function DockMenu({
             <span ref={highlightRef} className="dock-menu-highlight" />
             {rows.map((row, index) => {
               if (!row) return null;
-              if (row.separator) return <span key={index} className="dock-menu-separator" role="separator" />;
+              if (row.separator)
+                return <span key={index} className="dock-menu-separator" role="separator" />;
               const lit = index === active && !blink;
               const submenu = Boolean(row.items?.length);
               return (
                 <button
                   key={index}
-                  ref={node => {
+                  ref={(node) => {
                     rowRefs.current[index] = node;
                   }}
                   type="button"
                   className="dock-menu-row"
-                  role={row.checked !== undefined ? 'menuitemcheckbox' : 'menuitem'}
+                  role={row.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
                   aria-checked={row.checked !== undefined ? Boolean(row.checked) : undefined}
                   aria-disabled={row.disabled ? true : undefined}
-                  aria-haspopup={submenu ? 'menu' : undefined}
+                  aria-haspopup={submenu ? "menu" : undefined}
                   aria-expanded={submenu ? sub?.index === index : undefined}
                   tabIndex={-1}
                   data-dock-row={index}
-                  data-active={lit ? '' : undefined}
+                  data-active={lit ? "" : undefined}
                   onPointerMove={() => enterRow(index)}
                   onPointerUp={() => {
                     if (!pressingRef?.current || !usable(row) || submenu) return;
                     pressingRef.current = false;
                     choose(index, false);
                   }}
-                  onClick={event => {
+                  onClick={(event) => {
                     if (chosen || !usable(row)) return;
                     if (submenu) openSub(index, event.detail === 0);
                     else choose(index, event.detail === 0);
                   }}
                 >
-                  {checks ? <span className="dock-menu-check">{row.checked ? <CheckGlyph /> : null}</span> : null}
+                  {checks ? (
+                    <span className="dock-menu-check">{row.checked ? <CheckGlyph /> : null}</span>
+                  ) : null}
                   {row.icon ? <span className="dock-menu-icon">{row.icon}</span> : null}
                   <span className="dock-menu-text">{row.label}</span>
                   {row.shortcut ? <span className="dock-menu-shortcut">{row.shortcut}</span> : null}
@@ -518,13 +546,13 @@ function DockMenu({
             })}
           </div>
         </div>,
-        document.body
+        document.body,
       )}
       {sub ? (
         <DockMenu
           key={sub.index}
           rows={subRow?.items ?? []}
-          label={typeof subRow?.label === 'string' ? subRow.label : undefined}
+          label={typeof subRow?.label === "string" ? subRow.label : undefined}
           edge={sub.edge}
           tokens={tokens}
           nested
@@ -532,7 +560,7 @@ function DockMenu({
           closing={closing}
           pressingRef={pressingRef}
           onSelect={(row, keyboard) => callbacks.current.onSelect?.(row, keyboard)}
-          onDismiss={restore => callbacks.current.onDismiss?.(restore)}
+          onDismiss={(restore) => callbacks.current.onDismiss?.(restore)}
           onBack={() => {
             const index = sub.index;
             closeSub();
@@ -550,8 +578,8 @@ function DockMenu({
 
 export default function Dock({
   items = [],
-  position = 'bottom',
-  theme = 'dark',
+  position = "bottom",
+  theme = "dark",
   baseItemSize = 50,
   magnification = 70,
   distance = 200,
@@ -565,10 +593,10 @@ export default function Dock({
   showLabels = true,
   showIndicators = true,
   showBadges = true,
-  badgeColor = '#ff453a',
-  accentColor = '#0a84ff',
-  className = '',
-  style
+  badgeColor = "#ff453a",
+  accentColor = "#0a84ff",
+  className = "",
+  style,
 }: DockProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -581,8 +609,8 @@ export default function Dock({
   const skipRef = useRef(-1);
   const [fit, setFit] = useState(1);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const side = SIDES.includes(position) ? position : 'bottom';
-  const vertical = side === 'left' || side === 'right';
+  const side = SIDES.includes(position) ? position : "bottom";
+  const vertical = side === "left" || side === "right";
   const rawBase = Math.max(16, baseItemSize);
   const rawPeak = Math.max(rawBase, magnification);
   const rawThickness = Math.max(rawBase, panelHeight);
@@ -597,8 +625,8 @@ export default function Dock({
   const thickness = rawThickness * fit;
   const tokens: Tokens = {
     ...(THEMES[theme] ?? THEMES.dark),
-    '--dock-accent': accentColor,
-    '--dock-badge': badgeColor
+    "--dock-accent": accentColor,
+    "--dock-badge": badgeColor,
   };
 
   const settings = {
@@ -615,7 +643,7 @@ export default function Dock({
     stiffness: Math.max(1, spring?.stiffness ?? 150),
     damping: Math.max(0, spring?.damping ?? 12),
     bounce,
-    autoHide
+    autoHide,
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -626,7 +654,7 @@ export default function Dock({
   });
 
   useIsomorphicLayoutEffect(() => {
-    if (autoHide) rootRef.current?.setAttribute('data-hidden', '');
+    if (autoHide) rootRef.current?.setAttribute("data-hidden", "");
   }, []);
 
   useIsomorphicLayoutEffect(() => {
@@ -649,7 +677,7 @@ export default function Dock({
     const root = rootRef.current;
     if (!root) return undefined;
 
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const motion = new Map<number, Motion>();
     const pointer = { x: 0, y: 0, inside: false };
     let focused = -1;
@@ -657,7 +685,7 @@ export default function Dock({
     let lastFocus: number | null = null;
     let lastRest: number[] = [];
     let lastBase = settingsRef.current.base;
-    let hidden = root.hasAttribute('data-hidden');
+    let hidden = root.hasAttribute("data-hidden");
     let hiding = settingsRef.current.autoHide;
     let hideTimer = 0;
     let raf = 0;
@@ -675,8 +703,8 @@ export default function Dock({
           launch: 0,
           gravity: 0,
           hopping: false,
-          drawn: '',
-          node: null
+          drawn: "",
+          node: null,
         };
         motion.set(index, state);
       }
@@ -691,7 +719,7 @@ export default function Dock({
       last = now;
       if (s.base !== lastBase) {
         const ratio = s.base / lastBase;
-        motion.forEach(state => {
+        motion.forEach((state) => {
           state.size *= ratio;
           state.velocity *= ratio;
         });
@@ -699,9 +727,10 @@ export default function Dock({
       }
       const rect = root.getBoundingClientRect();
       const center = s.vertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
-      const spans = s.items.map(item => (item?.separator ? 1 : s.base));
-      let cursor = -(spans.reduce((sum, span) => sum + span, 0) + s.gap * Math.max(0, spans.length - 1)) / 2;
-      const rest = spans.map(span => {
+      const spans = s.items.map((item) => (item?.separator ? 1 : s.base));
+      let cursor =
+        -(spans.reduce((sum, span) => sum + span, 0) + s.gap * Math.max(0, spans.length - 1)) / 2;
+      const rest = spans.map((span) => {
         const middle = cursor + span / 2;
         cursor += span + s.gap;
         return middle;
@@ -723,13 +752,15 @@ export default function Dock({
         if (!node || item?.separator) return;
         const state = entry(index);
         const reach = focus === null ? 1 : Math.abs(focus - rest[index]) / s.distance;
-        const target = s.base + (s.peak - s.base) * (reach < 1 ? Math.cos((reach * Math.PI) / 2) ** 2 : 0);
+        const target =
+          s.base + (s.peak - s.base) * (reach < 1 ? Math.cos((reach * Math.PI) / 2) ** 2 : 0);
         if (reduce) {
           state.size = target;
           state.velocity = 0;
         } else {
           for (let i = 0; i < steps; i++) {
-            state.velocity = (state.velocity + h * k * (target - state.size)) / (1 + h * c + h * h * k);
+            state.velocity =
+              (state.velocity + h * k * (target - state.size)) / (1 + h * c + h * h * k);
             state.size += state.velocity * h;
             if (!state.hopping) continue;
             state.rise -= state.gravity * h;
@@ -740,7 +771,7 @@ export default function Dock({
             if (state.rise < state.launch * 0.2) {
               state.rise = 0;
               state.hopping = false;
-              node.removeAttribute('data-hop');
+              node.removeAttribute("data-hop");
             }
           }
         }
@@ -756,7 +787,7 @@ export default function Dock({
         if (drawn === state.drawn && node === state.node) return;
         state.drawn = drawn;
         state.node = node;
-        const lift = s.side === 'bottom' || s.side === 'right' ? -state.lift : state.lift;
+        const lift = s.side === "bottom" || s.side === "right" ? -state.lift : state.lift;
         const tile = node.firstElementChild as HTMLElement | null;
         node.style.width = `${size}px`;
         node.style.height = `${size}px`;
@@ -778,7 +809,7 @@ export default function Dock({
       hideTimer = 0;
       if (!hidden) return;
       hidden = false;
-      root.removeAttribute('data-hidden');
+      root.removeAttribute("data-hidden");
     };
 
     const hide = () => {
@@ -787,7 +818,7 @@ export default function Dock({
       const blocked = pointer.inside || held !== null || root.contains(document.activeElement);
       if (hidden || !settingsRef.current.autoHide || blocked) return;
       hidden = true;
-      root.setAttribute('data-hidden', '');
+      root.setAttribute("data-hidden", "");
     };
 
     const hideLater = () => {
@@ -816,7 +847,7 @@ export default function Dock({
         state.launch = (state.gravity * HOP_TIME) / 2;
         state.rise = state.launch;
         state.hopping = true;
-        node.setAttribute('data-hop', '');
+        node.setAttribute("data-hop", "");
         wake();
       },
       focus: (index: number) => {
@@ -833,7 +864,7 @@ export default function Dock({
         held = lastFocus ?? lastRest[index] ?? 0;
         show();
         wake();
-      }
+      },
     };
 
     const onMove = (event: PointerEvent) => {
@@ -866,34 +897,34 @@ export default function Dock({
         bottom: y >= rect.bottom - zone,
         top: y <= rect.top + zone,
         left: x <= rect.left + zone,
-        right: x >= rect.right - zone
+        right: x >= rect.right - zone,
       }[s.side];
       if (within && near) show();
       else hideLater();
     };
 
-    root.addEventListener('pointermove', onMove);
-    root.addEventListener('pointerdown', onMove);
-    root.addEventListener('pointerleave', onLeave);
-    root.addEventListener('pointercancel', onLeave);
-    root.addEventListener('focusin', show);
-    root.addEventListener('focusout', onFocusOut);
-    window.addEventListener('pointermove', onWindowMove);
-    window.addEventListener('pointerdown', onWindowMove);
+    root.addEventListener("pointermove", onMove);
+    root.addEventListener("pointerdown", onMove);
+    root.addEventListener("pointerleave", onLeave);
+    root.addEventListener("pointercancel", onLeave);
+    root.addEventListener("focusin", show);
+    root.addEventListener("focusout", onFocusOut);
+    window.addEventListener("pointermove", onWindowMove);
+    window.addEventListener("pointerdown", onWindowMove);
     wake();
 
     return () => {
       alive = false;
       cancelAnimationFrame(raf);
       window.clearTimeout(hideTimer);
-      root.removeEventListener('pointermove', onMove);
-      root.removeEventListener('pointerdown', onMove);
-      root.removeEventListener('pointerleave', onLeave);
-      root.removeEventListener('pointercancel', onLeave);
-      root.removeEventListener('focusin', show);
-      root.removeEventListener('focusout', onFocusOut);
-      window.removeEventListener('pointermove', onWindowMove);
-      window.removeEventListener('pointerdown', onWindowMove);
+      root.removeEventListener("pointermove", onMove);
+      root.removeEventListener("pointerdown", onMove);
+      root.removeEventListener("pointerleave", onLeave);
+      root.removeEventListener("pointercancel", onLeave);
+      root.removeEventListener("focusin", show);
+      root.removeEventListener("focusout", onFocusOut);
+      window.removeEventListener("pointermove", onWindowMove);
+      window.removeEventListener("pointerdown", onWindowMove);
       wakeRef.current = null;
       actionsRef.current = null;
       const press = pressRef.current;
@@ -926,27 +957,31 @@ export default function Dock({
     const owner = itemRefs.current[menu.index];
     const onDown = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Element && (target.closest('[data-dock-menu]') || owner?.contains(target))) return;
+      if (
+        target instanceof Element &&
+        (target.closest("[data-dock-menu]") || owner?.contains(target))
+      )
+        return;
       closeMenu(false);
     };
     const onScroll = (event: Event) => {
-      if (event.target instanceof Element && event.target.closest('[data-dock-menu]')) return;
+      if (event.target instanceof Element && event.target.closest("[data-dock-menu]")) return;
       closeMenu(false);
     };
     const onAway = () => closeMenu(false);
-    document.addEventListener('pointerdown', onDown, true);
-    window.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', onAway);
-    window.addEventListener('blur', onAway);
+    document.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onAway);
+    window.addEventListener("blur", onAway);
     return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onAway);
-      window.removeEventListener('blur', onAway);
+      document.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onAway);
+      window.removeEventListener("blur", onAway);
     };
   }, [menu, closeMenu]);
 
-  const openMenu = (index: number, mode: 'pointer' | 'keyboard' | 'press') => {
+  const openMenu = (index: number, mode: "pointer" | "keyboard" | "press") => {
     const node = itemRefs.current[index];
     if (!node || !items[index]?.menu?.length) return false;
     const current = menuRef.current;
@@ -957,16 +992,16 @@ export default function Dock({
       bottom: { x: rect.left + rect.width / 2, y: rect.top - MENU_GAP },
       top: { x: rect.left + rect.width / 2, y: rect.bottom + MENU_GAP },
       left: { x: rect.right + MENU_GAP, y: rect.top + rect.height / 2 },
-      right: { x: rect.left - MENU_GAP, y: rect.top + rect.height / 2 }
+      right: { x: rect.left - MENU_GAP, y: rect.top + rect.height / 2 },
     }[side];
     serialRef.current += 1;
     const next: MenuState = {
       id: serialRef.current,
       index,
       point,
-      keyboard: mode === 'keyboard',
+      keyboard: mode === "keyboard",
       closing: false,
-      restore: false
+      restore: false,
     };
     menuRef.current = next;
     setMenu(next);
@@ -984,7 +1019,13 @@ export default function Dock({
   const startPress = (event: React.PointerEvent<HTMLButtonElement>, index: number) => {
     endPress();
     const target = event.currentTarget;
-    const press: Press = { id: event.pointerId, x: event.clientX, y: event.clientY, timer: 0, cleanup: () => {} };
+    const press: Press = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      timer: 0,
+      cleanup: () => {},
+    };
     if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
     const onMove = (moved: PointerEvent) => {
       if (moved.pointerId !== press.id) return;
@@ -994,44 +1035,50 @@ export default function Dock({
       if (released.pointerId === press.id) endPress();
     };
     press.cleanup = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
     press.timer = window.setTimeout(() => {
       press.cleanup();
       pressRef.current = null;
-      if (!openMenu(index, 'press')) return;
+      if (!openMenu(index, "press")) return;
       skipRef.current = index;
       pressingRef.current = true;
       window.addEventListener(
-        'pointerup',
+        "pointerup",
         () => {
           pressingRef.current = false;
         },
-        { once: true }
+        { once: true },
       );
     }, HOLD_TIME);
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
     pressRef.current = press;
   };
 
   const onItemKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const toward = { bottom: 'ArrowUp', top: 'ArrowDown', left: 'ArrowRight', right: 'ArrowLeft' }[side];
-    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10') || event.key === toward) {
-      if (openMenu(index, 'keyboard')) event.preventDefault();
+    const toward = { bottom: "ArrowUp", top: "ArrowDown", left: "ArrowRight", right: "ArrowLeft" }[
+      side
+    ];
+    if (
+      event.key === "ContextMenu" ||
+      (event.shiftKey && event.key === "F10") ||
+      event.key === toward
+    ) {
+      if (openMenu(index, "keyboard")) event.preventDefault();
       return;
     }
     const order = items.flatMap((item, i) => (item?.separator ? [] : [i]));
     const at = order.indexOf(index);
-    const keys = vertical ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
+    const keys = vertical ? ["ArrowUp", "ArrowDown"] : ["ArrowLeft", "ArrowRight"];
     let next: number | undefined;
     if (event.key === keys[0]) next = order[(at - 1 + order.length) % order.length];
     else if (event.key === keys[1]) next = order[(at + 1) % order.length];
-    else if (event.key === 'Home') next = order[0];
-    else if (event.key === 'End') next = order[order.length - 1];
+    else if (event.key === "Home") next = order[0];
+    else if (event.key === "End") next = order[order.length - 1];
     if (next === undefined) return;
     event.preventDefault();
     itemRefs.current[next]?.focus();
@@ -1042,20 +1089,20 @@ export default function Dock({
   return (
     <div
       ref={rootRef}
-      className={`dock dock--${side}${tiles ? '' : ' dock--bare'}${className ? ` ${className}` : ''}`}
+      className={`dock dock--${side}${tiles ? "" : " dock--bare"}${className ? ` ${className}` : ""}`}
       role="toolbar"
       aria-label="Dock"
-      aria-orientation={vertical ? 'vertical' : 'horizontal'}
+      aria-orientation={vertical ? "vertical" : "horizontal"}
       style={
         {
           ...tokens,
-          '--dock-base': `${base}px`,
-          '--dock-thickness': `${thickness}px`,
-          '--dock-gap': `${rawGap * fit}px`,
-          '--dock-pad': `${(thickness - base) / 2}px`,
-          '--dock-reach': `${peak - base}px`,
-          '--dock-round': clamp(roundness, 0, 1),
-          ...style
+          "--dock-base": `${base}px`,
+          "--dock-thickness": `${thickness}px`,
+          "--dock-gap": `${rawGap * fit}px`,
+          "--dock-pad": `${(thickness - base) / 2}px`,
+          "--dock-reach": `${peak - base}px`,
+          "--dock-round": clamp(roundness, 0, 1),
+          ...style,
         } as React.CSSProperties
       }
     >
@@ -1065,17 +1112,17 @@ export default function Dock({
         ) : (
           <button
             key={index}
-            ref={node => {
+            ref={(node) => {
               itemRefs.current[index] = node;
             }}
             type="button"
             data-sound="click" // Desk: the sound manager's click
-            className={`dock-item${item.className ? ` ${item.className}` : ''}`}
+            className={`dock-item${item.className ? ` ${item.className}` : ""}`}
             aria-label={item.label}
-            aria-haspopup={item.menu?.length ? 'menu' : undefined}
+            aria-haspopup={item.menu?.length ? "menu" : undefined}
             aria-expanded={item.menu?.length ? openIndex === index : undefined}
-            data-open={openIndex === index ? '' : undefined}
-            onPointerDown={event => {
+            data-open={openIndex === index ? "" : undefined}
+            onPointerDown={(event) => {
               skipRef.current = -1;
               const current = menuRef.current;
               if (current && !current.closing) {
@@ -1084,13 +1131,14 @@ export default function Dock({
                 closeMenu(false);
                 return;
               }
-              if (item.menu?.length && event.button === 0 && !event.ctrlKey) startPress(event, index);
+              if (item.menu?.length && event.button === 0 && !event.ctrlKey)
+                startPress(event, index);
             }}
-            onContextMenu={event => {
+            onContextMenu={(event) => {
               if (!item.menu?.length) return;
               event.preventDefault();
               endPress();
-              openMenu(index, 'pointer');
+              openMenu(index, "pointer");
             }}
             onClick={() => {
               if (skipRef.current === index) {
@@ -1100,11 +1148,11 @@ export default function Dock({
               actionsRef.current?.hop(index);
               item.onClick?.();
             }}
-            onFocus={event => {
-              if (event.currentTarget.matches(':focus-visible')) actionsRef.current?.focus(index);
+            onFocus={(event) => {
+              if (event.currentTarget.matches(":focus-visible")) actionsRef.current?.focus(index);
             }}
             onBlur={() => actionsRef.current?.focus(-1)}
-            onKeyDown={event => onItemKeyDown(event, index)}
+            onKeyDown={(event) => onItemKeyDown(event, index)}
           >
             <span className="dock-tile">
               <span className="dock-face">{item.icon}</span>
@@ -1112,14 +1160,16 @@ export default function Dock({
                 <span className="dock-badge">{item.badge === true ? null : item.badge}</span>
               ) : null}
             </span>
-            {showIndicators && item.active ? <span className="dock-dot" aria-hidden="true" /> : null}
+            {showIndicators && item.active ? (
+              <span className="dock-dot" aria-hidden="true" />
+            ) : null}
             {showLabels && item.label && !menu ? (
               <span className="dock-label" aria-hidden="true">
                 {item.label}
               </span>
             ) : null}
           </button>
-        )
+        ),
       )}
       {menu ? (
         <DockMenu
