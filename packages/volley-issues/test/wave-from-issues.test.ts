@@ -924,6 +924,65 @@ describe("footprints and the overlap plan (#381)", () => {
     );
   });
 
+  describe("dependency clauses in the opening paragraph, no colon (#648)", () => {
+    const lead = (tag: string) => `Part of #100 (the epic). **${tag} — stage.** `;
+    const stage = (number: number, tag: string, clause: string, ...paths: string[]) => ({
+      number,
+      title: `${tag}: stage`,
+      body: `${lead(tag)}${clause}\n\n${files(...paths)}`,
+    });
+
+    it("are read as edges, so no issue is undeclared", () => {
+      const issues: IssueInput[] = [
+        stage(101, "T0", "Depends on: nothing.", `${P}/pipeline.ts`, `${P}/retry.ts`),
+        stage(
+          102,
+          "T1",
+          "Depends on #101 (the wire field). Blocks: T2.",
+          `${P}/pipeline.ts`,
+          `${P}/timeout.ts`,
+        ),
+        stage(
+          103,
+          "T2",
+          "Depends on #101 (the wire field), #102 (renderer). Blocks: nothing.",
+          `${P}/pipeline.ts`,
+          `${P}/backoff.ts`,
+        ),
+      ];
+      const { yaml, undeclared } = waveFromIssues(issues, { ...OPTS, tree: TREE, noPlan: true });
+      expect(undeclared).toEqual([]);
+      expect(yaml).toContain("    after: [T0]\n");
+      expect(yaml).toContain("    after: [T0, T1]\n");
+    });
+
+    it("the planner never bundles across a declared stage between them", () => {
+      // T0 and T2 share the hot file; T1, between them, does not. Undeclared, T0 + T2 bundle.
+      const issues: IssueInput[] = [
+        stage(101, "T0", "Depends on: nothing.", `${P}/pipeline.ts`, `${P}/retry.ts`),
+        stage(102, "T1", "Depends on #101 (the wire field). Blocks: T2.", `${P}/timeout.ts`),
+        stage(
+          103,
+          "T2",
+          "Depends on #102 (renderer). Blocks: nothing.",
+          `${P}/pipeline.ts`,
+          `${P}/backoff.ts`,
+        ),
+      ];
+      const { yaml, undeclared } = waveFromIssues(issues, { ...OPTS, tree: TREE });
+      expect(undeclared).toEqual([]);
+      expect(yaml).toContain("    after: [T0]\n");
+      expect(yaml).toContain("    after: [T1]\n");
+      expect(yaml).not.toContain("issues:");
+      expect(yaml).not.toContain("# chained by the planner");
+      const bare = issues.map((i) => ({
+        ...i,
+        body: files(...(i.number === 102 ? [`${P}/timeout.ts`] : [`${P}/pipeline.ts`])),
+      }));
+      expect(waveFromIssues(bare, { ...OPTS, tree: TREE }).yaml).toContain("issues: [101,103]");
+    });
+  });
+
   it("noPlan: footprints only — no bundle, no plan, no added after", () => {
     const { yaml, explanation } = waveFromIssues(FIVE, { ...OPTS, tree: TREE, noPlan: true });
     const w = parseWaveFile(yaml);

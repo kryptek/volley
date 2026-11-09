@@ -104,6 +104,7 @@ on_sim "$HUB" "volley machine add $VM_USER@$PEER_ADDR --name $PEER --hub $VM_USE
   >>"$TRANSCRIPT" 2>&1 || fail "volley machine add exited non-zero"
 
 say "The peer is ready within 10 minutes"
+# shellcheck disable=SC2329 # called through poll
 ready() {
   on "$HUB" "volley sub --pattern volley/_system/machines/$PEER/readiness --max-messages 1 --timeout 5" |
     metrics verdict ready --name "$PEER"
@@ -119,6 +120,7 @@ capture "$HUB" 'volley peer list' peer-list.txt
 # <wave> complete on the hub, its task T1 placed on the peer (`<wave>-status.json`,
 # `<wave>-events.jsonl`); a REMOTE_REPO_MISSING in its journal says so at once (#596) and ends the
 # poll (exit 3).
+# shellcheck disable=SC2329 # called through poll
 done_on_peer() {
   local wave=$1
   on "$HUB" "volleyd status $wave --json" >"$OUT/$wave-status.json" 2>/dev/null &&
@@ -209,6 +211,7 @@ fi
 say "volley peer remove $PEER stops the peer's service"
 on "$HUB" "volley peer remove $PEER --now" >>"$TRANSCRIPT" 2>&1 || fail "volley peer remove exited non-zero"
 # Exit 3 is systemd's "inactive"; anything else (ssh's 255 among them) is not a stopped service.
+# shellcheck disable=SC2329 # called through poll
 stopped() {
   on "$PEER_ADDR" 'systemctl --user is-active --quiet volley-peer.service'
   [ $? -eq 3 ]

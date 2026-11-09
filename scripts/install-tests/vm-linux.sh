@@ -89,6 +89,7 @@ RESTARTED=$(on "$ADDR" 'date +%s' 2>>"$TRANSCRIPT")
 on "$ADDR" "mkdir -p $DROPIN && printf '[Service]\\nEnvironment=VOLLEY_SIM_WORKFLOWS=0\\n' >$DROPIN/sim.conf &&" \
   'systemctl --user daemon-reload && systemctl --user restart volleyd.service' >>"$TRANSCRIPT" 2>&1 ||
   fail "could not restart volleyd with VOLLEY_SIM_WORKFLOWS=0"
+# shellcheck disable=SC2329 # called through poll
 back() {
   on "$ADDR" 'volley sub --pattern volley/default/volleyd/status --max-messages 1 --timeout 10' |
     metrics verdict status --boot "${RESTARTED:-0}"
@@ -96,6 +97,7 @@ back() {
 if poll 120 back; then
   SUBMIT_ENV='VOLLEY_SIM_WORKFLOWS=0' submit_wave "$ADDR" first-wave hello-noci "Add NOCI.md" \
     >>"$TRANSCRIPT" 2>&1 || fail "could not submit the wave hello-noci"
+  # shellcheck disable=SC2329 # called through poll
   noci() {
     on "$ADDR" 'volleyd status hello-noci --json' >"$OUT/wave-noci-status.json" 2>/dev/null &&
       on "$ADDR" 'volleyd events hello-noci --cursor vm-linux' >"$OUT/wave-noci-events.jsonl" 2>/dev/null &&
@@ -121,6 +123,7 @@ if reboot_wait "$ADDR" 300; then
     on "$ADDR" "systemctl --user is-active --quiet $unit" || fail "$unit is not active after the reboot"
   done
   say "volleyd's retained status is working, and from this boot"
+  # shellcheck disable=SC2329 # called through poll
   fresh() {
     on "$ADDR" 'volley sub --pattern volley/default/volleyd/status --max-messages 1 --timeout 10' |
       metrics verdict status --boot "${BOOT:-0}"
