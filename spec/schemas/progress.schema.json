@@ -70,7 +70,11 @@
             },
             "background_wait": {
               "type": "boolean",
-              "description": "idle / awaiting_input: true when the session ended its turn without a question while a background task it started is still running; it waits on that task's events, not on a human (spec section 4.3). Never set on a permission_prompt."
+              "description": "idle / awaiting_input: true when the session ended its turn without a question while a background task it started is still running, or with the hooks' owner wake armed; it waits on events, not on a human (spec section 4.3). Never set on a permission_prompt."
+            },
+            "wait": {
+              "enum": ["background_task", "owner_wake"],
+              "description": "idle / awaiting_input, only beside background_wait: what the session waits on. background_task: a live background task it started; owner_wake: the harness hooks' owner wake, armed on the digests of the waves the session owns (spec section 4.6.16)."
             },
             "completed": {
               "type": "boolean",
