@@ -150,6 +150,10 @@ export function blockReason(waves: readonly string[]): string {
 // ---- the waiter's lock ----------------------------------------------------------------------
 
 export const LOCK_FILE = "owner-wake.lock";
+/** The waiter's longest wait (`VOLLEY_OWNER_WAKE_MAX_S` is clamped to it; template timeout 14700). */
+export const MAX_WAKE_S = 14_400;
+/** A lock armed longer ago than any waiter lives is stale whatever its pid (a recycled pid). */
+const LOCK_MAX_AGE_MS = (MAX_WAKE_S + 600) * 1000;
 export const WAKE_FILE = "owner-wake.json";
 
 export interface WakeLock {
@@ -157,7 +161,7 @@ export interface WakeLock {
   armed_at: string;
 }
 
-function pidAlive(pid: number): boolean {
+export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -167,10 +171,15 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** The lock in `stateDir` when its holder is alive, else null (none, unreadable or stale). */
+/**
+ * The lock in `stateDir` when its holder is alive and it was armed less than `MAX_WAKE_S` + 10
+ * min ago, else null (none, unreadable or stale).
+ */
 export function liveLock(stateDir: string): WakeLock | null {
   try {
     const l = JSON.parse(readFileSync(join(stateDir, LOCK_FILE), "utf-8")) as WakeLock;
+    const age = Date.now() - Date.parse(l.armed_at);
+    if (!(age < LOCK_MAX_AGE_MS)) return null;
     return Number.isSafeInteger(l.pid) && l.pid > 0 && pidAlive(l.pid) ? l : null;
   } catch {
     return null;

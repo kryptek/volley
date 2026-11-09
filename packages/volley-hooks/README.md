@@ -400,11 +400,15 @@ escalates to the owner. Nothing is for the coordinator to remember: the hooks ar
   `coordinator.agent_id` is this session's agent id (the agent bound to the owner's coordinator
   name). A second session under the same name is not the bound agent, so it arms nothing; after
   an MCP restart or a compaction the name rebinds and the next `Stop` reads it again.
-- **One waiter, no replay.** It takes `<state dir>/owner-wake.lock` (`{ pid, armed_at }`); while
-  that pid lives, every later `Stop`'s waiter exits 0 at once. A lock whose pid is dead (its session
-  ended) is taken over. It subscribes `volley/_waves/+/digest` with MQTT 5 Retain Handling 2 (no
-  retained replay), and drops a digest whose `generated_at` precedes `armed_at` (an MQTT 3.1.1
-  broker's retained copy, a QoS 1 redelivery).
+- **One waiter, no missed wake, no replay.** It takes `<state dir>/owner-wake.lock` (`{ pid,
+  armed_at }`) first, before it connects; while that pid lives, every later `Stop`'s waiter exits 0
+  at once. A lock whose pid is dead (its session ended), or armed more than
+  `VOLLEY_OWNER_WAKE_MAX_S` + 10 min ago (a recycled pid), is taken over. It subscribes
+  `volley/_waves/+/digest` before it reads the wave states, so a digest that goes out while it
+  arms is seen. A live digest wakes with no clock compare (volleyd's clock and the session's may
+  differ); a retained one wakes only when it is new to the session: its `generated_at` no more
+  than 30 s before the waiter started, and not the digest `owner-wake.json` records as the last
+  wake. An older retained digest, and the one that already woke the session, are dropped.
 - **The wake.** The first digest of an owned wave: `owner-wake.json` (`{ wave, trigger,
   generated_at, woke_at }`), the lock released, and on stderr, exit 2:
   `` [volley owner-wake] wave <wave>: <trigger> — <summary line>. Run `volleyd digest <wave>` (and `volleyd inbox` when it says waiting for you) and carry the wave on; the next Stop re-arms this wake. ``
@@ -413,7 +417,7 @@ escalates to the owner. Nothing is for the coordinator to remember: the hooks ar
   digest), exit 0, waking nothing.
 - **The fallback wake.** Claude Code enforces `timeout` on an `asyncRewake` hook, and a hook killed
   there wakes nobody. So at `armed_at + VOLLEY_OWNER_WAKE_MAX_S` (default 14400, 300 s under the
-  template's timeout) with an owned wave still in flight, the waiter wakes the session itself with
+  template's timeout; a larger value is clamped to 14400) with an owned wave still in flight, the waiter wakes the session itself with
   `[volley owner-wake] wave <wave> still in flight after 4 h; re-armed.`: a short turn whose `Stop`
   re-arms.
 - **A session that ends** wakes nothing and leaves nothing running: its waiter exits when its
@@ -492,7 +496,7 @@ is loaded. Write `match` patterns for the forms your agents actually use.
 | `VOLLEY_WORKSPACE_TITLE` | `cmux list-workspaces --json` | Coordinator: the workspace's title, published as `workspace_title` on the registry entry. |
 | `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root; also where `statusline-chain.json` lives. |
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
-| `VOLLEY_OWNER_WAKE_MAX_S` | `14400` | The [owner-wake](#owner-wake) waiter's fallback wake (keep it under the template's `timeout`, 14700). |
+| `VOLLEY_OWNER_WAKE_MAX_S` | `14400` | The [owner-wake](#owner-wake) waiter's fallback wake; a larger value is clamped to 14400 (the template's `timeout` is 14700). |
 | `VOLLEY_OWNER_WAKE_SETTLE_MS` | `10000` | How long the waiter waits for a digest once every owned wave left `running` / `releasing`. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
 | `VOLLEY_LEASE_CLI` | this repo's `volley-cli`, else `volley` | Shell fragment the lease hook uses to invoke the CLI. |

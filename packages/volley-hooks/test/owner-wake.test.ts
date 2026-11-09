@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
+import { maxWakeSeconds } from "../src/hooks/owner-wake";
 import { coordinatorStateDir } from "../src/lib/identity";
-import { summaryLineOf, wakeLine } from "../src/lib/owner-waves";
+import { liveLock, summaryLineOf, wakeLine } from "../src/lib/owner-waves";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import {
   type HookRun,
@@ -247,6 +248,66 @@ describe("owner-wake (coordinator mode)", () => {
     expect(existsSync(lockPath())).toBe(false);
   });
 
+  it("a wave_complete digest published just before the waiter started (state already out) wakes", async () => {
+    await publishState("w1", "complete", COORD);
+    await publishDigest("w1", new Date().toISOString());
+    const run = await start();
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toMatch(/^\[volley owner-wake\] wave w1: wave_complete — /);
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it("a release_go digest published just before the waiter started (wave still running) wakes", async () => {
+    await publishState("w1", "running", COORD);
+    await publishDigest("w1", new Date().toISOString(), "release_go");
+    const run = await start();
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toMatch(/^\[volley owner-wake\] wave w1: release_go — /);
+  });
+
+  it("the retained digest that last woke the session does not wake it again", async () => {
+    const at = new Date().toISOString();
+    await publishState("w1", "running", COORD);
+    await publishDigest("w1", at, "escalation");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "owner-wake.json"),
+      JSON.stringify({ wave: "w1", trigger: "escalation", generated_at: at, woke_at: at }),
+    );
+    const waiting = start();
+    await eventually(() => existsSync(lockPath()), 5000);
+    await tick(600);
+    expect(existsSync(lockPath())).toBe(true);
+    await publishState("w1", "archived", COORD);
+    const run = await waiting;
+    expect(run.exitCode).toBe(0);
+    expect(run.stderr).toBe("");
+  });
+
+  it("a live digest wakes even when volleyd's clock is behind the session's", async () => {
+    await publishState("w1", "running", COORD);
+    const waiting = start();
+    await eventually(() => existsSync(lockPath()), 5000);
+    await tick(400);
+    await publishDigest("w1", new Date(Date.now() - 3_600_000).toISOString(), "escalation");
+    const run = await waiting;
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toMatch(/^\[volley owner-wake\] wave w1: escalation — /);
+  });
+
+  it("a digest inside the settle window after the state left running still wakes", async () => {
+    await publishState("w1", "running", COORD);
+    const waiting = start({ VOLLEY_OWNER_WAKE_SETTLE_MS: "1500" });
+    await eventually(() => existsSync(lockPath()), 5000);
+    await tick(400);
+    await publishState("w1", "complete", COORD);
+    await tick(300);
+    await publishDigest("w1", new Date().toISOString());
+    const run = await waiting;
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toMatch(/^\[volley owner-wake\] wave w1: wave_complete — /);
+  });
+
   it("VOLLEY_OWNER_WAKE_MAX_S: wakes with the still-in-flight line when the wave still runs", async () => {
     await publishState("w1", "releasing", COORD);
     const run = await start({ VOLLEY_OWNER_WAKE_MAX_S: "1" });
@@ -272,5 +333,30 @@ describe("wakeLine / summaryLineOf", () => {
 
   it("tolerates a digest missing its counters", () => {
     expect(summaryLineOf({ wave: "w9", trigger: "escalation" })).toBe("w9 needs you: 0 shipped");
+  });
+});
+
+describe("maxWakeSeconds", () => {
+  it("defaults to 14400 and clamps above it (the template's timeout is 14700)", () => {
+    expect(maxWakeSeconds({})).toBe(14_400);
+    expect(maxWakeSeconds({ VOLLEY_OWNER_WAKE_MAX_S: "60" })).toBe(60);
+    expect(maxWakeSeconds({ VOLLEY_OWNER_WAKE_MAX_S: "20000" })).toBe(14_400);
+    expect(maxWakeSeconds({ VOLLEY_OWNER_WAKE_MAX_S: "9999999999" })).toBe(14_400);
+    expect(maxWakeSeconds({ VOLLEY_OWNER_WAKE_MAX_S: "-1" })).toBe(14_400);
+  });
+});
+
+describe("liveLock", () => {
+  it("treats a lock armed longer ago than any waiter lives as stale, even when its pid is alive", () => {
+    const dir = tempDir("volley-hooks-lock-");
+    const lock = (armedAt: string) =>
+      writeFileSync(
+        join(dir, "owner-wake.lock"),
+        JSON.stringify({ pid: process.pid, armed_at: armedAt }),
+      );
+    lock(new Date().toISOString());
+    expect(liveLock(dir)).not.toBeNull();
+    lock(new Date(Date.now() - 5 * 3600 * 1000).toISOString());
+    expect(liveLock(dir)).toBeNull();
   });
 });
