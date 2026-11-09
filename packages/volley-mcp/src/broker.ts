@@ -123,6 +123,12 @@ export const DEFAULT_SESSION_EXPIRY_S = 7 * 24 * 60 * 60;
 export interface BrokerMessage {
   topic: string;
   payload: string;
+  /**
+   * The PUBLISH's retain flag: true for a retained message the broker sent because of a
+   * SUBSCRIBE, false for a live one forwarded on a subscription (MQTT 3.1.1 and 5 alike, retain
+   * as published being off).
+   */
+  retain?: boolean;
 }
 
 export interface DrainOptions {
@@ -137,6 +143,8 @@ export interface DrainOptions {
 /** A local subscriber: receives every inbound message whose topic matches `filter`. */
 interface Route {
   filter: string;
+  /** Deliver `BrokerMessage.retain` (subscribeStream); collectors and drains get topic + payload. */
+  withRetain?: boolean;
   deliver: (msg: BrokerMessage) => void;
 }
 
@@ -239,7 +247,7 @@ export class VolleyBroker {
    * only goes out when the last local holder releases one.
    */
   private routedClient: MqttClient | null = null;
-  private dispatcher: ((t: string, p: Buffer) => void) | null = null;
+  private dispatcher: ((t: string, p: Buffer, packet: { retain?: boolean }) => void) | null = null;
   private routes = new Set<Route>();
   private filterHolds = new Map<string, number>();
   /** The current connection resumed (or created) a persistent session. */
@@ -523,14 +531,15 @@ export class VolleyBroker {
    */
   private attachDispatcher(client: MqttClient, persistent: boolean): void {
     this.resetConnectionState();
-    const dispatcher = (t: string, p: Buffer) => {
+    const dispatcher = (t: string, p: Buffer, packet: { retain?: boolean }) => {
       if (this.routedClient !== client) return;
-      const msg = { topic: t, payload: p.toString() };
+      const msg: BrokerMessage = { topic: t, payload: p.toString() };
+      const routed: BrokerMessage = { ...msg, retain: packet.retain === true };
       let claimed = false;
       for (const route of [...this.routes]) {
         if (!topicMatches(route.filter, t)) continue;
         claimed = true;
-        route.deliver(msg);
+        route.deliver(route.withRetain === true ? routed : msg);
       }
       const drained = [...this.drainFilters.keys()].some((f) => topicMatches(f, t));
       if (drained || (this.persistentSession && !claimed)) {
@@ -623,8 +632,9 @@ export class VolleyBroker {
     filter: string,
     deliver: (msg: BrokerMessage) => void,
     retainHandling: RetainHandling = 0,
+    withRetain = false,
   ): { ready: Promise<void>; close: () => Promise<void> } {
-    const route: Route = { filter, deliver };
+    const route: Route = { filter, deliver, withRetain };
     this.routes.add(route);
     let closed = false;
     const ready = this.holdFilter(client, filter, retainHandling);
@@ -894,15 +904,15 @@ export class VolleyBroker {
    * Unlike `subscribeCollect`, this does NOT accumulate messages in memory —
    * it streams them through the callback. The right primitive for indefinite-
    * runtime consumers like `volley notify`. `opts.retainHandling` 2 (MQTT 5) streams live
-   * messages only.
+   * messages only. Each message carries `retain` (a retained replay, or a live one).
    */
   async subscribeStream(
     topicPattern: string,
-    onMessage: (msg: { topic: string; payload: string }) => void,
+    onMessage: (msg: BrokerMessage) => void,
     opts: SubscribeOptions = {},
   ): Promise<() => Promise<void>> {
     const client = this.requireClient();
-    const sub = this.attachRoute(client, topicPattern, onMessage, opts.retainHandling);
+    const sub = this.attachRoute(client, topicPattern, onMessage, opts.retainHandling, true);
     try {
       await sub.ready;
     } catch (e) {

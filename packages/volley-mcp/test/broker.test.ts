@@ -284,6 +284,22 @@ describe("VolleyBroker subscribeCollect", () => {
     const opt = await b.subscribeCollect("volley/test/rh/status", 1, 600, { retainHandling: 0 });
     expect(opt.map((m) => m.payload)).toEqual(["kept"]);
   });
+
+  it("subscribeStream marks a retained replay retain: true and a live message retain: false", async () => {
+    await b.publish("volley/test/rf/status", "old", { qos: 1, retain: true });
+    const seen: { payload: string; retain: boolean | undefined }[] = [];
+    const stop = await b.subscribeStream("volley/test/rf/status", (m) =>
+      seen.push({ payload: m.payload, retain: m.retain }),
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    await b.publish("volley/test/rf/status", "new", { qos: 1, retain: true });
+    await new Promise((r) => setTimeout(r, 200));
+    await stop();
+    expect(seen).toEqual([
+      { payload: "old", retain: true },
+      { payload: "new", retain: false },
+    ]);
+  });
 });
 
 describe("subscribeOptions (MQTT 5 retain handling)", () => {
