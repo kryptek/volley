@@ -12,6 +12,25 @@ describe("settings template", () => {
     expect(result.commands.length).toBeGreaterThanOrEqual(7);
     expect(result.commands).toContain('bun run "$VOLLEY_HOOKS_DIR/src/statusline/publish.ts"');
     expect(result.commands).toContain('bun run "$VOLLEY_HOOKS_DIR/src/hooks/pre-tool-use.ts"');
+    expect(result.commands).toContain('bun run "$VOLLEY_HOOKS_DIR/src/hooks/owner-wake.ts"');
+    expect(result.invalid).toEqual([]);
+  });
+
+  it("reports an asyncRewake entry that is not async or has no timeout", () => {
+    const dir = tempDir("volley-hooks-tpl-");
+    const path = join(dir, "settings.json");
+    const command = 'bun "$VOLLEY_HOOKS_DIR/src/hooks/owner-wake.ts"';
+    writeFileSync(
+      path,
+      JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: "command", command, asyncRewake: true }] }] },
+      }),
+    );
+    const result = checkTemplate(path, PACKAGE_ROOT);
+    expect(result.missing).toEqual([]);
+    expect(result.invalid).toEqual([
+      `${command}: asyncRewake needs async: true and a numeric timeout`,
+    ]);
   });
 
   it("reports a statusLine command whose script does not exist", () => {

@@ -5,8 +5,9 @@
  * `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only.
  * Coordinators add `question` (the last Stop's whole question, else the whole message),
  * `session_url` and `workspace`. An `idle_prompt` after a Stop
- * that left a background task running carries `background_wait: true`: the session waits on
- * that task's events, not on a person.
+ * that left a background task running, or armed the owner wake, carries `background_wait: true`
+ * and the Stop's `wait` (`background_task` / `owner_wake`): the session waits on events, not on
+ * a person.
  */
 import { type HookContext, boundQuestion, clip, runHook } from "../lib/hook-io";
 import {
@@ -41,7 +42,9 @@ export async function handle(ctx: HookContext): Promise<string | null> {
       await session.progress("awaiting_input", {
         ...base,
         ...(AWAITING.has(type) ? {} : { class: "credit" }),
-        ...(wait ? { background_wait: true } : {}),
+        ...(wait
+          ? { background_wait: true, ...(prev?.wait !== undefined ? { wait: prev.wait } : {}) }
+          : {}),
         ...coordinator,
       });
       state = "awaiting_input";
@@ -56,6 +59,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
         hook_event: ctx.event,
         ...(prev?.question !== undefined ? { question: prev.question } : {}),
         ...(prev?.background_wait === true ? { background_wait: true } : {}),
+        ...(prev?.background_wait === true && prev.wait !== undefined ? { wait: prev.wait } : {}),
       });
     }
     await session.heartbeat();

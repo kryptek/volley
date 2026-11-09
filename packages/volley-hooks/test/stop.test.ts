@@ -1,9 +1,11 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { VolleyBroker } from "volley-mcp/broker";
 import type { Envelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
+import { coordinatorStateDir } from "../src/lib/identity";
+import { blockReason } from "../src/lib/owner-waves";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import {
   collect,
@@ -245,5 +247,145 @@ describe("coordinator mode (no agent.json; registry entry found by cwd)", () => 
     await tick(150);
     expect(progress.envelopes).toEqual([]);
     await progress.stop();
+  });
+});
+
+describe("coordinator owning a wave in flight (owner wake)", () => {
+  const COORD = "coordinator-ab12";
+  const SESSION = "3f1c2a90-5b7e-4d21-9a0c-6e8f1b2d4c77";
+  let dir: string;
+  let env: Record<string, string>;
+  let stateDir: string;
+
+  beforeEach(async () => {
+    dir = makeWorkdir();
+    env = {
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
+    };
+    stateDir = coordinatorStateDir(dir, env, `session:${SESSION}`);
+    await publishRegistry(client, COORD, "default", {
+      capabilities: [],
+      cwd: dir,
+      started_at: "2026-11-08T10:00:00.000Z",
+    });
+    await publishEnvelope(
+      client,
+      "volley/_waves/w1/state",
+      {
+        agentId: "volleyd",
+        parentId: null,
+        channel: "_waves/state",
+        type: "wave_state",
+        payload: {
+          wave: "w1",
+          owner: COORD,
+          status: "running",
+          coordinator: { agent_id: COORD, presence: "online", state: "working" },
+        },
+      },
+      { qos: 1, retain: true },
+    );
+  });
+
+  const stop = (overrides: Record<string, unknown> = {}) =>
+    runHook("stop", fixture("stop-owner-wake.json", dir, overrides), { cwd: dir, env });
+
+  function holdLock(): void {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "owner-wake.lock"),
+      JSON.stringify({ pid: process.pid, armed_at: new Date().toISOString() }),
+    );
+  }
+
+  it("with the waiter's lock live: idle carries background_wait and wait owner_wake, nothing blocks", async () => {
+    holdLock();
+    const progress = await collect(client, buildTopic("default", COORD, "progress"));
+    const run = await stop();
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toBe("");
+    await tick(150);
+    expect(types(progress.envelopes)).toEqual(["idle", "heartbeat"]);
+    expect(progress.envelopes[0]?.payload).toMatchObject({
+      background_wait: true,
+      wait: "owner_wake",
+    });
+    const activity = JSON.parse(readFileSync(join(stateDir, "activity.json"), "utf-8"));
+    expect(activity).toMatchObject({ state: "idle", background_wait: true, wait: "owner_wake" });
+    await progress.stop();
+  });
+
+  it("with no lock after the wait, no background task, no question: blocks once with the fallback command", async () => {
+    const progress = await collect(client, buildTopic("default", COORD, "progress"));
+    const run = await stop();
+    expect(run.exitCode).toBe(0);
+    expect(run.ms).toBeGreaterThanOrEqual(2000);
+    const out = JSON.parse(run.stdout) as { decision: string; reason: string };
+    expect(out).toEqual({ decision: "block", reason: blockReason(["w1"]) });
+    expect(out.reason).toMatch(/^wave w1 is in flight and nothing will wake this session/);
+    expect(out.reason).toContain(
+      'volley sub --pattern "volley/_waves/w1/digest" --max-messages 1 --timeout 14400',
+    );
+    await tick(150);
+    expect(types(progress.envelopes)).toEqual(["idle", "heartbeat"]);
+    expect(progress.envelopes[0]?.payload).not.toHaveProperty("background_wait");
+    expect(progress.envelopes[0]?.payload).not.toHaveProperty("wait");
+    await progress.stop();
+  });
+
+  it("never blocks the second time (stop_hook_active)", async () => {
+    const run = await stop({ stop_hook_active: true });
+    expect(run.stdout).toBe("");
+  });
+
+  it("never blocks with a live background task: the wait is that task's", async () => {
+    const progress = await collect(client, buildTopic("default", COORD, "progress"));
+    const run = await runHook(
+      "stop",
+      fixture("stop-background-tasks.json", dir, { session_id: SESSION }),
+      {
+        cwd: dir,
+        env,
+      },
+    );
+    expect(run.stdout).toBe("");
+    await tick(150);
+    expect(progress.envelopes[0]?.payload).toMatchObject({
+      background_wait: true,
+      wait: "background_task",
+    });
+    await progress.stop();
+  });
+
+  it("never blocks on a turn that ends in a question", async () => {
+    const progress = await collect(client, buildTopic("default", COORD, "progress"));
+    const run = await stop({
+      last_assistant_message: "Wave w1 is submitted.\n\nShould I also file #12?",
+    });
+    expect(run.stdout).toBe("");
+    await tick(150);
+    expect(types(progress.envelopes)).toEqual(["idle", "awaiting_input", "heartbeat"]);
+    expect(progress.envelopes[0]?.payload).not.toHaveProperty("background_wait");
+    await progress.stop();
+  });
+
+  it("owning nothing in flight: no block", async () => {
+    await publishEnvelope(
+      client,
+      "volley/_waves/w1/state",
+      {
+        agentId: "volleyd",
+        parentId: null,
+        channel: "_waves/state",
+        type: "wave_state",
+        payload: { wave: "w1", owner: COORD, status: "complete", coordinator: { agent_id: COORD } },
+      },
+      { qos: 1, retain: true },
+    );
+    const run = await stop();
+    expect(run.stdout).toBe("");
+    expect(run.ms).toBeLessThan(2000);
   });
 });
