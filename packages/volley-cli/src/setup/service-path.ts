@@ -17,6 +17,27 @@ export const CMUX_APP_BINS = (home: string) => [
   join(home, "Applications", "cmux.app", "Contents", "Resources", "bin"),
 ];
 
+/**
+ * Where Rex keeps its command-line tool `rex`: the Rex Server app bundle under the user's
+ * Application Support directory. `Versions/Current` is a link Rex's own updates move, so the
+ * services' PATH keeps working across them. A space in a PATH entry is fine: a plist or unit file
+ * never shell-expands it.
+ */
+export const REX_APP_BINS = (home: string) => [
+  join(
+    home,
+    "Library",
+    "Application Support",
+    "com.superlogical.rex",
+    "RexServer",
+    "Versions",
+    "Current",
+    "Rex Server.app",
+    "Contents",
+    "MacOS",
+  ),
+];
+
 /** Package managers' and installers' directories (Homebrew, Linuxbrew), before /usr/local/bin. */
 const PACKAGE_DIRS = [
   "/opt/homebrew/bin",
@@ -72,7 +93,8 @@ export interface ServicePathInputs {
 
 /**
  * `~/.volley/bin`, bun's directory, Homebrew's (when there is one), `/usr/local/bin`, the cmux
- * app's bin, the per-user install dirs (each when it exists), then `/usr/bin:/bin:/usr/sbin:/sbin`.
+ * app's bin, the Rex Server bundle's, the per-user install dirs (each when it exists), then
+ * `/usr/bin:/bin:/usr/sbin:/sbin`.
  */
 export function stableServicePath({
   home,
@@ -88,6 +110,7 @@ export function stableServicePath({
       ...PACKAGE_DIRS.filter((d) => exists(d)),
       "/usr/local/bin",
       ...CMUX_APP_BINS(home).filter((d) => exists(d)),
+      ...REX_APP_BINS(home).filter((d) => exists(d)),
       ...USER_DIRS(home).filter((d) => exists(d)),
       ...SYSTEM,
     ]),

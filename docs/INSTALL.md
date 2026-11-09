@@ -81,7 +81,9 @@ README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has eve
    registration from before v0.13.0 that still carries a broker login is re-registered without
    it, shown as a change like any other, the password never printed); the `/volley`,
    `/volley-issues` and `/wait` skills; the Volley hooks.
-7. **Terminal**: where volleyd starts agents here: cmux on a Mac that has it, else tmux.
+7. **Terminal**: where volleyd starts agents here: Rex when it is installed, else cmux on a Mac
+   that has it, else tmux. With more than one installed, it says how to switch
+   (`volleyd config set fleet.local_terminal <terminal>`, from volleyd's next start).
 8. **Services**: volleyd and the Desk (`http://localhost:5199`) as services.
 9. **Phone**: a one-time sign-in QR for the Desk on your phone, when you let your network reach
    the broker's WebSocket listener.

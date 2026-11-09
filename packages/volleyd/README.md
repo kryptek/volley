@@ -1602,7 +1602,7 @@ closed, nothing was typed`, closes it the same way, and reads or types nothing; 
 that row as closed.
 
 An inbox answer to either is carried out on the session's screen (`src/autopilot/carry.ts`),
-through its host adapter (cmux on this machine, tmux on a paired one), **before** it is accepted:
+through its host adapter (cmux, tmux or Rex on this machine, tmux on a paired one), **before** it is accepted:
 
 - *picker*: read the screen; refuse `picker not on screen` unless it shows that same picker (the
   question's first line and every option label, in order); then press the keys that select the
@@ -2353,7 +2353,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
-| `fleet.local_terminal` | the next volleyd start ([local hosts](#local-hosts-cmux-or-tmux)) | agents already running keep their terminal |
+| `fleet.local_terminal` | the next volleyd start ([local hosts](#local-hosts-cmux-tmux-or-rex)) | agents already running keep their terminal |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
@@ -2379,7 +2379,7 @@ lists every key with its default and example pools, commented out.
 
 `volleyd daemon` spawns an implementer for every admitted task (`--no-spawn` turns that off;
 `volleyd spawn` starts one by hand). One spawn (`src/spawn.ts`) runs these steps through a
-`Host` (`src/hosts/host.ts`; `local-cmux` or `local-tmux` is the local one ([below](#local-hosts-cmux-or-tmux)),
+`Host` (`src/hosts/host.ts`; `local-cmux`, `local-tmux` or `local-rex` is the local one ([below](#local-hosts-cmux-tmux-or-rex)),
 `ssh-tmux` a [remote one](#remote-hosts-ssh--tmux)), every command through the fence:
 
 | # | Step | Module | Refusal (journaled as `alarm_raised { code }`) |
@@ -2398,35 +2398,48 @@ The gate runs before credentials are minted, so a rejected brief costs nothing t
 refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
 spawn` retries at once. While the kill switch is engaged nothing is spawned.
 
-### Local hosts: cmux or tmux
+### Local hosts: cmux, tmux or Rex
 
-`fleet.local_terminal` (`cmux` | `tmux`, SPEC §4.6.4) picks the terminal agents run in on the
-supervisor's own machine. Unset (`null`, the default) it is `cmux` on macOS when cmux is installed
-and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. A `cmux` set anywhere but
-macOS is `tmux` too. `volley setup`'s Terminal step records its choice there (and in
-`setup.json`). volleyd reads it when it starts; a change applies to agents spawned after the
-next start, since a running agent's workspace belongs to the terminal it started in: a volleyd
-restarted under another value keeps reaching each running agent (its screen, keys, retire)
-through the terminal its `agent_spawned` recorded. An explicit `cmux` copied to a Mac without
-cmux stays until the Terminal step runs there (`volley setup --step terminal` replaces it).
+`fleet.local_terminal` (`cmux` | `tmux` | `rex`, SPEC §4.6.4) picks the terminal agents run in on
+the supervisor's own machine. Unset (`null`, the default) it is the first one installed of `rex`
+(Rex's command-line tool in the Rex Server app bundle, or `rex` on volleyd's `PATH`), `cmux` (on
+macOS) and `tmux`: every Linux supervisor without Rex, and a Mac with neither, is `tmux`. A `cmux`
+set anywhere but macOS is `tmux` too; an explicit `rex` is kept as set (a missing `rex` fails the
+launch, saying where it lives and how to add it). `volley setup`'s Terminal step records its
+choice there (and in `setup.json`). volleyd reads it when it starts; a change applies to agents
+spawned after the next start, since a running agent's workspace belongs to the terminal it
+started in: a volleyd restarted under another value keeps reaching each running agent (its
+screen, keys, retire) through the terminal its `agent_spawned` recorded. An explicit `cmux`
+copied to a Mac without cmux stays until the Terminal step runs there (`volley setup --step
+terminal` replaces it).
 
-| | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) |
-|---|---|---|
-| Launch | `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `tmux new-session -d -x <cols> -y <rows> -s volley-<wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (a taken name gets `-2`, `-3`, …) |
-| Find | `cmux list-workspaces`, by title | `tmux has-session -t =<session>` |
-| Screen | `cmux read-screen --workspace <ref> --lines <n>` (`source: cmux`) | `tmux capture-pane -p -t =<session>: -S-<n>` (`source: tmux`) |
-| Keys, text | `cmux send-key` / `cmux send` | `tmux send-keys -t =<session>: <key>` / `send-keys … -l -- <text>` |
-| Resize | not possible (`resized: false`) | `tmux resize-window -t =<session>: -x <cols> -y <rows>` |
-| Close | `cmux close-workspace` (consent) | `tmux kill-session -t =<session>` (consent; a session already gone is closed) |
+| | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) | `rex` (`src/hosts/local-rex.ts`) |
+|---|---|---|---|
+| Launch | `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `tmux new-session -d -x <cols> -y <rows> -s volley-<wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (a taken name gets `-2`, `-3`, …) | `rex new volley-<wave>-<task>-<role> -c <worktree> --json -- bash .volley/launch.sh` (a taken label gets `-2`, `-3`, …), then a resize to `<cols>`×`<rows>`; the workspace is the session's id, `session:<uuid>` |
+| Find | `cmux list-workspaces`, by title | `tmux has-session -t =<session>` | `rex ls --json`, the one session with the label (two with it: undecidable) |
+| Screen | `cmux read-screen --workspace <ref> --lines <n>` (`source: cmux`) | `tmux capture-pane -p -t =<session>: -S-<n>` (`source: tmux`) | `rex block call -s <session> -b <block> format` (the first 64 KiB of the text), then `blob_read` of the last 64 KiB when there is more (`source: rex`) |
+| Keys, text | `cmux send-key` / `cmux send` | `tmux send-keys -t =<session>: <key>` / `send-keys … -l -- <text>` | `rex send-key -s <session> -b <block> enter\|esc\|up\|down\|space` / `rex send … -- <text>` |
+| Resize | not possible (`resized: false`) | `tmux resize-window -t =<session>: -x <cols> -y <rows>` | `rex block call … resize`, then `size` read back: `resized: false` while a client (the Rex app showing it) owns the block and keeps its own size |
+| Close | `cmux close-workspace` (consent) | `tmux kill-session -t =<session>` (consent; a session already gone is closed) | `rex kill <session>` (consent; a session already gone is closed) |
 
 The tmux sessions live on your default tmux server, so `tmux ls` lists them and `tmux attach -t
 volley-w1-T1-implementer` shows an agent. The fence admits local tmux only for those session
 names (`volley-<wave>-<task>-<role>[-<n>]`, never a `volley-signin-*` sign-in session's, so a
 wave named `signin` cannot run in local tmux) and only in the shapes above; the launch needs the
 worktree's sealed `launch.sh` like cmux's. A retire kills the session, then stops whatever still
-runs under the worktree, as with cmux. `agent_spawned` carries `terminal: cmux | tmux`. On Linux
-the volleyd unit `volley setup` writes has `KillMode=process`, so restarting volleyd (`volley
-deploy`) leaves a tmux server it started, and the agents in it, running.
+runs under the worktree, as with cmux. `agent_spawned` carries `terminal: cmux | tmux | rex`. On
+Linux the volleyd unit `volley setup` writes has `KillMode=process`, so restarting volleyd
+(`volley deploy`) leaves a tmux server it started, and the agents in it, running.
+
+Rex sessions live on the Rex server the Rex app runs, so `rex ls` lists them and the app shows
+each agent; its one block runs the launch script. Rex labels are not unique, so volleyd reaches a
+session only by its id and its block's (resolved once through `rex session inspect` after a
+restart), never by label. Every call passes `--autostart=false --timeout 10s`: with no Rex
+server running, a launch fails `LAUNCH_FAILED` (refused, nothing created) saying to open Rex (or
+run `rex server start`). volleyd runs `rex` by name: `volley setup` puts the Rex Server bundle's
+`Contents/MacOS` directory on the services' `PATH`. The coordinator role stays on tmux. A retire
+kills the session, then stops what still runs under the worktree, as with tmux; `volleyd cleanup
+--yes` closes Rex sessions of worktrees whose agents ran in Rex.
 
 ### Bundles
 
@@ -4996,6 +5009,19 @@ ALLOW (program by bare name only — never a path):
       has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
       send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
       send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
+  rex (local agents, hosts/local-rex.ts, under `fleet.local_terminal: rex`) — exact shapes
+    only, each starting with exactly the global flags `--autostart=false --timeout 10s` (no
+    other global flag: never -S or -C); sessions targeted by id only (SESSION_ID
+    `session:<uuid>`, BLOCK_ID `block:<uuid>`; a label is never a target, Rex labels are not
+    unique):
+    new <AGENT_SESSION label> -c <dir> --json -- bash .volley/launch.sh (with the LaunchToken
+      sealed for <dir>) · ls --json · session inspect <SESSION_ID> --json ·
+      block call -s <SESSION_ID> -b <BLOCK_ID> format <REX_SCREEN_FORMAT> | blob_read
+      {"id":<n>,"offset":<n>,"max_bytes":<n ≤ 65536>} | size | resize
+      {"columns":<n>,"rows":<n>} (n in 20..500) ·
+      send-key -s <SESSION_ID> -b <BLOCK_ID> enter|esc (up|down|space: PICKER) ·
+      send -s <SESSION_ID> -b <BLOCK_ID> -- <TYPED_TEXT> · kill <SESSION_ID> = CONSENT
+    (never do, run, split, api, server, events, wait, capture)
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -5047,7 +5073,7 @@ MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
   volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
   volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
   supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
-  --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
+  --from <name> [--local-terminal cmux|tmux|rex] [--local-agents never] [--broker-url
   mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
   ssh-back probe); base64 -d to that bundle path (the copy).
   A broker move's, here: brew services stop|start mosquitto · sudo -n snap|systemctl
@@ -5121,8 +5147,8 @@ ASKPASS (the env rule): a command whose env sets SSH_ASKPASS, SSH_ASKPASS_REQUIR
   SUDO_ASKPASS is refused, except MACHINE ADD's password form with exactly the token's helper
   and `SSH_ASKPASS_REQUIRE=force` (no SUDO_ASKPASS: sudo runs on the box, from its own helper).
 
-TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
-  with its token, checked by identity like consent tokens:
+TYPED_TEXT (cmux send, tmux send-keys -l, rex send: what is typed into an agent's terminal),
+  each only with its token, checked by identity like consent tokens:
     LAUNCH_COMMAND   with a LaunchToken (`sealLaunchScript`: volleyd rendered that launch.sh)
     `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
                      minted when an approved model_switch decision is acted on); <id> is a
@@ -5134,10 +5160,11 @@ TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal
     WAKE_TEXT        with a WakeToken (`mintWakeToken`, minted when an idle agent did not ack
                      a mailbox message in time), typed once per token; nothing else with it
 
-PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
-  `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
-  one item version after the screen showed its picker) naming that key; `Enter` and `Escape`
-  need no token. No other key name is ever sent.
+PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space`,
+  `tmux send-keys -t <t> Up|Down|Space` and `rex send-key … up|down|space` only with a
+  PickerToken (`mintPickerToken`, minted for one item version after the screen showed its
+  picker) naming that key; `Enter` and `Escape` (Rex: `enter`, `esc`) need no token. No other
+  key name is ever sent.
 
 SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):

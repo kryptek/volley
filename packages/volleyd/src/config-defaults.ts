@@ -77,7 +77,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   // local_agents null: fallback once any hosts.<name> is configured, else always.
-  // local_terminal null: cmux on macOS when cmux is installed, else tmux (read at volleyd start).
+  // local_terminal null: rex when Rex is installed, else cmux on macOS when cmux is installed, else
+  // tmux (read at volleyd start).
   fleet: {
     local_name: null,
     local_agents: null,

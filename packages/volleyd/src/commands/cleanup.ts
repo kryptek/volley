@@ -16,6 +16,7 @@ import {
 } from "../fence";
 import type { Host } from "../hosts/host";
 import { LocalCmuxHost } from "../hosts/local-cmux";
+import { LocalRexHost } from "../hosts/local-rex";
 import { LocalTmuxHost } from "../hosts/local-tmux";
 import { type RemoteHost, SshTmuxHost } from "../hosts/ssh-tmux";
 import { type CommandArgs, EXIT, type ExitCode, type IO } from "../io";
@@ -23,7 +24,7 @@ import { Journal, readJournalFile } from "../journal";
 import { type StopOptions, listProcessesUnder, stopProcesses } from "../procs";
 import { replay } from "../reducer";
 import { type OwnedClone, isSlug, ownedClonesOf, sameSlug } from "../repos";
-import { SYSTEM_WAVE } from "../types";
+import { type LocalTerminal, SYSTEM_WAVE } from "../types";
 import type {
   CleanupCounts,
   JournalEvent,
@@ -38,7 +39,7 @@ const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force] [--all] [--by <nam
                        [--broker-url <url>] [--namespace <ns>]
 
 Remove everything Volley made for a wave, on every machine (SPEC "Wave cleanup"): its agents'
-workspaces or tmux sessions, git worktrees and locks; every process under those worktrees (by
+workspaces, tmux or Rex sessions, git worktrees and locks; every process under those worktrees (by
 --mcp-config= or by working directory: a dev server an agent started dies with it; SIGTERM, a
 grace, then SIGKILL; on a paired machine through \`volley peer cleanup\` there); the agent branches
 whose PR the journal shows merged at the branch's current tip; leftover agent logins; and a
@@ -68,8 +69,8 @@ interface Target {
   task?: string;
   /** Set for a remote host's worktree (agent_spawned `remote`): where it lives. */
   remote?: { host: string; target: string; repo: string };
-  /** A local worktree's agents ran in tmux (agent_spawned `terminal`), not cmux. */
-  tmux?: boolean;
+  /** The terminal a local worktree's agents ran in (agent_spawned `terminal`; absent: cmux). */
+  terminal?: LocalTerminal;
   /** The spawn locks its agents held (`$VOLLEYD_HOME/locks/…`, supervisor only). */
   locks: string[];
 }
@@ -233,7 +234,7 @@ export function ledgerOf(input: LedgerInput, o: LedgerOptions = {}): Ledger {
     if (typeof remote?.target === "string" && typeof remote.repo === "string") {
       t.remote = { host, target: remote.target, repo: remote.repo };
     }
-    if (e.data.terminal === "tmux") t.tmux = true;
+    if (e.data.terminal === "tmux" || e.data.terminal === "rex") t.terminal = e.data.terminal;
     const ws = e.data.workspace;
     if (typeof ws === "string" && !closed.has(id) && !t.workspaces.includes(ws))
       t.workspaces.push(ws);
@@ -595,6 +596,7 @@ export async function runCleanup(
   for (const h of ledger.held) io.stdout(`skip ${h.task}: ${h.stage}\n`);
   const cmux = new LocalCmuxHost(deps.exec);
   const tmux = new LocalTmuxHost(deps.exec);
+  const rex = new LocalRexHost(deps.exec);
   const proven = new Set<string>();
 
   // --- The supervisor's own worktrees, sessions, processes, locks ---
@@ -619,7 +621,7 @@ export async function runCleanup(
       );
   } else {
     for (const t of retiredLocal) {
-      const host: Host = t.tmux === true ? tmux : cmux;
+      const host: Host = t.terminal === "tmux" ? tmux : t.terminal === "rex" ? rex : cmux;
       for (const ws of t.workspaces) {
         try {
           await host.close(ws, consent as ConsentToken);

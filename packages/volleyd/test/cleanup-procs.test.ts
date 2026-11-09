@@ -243,13 +243,14 @@ describe("cleanup skips unfinished tasks", () => {
 });
 
 describe("cleanup closes each local workspace in the terminal its agent ran in", () => {
-  it("a tmux agent's session is killed with tmux, a cmux agent's workspace closed with cmux", async () => {
+  it("a tmux agent's session is killed with tmux, a cmux agent's closed with cmux, a Rex agent's with rex", async () => {
     const home = tempDir("volleyd-cleanup-terminal-");
     const j = Journal.open(join(home, "waves", "w1"));
     j.append({ type: "wave_submitted", data: { wave: minimalWave(join(home, "repo")) } });
     const spawned = [
       ["w1-t1-implementer-1", "T1-implementer", "volley-w1-T1-implementer", "tmux"],
       ["w1-t1-reviewer-1", "T1-reviewer", "workspace:7", undefined],
+      ["w1-t1-fixup-1", "T1-fixup", "session:11111111-2222-3333-4444-555555555555", "rex"],
     ] as const;
     for (const [agent_id, dir, workspace, terminal] of spawned) {
       j.append({
@@ -270,9 +271,17 @@ describe("cleanup closes each local workspace in the terminal its agent ran in",
       return { code: 0, stdout: "", stderr: "", timedOut: false };
     };
     await cleanupWave(home, "w1", { yes: true, force: false, exec: run }, makeBufferIO());
-    expect(argvs.filter((a) => a[0] === "tmux" || a[0] === "cmux")).toEqual([
+    expect(argvs.filter((a) => a[0] === "tmux" || a[0] === "cmux" || a[0] === "rex")).toEqual([
       ["tmux", "kill-session", "-t", "=volley-w1-T1-implementer"],
       ["cmux", "close-workspace", "--workspace", "workspace:7"],
+      [
+        "rex",
+        "--autostart=false",
+        "--timeout",
+        "10s",
+        "kill",
+        "session:11111111-2222-3333-4444-555555555555",
+      ],
     ]);
   });
 });

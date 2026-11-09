@@ -853,27 +853,40 @@ describe("ConfigStore.migrateLegacyRepo: hosts.<name>.repo → repos (D10)", () 
 });
 
 describe("resolveLocalTerminal (fleet.local_terminal)", () => {
-  it("keeps a set terminal; null is cmux on a Mac with cmux, else tmux", () => {
+  it("keeps a set terminal; null is rex, then cmux on a Mac, then tmux (what is installed)", () => {
     const never = () => {
       throw new Error("not asked");
     };
+    const only =
+      (...found: string[]) =>
+      (t: string) =>
+        found.includes(t);
     expect(resolveLocalTerminal("tmux", "darwin", never)).toBe("tmux");
     // cmux is a Mac app: a hand-edited `cmux` on Linux still runs agents in tmux.
     expect(resolveLocalTerminal("cmux", "linux", never)).toBe("tmux");
     expect(resolveLocalTerminal("cmux", "darwin", never)).toBe("cmux");
-    expect(resolveLocalTerminal(null, "darwin", () => true)).toBe("cmux");
-    expect(resolveLocalTerminal(null, "darwin", () => false)).toBe("tmux");
-    expect(resolveLocalTerminal(null, "linux", never)).toBe("tmux");
-    expect(resolveLocalTerminal(undefined, "linux", never)).toBe("tmux");
+    // An explicit rex is kept, found or not: a missing rex fails the launch with its advice.
+    expect(resolveLocalTerminal("rex", "darwin", never)).toBe("rex");
+    expect(resolveLocalTerminal("rex", "linux", never)).toBe("rex");
+    // null: rex → cmux → tmux.
+    expect(resolveLocalTerminal(null, "darwin", only("rex", "cmux", "tmux"))).toBe("rex");
+    expect(resolveLocalTerminal(null, "darwin", only("rex"))).toBe("rex");
+    expect(resolveLocalTerminal(null, "darwin", only("cmux", "tmux"))).toBe("cmux");
+    expect(resolveLocalTerminal(null, "darwin", only("tmux"))).toBe("tmux");
+    expect(resolveLocalTerminal(null, "darwin", only())).toBe("tmux");
+    expect(resolveLocalTerminal(null, "linux", only("cmux"))).toBe("tmux");
+    expect(resolveLocalTerminal(undefined, "linux", only())).toBe("tmux");
   });
 
-  it("is a config key: config.yaml and config_set take cmux, tmux or null, nothing else", () => {
+  it("is a config key: config.yaml and config_set take cmux, tmux, rex or null, nothing else", () => {
     writeFileSync(join(home, "config.yaml"), "fleet:\n  local_terminal: tmux\n");
     const c = open();
     expect(c.effective().fleet.local_terminal).toBe("tmux");
     expect(c.retainedPayload().fleet.local_terminal).toBe("tmux");
     expect(c.applyPatch({ fleet: { local_terminal: "cmux" } }, "admin-1").applied).toBe(true);
     expect(c.effective().fleet.local_terminal).toBe("cmux");
+    expect(c.applyPatch({ fleet: { local_terminal: "rex" } }, "admin-1").applied).toBe(true);
+    expect(c.effective().fleet.local_terminal).toBe("rex");
     expect(c.applyPatch({ fleet: { local_terminal: null } }, "admin-1").applied).toBe(true);
     expect(c.effective().fleet.local_terminal).toBeNull();
     const bad = c.applyPatch(

@@ -21,7 +21,7 @@ import type { ReadinessPayload } from "../src/readiness";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
-import type { JournalEvent, TaskState } from "../src/types";
+import type { JournalEvent, LocalTerminal, TaskState } from "../src/types";
 import { addWorktree } from "../src/worktree";
 import { eventually } from "./helpers/broker-wait";
 import { CALM_OS, type DaemonEnv, NS, OWNER_DECIDES, makeDaemonEnv } from "./helpers/daemon-env";
@@ -103,7 +103,13 @@ describe("daemon spawn loop", () => {
        * Build the local host by `fleet.local_terminal` (the fake host, with the terminal recorded
        * in `built`): the global config's key, the machine's platform and whether cmux is there.
        */
-      local?: { terminal?: "cmux" | "tmux"; platform: NodeJS.Platform; cmux: boolean };
+      local?: {
+        terminal?: LocalTerminal;
+        platform: NodeJS.Platform;
+        cmux: boolean;
+        /** Whether Rex's command-line tool is there (default: not). */
+        rex?: boolean;
+      };
     } = {},
   ) {
     env = await makeDaemonEnv();
@@ -223,11 +229,12 @@ describe("daemon spawn loop", () => {
         ...(local === undefined
           ? { host }
           : {
-              localHostFor: (terminal: "cmux" | "tmux") => {
+              localHostFor: (terminal: LocalTerminal) => {
                 built.push(terminal);
                 return Object.assign(host, { screenSource: terminal });
               },
-              cmuxFound: () => local.cmux,
+              terminalFound: (t: LocalTerminal) =>
+                t === "cmux" ? local.cmux : t === "rex" ? local.rex === true : true,
             }),
         claudeJsonPath: claudeJson,
         hooksDir: "/opt/volley-hooks",
@@ -569,6 +576,69 @@ describe("daemon spawn loop", () => {
       expect(journal().filter(about)).toEqual([]);
     });
 
+    it("rex: the local host is the Rex one, and agent_spawned carries terminal rex", async () => {
+      await setup({ local: { terminal: "rex", platform: "darwin", cmux: true } });
+      const spawned = await event("agent_spawned");
+      expect(built).toEqual(["rex"]);
+      expect(spawned?.data).toMatchObject({ host: "local", terminal: "rex" });
+      expect(
+        schemaErrors("wave-event.schema.json", {
+          schema_version: "0.1",
+          agent_id: "volleyd",
+          parent_id: null,
+          wall_time: spawned?.at,
+          channel: "_waves/events",
+          type: "agent_spawned",
+          payload: { wave: "w1", ...spawned },
+        }),
+      ).toEqual([]);
+      await event("agent_registered");
+      await waits.settled();
+    });
+
+    it("unset on a Mac with Rex and cmux: rex", async () => {
+      await setup({ local: { platform: "darwin", cmux: true, rex: true } });
+      expect((await event("agent_spawned"))?.data.terminal).toBe("rex");
+      expect(built).toEqual(["rex"]);
+      await event("agent_registered");
+      await waits.settled();
+    });
+
+    it("a restart from tmux to rex keeps the running tmux agent on tmux", async () => {
+      await setup({ local: { terminal: "tmux", platform: "darwin", cmux: false } });
+      expect((await event("agent_spawned"))?.data.terminal).toBe("tmux");
+      await event("agent_registered");
+      await waits.settled();
+      await daemon.stop();
+      writeFileSync(join(env.home, "config.yaml"), "fleet:\n  local_terminal: rex\n");
+      const tmuxHost = Object.assign(fakeHost(exec), { screenSource: "tmux" as const });
+      const rexHost = Object.assign(fakeHost(exec), { screenSource: "rex" as const });
+      built = [];
+      daemon = await env.start({
+        clock,
+        fleet: { os: { ...CALM_OS, platform: () => "darwin" } },
+        spawner: {
+          localHostFor: (terminal: LocalTerminal) => {
+            built.push(terminal);
+            return terminal === "rex" ? rexHost : tmuxHost;
+          },
+          terminalFound: () => true,
+          claudeJsonPath: claudeJson,
+          hooksDir: "/opt/volley-hooks",
+          reapGraceMs: 300,
+          credentials: creds,
+        },
+      });
+      await daemon.reconciled();
+      await waits.settled();
+      expect(built).toEqual(["rex", "tmux"]);
+      await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
+      await event("agent_retired");
+      await waits.settled();
+      expect(tmuxHost.sessionsEnded).toHaveLength(1);
+      expect(rexHost.sessionsEnded).toEqual([]);
+    });
+
     it("a restart under another terminal keeps a running agent on the one it started in", async () => {
       await setup({ local: { terminal: "cmux", platform: "darwin", cmux: true } });
       expect((await event("agent_spawned"))?.data.terminal).toBe("cmux");
@@ -584,11 +654,11 @@ describe("daemon spawn loop", () => {
         clock,
         fleet: { os: { ...CALM_OS, platform: () => "darwin" } },
         spawner: {
-          localHostFor: (terminal: "cmux" | "tmux") => {
+          localHostFor: (terminal: LocalTerminal) => {
             built.push(terminal);
             return terminal === "cmux" ? cmuxHost : tmuxHost;
           },
-          cmuxFound: () => true,
+          terminalFound: () => true,
           claudeJsonPath: claudeJson,
           hooksDir: "/opt/volley-hooks",
           reapGraceMs: 300,

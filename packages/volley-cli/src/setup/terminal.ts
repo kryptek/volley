@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isMap, parseDocument } from "yaml";
 import { writeSecret } from "../auth/context";
 import {
@@ -20,17 +20,20 @@ import {
   keychainReadItemArgv,
   storeInKeychain,
 } from "./keychain";
-import { CMUX_APP_BINS, serviceEnv } from "./service-path";
+import { CMUX_APP_BINS, REX_APP_BINS, serviceEnv } from "./service-path";
 import type { Change, ExecResult, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 
 /**
- * The Terminal step of `volley setup`: which terminal volleyd starts local agents in, cmux or
- * tmux, recorded in `$VOLLEYD_HOME/config.yaml` (`fleet.local_terminal`) and setup.json
- * (`terminal`). On macOS with cmux installed it is cmux, and the step checks that volleyd's
- * service can use cmux's socket (below); otherwise (a Mac without cmux, every Linux machine) it
- * is tmux, and the step blocks while tmux is not on the services' PATH, printing how to install
- * it. An explicit `fleet.local_terminal` in config.yaml is kept while its terminal is installed.
+ * The Terminal step of `volley setup`: which terminal volleyd starts local agents in, Rex, cmux
+ * or tmux, recorded in `$VOLLEYD_HOME/config.yaml` (`fleet.local_terminal`) and setup.json
+ * (`terminal`). With Rex installed (its command-line tool in the Rex Server bundle, or `rex` on
+ * the services' PATH) it is rex; else on macOS with cmux installed it is cmux, and the step
+ * checks that volleyd's service can use cmux's socket (below); otherwise (a Mac with neither,
+ * every Linux machine) it is tmux, and the step blocks while tmux is not on the services' PATH,
+ * printing how to install it. An explicit `fleet.local_terminal` in config.yaml is kept while
+ * its terminal is installed. Rex needs no access check: its server's socket is the user's own
+ * (mode 0600, no password), which volleyd's service, running as the user, reaches.
  *
  * On macOS, volleyd starts local agents in cmux workspaces. Out of the box cmux lets only programs started
  * inside cmux use its socket, and volleyd runs as a background service, so every spawn is refused.
@@ -237,6 +240,74 @@ export function cmuxInstalled(
   return [...CMUX_APP_BINS(home), ...servicePath.split(":")]
     .filter((d) => d !== "")
     .some((d) => exists(join(d, "cmux")));
+}
+
+/** The `rex` in the Rex Server bundle or on the services' PATH, or null when there is none. */
+export function rexPath(
+  home: string,
+  servicePath: string,
+  exists: (p: string) => boolean = existsSync,
+): string | null {
+  for (const d of [...REX_APP_BINS(home), ...servicePath.split(":")]) {
+    if (d !== "" && exists(join(d, "rex"))) return join(d, "rex");
+  }
+  return null;
+}
+
+/** Whether Rex is installed: its command-line tool in the Rex Server bundle, or on the PATH. */
+export function rexInstalled(
+  home: string,
+  servicePath: string,
+  exists: (p: string) => boolean = existsSync,
+): boolean {
+  return rexPath(home, servicePath, exists) !== null;
+}
+
+/** How a rex command went: no server (`not_running`), no `rex` (`missing`), or else. */
+export type RexAccess = "ok" | "not_running" | "missing" | "unknown";
+
+/**
+ * Classify a rex command's result, or the error its exec rejected with (a missing `rex` rejects
+ * with ENOENT: exec spawns without a shell). Rex exits 4 when no server is running and
+ * autostart is off (volleyd always passes `--autostart=false`).
+ */
+export function classifyRex(
+  r: Pick<ExecResult, "code" | "stdout" | "stderr"> | NodeJS.ErrnoException,
+): RexAccess {
+  if (r instanceof Error) return r.code === "ENOENT" ? "missing" : "unknown";
+  if (r.code === 0) return "ok";
+  const text = `${r.stderr}\n${r.stdout}`;
+  if (r.code === 127 || /command not found|ENOENT/i.test(text)) return "missing";
+  if (r.code === 4 || /no Rex server is running/i.test(text)) return "not_running";
+  return "unknown";
+}
+
+/** Where the Rex Server bundle keeps `rex`, as the owner reads it (no home path spelled out). */
+export const REX_BUNDLE_DIR =
+  "~/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/";
+
+/**
+ * What to do when volleyd cannot use Rex, in plain words: the spawn_failed decision's text.
+ * `path`: the PATH volleyd looked on, for a missing `rex`.
+ */
+export function rexAdvice(access: RexAccess, path?: string): string {
+  switch (access) {
+    case "not_running":
+      return "No Rex server is running, and volleyd starts local agents in Rex sessions without starting one itself: open Rex (or run `rex server start`), then retry; nothing was created.";
+    case "missing":
+      return `Rex's command-line tool \`rex\` is not on volleyd's PATH${path !== undefined && path !== "" ? ` (${path})` : ""}; it lives in the Rex Server app bundle, ${REX_BUNDLE_DIR}. Run \`volley setup --step terminal\`, then \`volley setup --step services\`, to put it on volleyd's PATH; nothing was created.`;
+    default:
+      return "Rex failed in a way volleyd does not recognise: check that Rex is open and `rex ls` answers, then retry.";
+  }
+}
+
+/** ` (rex said: <its first line>)`, or nothing when it said nothing. */
+export function rexSaid(output: string): string {
+  const first = output
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l !== "");
+  return first === undefined ? "" : ` (rex said: ${first})`;
 }
 
 /**
@@ -476,7 +547,7 @@ async function askAndStorePassword(
 }
 
 /** The terminals volleyd starts local agents in (`fleet.local_terminal`). */
-export const LOCAL_TERMINALS = ["cmux", "tmux"] as const;
+export const LOCAL_TERMINALS = ["cmux", "tmux", "rex"] as const;
 export type LocalTerminal = (typeof LOCAL_TERMINALS)[number];
 
 export const isLocalTerminal = (v: unknown): v is LocalTerminal =>
@@ -565,10 +636,12 @@ export function tmuxInstallLine(
 }
 
 /**
- * Step 4 of `volley setup`: the terminal volleyd starts local agents in. macOS with cmux: cmux,
- * and the service-like cmux check (`planCmux`); otherwise tmux, which must be on the services'
- * PATH (Linux never hears of cmux). The choice goes in config.yaml (`fleet.local_terminal`, the
- * change this step makes) and setup.json (`terminal`, recorded when the run ends).
+ * Step 7 of `volley setup`: the terminal volleyd starts local agents in, the first installed of
+ * Rex, cmux (macOS: then the service-like cmux check, `planCmux`) and tmux, which must be on the
+ * services' PATH (Linux never hears of cmux). An explicit choice in config.yaml is kept while
+ * that terminal is installed. The choice goes in config.yaml (`fleet.local_terminal`, the change
+ * this step makes) and setup.json (`terminal`, recorded when the run ends); when Rex is one of
+ * several installed terminals, a found line says how to switch.
  */
 export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
   const plan: StepPlan = { step: "terminal", title: "Terminal", found: [], changes: [] };
@@ -582,6 +655,7 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
   const mac = ctx.deps.platform === "darwin";
   const cmux = mac && cmuxInstalled(ctx.home, env.PATH ?? "", exists);
   const tmux = tmuxOnPath(env.PATH ?? "", exists);
+  const rex = rexPath(ctx.home, env.PATH ?? "", exists);
   const file = join(ctx.volleydHome, VOLLEYD_CONFIG);
   const before = existsSync(file) ? readFileSync(file, "utf-8") : "";
   let current: LocalTerminal | null;
@@ -592,15 +666,12 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
     plan.row = `${file} is not valid YAML`;
     return plan;
   }
-  const installed = (t: LocalTerminal) => (t === "cmux" ? cmux : tmux !== null);
+  const installed = (t: LocalTerminal) =>
+    t === "cmux" ? cmux : t === "rex" ? rex !== null : tmux !== null;
+  // rex → cmux → tmux: the first installed, unless config.yaml names one that is.
+  const order: LocalTerminal[] = ["rex", "cmux", "tmux"];
   const chosen: LocalTerminal | null =
-    current !== null && installed(current)
-      ? current
-      : cmux
-        ? "cmux"
-        : tmux !== null
-          ? "tmux"
-          : null;
+    current !== null && installed(current) ? current : (order.find(installed) ?? null);
   if (chosen === null) {
     const line = tmuxInstallLine(ctx.deps.platform, exists);
     plan.blocked = mac
@@ -617,10 +688,24 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
     );
   }
   plan.found.push(
-    chosen === "cmux"
-      ? "Terminal: cmux (volleyd starts local agents in cmux workspaces)"
-      : `Terminal: tmux at ${tmux} (volleyd starts local agents in tmux sessions${mac && cmux ? `; ${file} chose it over cmux` : mac ? "; cmux is not installed" : ""})`,
+    chosen === "rex"
+      ? "Terminal: rex (volleyd starts local agents in Rex sessions)"
+      : chosen === "cmux"
+        ? "Terminal: cmux (volleyd starts local agents in cmux workspaces)"
+        : `Terminal: tmux at ${tmux} (volleyd starts local agents in tmux sessions${mac && cmux ? `; ${file} chose it over cmux` : mac ? "; cmux is not installed" : ""})`,
   );
+  // Rex with another terminal installed too: how to switch (no question; the step stays
+  // idempotent).
+  const others = order.filter((t) => t !== chosen && installed(t));
+  if (rex !== null && others.length > 0) {
+    plan.found.push(
+      `Also installed: ${others.join(", ")}. To switch, \`${others.map((t) => `volleyd config set fleet.local_terminal ${t}`).join("` or `")}\` (applies at volleyd's next start).`,
+    );
+  }
+  if (chosen === "rex" && rex !== null) {
+    const lacks = rexMissingFromService(ctx, rex);
+    if (lacks !== null) plan.found.push(lacks);
+  }
   if (current === chosen) {
     plan.found.push(`fleet.local_terminal: ${chosen} in ${file}`);
     ctx.terminal = chosen;
@@ -645,9 +730,11 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
     if (change !== null) plan.changes.push(change);
   }
   plan.row =
-    chosen === "cmux"
-      ? `cmux${ctx.cmuxSocketMode !== undefined ? ` (socket control mode: ${CMUX_MODE_LABEL[ctx.cmuxSocketMode]})` : ""}`
-      : `tmux (${tmux})`;
+    chosen === "rex"
+      ? `rex (${rex})`
+      : chosen === "cmux"
+        ? `cmux${ctx.cmuxSocketMode !== undefined ? ` (socket control mode: ${CMUX_MODE_LABEL[ctx.cmuxSocketMode]})` : ""}`
+        : `tmux (${tmux})`;
   plan.verify = async () => {
     const again = await planTerminal(ctx);
     return [
@@ -656,4 +743,19 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
     ];
   };
   return plan;
+}
+
+/**
+ * A found line when volleyd's installed launchd service (macOS) does not have the directory `rex`
+ * was found in on its PATH yet: the Services step, which setup runs next, writes it. Null when it
+ * has it, or no service is installed.
+ */
+function rexMissingFromService(ctx: SetupContext, rex: string): string | null {
+  if (ctx.deps.platform !== "darwin") return null;
+  const plist = join(ctx.home, "Library", "LaunchAgents", "systems.volley.volleyd.plist");
+  if (!existsSync(plist)) return null;
+  const dir = dirname(rex);
+  const path = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(readFileSync(plist, "utf-8"));
+  if (path !== null && (path[1] ?? "").split(":").includes(dir)) return null;
+  return `volleyd's installed service (${plist}) does not have ${dir} on its PATH yet, so it cannot run rex: \`volley setup --step services\` adds it.`;
 }

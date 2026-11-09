@@ -34,7 +34,7 @@ import { DESK_PORT } from "volley-cli/commands/desk-serve";
 import { PMSET_BATT_ARGV, POWER_SUPPLY_DIR, isLaptop } from "volley-cli/machine/laptop";
 import { countLiveAgents, probeAnonymous } from "volley-cli/setup/broker";
 import { readNetworkRecord, readSetupInstall } from "volley-cli/setup/journal";
-import { cmuxInstalled } from "volley-cli/setup/terminal";
+import { cmuxInstalled, rexInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type BrokerAuth, coordinatorAuthPath } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -357,6 +357,7 @@ import { type Tree, footprintOf, readReleaseTree } from "./footprint";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
+import { LocalRexHost } from "./hosts/local-rex";
 import { LocalTmuxHost } from "./hosts/local-tmux";
 import {
   type CloneProbe,
@@ -871,17 +872,35 @@ export interface DaemonOptions {
   };
 }
 
+/**
+ * Whether a local terminal's tool is installed here (an unset `fleet.local_terminal` takes the
+ * first of rex, cmux, tmux): Rex's command-line tool in the Rex Server bundle or on the PATH,
+ * cmux's in its app or on the PATH; tmux is the fallback.
+ */
+function terminalInstalled(terminal: LocalTerminal): boolean {
+  const path = process.env.PATH ?? "";
+  if (terminal === "rex") return rexInstalled(homedir(), path);
+  if (terminal === "cmux") return cmuxInstalled(homedir(), path);
+  return true;
+}
+
 /** How the daemon spawns agents. Every field has a production default. */
 export interface SpawnerOptions {
   /**
-   * The `local` host (default: the host for the resolved `fleet.local_terminal`: cmux or tmux
-   * on this machine, through the fenced exec).
+   * The `local` host (default: the host for the resolved `fleet.local_terminal`: cmux, tmux or
+   * Rex on this machine, through the fenced exec).
    */
   host?: Host;
-  /** Builds the `local` host for a terminal (tests; default: LocalCmuxHost or LocalTmuxHost). */
+  /**
+   * Builds the `local` host for a terminal (tests; default: LocalCmuxHost, LocalTmuxHost or
+   * LocalRexHost).
+   */
   localHostFor?: (terminal: LocalTerminal) => Host;
-  /** Whether cmux is installed here, for an unset `fleet.local_terminal` (default: `cmuxInstalled`). */
-  cmuxFound?: () => boolean;
+  /**
+   * Whether a terminal is installed here, for an unset `fleet.local_terminal` (default:
+   * `rexInstalled`, `cmuxInstalled`; tmux is the fallback, never asked).
+   */
+  terminalFound?: (terminal: LocalTerminal) => boolean;
   /** Claude Code's folder-trust file (default `~/.claude.json`). */
   claudeJsonPath?: string;
   /** `packages/volley-hooks` (default: the one in this checkout). */
@@ -5756,7 +5775,7 @@ export class Daemon {
   }
 
   /**
-   * The `local` host agents run on: cmux or tmux by `fleet.local_terminal`, resolved once (a
+   * The `local` host agents run on: cmux, tmux or Rex by `fleet.local_terminal`, resolved once (a
    * change applies at the next start: running agents' workspaces belong to the terminal they
    * started in).
    */
@@ -5767,7 +5786,7 @@ export class Daemon {
         resolveLocalTerminal(
           this.config.effective().fleet.local_terminal,
           this.opts.fleet?.os?.platform?.() ?? process.platform,
-          this.opts.spawner?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
+          this.opts.spawner?.terminalFound ?? terminalInstalled,
         ),
       );
     return this.localHost;
@@ -5784,7 +5803,9 @@ export class Daemon {
           ? build(terminal)
           : terminal === "tmux"
             ? new LocalTmuxHost(realExec)
-            : new LocalCmuxHost(realExec);
+            : terminal === "rex"
+              ? new LocalRexHost(realExec)
+              : new LocalCmuxHost(realExec);
       this.localHosts.set(terminal, h);
     }
     return h;
@@ -5800,7 +5821,10 @@ export class Daemon {
     if (this.opts.spawner?.host !== undefined) return this.host;
     const spawned = this.spawnedRecord((e) => e.task === task, wave);
     const terminal = spawned?.host === "local" ? spawned.terminal : undefined;
-    if ((terminal !== "cmux" && terminal !== "tmux") || terminal === this.host.screenSource)
+    if (
+      (terminal !== "cmux" && terminal !== "tmux" && terminal !== "rex") ||
+      terminal === this.host.screenSource
+    )
       return this.host;
     return this.localHostFor(terminal);
   }

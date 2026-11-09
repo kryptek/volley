@@ -412,6 +412,24 @@ describe("volley role receive supervisor", () => {
     expect(f.calls).toEqual([]);
   });
 
+  it("takes rex as the local terminal, and refuses a terminal volleyd does not know", async () => {
+    const r = await receive(
+      ["supervisor", bundle(), "--from", "old-box", "--local-terminal", "rex"],
+      deps(fakeExec().exec),
+    );
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(EXIT.OK);
+    expect(parse(readFileSync(join(vhome, "config.yaml"), "utf-8")).fleet.local_terminal).toBe(
+      "rex",
+    );
+    const bad = await receive(
+      ["supervisor", bundle(), "--from", "old-box", "--local-terminal", "kitty"],
+      deps(fakeExec().exec),
+    );
+    expect(bad.code).toBe(EXIT.USAGE);
+    expect(bad.stderr).toContain("cmux, tmux or rex");
+  });
+
   it("refuses a role other than supervisor", async () => {
     const r = await receive(
       ["desk", "/path/to/bundle.tgz", "--from", "old-box"],
