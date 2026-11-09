@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 
-import "./Threads.css";
+import './Threads.css';
 
-export interface ThreadsProps extends Omit<HTMLAttributes<HTMLDivElement>, "color"> {
+export interface ThreadsProps extends Omit<HTMLAttributes<HTMLDivElement>, 'color'> {
   color?: string | [number, number, number];
   accentColor?: string | [number, number, number];
   amplitude?: number;
@@ -244,8 +244,8 @@ const Threads = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
-  const colorKey = `${Array.isArray(color) ? color.join(",") : String(color)}|${
-    Array.isArray(accentColor) ? accentColor.join(",") : String(accentColor ?? "")
+  const colorKey = `${Array.isArray(color) ? color.join(',') : String(color)}|${
+    Array.isArray(accentColor) ? accentColor.join(',') : String(accentColor ?? '')
   }`;
   const settings: Settings = {
     color,
@@ -268,7 +268,7 @@ const Threads = ({
     brightness: clamp(brightness, 0.25, 2),
     fade: clamp(fade, 0, 1),
     opacity: clamp(opacity, 0, 1),
-    paused,
+    paused
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -276,12 +276,12 @@ const Threads = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
@@ -290,38 +290,32 @@ const Threads = ({
     if (!lineProgram || !screenProgram) return undefined;
 
     const lineUniforms = locate(gl, lineProgram, [
-      "uTime",
-      "uResolution",
-      "uFrame",
-      "uAmplitude",
-      "uDistance",
-      "uMouse",
-      "uCount",
-      "uThickness",
-      "uSoftness",
-      "uWaves",
-      "uSplit",
-      "uFray",
-      "uSeed",
-      "uTurn",
-      "uPart",
-      "uTaper",
-      "uColor",
-      "uAccent",
+      'uTime',
+      'uResolution',
+      'uFrame',
+      'uAmplitude',
+      'uDistance',
+      'uMouse',
+      'uCount',
+      'uThickness',
+      'uSoftness',
+      'uWaves',
+      'uSplit',
+      'uFray',
+      'uSeed',
+      'uTurn',
+      'uPart',
+      'uTaper',
+      'uColor',
+      'uAccent'
     ]);
-    const screenUniforms = locate(gl, screenProgram, [
-      "uLines",
-      "uResolution",
-      "uFade",
-      "uOpacity",
-      "uCurve",
-    ]);
+    const screenUniforms = locate(gl, screenProgram, ['uLines', 'uResolution', 'uFade', 'uOpacity', 'uCurve']);
 
     const lineVao = gl.createVertexArray();
     const lineBuffer = gl.createBuffer();
     gl.bindVertexArray(lineVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
-    const pointLocation = gl.getAttribLocation(lineProgram, "aPoint");
+    const pointLocation = gl.getAttribLocation(lineProgram, 'aPoint');
     gl.enableVertexAttribArray(pointLocation);
     gl.vertexAttribPointer(pointLocation, 2, gl.FLOAT, false, 0, 0);
 
@@ -330,7 +324,7 @@ const Threads = ({
     gl.bindVertexArray(screenVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, screenBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-    const positionLocation = gl.getAttribLocation(screenProgram, "aPosition");
+    const positionLocation = gl.getAttribLocation(screenProgram, 'aPosition');
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
@@ -343,17 +337,17 @@ const Threads = ({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    const probe = document.createElement("canvas");
+    const probe = document.createElement('canvas');
     probe.width = 1;
     probe.height = 1;
-    const probeContext = probe.getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probeContext = probe.getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const state = {
       time: 0,
       width: 1,
       height: 1,
       segments: 0,
-      colorKey: "",
+      colorKey: '',
       color: [1, 1, 1] as number[],
       accent: [1, 1, 1] as number[],
       mouse: [0.5, 0.5],
@@ -361,7 +355,7 @@ const Threads = ({
       pointer: [0, 0],
       targetPointer: [0, 0],
       presence: 0,
-      inside: false,
+      inside: false
     };
     let raf = 0;
     let last = 0;
@@ -369,10 +363,10 @@ const Threads = ({
     let alive = true;
 
     const toRgb = (value: string | number[]): number[] => {
-      if (Array.isArray(value)) return [0, 1, 2].map((i) => clamp(Number(value[i] ?? 1), 0, 1));
+      if (Array.isArray(value)) return [0, 1, 2].map(i => clamp(Number(value[i] ?? 1), 0, 1));
       if (!probeContext) return [1, 1, 1];
       probeContext.clearRect(0, 0, 1, 1);
-      probeContext.fillStyle = "#ffffff";
+      probeContext.fillStyle = '#ffffff';
       probeContext.fillStyle = String(value);
       probeContext.fillRect(0, 0, 1, 1);
       const [r, g, b] = probeContext.getImageData(0, 0, 1, 1).data;
@@ -383,8 +377,7 @@ const Threads = ({
       if (s.colorKey === state.colorKey) return;
       state.colorKey = s.colorKey;
       state.color = toRgb(s.color);
-      state.accent =
-        s.accentColor === undefined || s.accentColor === null ? state.color : toRgb(s.accentColor);
+      state.accent = s.accentColor === undefined || s.accentColor === null ? state.color : toRgb(s.accentColor);
     };
 
     const buildStrip = (segments: number) => {
@@ -410,17 +403,7 @@ const Threads = ({
       state.width = width;
       state.height = height;
       gl.bindTexture(gl.TEXTURE_2D, target);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        canvas.width,
-        canvas.height,
-        0,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        null,
-      );
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -504,8 +487,7 @@ const Threads = ({
       const glide = 1 - Math.exp(-dt * 10);
       state.pointer[0] += (state.targetPointer[0] - state.pointer[0]) * glide;
       state.pointer[1] += (state.targetPointer[1] - state.pointer[1]) * glide;
-      state.presence +=
-        ((state.inside && s.parting > 0 ? 1 : 0) - state.presence) * (1 - Math.exp(-dt * 4));
+      state.presence += ((state.inside && s.parting > 0 ? 1 : 0) - state.presence) * (1 - Math.exp(-dt * 4));
       render();
       const settling =
         Math.abs(state.targetMouse[0] - state.mouse[0]) > 0.0005 ||
@@ -530,7 +512,7 @@ const Threads = ({
         state.targetMouse = [x, 1 - y];
         state.targetPointer = [
           event.clientX - rect.left - rect.width / 2,
-          rect.height / 2 - (event.clientY - rect.top),
+          rect.height / 2 - (event.clientY - rect.top)
         ];
         if (!state.inside && state.presence < 0.01) state.pointer = [...state.targetPointer];
       } else if (state.inside) {
@@ -553,17 +535,17 @@ const Threads = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     wakeRef.current = () => {
@@ -577,9 +559,9 @@ const Threads = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteFramebuffer(framebuffer);
       gl.deleteTexture(target);
       gl.deleteBuffer(lineBuffer);
@@ -595,14 +577,10 @@ const Threads = ({
     wakeRef.current?.();
   });
 
-  const { className = "", ...attributes } = rest;
+  const { className = '', ...attributes } = rest;
 
   return (
-    <div
-      ref={containerRef}
-      className={`threads-container${className ? ` ${className}` : ""}`}
-      {...attributes}
-    >
+    <div ref={containerRef} className={`threads-container${className ? ` ${className}` : ''}`} {...attributes}>
       <canvas ref={canvasRef} className="threads-canvas" aria-hidden="true" />
     </div>
   );

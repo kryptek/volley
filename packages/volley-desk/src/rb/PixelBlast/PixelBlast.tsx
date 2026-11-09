@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
-import "./PixelBlast.css";
+import { useEffect, useRef, type CSSProperties } from 'react';
+import './PixelBlast.css';
 
-export type PixelBlastVariant = "square" | "circle" | "triangle" | "diamond" | "cross" | "ring";
-export type PixelBlastHoverEffect = "reveal" | "grow" | "none";
+export type PixelBlastVariant = 'square' | 'circle' | 'triangle' | 'diamond' | 'cross' | 'ring';
+export type PixelBlastHoverEffect = 'reveal' | 'grow' | 'none';
 
 export interface PixelBlastProps {
   variant?: PixelBlastVariant;
@@ -81,22 +81,12 @@ type Program = { program: WebGLProgram; uniforms: Record<string, WebGLUniformLoc
 
 const MAX_CLICKS = 10;
 const INTRO_SECONDS = 1.8;
-const SHAPES: Record<string, number> = {
-  square: 0,
-  circle: 1,
-  triangle: 2,
-  diamond: 3,
-  cross: 4,
-  ring: 5,
-};
+const SHAPES: Record<string, number> = { square: 0, circle: 1, triangle: 2, diamond: 3, cross: 4, ring: 5 };
 const HOVERS: Record<string, number> = { none: 0, grow: 1, reveal: 2 };
-const bayer2 = (x: number, y: number): number =>
-  (Math.floor(x) / 2 + Math.floor(y) * Math.floor(y) * 0.75) % 1;
+const bayer2 = (x: number, y: number): number => (Math.floor(x) / 2 + Math.floor(y) * Math.floor(y) * 0.75) % 1;
 const bayer8 = (x: number, y: number): number =>
   (bayer2(x / 4, y / 4) * 0.25 + bayer2(x / 2, y / 2)) * 0.25 + bayer2(x, y);
-const BAYER_TABLE = Array.from({ length: 64 }, (_, i) =>
-  bayer8(i % 8, Math.floor(i / 8)).toFixed(6),
-).join(", ");
+const BAYER_TABLE = Array.from({ length: 64 }, (_, i) => bayer8(i % 8, Math.floor(i / 8)).toFixed(6)).join(', ');
 const RANGE_MIN = -6;
 const RANGE_MAX = 10;
 
@@ -491,7 +481,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   for (let i = 0; i < count; i++) {
     const info = gl.getActiveUniform(program, i);
     if (!info) continue;
-    const name = info.name.replace(/\[0\]$/, "");
+    const name = info.name.replace(/\[0\]$/, '');
     uniforms[name] = gl.getUniformLocation(program, name);
   }
   return { program, uniforms };
@@ -510,22 +500,22 @@ const hexToRgb = (hex: string): number[] => {
 };
 
 const parseHex = (hex: string): number[] => {
-  let h = String(hex || "#ffffff")
-    .replace("#", "")
+  let h = String(hex || '#ffffff')
+    .replace('#', '')
     .trim();
   if (h.length === 3 || h.length === 4)
     h = h
       .slice(0, 3)
-      .split("")
-      .map((c) => c + c)
-      .join("");
-  const num = Number.parseInt(h.slice(0, 6), 16);
+      .split('')
+      .map(c => c + c)
+      .join('');
+  const num = parseInt(h.slice(0, 6), 16);
   if (Number.isNaN(num)) return [1, 1, 1];
   return [((num >> 16) & 255) / 255, ((num >> 8) & 255) / 255, (num & 255) / 255];
 };
 
 const randomFloat = () => {
-  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
     const u32 = new Uint32Array(1);
     window.crypto.getRandomValues(u32);
     return u32[0] / 0xffffffff;
@@ -548,7 +538,7 @@ const invert3 = (m: number[]): number[] => {
     -(a * f - c * d) / det,
     C / det,
     -(a * h - b * g) / det,
-    (a * e - b * d) / det,
+    (a * e - b * d) / det
   ];
 };
 
@@ -577,26 +567,16 @@ const planeFor = (tiltX: number, tiltY: number, width: number, height: number) =
     0,
     (Math.sin(ay) * Math.cos(ax)) / depth,
     -Math.sin(ax) / depth,
-    1,
+    1
   ];
-  const forward = multiply3(multiply3([1, 0, cx, 0, 1, cy, 0, 0, 1], tilt), [
-    1,
-    0,
-    -cx,
-    0,
-    1,
-    -cy,
-    0,
-    0,
-    1,
-  ]);
+  const forward = multiply3(multiply3([1, 0, cx, 0, 1, cy, 0, 0, 1], tilt), [1, 0, -cx, 0, 1, -cy, 0, 0, 1]);
   return invert3(forward);
 };
 
 const PixelBlast = ({
-  variant = "square",
+  variant = 'square',
   pixelSize = 3,
-  color = "#B497CF",
+  color = '#B497CF',
   accentColor,
   className,
   style,
@@ -618,7 +598,7 @@ const PixelBlast = ({
   twinkle = 0.25,
   drift = 0.2,
   driftAngle = 30,
-  hoverEffect = "reveal",
+  hoverEffect = 'reveal',
   hoverRadius = 140,
   autoRipple = 0,
   tiltX = 0,
@@ -626,7 +606,7 @@ const PixelBlast = ({
   intro = true,
   variation,
   lightMode = false,
-  dpr,
+  dpr
 }: PixelBlastProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -662,7 +642,7 @@ const PixelBlast = ({
     intro,
     variation,
     lightMode,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -670,12 +650,12 @@ const PixelBlast = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
     const cellShader = link(gl, CELL_FRAGMENT);
@@ -704,21 +684,15 @@ const PixelBlast = ({
     });
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    const view: {
-      width: number;
-      height: number;
-      ratio: number;
-      plane: number[] | null;
-      tiltKey: string;
-    } = {
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const view: { width: number; height: number; ratio: number; plane: number[] | null; tiltKey: string } = {
       width: 1,
       height: 1,
       ratio: 1,
       plane: null,
-      tiltKey: "",
+      tiltKey: ''
     };
-    const cells = { x: 0, y: 0, w: 1, h: 1, key: "" };
+    const cells = { x: 0, y: 0, w: 1, h: 1, key: '' };
     const pointer = { x: 0, y: 0, inside: false };
     const mouse = { x: 0, y: 0, ready: false };
     const clickPos = new Float32Array(MAX_CLICKS * 2).fill(-1);
@@ -728,7 +702,7 @@ const PixelBlast = ({
     let current = 0;
     let fresh = true;
     const seedOffset = settingsRef.current.variation;
-    const timeOffset = typeof seedOffset === "number" ? seedOffset * 37 : randomFloat() * 1000;
+    const timeOffset = typeof seedOffset === 'number' ? seedOffset * 37 : randomFloat() * 1000;
     let elapsed = 0;
     let clock = 0;
     let presence = 0;
@@ -761,12 +735,12 @@ const PixelBlast = ({
           [w / 2, 0],
           [w / 2, h],
           [0, h / 2],
-          [w, h / 2],
+          [w, h / 2]
         ];
-        minX = Number.POSITIVE_INFINITY;
-        maxX = Number.NEGATIVE_INFINITY;
-        minY = Number.POSITIVE_INFINITY;
-        maxY = Number.NEGATIVE_INFINITY;
+        minX = Infinity;
+        maxX = -Infinity;
+        minY = Infinity;
+        maxY = -Infinity;
         for (const [x, y] of corners) {
           const [qx, qy] = toPlane(x, y);
           if (qx < -1e5) continue;
@@ -798,17 +772,7 @@ const PixelBlast = ({
       cells.h = height;
       for (const target of targets) {
         gl.bindTexture(gl.TEXTURE_2D, target.texture);
-        gl.texImage2D(
-          gl.TEXTURE_2D,
-          0,
-          gl.RGBA8,
-          width,
-          height,
-          0,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          null,
-        );
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       }
       fresh = true;
     };
@@ -894,17 +858,7 @@ const PixelBlast = ({
       gl.uniform1f(mu.uTilted, view.plane ? 1 : 0);
       if (view.plane) {
         const m = view.plane;
-        gl.uniformMatrix3fv(mu.uPlane, false, [
-          m[0],
-          m[3],
-          m[6],
-          m[1],
-          m[4],
-          m[7],
-          m[2],
-          m[5],
-          m[8],
-        ]);
+        gl.uniformMatrix3fv(mu.uPlane, false, [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]);
       }
       gl.bindVertexArray(vao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -922,8 +876,7 @@ const PixelBlast = ({
     };
 
     const updatePlane = (s: Settings) => {
-      view.plane =
-        s.tiltX || s.tiltY ? planeFor(s.tiltX, s.tiltY, canvas.width, canvas.height) : null;
+      view.plane = s.tiltX || s.tiltY ? planeFor(s.tiltX, s.tiltY, canvas.width, canvas.height) : null;
       view.tiltKey = `${s.tiltX}:${s.tiltY}:${canvas.width}:${canvas.height}`;
     };
 
@@ -964,10 +917,7 @@ const PixelBlast = ({
         nextAuto -= dt;
         if (nextAuto <= 0) {
           nextAuto = s.autoRipple * (0.7 + Math.random() * 0.6);
-          addRipple(
-            (0.15 + Math.random() * 0.7) * view.width,
-            (0.15 + Math.random() * 0.7) * view.height,
-          );
+          addRipple((0.15 + Math.random() * 0.7) * view.width, (0.15 + Math.random() * 0.7) * view.height);
         }
       }
       for (let k = 0; k < MAX_CLICKS; k++) clickAge[k] = (clock - clickAt[k]) * 0.5;
@@ -986,9 +936,7 @@ const PixelBlast = ({
       stepCells(s, decay);
       draw();
       if (introClock < 1) introClock = Math.min(1, introClock + dt / INTRO_SECONDS);
-      let busy =
-        !reduce &&
-        (s.speed !== 0 || s.drift !== 0 || s.twinkle > 0 || (s.autoRipple > 0 && s.enableRipples));
+      let busy = !reduce && (s.speed !== 0 || s.drift !== 0 || s.twinkle > 0 || (s.autoRipple > 0 && s.enableRipples));
       busy = busy || introClock < 1 || presence > 0.001;
       for (let k = 0; k < MAX_CLICKS; k++) busy = busy || (clickPos[k * 2] >= 0 && clickAge[k] < 8);
       quiet = busy ? 0 : quiet + dt;
@@ -1049,15 +997,15 @@ const PixelBlast = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) wake();
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
     wakeRef.current = wake;
 
@@ -1066,10 +1014,10 @@ const PixelBlast = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       for (const target of targets) {
         gl.deleteTexture(target.texture);
         gl.deleteFramebuffer(target.framebuffer);
@@ -1077,7 +1025,7 @@ const PixelBlast = ({
       gl.deleteVertexArray(vao);
       gl.deleteProgram(cellShader.program);
       gl.deleteProgram(mainShader.program);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -1088,7 +1036,7 @@ const PixelBlast = ({
   return (
     <div
       ref={containerRef}
-      className={`pixel-blast-container${className ? ` ${className}` : ""}`}
+      className={`pixel-blast-container${className ? ` ${className}` : ''}`}
       style={style}
       aria-label="PixelBlast interactive background"
     >

@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useMemo, useRef } from "react";
-import "./WebThreads.css";
+import { useEffect, useMemo, useRef, type CSSProperties } from 'react';
+import './WebThreads.css';
 
 export interface WebThreadsProps {
   colors?: string[];
@@ -59,8 +59,8 @@ interface Shape {
   position: number;
 }
 
-const ROOT = "web-threads-container";
-const CANVAS = "web-threads-canvas";
+const ROOT = 'web-threads-container';
+const CANVAS = 'web-threads-canvas';
 
 const MAX_THREADS = 24;
 const MAX_COLORS = 6;
@@ -302,15 +302,15 @@ const mod = (value: number, base: number) => ((value % base) + base) % base;
 let probe: CanvasRenderingContext2D | null = null;
 
 const parseColor = (value: string, fallback: RGB | null): RGB | null => {
-  if (value === "transparent") return null;
-  if (typeof document === "undefined") return fallback;
-  if (!probe) probe = document.createElement("canvas").getContext("2d");
+  if (value === 'transparent') return null;
+  if (typeof document === 'undefined') return fallback;
+  if (!probe) probe = document.createElement('canvas').getContext('2d');
   if (!probe) return fallback;
-  probe.fillStyle = "#000000";
+  probe.fillStyle = '#000000';
   probe.fillStyle = value;
   const text = probe.fillStyle;
-  if (text.startsWith("#")) {
-    const hex = Number.parseInt(text.slice(1), 16);
+  if (text.startsWith('#')) {
+    const hex = parseInt(text.slice(1), 16);
     return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
   }
   const match = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?/.exec(text);
@@ -334,9 +334,7 @@ const threadY = (s: Shape, x: number, index: number, phase: number, clock: numbe
   const side = s.mirror ? (mod(Math.floor(lane), 2) < 0.5 ? -1 : 1) : 1;
   const dx = x - s.pinch;
   const env =
-    s.nodes <= 1
-      ? s.spread * Math.abs(dx)
-      : s.spread * 0.5 * Math.abs(Math.cos(Math.PI * s.nodes * (dx + 0.5)));
+    s.nodes <= 1 ? s.spread * Math.abs(dx) : s.spread * 0.5 * Math.abs(Math.cos(Math.PI * s.nodes * (dx + 0.5)));
   const shimmer = s.shimmer ? Math.sin(clock * 1.7 + index * 1.3) * 0.35 : 0;
   const angle = x * s.frequency + (phase + (index * TAU) / Math.max(s.count, 1)) * side + shimmer;
   return s.position - env * (1 + index * s.taper) * Math.sin(angle);
@@ -355,13 +353,12 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
 };
 
 const prefersReduced = () =>
-  typeof window !== "undefined" &&
-  (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
+  typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
 
 export default function WebThreads({
-  colors = ["#5227FF", "#FF9FFC"],
-  coreColor = "#FFFFFF",
-  backgroundColor = "transparent",
+  colors = ['#5227FF', '#FF9FFC'],
+  coreColor = '#FFFFFF',
+  backgroundColor = 'transparent',
   lightMode = false,
   threadCount = 6,
   speed = 0.2,
@@ -389,18 +386,18 @@ export default function WebThreads({
   pulseOnClick = true,
   paused = false,
   dpr = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: WebThreadsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const colorKey = colors.join("|");
+  const colorKey = colors.join('|');
   const palette = useMemo(
     () =>
       colorKey
-        .split("|")
+        .split('|')
         .slice(0, MAX_COLORS)
         .map((value): RGB => parseColor(value, [1, 1, 1]) ?? [1, 1, 1]),
-    [colorKey],
+    [colorKey]
   );
   const core = useMemo((): RGB => parseColor(coreColor, [1, 1, 1]) ?? [1, 1, 1], [coreColor]);
   const paper = useMemo(() => parseColor(backgroundColor, null), [backgroundColor]);
@@ -429,13 +426,13 @@ export default function WebThreads({
     mirror,
     shimmer,
     fade: clamp(fade, 0, 1),
-    grain: typeof grain === "number" ? Math.max(0, grain) : grain ? 0.05 : 0,
+    grain: typeof grain === 'number' ? Math.max(0, grain) : grain ? 0.05 : 0,
     intro,
     mouseInteraction,
     mouseStrength: clamp(mouseStrength, 0, 1),
     pulseOnClick,
     paused,
-    dpr: Math.max(0.5, dpr),
+    dpr: Math.max(0.5, dpr)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -443,16 +440,16 @@ export default function WebThreads({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    const canvas = document.createElement("canvas");
+    const canvas = document.createElement('canvas');
     canvas.className = CANVAS;
     container.appendChild(canvas);
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       antialias: false,
       depth: false,
       stencil: false,
       premultipliedAlpha: true,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!gl) {
       canvas.remove();
@@ -468,7 +465,7 @@ export default function WebThreads({
     }
     gl.attachShader(program, vertex);
     gl.attachShader(program, fragment);
-    gl.bindAttribLocation(program, 0, "aPosition");
+    gl.bindAttribLocation(program, 0, 'aPosition');
     gl.linkProgram(program);
     gl.deleteShader(vertex);
     gl.deleteShader(fragment);
@@ -478,41 +475,41 @@ export default function WebThreads({
       return undefined;
     }
     const names = [
-      "uResolution",
-      "uPhase",
-      "uClock",
-      "uCount",
-      "uFrequency",
-      "uSpread",
-      "uTaper",
-      "uPosition",
-      "uPinch",
-      "uNodes",
-      "uAngle",
-      "uGlow",
-      "uFalloff",
-      "uThickness",
-      "uBrightness",
-      "uOpacity",
-      "uMirror",
-      "uShimmer",
-      "uDepth",
-      "uPulses",
-      "uFade",
-      "uGrain",
-      "uColors",
-      "uColorCount",
-      "uCore",
-      "uBackground",
-      "uOpaque",
-      "uLight",
-      "uIntro",
-      "uFocus",
-      "uFocusState",
-      "uSurges",
+      'uResolution',
+      'uPhase',
+      'uClock',
+      'uCount',
+      'uFrequency',
+      'uSpread',
+      'uTaper',
+      'uPosition',
+      'uPinch',
+      'uNodes',
+      'uAngle',
+      'uGlow',
+      'uFalloff',
+      'uThickness',
+      'uBrightness',
+      'uOpacity',
+      'uMirror',
+      'uShimmer',
+      'uDepth',
+      'uPulses',
+      'uFade',
+      'uGrain',
+      'uColors',
+      'uColorCount',
+      'uCore',
+      'uBackground',
+      'uOpaque',
+      'uLight',
+      'uIntro',
+      'uFocus',
+      'uFocusState',
+      'uSurges'
     ];
     const u: Record<string, WebGLUniformLocation | null> = {};
-    names.forEach((name) => {
+    names.forEach(name => {
       u[name] = gl.getUniformLocation(program, name);
     });
 
@@ -544,7 +541,7 @@ export default function WebThreads({
       target: -1,
       surges: [] as Surge[],
       quiet: 0,
-      seen: null as typeof settings | null,
+      seen: null as typeof settings | null
     };
 
     const resize = () => {
@@ -560,8 +557,7 @@ export default function WebThreads({
       canvas.height = height;
     };
 
-    const introLength = (s: typeof settings) =>
-      (s.count - 1) * staggerFor(s.count) + STROKE_SECONDS;
+    const introLength = (s: typeof settings) => (s.count - 1) * staggerFor(s.count) + STROKE_SECONDS;
 
     const updateFocus = (s: typeof settings, dt: number, reduced: boolean) => {
       const wanted = s.mouseInteraction && state.inside;
@@ -569,11 +565,9 @@ export default function WebThreads({
         const aspect = state.width / Math.max(state.height, 1);
         const [cx, cy] = toThreadSpace(state.pointer, aspect, s.angle);
         let best = -1;
-        let bestDistance = Number.POSITIVE_INFINITY;
+        let bestDistance = Infinity;
         for (let index = 0; index < s.count; index++) {
-          const distance = Math.abs(
-            threadY(s, cx, index, state.phase, reduced ? 0 : state.clock) - cy,
-          );
+          const distance = Math.abs(threadY(s, cx, index, state.phase, reduced ? 0 : state.clock) - cy);
           const reach = index === state.target ? 0.11 : 0.085;
           if (distance < reach && distance < bestDistance) {
             best = index;
@@ -662,14 +656,12 @@ export default function WebThreads({
       if (!s.paused && !reduced) state.phase += dt * s.speed;
       const focusing = updateFocus(s, dt, reduced);
       state.surges = state.surges.filter(
-        (surge) => state.clock - surge.at < SURGE_SECONDS + (s.count - 1) * SURGE_STAGGER,
+        surge => state.clock - surge.at < SURGE_SECONDS + (s.count - 1) * SURGE_STAGGER
       );
 
       const still = s.paused || reduced;
       const transient =
-        state.surges.length > 0 ||
-        (s.intro && !reduced && state.clock - state.introAt < introLength(s)) ||
-        focusing;
+        state.surges.length > 0 || (s.intro && !reduced && state.clock - state.introAt < introLength(s)) || focusing;
       if (state.seen !== s || transient || !still) state.quiet = 0;
       else state.quiet += 1;
       state.seen = s;
@@ -688,7 +680,7 @@ export default function WebThreads({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -719,34 +711,32 @@ export default function WebThreads({
       if (state.surges.length > MAX_SURGES) state.surges.shift();
     };
 
-    const visibility = new IntersectionObserver((entries) => {
-      state.visible = entries.some((entry) => entry.isIntersecting);
+    const visibility = new IntersectionObserver(entries => {
+      state.visible = entries.some(entry => entry.isIntersecting);
     });
     visibility.observe(container);
     const sizes = new ResizeObserver(resize);
     sizes.observe(container);
     resize();
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown);
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onDown);
+    document.documentElement.addEventListener('pointerleave', onLeave);
     state.raf = requestAnimationFrame(tick);
 
     return () => {
       cancelAnimationFrame(state.raf);
       visibility.disconnect();
       sizes.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onDown);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDown);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
       gl.deleteProgram(program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       canvas.remove();
     };
   }, []);
 
-  return (
-    <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(" ")} style={style} />
-  );
+  return <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(' ')} style={style} />;
 }

@@ -1,16 +1,16 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { Mesh, Program, RenderTarget, Renderer, Texture, Triangle } from "ogl";
-import { useEffect, useMemo, useRef } from "react";
-import type { CSSProperties } from "react";
+import { useEffect, useMemo, useRef } from 'react';
+import type { CSSProperties } from 'react';
+import { Renderer, Program, Mesh, Triangle, RenderTarget, Texture } from 'ogl';
 
-import "./PatternWaves.css";
+import './PatternWaves.css';
 
-type SurfacePreset = "silk" | "ocean" | "pond" | "lines" | "terminal" | "mesh";
-type PatternKind = "dot" | "square" | "plus" | "line" | "glyph";
-type WaveKind = "silk" | "swell" | "ripple";
-type FadeKind = "edges" | "center" | "bottom" | "top" | "none";
+type SurfacePreset = 'silk' | 'ocean' | 'pond' | 'lines' | 'terminal' | 'mesh';
+type PatternKind = 'dot' | 'square' | 'plus' | 'line' | 'glyph';
+type WaveKind = 'silk' | 'swell' | 'ripple';
+type FadeKind = 'edges' | 'center' | 'bottom' | 'top' | 'none';
 type Rgba = [number, number, number, number];
 
 interface PresetValues {
@@ -67,8 +67,8 @@ interface RippleField {
 
 const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
   silk: {
-    pattern: "dot",
-    wave: "silk",
+    pattern: 'dot',
+    wave: 'silk',
     spacing: 9,
     markSize: 0.95,
     depth: 0.95,
@@ -77,11 +77,11 @@ const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
     contrast: 1.2,
     speed: 0.35,
     scale: 1,
-    direction: 20,
+    direction: 20
   },
   ocean: {
-    pattern: "dot",
-    wave: "swell",
+    pattern: 'dot',
+    wave: 'swell',
     spacing: 10,
     markSize: 0.9,
     depth: 0.42,
@@ -90,11 +90,11 @@ const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
     contrast: 1.2,
     speed: 0.5,
     scale: 1,
-    direction: 100,
+    direction: 100
   },
   pond: {
-    pattern: "dot",
-    wave: "ripple",
+    pattern: 'dot',
+    wave: 'ripple',
     spacing: 10,
     markSize: 0.9,
     depth: 0.55,
@@ -103,11 +103,11 @@ const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
     contrast: 1.2,
     speed: 0.5,
     scale: 1,
-    direction: 35,
+    direction: 35
   },
   lines: {
-    pattern: "line",
-    wave: "silk",
+    pattern: 'line',
+    wave: 'silk',
     spacing: 12,
     markSize: 0.42,
     depth: 0.9,
@@ -116,11 +116,11 @@ const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
     contrast: 1.2,
     speed: 0.3,
     scale: 1,
-    direction: 20,
+    direction: 20
   },
   terminal: {
-    pattern: "glyph",
-    wave: "ripple",
+    pattern: 'glyph',
+    wave: 'ripple',
     spacing: 13,
     markSize: 0.95,
     depth: 0.75,
@@ -129,11 +129,11 @@ const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
     contrast: 1.4,
     speed: 0.3,
     scale: 1.1,
-    direction: 200,
+    direction: 200
   },
   mesh: {
-    pattern: "plus",
-    wave: "silk",
+    pattern: 'plus',
+    wave: 'silk',
     spacing: 14,
     markSize: 0.8,
     depth: 0.95,
@@ -142,15 +142,15 @@ const SURFACE_PRESETS: Record<SurfacePreset, PresetValues> = {
     contrast: 1.45,
     speed: 0.4,
     scale: 1.1,
-    direction: 325,
-  },
+    direction: 325
+  }
 };
 
 const PATTERNS: Record<string, number> = { dot: 0, square: 1, plus: 2, line: 3, glyph: 4 };
 const WAVES: Record<string, number> = { silk: 0, swell: 1, ripple: 2 };
 const FADES: Record<string, number> = { none: 0, edges: 1, center: 2, bottom: 3, top: 4 };
-const DEFAULT_CHARACTERS = ".:-=+*#%@";
-const GLYPH_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+const DEFAULT_CHARACTERS = '.:-=+*#%@';
+const GLYPH_FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const ATLAS_TILE = 128;
 const WAVE_UNIT = 520;
 const RIPPLE_CELL = 8;
@@ -164,23 +164,18 @@ const luminance = (rgba: number[]) => 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.07
 
 const parseColor = (value: string, fallback: Rgba): Rgba => {
   try {
-    const ctx = document.createElement("canvas").getContext("2d");
+    const ctx = document.createElement('canvas').getContext('2d');
     if (!ctx) return fallback;
-    ctx.fillStyle = "#000000";
+    ctx.fillStyle = '#000000';
     ctx.fillStyle = value;
     const resolved = ctx.fillStyle;
-    if (resolved.startsWith("#")) {
-      const n = Number.parseInt(resolved.slice(1), 16);
+    if (resolved.startsWith('#')) {
+      const n = parseInt(resolved.slice(1), 16);
       return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1];
     }
     const parts = resolved.match(/[\d.]+/g);
     if (!parts || parts.length < 3) return fallback;
-    return [
-      Number(parts[0]) / 255,
-      Number(parts[1]) / 255,
-      Number(parts[2]) / 255,
-      parts[3] ? Number(parts[3]) : 1,
-    ];
+    return [Number(parts[0]) / 255, Number(parts[1]) / 255, Number(parts[2]) / 255, parts[3] ? Number(parts[3]) : 1];
   } catch {
     return fallback;
   }
@@ -190,14 +185,14 @@ const buildAtlas = (characters: string) => {
   const glyphs = Array.from(characters && characters.length ? characters : DEFAULT_CHARACTERS);
   const columns = Math.ceil(Math.sqrt(glyphs.length));
   const lines = Math.ceil(glyphs.length / columns);
-  const canvas = document.createElement("canvas");
+  const canvas = document.createElement('canvas');
   canvas.width = columns * ATLAS_TILE;
   canvas.height = lines * ATLAS_TILE;
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext('2d');
   if (!ctx) return null;
-  ctx.fillStyle = "#ffffff";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
   ctx.font = `500 ${Math.round(ATLAS_TILE * 0.86)}px ${GLYPH_FONT}`;
   glyphs.forEach((glyph, index) => {
     const x = (index % columns) * ATLAS_TILE + ATLAS_TILE / 2;
@@ -482,7 +477,7 @@ void main() {
 `;
 
 const PatternWaves = ({
-  preset = "silk",
+  preset = 'silk',
   pattern,
   wave,
   spacing,
@@ -494,10 +489,10 @@ const PatternWaves = ({
   speed,
   scale,
   direction,
-  color = "#ffffff",
-  backgroundColor = "#000000",
+  color = '#ffffff',
+  backgroundColor = '#000000',
   opacity = 1,
-  fade = "edges",
+  fade = 'edges',
   fadeSize = 0.5,
   characters = DEFAULT_CHARACTERS,
   interactive = true,
@@ -505,41 +500,39 @@ const PatternWaves = ({
   cursorStrength = 0.6,
   intro = true,
   paused = false,
-  className = "",
-  style,
+  className = '',
+  style
 }: PatternWavesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<Settings | null>(null);
   const wakeRef = useRef<(() => void) | null>(null);
 
   const base = SURFACE_PRESETS[preset] || SURFACE_PRESETS.silk;
-  const pick = <K extends keyof PresetValues>(
-    value: PresetValues[K] | undefined,
-    key: K,
-  ): PresetValues[K] => (value === undefined || value === null ? base[key] : value);
+  const pick = <K extends keyof PresetValues>(value: PresetValues[K] | undefined, key: K): PresetValues[K] =>
+    value === undefined || value === null ? base[key] : value;
 
   const colors = useMemo(
     () => ({
       color: parseColor(color, [1, 1, 1, 1]),
-      background: parseColor(backgroundColor, [0, 0, 0, 1]),
+      background: parseColor(backgroundColor, [0, 0, 0, 1])
     }),
-    [color, backgroundColor],
+    [color, backgroundColor]
   );
 
   useEffect(() => {
     settingsRef.current = {
       ...colors,
-      pattern: pick(pattern, "pattern"),
-      wave: pick(wave, "wave"),
-      spacing: pick(spacing, "spacing"),
-      markSize: pick(markSize, "markSize"),
-      depth: pick(depth, "depth"),
-      light: pick(light, "light"),
-      shine: pick(shine, "shine"),
-      contrast: pick(contrast, "contrast"),
-      speed: pick(speed, "speed"),
-      scale: pick(scale, "scale"),
-      direction: pick(direction, "direction"),
+      pattern: pick(pattern, 'pattern'),
+      wave: pick(wave, 'wave'),
+      spacing: pick(spacing, 'spacing'),
+      markSize: pick(markSize, 'markSize'),
+      depth: pick(depth, 'depth'),
+      light: pick(light, 'light'),
+      shine: pick(shine, 'shine'),
+      contrast: pick(contrast, 'contrast'),
+      speed: pick(speed, 'speed'),
+      scale: pick(scale, 'scale'),
+      direction: pick(direction, 'direction'),
       opacity,
       fade,
       fadeSize,
@@ -548,7 +541,7 @@ const PatternWaves = ({
       cursorSize,
       cursorStrength,
       intro,
-      paused,
+      paused
     };
     wakeRef.current?.();
   });
@@ -557,28 +550,23 @@ const PatternWaves = ({
     const container = containerRef.current;
     if (!container) return undefined;
 
-    const renderer = new Renderer({
-      alpha: true,
-      premultipliedAlpha: true,
-      antialias: false,
-      depth: false,
-    });
+    const renderer = new Renderer({ alpha: true, premultipliedAlpha: true, antialias: false, depth: false });
     const gl = renderer.gl;
     if (!renderer.isWebgl2) {
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       return undefined;
     }
     gl.clearColor(0, 0, 0, 0);
     const canvas = gl.canvas;
-    canvas.style.display = "block";
-    canvas.style.width = "100%";
-    canvas.style.height = "100%";
-    canvas.setAttribute("aria-hidden", "true");
+    canvas.style.display = 'block';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.setAttribute('aria-hidden', 'true');
     container.appendChild(canvas);
 
     const geometry = new Triangle(gl);
     const blank = new Texture(gl);
-    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
 
     const dispose = (target: RenderTarget) => {
       gl.deleteFramebuffer(target.buffer);
@@ -586,13 +574,7 @@ const PatternWaves = ({
     };
 
     const fieldTargetFor = (w: number, h: number) =>
-      new RenderTarget(gl, {
-        width: w,
-        height: h,
-        depth: false,
-        minFilter: gl.NEAREST,
-        magFilter: gl.NEAREST,
-      });
+      new RenderTarget(gl, { width: w, height: h, depth: false, minFilter: gl.NEAREST, magFilter: gl.NEAREST });
 
     const rippleTargetFor = (w: number, h: number) =>
       new RenderTarget(gl, {
@@ -603,7 +585,7 @@ const PatternWaves = ({
         format: gl.RGBA,
         internalFormat: (gl as unknown as WebGL2RenderingContext).RGBA16F,
         minFilter: gl.LINEAR,
-        magFilter: gl.LINEAR,
+        magFilter: gl.LINEAR
       });
 
     let fieldTarget = fieldTargetFor(1, 1);
@@ -613,7 +595,7 @@ const PatternWaves = ({
       generateMipmaps: true,
       minFilter: gl.LINEAR_MIPMAP_LINEAR,
       magFilter: gl.LINEAR,
-      flipY: false,
+      flipY: false
     });
 
     const fieldUniforms = {
@@ -636,7 +618,7 @@ const PatternWaves = ({
       uFadeSize: { value: 0.5 },
       uAppear: { value: 0 },
       tRipple: { value: blank },
-      uRipple: { value: 0 },
+      uRipple: { value: 0 }
     };
     const fieldMesh = new Mesh(gl, {
       geometry,
@@ -645,8 +627,8 @@ const PatternWaves = ({
         fragment: fieldFragment,
         uniforms: fieldUniforms,
         depthTest: false,
-        depthWrite: false,
-      }),
+        depthWrite: false
+      })
     });
 
     const rippleUniforms = {
@@ -657,7 +639,7 @@ const PatternWaves = ({
       uTo: { value: [0, 0] },
       uRadius: { value: 40 },
       uImpulse: { value: 0 },
-      uDamping: { value: 0.975 },
+      uDamping: { value: 0.975 }
     };
     const rippleMesh = new Mesh(gl, {
       geometry,
@@ -666,8 +648,8 @@ const PatternWaves = ({
         fragment: rippleFragment,
         uniforms: rippleUniforms,
         depthTest: false,
-        depthWrite: false,
-      }),
+        depthWrite: false
+      })
     });
 
     const markUniforms = {
@@ -682,7 +664,7 @@ const PatternWaves = ({
       uColor: { value: [1, 1, 1] },
       uAccent: { value: [1, 1, 1] },
       uBackground: { value: [0, 0, 0, 1] },
-      uAtlas: { value: [1, 1, 0] },
+      uAtlas: { value: [1, 1, 0] }
     };
     const markMesh = new Mesh(gl, {
       geometry,
@@ -691,11 +673,11 @@ const PatternWaves = ({
         fragment: markFragment,
         uniforms: markUniforms,
         depthTest: false,
-        depthWrite: false,
-      }),
+        depthWrite: false
+      })
     });
 
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
     let width = 1;
     let height = 1;
@@ -709,7 +691,7 @@ const PatternWaves = ({
     let rippleUntil = 0;
     let rippleLive = false;
     let rippleClock = 0;
-    let atlasKey = "";
+    let atlasKey = '';
     const pointer = { x: 0, y: 0, inside: false, placed: false, lastX: 0, lastY: 0, burst: 0 };
 
     const buildRipple = () => {
@@ -727,7 +709,7 @@ const PatternWaves = ({
 
     const clearRipple = () => {
       if (!ripple) return;
-      [ripple.read, ripple.write].forEach((target) => {
+      [ripple.read, ripple.write].forEach(target => {
         renderer.bindFramebuffer(target);
         gl.viewport(0, 0, target.width, target.height);
         gl.clear(gl.COLOR_BUFFER_BIT);
@@ -747,11 +729,7 @@ const PatternWaves = ({
     const resize = () => {
       width = Math.max(1, container.clientWidth);
       height = Math.max(1, container.clientHeight);
-      renderer.dpr = Math.min(
-        window.devicePixelRatio || 1,
-        2,
-        Math.sqrt(PIXEL_BUDGET / (width * height)),
-      );
+      renderer.dpr = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(PIXEL_BUDGET / (width * height)));
       renderer.setSize(width, height);
       buildRipple();
       dirty = true;
@@ -762,8 +740,7 @@ const PatternWaves = ({
       rippleClock = Math.min(rippleClock + dt * RIPPLE_RATE, 4);
       const strength = clamp(s.cursorStrength, 0, 1);
       const moved = Math.hypot(pointer.x - pointer.lastX, pointer.y - pointer.lastY);
-      let impulse =
-        (pointer.inside ? Math.min(moved / 14, 1) * 0.35 * strength : 0) + pointer.burst * strength;
+      let impulse = (pointer.inside ? Math.min(moved / 14, 1) * 0.35 * strength : 0) + pointer.burst * strength;
       pointer.burst = 0;
       rippleUniforms.uTexel.value = [1 / field.width, 1 / field.height];
       rippleUniforms.uSize.value = [width, height];
@@ -825,10 +802,7 @@ const PatternWaves = ({
       const pitchX = patternIndex === 3 ? Math.max(2, Math.round(pitchY / 4)) : pitchY;
       const cols = Math.min(4096, Math.ceil(canvasW / pitchX) + 1);
       const rows = Math.min(4096, Math.ceil(canvasH / pitchY) + 2);
-      const origin = [
-        Math.floor((canvasW - cols * pitchX) / 2),
-        Math.floor((canvasH - rows * pitchY) / 2),
-      ];
+      const origin = [Math.floor((canvasW - cols * pitchX) / 2), Math.floor((canvasH - rows * pitchY) / 2)];
       if (fieldTarget.width !== cols || fieldTarget.height !== rows) {
         dispose(fieldTarget);
         fieldTarget = fieldTargetFor(cols, rows);
@@ -837,10 +811,7 @@ const PatternWaves = ({
       const heading = (s.direction * Math.PI) / 180;
       const lightAngle = ((s.direction + 180 + clamp(s.light, -90, 90)) * Math.PI) / 180;
       const background = s.background;
-      const ink =
-        background[3] > 0.02
-          ? luminance(s.color) < luminance(background)
-          : luminance(s.color) < 0.5;
+      const ink = background[3] > 0.02 ? luminance(s.color) < luminance(background) : luminance(s.color) < 0.5;
 
       fieldUniforms.uSize.value = [width, height];
       fieldUniforms.uDpr.value = dpr;
@@ -869,20 +840,16 @@ const PatternWaves = ({
       markUniforms.uGrid.value = [cols, rows];
       markUniforms.uPattern.value = patternIndex;
       markUniforms.uMarkSize.value = clamp(s.markSize, 0.05, 1);
-      markUniforms.uStroke.value =
-        patternIndex === 3 ? 0.9 * dpr : Math.max(1.1 * dpr, pitchY * 0.08);
+      markUniforms.uStroke.value = patternIndex === 3 ? 0.9 * dpr : Math.max(1.1 * dpr, pitchY * 0.08);
       const tint = ink ? 0 : 1;
       const blend = ink ? 0.35 : 0.55;
       markUniforms.uColor.value = s.color.slice(0, 3);
-      markUniforms.uAccent.value = s.color
-        .slice(0, 3)
-        .map((channel) => channel + (tint - channel) * blend);
+      markUniforms.uAccent.value = s.color.slice(0, 3).map(channel => channel + (tint - channel) * blend);
       markUniforms.uBackground.value = background;
       renderer.render({ scene: markMesh });
       dirty = false;
 
-      if (visible && (moving || introClock < 1 || rippleActive || dirty))
-        raf = requestAnimationFrame(frame);
+      if (visible && (moving || introClock < 1 || rippleActive || dirty)) raf = requestAnimationFrame(frame);
     };
 
     const start = () => {
@@ -931,19 +898,19 @@ const PatternWaves = ({
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      if (e.pointerType === "touch") onPointerLeave();
+      if (e.pointerType === 'touch') onPointerLeave();
     };
 
     const onVisibility = () => {
       if (!document.hidden) start();
     };
 
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown, { passive: true });
-    window.addEventListener("pointerout", onPointerOut, { passive: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("blur", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointerout', onPointerOut, { passive: true });
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('blur', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
@@ -965,12 +932,12 @@ const PatternWaves = ({
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
       intersectionObserver.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerout", onPointerOut);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("blur", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerout', onPointerOut);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('blur', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       wakeRef.current = null;
       if (ripple) {
         dispose(ripple.read);
@@ -978,7 +945,7 @@ const PatternWaves = ({
       }
       dispose(fieldTarget);
       gl.deleteTexture(atlasTexture.texture);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
     };
   }, []);

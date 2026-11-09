@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useMemo, useRef } from "react";
-import "./CRTWarp.css";
+import { useEffect, useMemo, useRef, type CSSProperties } from 'react';
+import './CRTWarp.css';
 
 export interface CRTWarpProps {
   color?: string;
@@ -19,7 +19,7 @@ export interface CRTWarpProps {
   corners?: number;
   scanlineStrength?: number;
   scanlineFrequency?: number;
-  mask?: "aperture" | "shadow" | "slot" | "none";
+  mask?: 'aperture' | 'shadow' | 'slot' | 'none';
   maskStrength?: number;
   bloom?: number;
   bloomRadius?: number;
@@ -54,8 +54,8 @@ interface Target {
   height: number;
 }
 
-const ROOT = "crt-warp-container";
-const CANVAS = "crt-warp-canvas";
+const ROOT = 'crt-warp-container';
+const CANVAS = 'crt-warp-canvas';
 
 const MASKS: Record<string, number> = { none: 0, aperture: 1, shadow: 2, slot: 3 };
 const CELL_ASPECT = 0.56;
@@ -333,15 +333,15 @@ const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 
 let probe: CanvasRenderingContext2D | null = null;
 
 const parseColor = (value: string, fallback: RGB | null): RGB | null => {
-  if (value === "transparent") return null;
-  if (typeof document === "undefined") return fallback;
-  if (!probe) probe = document.createElement("canvas").getContext("2d");
+  if (value === 'transparent') return null;
+  if (typeof document === 'undefined') return fallback;
+  if (!probe) probe = document.createElement('canvas').getContext('2d');
   if (!probe) return fallback;
-  probe.fillStyle = "#000000";
+  probe.fillStyle = '#000000';
   probe.fillStyle = value;
   const text = probe.fillStyle;
-  if (text.startsWith("#")) {
-    const hex = Number.parseInt(text.slice(1), 16);
+  if (text.startsWith('#')) {
+    const hex = parseInt(text.slice(1), 16);
     return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
   }
   const match = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?/.exec(text);
@@ -379,11 +379,7 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
   return shader;
 };
 
-const createProgram = (
-  gl: WebGL2RenderingContext,
-  fragment: string,
-  names: string[],
-): Program | null => {
+const createProgram = (gl: WebGL2RenderingContext, fragment: string, names: string[]): Program | null => {
   const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX);
   const shader = compile(gl, gl.FRAGMENT_SHADER, fragment);
   if (!vertex || !shader) return null;
@@ -391,7 +387,7 @@ const createProgram = (
   if (!program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, shader);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(shader);
@@ -400,7 +396,7 @@ const createProgram = (
     return null;
   }
   const uniforms: Record<string, WebGLUniformLocation | null> = {};
-  names.forEach((name) => {
+  names.forEach(name => {
     uniforms[name] = gl.getUniformLocation(program, name);
   });
   return { program, uniforms };
@@ -429,12 +425,11 @@ const deleteTarget = (gl: WebGL2RenderingContext, target: Target | null) => {
 };
 
 const prefersReduced = () =>
-  typeof window !== "undefined" &&
-  (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
+  typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
 
 export default function CRTWarp({
-  color = "#c755f7",
-  backgroundColor = "#120f17",
+  color = '#c755f7',
+  backgroundColor = '#120f17',
   lightMode = false,
   speed = 0.5,
   variation = 0,
@@ -447,7 +442,7 @@ export default function CRTWarp({
   corners = 0,
   scanlineStrength = 0.6,
   scanlineFrequency = 200,
-  mask = "aperture",
+  mask = 'aperture',
   maskStrength = 0.3,
   bloom = 1.5,
   bloomRadius = 1,
@@ -464,14 +459,11 @@ export default function CRTWarp({
   dpr = 2,
   fps = 60,
   paused = false,
-  className = "",
-  style,
+  className = '',
+  style
 }: CRTWarpProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const ink = useMemo(
-    (): RGB => parseColor(color, [0.78, 0.33, 0.97]) ?? [0.78, 0.33, 0.97],
-    [color],
-  );
+  const ink = useMemo((): RGB => parseColor(color, [0.78, 0.33, 0.97]) ?? [0.78, 0.33, 0.97], [color]);
   const paper = useMemo(() => parseColor(backgroundColor, [0.07, 0.06, 0.09]), [backgroundColor]);
 
   const settings = {
@@ -505,7 +497,7 @@ export default function CRTWarp({
     changeOnClick,
     dpr: Math.max(0.5, dpr),
     fps: Math.max(1, fps),
-    paused,
+    paused
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -513,16 +505,16 @@ export default function CRTWarp({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    const canvas = document.createElement("canvas");
+    const canvas = document.createElement('canvas');
     canvas.className = CANVAS;
     container.appendChild(canvas);
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       antialias: false,
       depth: false,
       stencil: false,
       premultipliedAlpha: true,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!gl) {
       canvas.remove();
@@ -530,51 +522,51 @@ export default function CRTWarp({
     }
 
     const content = createProgram(gl, CONTENT, [
-      "uGrid",
-      "uTime",
-      "uAmplitude",
-      "uFrequency",
-      "uLevels",
-      "uDecay",
-      "uReveal",
-      "uRise",
-      "uSeed",
-      "uPrevious",
+      'uGrid',
+      'uTime',
+      'uAmplitude',
+      'uFrequency',
+      'uLevels',
+      'uDecay',
+      'uReveal',
+      'uRise',
+      'uSeed',
+      'uPrevious'
     ]);
-    const glowSource = createProgram(gl, GLOW, ["uContent", "uSize"]);
-    const blur = createProgram(gl, BLUR, ["uSource", "uSize", "uDirection", "uSigma"]);
+    const glowSource = createProgram(gl, GLOW, ['uContent', 'uSize']);
+    const blur = createProgram(gl, BLUR, ['uSource', 'uSize', 'uDirection', 'uSigma']);
     const display = createProgram(gl, DISPLAY, [
-      "uContent",
-      "uGlow",
-      "uGrid",
-      "uResolution",
-      "uPixel",
-      "uTime",
-      "uColor",
-      "uBackground",
-      "uOpaque",
-      "uLight",
-      "uLines",
-      "uScanline",
-      "uCurve",
-      "uCorners",
-      "uMaskType",
-      "uMask",
-      "uBloom",
-      "uBrightness",
-      "uNoise",
-      "uFlicker",
-      "uInterference",
-      "uVignette",
-      "uShift",
-      "uWarm",
-      "uFocus",
-      "uStatic",
-      "uRoll",
-      "uTear",
-      "uGain",
-      "uMagnet",
-      "uPurity",
+      'uContent',
+      'uGlow',
+      'uGrid',
+      'uResolution',
+      'uPixel',
+      'uTime',
+      'uColor',
+      'uBackground',
+      'uOpaque',
+      'uLight',
+      'uLines',
+      'uScanline',
+      'uCurve',
+      'uCorners',
+      'uMaskType',
+      'uMask',
+      'uBloom',
+      'uBrightness',
+      'uNoise',
+      'uFlicker',
+      'uInterference',
+      'uVignette',
+      'uShift',
+      'uWarm',
+      'uFocus',
+      'uStatic',
+      'uRoll',
+      'uTear',
+      'uGain',
+      'uMagnet',
+      'uPurity'
     ]);
     if (!content || !glowSource || !blur || !display) {
       canvas.remove();
@@ -612,19 +604,15 @@ export default function CRTWarp({
       magnetGoal: 0,
       lost: false,
       quiet: 0,
-      seen: null as typeof settings | null,
+      seen: null as typeof settings | null
     };
 
     const ensureTargets = () => {
       const s = settingsRef.current;
       const cols = s.columns;
-      const rows = clamp(
-        Math.round((cols * CELL_ASPECT * state.height) / Math.max(state.width, 1)),
-        4,
-        300,
-      );
+      const rows = clamp(Math.round((cols * CELL_ASPECT * state.height) / Math.max(state.width, 1)), 4, 300);
       if (cols !== state.grid[0] || rows !== state.grid[1]) {
-        state.cells.forEach((target) => deleteTarget(gl, target));
+        state.cells.forEach(target => deleteTarget(gl, target));
         state.cells = [createTarget(gl, cols, rows), createTarget(gl, cols, rows)];
         state.grid = [cols, rows];
       }
@@ -632,7 +620,7 @@ export default function CRTWarp({
       const gh = Math.max(1, Math.round(state.height / 4));
       const glow = state.glows[0];
       if (!glow || glow.width !== gw || glow.height !== gh) {
-        state.glows.forEach((target) => deleteTarget(gl, target));
+        state.glows.forEach(target => deleteTarget(gl, target));
         state.glows = [createTarget(gl, gw, gh), createTarget(gl, gw, gh)];
       }
     };
@@ -657,11 +645,7 @@ export default function CRTWarp({
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
 
-    const bindTexture = (
-      unit: number,
-      texture: WebGLTexture,
-      location: WebGLUniformLocation | null,
-    ) => {
+    const bindTexture = (unit: number, texture: WebGLTexture, location: WebGLUniformLocation | null) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(location, unit);
@@ -761,13 +745,7 @@ export default function CRTWarp({
       gl.uniform1f(u.uRoll, roll);
       gl.uniform1f(u.uTear, tear);
       gl.uniform1f(u.uGain, gain);
-      gl.uniform4f(
-        u.uMagnet,
-        state.magnet[0],
-        1 - state.magnet[1],
-        state.magnet[4] * s.mouseStrength * 2,
-        0.24,
-      );
+      gl.uniform4f(u.uMagnet, state.magnet[0], 1 - state.magnet[1], state.magnet[4] * s.mouseStrength * 2, 0.24);
       gl.uniform1f(u.uPurity, s.mask > 0 ? 1 : 0);
       draw(null, state.width, state.height);
     };
@@ -801,12 +779,9 @@ export default function CRTWarp({
       const still = s.paused || reduced;
       const settling =
         Math.abs(m[4] - goal) > 0.002 ||
-        (m[4] > 0.002 &&
-          (Math.abs(m[2]) + Math.abs(m[3]) > 0.0005 || Math.abs(m[0] - state.pointer[0]) > 0.0005));
+        (m[4] > 0.002 && (Math.abs(m[2]) + Math.abs(m[3]) > 0.0005 || Math.abs(m[0] - state.pointer[0]) > 0.0005));
       const transient =
-        state.flipAt >= 0 ||
-        (s.intro && !reduced && state.clock - state.introAt < INTRO_SECONDS) ||
-        settling;
+        state.flipAt >= 0 || (s.intro && !reduced && state.clock - state.introAt < INTRO_SECONDS) || settling;
       if (state.seen !== s || transient || !still) state.quiet = 0;
       else state.quiet += 1;
       state.seen = s;
@@ -825,7 +800,7 @@ export default function CRTWarp({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -871,38 +846,36 @@ export default function CRTWarp({
       state.lost = true;
     };
 
-    const visibility = new IntersectionObserver((entries) => {
-      state.visible = entries.some((entry) => entry.isIntersecting);
+    const visibility = new IntersectionObserver(entries => {
+      state.visible = entries.some(entry => entry.isIntersecting);
     });
     visibility.observe(container);
     const sizes = new ResizeObserver(resize);
     sizes.observe(container);
     resize();
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown);
-    document.documentElement.addEventListener("pointerleave", onLeave);
-    canvas.addEventListener("webglcontextlost", onLost);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onDown);
+    document.documentElement.addEventListener('pointerleave', onLeave);
+    canvas.addEventListener('webglcontextlost', onLost);
     state.raf = requestAnimationFrame(tick);
 
     return () => {
       cancelAnimationFrame(state.raf);
       visibility.disconnect();
       sizes.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onDown);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      canvas.removeEventListener("webglcontextlost", onLost);
-      state.cells.forEach((target) => deleteTarget(gl, target));
-      state.glows.forEach((target) => deleteTarget(gl, target));
-      [content, glowSource, blur, display].forEach((item) => gl.deleteProgram(item.program));
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDown);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      state.cells.forEach(target => deleteTarget(gl, target));
+      state.glows.forEach(target => deleteTarget(gl, target));
+      [content, glowSource, blur, display].forEach(item => gl.deleteProgram(item.program));
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       canvas.remove();
     };
   }, []);
 
-  return (
-    <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(" ")} style={style} />
-  );
+  return <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(' ')} style={style} />;
 }

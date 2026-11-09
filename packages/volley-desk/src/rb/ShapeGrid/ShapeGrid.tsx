@@ -1,15 +1,15 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from 'react';
 
-import "./ShapeGrid.css";
+import './ShapeGrid.css';
 
 export interface ShapeGridProps {
-  shape?: "square" | "tile" | "hexagon" | "triangle" | "diamond" | "circle" | "cross" | "dot";
+  shape?: 'square' | 'tile' | 'hexagon' | 'triangle' | 'diamond' | 'circle' | 'cross' | 'dot';
   cellSize?: number;
   lineWidth?: number;
-  direction?: "diagonal" | "up" | "down" | "left" | "right" | "none";
+  direction?: 'diagonal' | 'up' | 'down' | 'left' | 'right' | 'none';
   speed?: number;
   lineColor?: string;
   hoverColor?: string;
@@ -89,14 +89,14 @@ interface Engine {
   redraw: () => void;
 }
 
-const SHAPES = ["square", "tile", "hexagon", "triangle", "diamond", "circle", "cross", "dot"];
+const SHAPES = ['square', 'tile', 'hexagon', 'triangle', 'diamond', 'circle', 'cross', 'dot'];
 const DIRECTIONS: Record<string, number[]> = {
   right: [1, 0],
   left: [-1, 0],
   up: [0, -1],
   down: [0, 1],
   diagonal: [Math.SQRT1_2, -Math.SQRT1_2],
-  none: [0, 0],
+  none: [0, 0]
 };
 const SQRT3 = Math.sqrt(3);
 const OFFSET = 32768;
@@ -120,33 +120,28 @@ const hash = (i: number, j: number) => {
 const keyOf = (i: number, j: number) => (i + OFFSET) * 65536 + (j + OFFSET);
 
 const fadeMask = (amount: number) => {
-  if (amount <= 0) return "none";
+  if (amount <= 0) return 'none';
   const edge = amount * 26;
   const stops: string[] = [];
   for (let k = 0; k <= 8; k++) {
     const t = k / 8;
     stops.push(`rgba(0, 0, 0, ${smootherstep(t).toFixed(3)}) ${(t * edge).toFixed(2)}%`);
   }
-  const inner = stops.join(", ");
+  const inner = stops.join(', ');
   const outer = [...stops]
     .reverse()
-    .map((stop) =>
-      stop.replace(
-        / ([\d.]+)%$/,
-        (_: string, value: string) => ` ${(100 - Number.parseFloat(value)).toFixed(2)}%`,
-      ),
-    )
-    .join(", ");
+    .map(stop => stop.replace(/ ([\d.]+)%$/, (_: string, value: string) => ` ${(100 - parseFloat(value)).toFixed(2)}%`))
+    .join(', ');
   const axis = (direction: string) => `linear-gradient(${direction}, ${inner}, ${outer})`;
-  return `${axis("to right")}, ${axis("to bottom")}`;
+  return `${axis('to right')}, ${axis('to bottom')}`;
 };
 
 const lightnessOf = (color: string) => {
-  let hex = String(color).trim().replace(/^#/, "");
-  if (hex.length === 3 || hex.length === 4) hex = hex.replace(/./g, "$&$&");
+  let hex = String(color).trim().replace(/^#/, '');
+  if (hex.length === 3 || hex.length === 4) hex = hex.replace(/./g, '$&$&');
   hex = hex.slice(0, 6);
   if (!/^[0-9a-f]{6}$/i.test(hex)) return 0.6;
-  const value = Number.parseInt(hex, 16);
+  const value = parseInt(hex, 16);
   const channels = [value >> 16, (value >> 8) & 255, value & 255];
   return (Math.max(...channels) + Math.min(...channels)) / 510;
 };
@@ -155,7 +150,7 @@ const tint = (hue: number, lightness: number) =>
   `hsl(${(((hue % 360) + 360) % 360).toFixed(1)}, 90%, ${(lightness * 100).toFixed(1)}%)`;
 
 const multiply = (a: number[], b: number[]) =>
-  [0, 1, 2, 3, 4, 5, 6, 7, 8].map((k) => {
+  [0, 1, 2, 3, 4, 5, 6, 7, 8].map(k => {
     const r = k - (k % 3);
     const c = k % 3;
     return a[r] * b[c] + a[r + 1] * b[c + 3] + a[r + 2] * b[c + 6];
@@ -167,17 +162,9 @@ const invert = (m: number[]) => {
   const B = f * g - d * i;
   const C = d * h - e * g;
   const det = a * A + b * B + c * C;
-  return [
-    A,
-    c * h - b * i,
-    b * f - c * e,
-    B,
-    a * i - c * g,
-    c * d - a * f,
-    C,
-    b * g - a * h,
-    a * e - b * d,
-  ].map((value) => value / det);
+  return [A, c * h - b * i, b * f - c * e, B, a * i - c * g, c * d - a * f, C, b * g - a * h, a * e - b * d].map(
+    value => value / det
+  );
 };
 
 const project = (m: number[], x: number, y: number) => {
@@ -191,19 +178,13 @@ const flatView = (width: number, height: number): View => ({
   width,
   height,
   inverse: null,
-  transform: "none",
+  transform: 'none',
   mist: null,
   far: FAR,
-  reach: Math.hypot(width, height) / 2,
+  reach: Math.hypot(width, height) / 2
 });
 
-const viewFor = (
-  tiltX: number,
-  tiltY: number,
-  width: number,
-  height: number,
-  cellSize: number,
-): View => {
+const viewFor = (tiltX: number, tiltY: number, width: number, height: number, cellSize: number): View => {
   if (!tiltX && !tiltY) return flatView(width, height);
   const ax = (tiltX * Math.PI) / 180;
   const ay = (tiltY * Math.PI) / 180;
@@ -219,19 +200,9 @@ const viewFor = (
     0,
     (Math.sin(ay) * Math.cos(ax)) / depth,
     -Math.sin(ax) / depth,
-    1,
+    1
   ];
-  const forward = multiply(multiply([1, 0, cx, 0, 1, cy, 0, 0, 1], tilt), [
-    1,
-    0,
-    -cx,
-    0,
-    1,
-    -cy,
-    0,
-    0,
-    1,
-  ]);
+  const forward = multiply(multiply([1, 0, cx, 0, 1, cy, 0, 0, 1], tilt), [1, 0, -cx, 0, 1, -cy, 0, 0, 1]);
   const inverse = invert(forward);
   const facing = Math.cos(ax) * Math.cos(ay);
   const far = clamp(Math.sqrt((facing * cellSize) / 5), 1.15, FAR);
@@ -241,12 +212,12 @@ const viewFor = (
     [0, 0],
     [width, 0],
     [width, height],
-    [0, height],
+    [0, height]
   ];
-  let x0 = Number.POSITIVE_INFINITY;
-  let y0 = Number.POSITIVE_INFINITY;
-  let x1 = Number.NEGATIVE_INFINITY;
-  let y1 = Number.NEGATIVE_INFINITY;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
   const include = (x: number, y: number) => {
     const [px, py] = project(inverse, x, y);
     x0 = Math.min(x0, px);
@@ -270,7 +241,7 @@ const viewFor = (
   x1 = Math.ceil(x1 / 16) * 16;
   y1 = Math.ceil(y1 / 16) * 16;
   const m = multiply(forward, [1, 0, x0, 0, 1, y0, 0, 0, 1]);
-  const transform = `matrix3d(${[m[0], m[3], 0, m[6], m[1], m[4], 0, m[7], 0, 0, 1, 0, m[2], m[5], 0, m[8]].join(", ")})`;
+  const transform = `matrix3d(${[m[0], m[3], 0, m[6], m[1], m[4], 0, m[7], 0, 0, 1, 0, m[2], m[5], 0, m[8]].join(', ')})`;
   const gx = forward[6];
   const gy = forward[7];
   const slope = Math.hypot(gx, gy);
@@ -280,24 +251,24 @@ const viewFor = (
           cx + (gx / slope) * ((near - 1) / slope),
           cy + (gy / slope) * ((near - 1) / slope),
           cx + (gx / slope) * ((far - 1) / slope),
-          cy + (gy / slope) * ((far - 1) / slope),
+          cy + (gy / slope) * ((far - 1) / slope)
         ]
       : null;
   const reach = Math.max(
     Math.hypot(x0 - cx, y0 - cy),
     Math.hypot(x1 - cx, y0 - cy),
     Math.hypot(x1 - cx, y1 - cy),
-    Math.hypot(x0 - cx, y1 - cy),
+    Math.hypot(x0 - cx, y1 - cy)
   );
   return { x0, y0, width: x1 - x0, height: y1 - y0, inverse, transform, mist, far, reach };
 };
 
 const layoutFor = (shape: string, size: number): Layout => {
-  if (shape === "hexagon") {
+  if (shape === 'hexagon') {
     const radius = size / SQRT3;
     return { stepX: radius * 1.5, stepY: size, radius };
   }
-  if (shape === "triangle") {
+  if (shape === 'triangle') {
     const side = (size * 2) / SQRT3;
     return { stepX: side / 2, stepY: size, side };
   }
@@ -306,12 +277,12 @@ const layoutFor = (shape: string, size: number): Layout => {
 
 const centerOf = (shape: string, layout: Layout, i: number, j: number): number[] => {
   const { stepX, stepY } = layout;
-  if (shape === "hexagon") return [i * stepX, j * stepY + (Math.abs(i) % 2 === 1 ? stepY / 2 : 0)];
-  if (shape === "triangle") {
+  if (shape === 'hexagon') return [i * stepX, j * stepY + (Math.abs(i) % 2 === 1 ? stepY / 2 : 0)];
+  if (shape === 'triangle') {
     const up = (((i + j) % 2) + 2) % 2 === 0;
     return [i * stepX, j * stepY + (up ? stepY * (2 / 3) : stepY / 3)];
   }
-  if (shape === "cross" || shape === "dot") return [i * stepX, j * stepY];
+  if (shape === 'cross' || shape === 'dot') return [i * stepX, j * stepY];
   return [(i + 0.5) * stepX, (j + 0.5) * stepY];
 };
 
@@ -324,9 +295,9 @@ const traceCell = (
   j: number,
   x: number,
   y: number,
-  inset: number,
+  inset: number
 ) => {
-  if (shape === "hexagon") {
+  if (shape === 'hexagon') {
     const r = (layout.radius ?? 0) - inset;
     for (let k = 0; k < 6; k++) {
       const angle = (Math.PI / 3) * k;
@@ -336,7 +307,7 @@ const traceCell = (
       else ctx.lineTo(px, py);
     }
     ctx.closePath();
-  } else if (shape === "triangle") {
+  } else if (shape === 'triangle') {
     const up = (((i + j) % 2) + 2) % 2 === 0;
     const half = (layout.side ?? 0) / 2 - inset * 1.7;
     const height = size - inset * 2.6;
@@ -346,27 +317,27 @@ const traceCell = (
     ctx.lineTo(x + half, base);
     ctx.lineTo(x - half, base);
     ctx.closePath();
-  } else if (shape === "diamond") {
+  } else if (shape === 'diamond') {
     const r = size / 2 - inset;
     ctx.moveTo(x, y - r);
     ctx.lineTo(x + r, y);
     ctx.lineTo(x, y + r);
     ctx.lineTo(x - r, y);
     ctx.closePath();
-  } else if (shape === "circle") {
+  } else if (shape === 'circle') {
     ctx.moveTo(x + size / 2 - inset, y);
     ctx.arc(x, y, Math.max(0.5, size / 2 - inset), 0, Math.PI * 2);
-  } else if (shape === "tile") {
+  } else if (shape === 'tile') {
     const half = size / 2 - Math.max(inset, size * 0.06);
     const r = Math.min(half, size * 0.22);
     ctx.roundRect(x - half, y - half, half * 2, half * 2, r);
-  } else if (shape === "cross") {
+  } else if (shape === 'cross') {
     const arm = size * 0.16 + inset;
     ctx.moveTo(x - arm, y);
     ctx.lineTo(x + arm, y);
     ctx.moveTo(x, y - arm);
     ctx.lineTo(x, y + arm);
-  } else if (shape === "dot") {
+  } else if (shape === 'dot') {
     const r = size * 0.05 + inset;
     ctx.moveTo(x + r, y);
     ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -377,13 +348,13 @@ const traceCell = (
 };
 
 export default function ShapeGrid({
-  shape = "square",
+  shape = 'square',
   cellSize = 40,
   lineWidth = 1,
-  direction = "diagonal",
+  direction = 'diagonal',
   speed = 0.5,
-  lineColor = "#2a2734",
-  hoverColor = "#ffffff",
+  lineColor = '#2a2734',
+  hoverColor = '#ffffff',
   hoverFillColor,
   fillOpacity = 0.15,
   rainbow = false,
@@ -397,11 +368,11 @@ export default function ShapeGrid({
   clickCascade = true,
   intro = true,
   opacity = 1,
-  backgroundColor = "transparent",
+  backgroundColor = 'transparent',
   paused = false,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: ShapeGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -409,10 +380,10 @@ export default function ShapeGrid({
   const settingsRef = useRef<Settings>(null as unknown as Settings);
 
   settingsRef.current = {
-    shape: SHAPES.includes(shape) ? shape : "square",
+    shape: SHAPES.includes(shape) ? shape : 'square',
     cellSize: Math.max(8, cellSize),
     lineWidth: Math.max(0.25, lineWidth),
-    direction: DIRECTIONS[direction] ? direction : "diagonal",
+    direction: DIRECTIONS[direction] ? direction : 'diagonal',
     speed: Math.max(0, speed),
     lineColor,
     hoverColor,
@@ -429,16 +400,16 @@ export default function ShapeGrid({
     clickCascade,
     intro,
     paused,
-    dpr,
+    dpr
   };
 
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
     if (!container || !canvas) return undefined;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext('2d');
     if (!ctx) return undefined;
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
     const state = {
       alive: true,
@@ -465,7 +436,7 @@ export default function ShapeGrid({
       lit: new Map<number, number>(),
       hues: new Map<number, number>(),
       cascades: [] as Cascade[],
-      cascadeHue: 0,
+      cascadeHue: 0
     };
 
     const resize = () => {
@@ -507,7 +478,7 @@ export default function ShapeGrid({
         Math.floor((state.offsetX + view.x0 - margin) / stepX) - 1,
         Math.ceil((state.offsetX + view.x0 + view.width + margin) / stepX) + 1,
         Math.floor((state.offsetY + view.y0 - margin) / stepY) - 1,
-        Math.ceil((state.offsetY + view.y0 + view.height + margin) / stepY) + 1,
+        Math.ceil((state.offsetY + view.y0 + view.height + margin) / stepY) + 1
       ];
     };
 
@@ -515,7 +486,7 @@ export default function ShapeGrid({
       const { stepX, stepY } = layout;
       const ci = Math.round(wx / stepX);
       const cj = Math.round(wy / stepY);
-      let best = Number.POSITIVE_INFINITY;
+      let best = Infinity;
       let cell = [ci, cj];
       for (let i = ci - 2; i <= ci + 2; i++) {
         for (let j = cj - 2; j <= cj + 2; j++) {
@@ -570,8 +541,7 @@ export default function ShapeGrid({
         const ring = Math.round(Math.hypot(x - cascade.x, y - cascade.y) / s.cellSize);
         const local = state.time - cascade.time - ring * 0.055;
         if (local < 0) continue;
-        const pulse =
-          Math.exp(-((local / 0.085) ** 2)) * cascade.power * Math.max(0, 1 - ring / cascade.reach);
+        const pulse = Math.exp(-((local / 0.085) ** 2)) * cascade.power * Math.max(0, 1 - ring / cascade.reach);
         if (pulse > value) {
           value = pulse;
           state.cascadeHue = cascade.hue + ring * 16;
@@ -585,7 +555,7 @@ export default function ShapeGrid({
       const { view, ratio } = state;
       const layout = layoutFor(s.shape, s.cellSize);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalCompositeOperation = "source-over";
+      ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.setTransform(ratio, 0, 0, ratio, -view.x0 * ratio, -view.y0 * ratio);
@@ -596,22 +566,21 @@ export default function ShapeGrid({
       const bottom = view.y0 + view.height;
       const size = s.cellSize;
       const [i0, i1, j0, j1] = range(layout, size);
-      const markers = s.shape === "cross" || s.shape === "dot";
+      const markers = s.shape === 'cross' || s.shape === 'dot';
       const elapsed = state.time - state.startedAt;
-      const introRadius =
-        s.intro && !reduce ? elapsed * view.reach * 1.8 : Number.POSITIVE_INFINITY;
+      const introRadius = s.intro && !reduce ? elapsed * view.reach * 1.8 : Infinity;
       const originX = state.width / 2;
       const originY = state.height / 2;
       const centerX = originX + state.offsetX;
       const centerY = originY + state.offsetY;
 
       ctx.lineWidth = s.lineWidth;
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.strokeStyle = s.lineColor;
       ctx.fillStyle = s.lineColor;
       ctx.beginPath();
-      if (s.shape === "square") {
+      if (s.shape === 'square') {
         for (let i = i0; i <= i1; i++) {
           const x = i * layout.stepX - state.offsetX;
           ctx.moveTo(x, top - size);
@@ -630,25 +599,18 @@ export default function ShapeGrid({
           }
         }
       }
-      if (s.shape === "dot") ctx.fill();
+      if (s.shape === 'dot') ctx.fill();
       else ctx.stroke();
 
-      if (introRadius !== Number.POSITIVE_INFINITY) {
-        const gradient = ctx.createRadialGradient(
-          originX,
-          originY,
-          0,
-          originX,
-          originY,
-          Math.max(1, introRadius),
-        );
-        gradient.addColorStop(0, "rgba(0, 0, 0, 1)");
-        gradient.addColorStop(0.82, "rgba(0, 0, 0, 1)");
-        gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-        ctx.globalCompositeOperation = "destination-in";
+      if (introRadius !== Infinity) {
+        const gradient = ctx.createRadialGradient(originX, originY, 0, originX, originY, Math.max(1, introRadius));
+        gradient.addColorStop(0, 'rgba(0, 0, 0, 1)');
+        gradient.addColorStop(0.82, 'rgba(0, 0, 0, 1)');
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.globalCompositeOperation = 'destination-in';
         ctx.fillStyle = gradient;
         ctx.fillRect(left, top, view.width, view.height);
-        ctx.globalCompositeOperation = "source-over";
+        ctx.globalCompositeOperation = 'source-over';
       }
 
       const glowing = s.glow > 0;
@@ -674,7 +636,7 @@ export default function ShapeGrid({
               hue = seed * 360;
             }
           }
-          if (introRadius !== Number.POSITIVE_INFINITY) {
+          if (introRadius !== Infinity) {
             const front = introRadius - Math.hypot(cx - centerX, cy - centerY);
             if (front < 0) continue;
             const wave = Math.exp(-((front / (size * 1.4)) ** 2)) * 0.85;
@@ -688,24 +650,14 @@ export default function ShapeGrid({
           const x = cx - state.offsetX;
           const y = cy - state.offsetY;
           ctx.beginPath();
-          traceCell(
-            ctx,
-            s.shape,
-            layout,
-            size,
-            i,
-            j,
-            x,
-            y,
-            markers ? value * size * 0.08 : s.lineWidth * 0.5,
-          );
+          traceCell(ctx, s.shape, layout, size, i, j, x, y, markers ? value * size * 0.08 : s.lineWidth * 0.5);
           if (markers) {
             ctx.globalAlpha = Math.min(1, value);
             if (glowing) {
               ctx.shadowColor = color;
               ctx.shadowBlur = s.glow * 14 * value;
             }
-            if (s.shape === "dot") {
+            if (s.shape === 'dot') {
               ctx.fillStyle = color;
               ctx.fill();
             } else {
@@ -741,10 +693,10 @@ export default function ShapeGrid({
           const t = k / 8;
           gradient.addColorStop(t, `rgba(0, 0, 0, ${(1 - smootherstep(t)).toFixed(3)})`);
         }
-        ctx.globalCompositeOperation = "destination-in";
+        ctx.globalCompositeOperation = 'destination-in';
         ctx.fillStyle = gradient;
         ctx.fillRect(left, top, view.width, view.height);
-        ctx.globalCompositeOperation = "source-over";
+        ctx.globalCompositeOperation = 'source-over';
       }
     };
 
@@ -775,14 +727,12 @@ export default function ShapeGrid({
         state.spotX += state.spotVX * dt;
         state.spotY += state.spotVY * dt;
         illuminate(s, layoutFor(s.shape, s.cellSize), dt);
-        state.cascades = state.cascades.filter(
-          (cascade) => state.time - cascade.time < cascade.reach * 0.055 + 0.4,
-        );
+        state.cascades = state.cascades.filter(cascade => state.time - cascade.time < cascade.reach * 0.055 + 0.4);
       }
       draw();
       const settled =
         s.paused ||
-        (s.speed === 0 || s.direction === "none" || reduce
+        (s.speed === 0 || s.direction === 'none' || reduce
           ? state.lit.size === 0 &&
             state.cascades.length === 0 &&
             s.twinkle === 0 &&
@@ -836,7 +786,7 @@ export default function ShapeGrid({
         time: state.time,
         power: 1,
         reach: Math.hypot(state.view.width, state.view.height) / s.cellSize,
-        hue: state.time * 120,
+        hue: state.time * 120
       });
       if (state.cascades.length > 6) state.cascades.shift();
       wake();
@@ -849,23 +799,23 @@ export default function ShapeGrid({
     });
     resizeObserver.observe(container);
 
-    const visibility = new IntersectionObserver((entries) => {
-      state.visible = entries.some((entry) => entry.isIntersecting);
+    const visibility = new IntersectionObserver(entries => {
+      state.visible = entries.some(entry => entry.isIntersecting);
       if (state.visible) wake();
     });
     visibility.observe(container);
 
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onLeave);
-    window.addEventListener("blur", onLeave);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onDown, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onLeave);
+    window.addEventListener('blur', onLeave);
 
     engineRef.current = {
       redraw: () => {
         resize();
         draw();
         wake();
-      },
+      }
     };
 
     resize();
@@ -876,10 +826,10 @@ export default function ShapeGrid({
       cancelAnimationFrame(state.raf);
       resizeObserver.disconnect();
       visibility.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onDown);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
-      window.removeEventListener("blur", onLeave);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDown);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
+      window.removeEventListener('blur', onLeave);
       engineRef.current = null;
     };
   }, []);
@@ -897,15 +847,10 @@ export default function ShapeGrid({
       style={{
         opacity: clamp(opacity, 0, 1),
         backgroundColor,
-        ...(mask === "none"
+        ...(mask === 'none'
           ? null
-          : {
-              maskImage: mask,
-              WebkitMaskImage: mask,
-              maskComposite: "intersect",
-              WebkitMaskComposite: "source-in",
-            }),
-        ...style,
+          : { maskImage: mask, WebkitMaskImage: mask, maskComposite: 'intersect', WebkitMaskComposite: 'source-in' }),
+        ...style
       }}
     >
       <canvas ref={canvasRef} className="shape-grid-canvas" />

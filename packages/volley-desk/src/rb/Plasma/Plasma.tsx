@@ -1,11 +1,11 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 
-import "./Plasma.css";
+import './Plasma.css';
 
-export type PlasmaDirection = "forward" | "reverse" | "pingpong";
+export type PlasmaDirection = 'forward' | 'reverse' | 'pingpong';
 
 export interface PlasmaProps extends HTMLAttributes<HTMLDivElement> {
   color?: string;
@@ -191,7 +191,7 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
   if (!vertex || !fragment || !program) return null;
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
-  gl.bindAttribLocation(program, 0, "aPosition");
+  gl.bindAttribLocation(program, 0, 'aPosition');
   gl.linkProgram(program);
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
@@ -209,9 +209,9 @@ const link = (gl: WebGL2RenderingContext, fragmentSource: string): Program | nul
 };
 
 export const Plasma = ({
-  color = "#a6a3b8",
+  color = '#a6a3b8',
   speed = 1,
-  direction = "forward",
+  direction = 'forward',
   scale = 1,
   twist = 1,
   wave = 1,
@@ -227,7 +227,7 @@ export const Plasma = ({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
+  className = '',
   ...rest
 }: PlasmaProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -251,7 +251,7 @@ export const Plasma = ({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -259,17 +259,17 @@ export const Plasma = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+    const floatTargets = !!gl.getExtension('EXT_color_buffer_float');
     const volumeProgram = link(gl, VOLUME);
     const compositeProgram = link(gl, COMPOSITE);
     if (!volumeProgram || !compositeProgram) return undefined;
@@ -304,8 +304,8 @@ export const Plasma = ({
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
     };
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colorCache = new Map<string, number[]>();
     const toLinear = (value: string): number[] => {
       const cached = colorCache.get(value);
@@ -313,11 +313,11 @@ export const Plasma = ({
       let rgb = [1, 1, 1];
       if (probe) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#ffffff";
+        probe.fillStyle = '#ffffff';
         probe.fillStyle = value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
-        rgb = [r, g, b].map((v) => Math.pow(v / 255, 2.2));
+        rgb = [r, g, b].map(v => Math.pow(v / 255, 2.2));
       }
       colorCache.set(value, rgb);
       return rgb;
@@ -334,7 +334,7 @@ export const Plasma = ({
       pitchVelocity: 0,
       heat: 0,
       heatX: 0,
-      heatY: 0,
+      heatY: 0
     };
     let raf = 0;
     let last = 0;
@@ -342,8 +342,8 @@ export const Plasma = ({
 
     const timeOf = (s: Settings) => {
       const t = state.clock * 0.4;
-      if (s.direction === "reverse") return -t;
-      if (s.direction !== "pingpong") return t;
+      if (s.direction === 'reverse') return -t;
+      if (s.direction !== 'pingpong') return t;
       const span = 10;
       const segment = (state.clock % span) / span;
       const eased = segment * segment * (3 - 2 * segment);
@@ -375,10 +375,10 @@ export const Plasma = ({
       const composite = programs.composite;
       const c = composite.uniforms;
       const base = toLinear(s.color);
-      const highlight = base.map((v) => v + (1 - v) * 0.85);
+      const highlight = base.map(v => v + (1 - v) * 0.85);
       const tone = 0.2126 * base[0] + 0.7152 * base[1] + 0.0722 * base[2];
       const depth = Math.min(1, 0.16 / Math.max(tone, 0.001));
-      const ink = base.map((v) => Math.pow(Math.min(1, v * depth), 1 / 2.2));
+      const ink = base.map(v => Math.pow(Math.min(1, v * depth), 1 / 2.2));
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(composite.program);
@@ -398,7 +398,7 @@ export const Plasma = ({
         c.uHeat,
         (state.heatX * canvas.width) / view.width,
         ((view.height - state.heatY) * canvas.height) / view.height,
-        state.heat,
+        state.heat
       );
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -452,8 +452,7 @@ export const Plasma = ({
       canvas.width = Math.max(1, Math.round(width * ratio));
       canvas.height = Math.max(1, Math.round(height * ratio));
       let scale = s.quality;
-      if (width * height * scale * scale > MAX_VOLUME_PIXELS)
-        scale = Math.sqrt(MAX_VOLUME_PIXELS / (width * height));
+      if (width * height * scale * scale > MAX_VOLUME_PIXELS) scale = Math.sqrt(MAX_VOLUME_PIXELS / (width * height));
       view.volumeWidth = Math.max(1, Math.round(width * scale));
       view.volumeHeight = Math.max(1, Math.round(height * scale));
       if (!raf) render();
@@ -464,8 +463,7 @@ export const Plasma = ({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.inside =
-        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       wake();
     };
 
@@ -481,17 +479,17 @@ export const Plasma = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     let lastQuality = settingsRef.current.quality;
@@ -513,16 +511,16 @@ export const Plasma = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteTexture(texture);
       gl.deleteFramebuffer(framebuffer);
       gl.deleteProgram(programs.volume.program);
       gl.deleteProgram(programs.composite.program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -531,11 +529,7 @@ export const Plasma = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`plasma-container${className ? ` ${className}` : ""}`}
-      {...rest}
-    >
+    <div ref={containerRef} className={`plasma-container${className ? ` ${className}` : ''}`} {...rest}>
       <canvas ref={canvasRef} className="plasma-canvas" aria-hidden="true" />
     </div>
   );

@@ -1,9 +1,9 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type HTMLAttributes, useEffect, useRef } from "react";
+import { useEffect, useRef, type HTMLAttributes } from 'react';
 
-import "./SlicedWaves.css";
+import './SlicedWaves.css';
 
 export interface SlicedWavesProps extends HTMLAttributes<HTMLDivElement> {
   color1?: string;
@@ -225,12 +225,7 @@ const compile = (gl: WebGL2RenderingContext, type: number, source: string) => {
   return null;
 };
 
-const link = (
-  gl: WebGL2RenderingContext,
-  vertexSource: string,
-  fragmentSource: string,
-  attributes: string[],
-) => {
+const link = (gl: WebGL2RenderingContext, vertexSource: string, fragmentSource: string, attributes: string[]) => {
   const vertex = compile(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compile(gl, gl.FRAGMENT_SHADER, fragmentSource);
   const program = gl.createProgram();
@@ -253,9 +248,9 @@ const locate = (gl: WebGL2RenderingContext, program: WebGLProgram, names: string
 };
 
 const SlicedWaves = ({
-  color1 = "#ffd9a8",
-  color2 = "#ff5fa2",
-  color3 = "#5b8cff",
+  color1 = '#ffd9a8',
+  color2 = '#ff5fa2',
+  color3 = '#5b8cff',
   ribbons = 3,
   spacing = 28,
   barWidth = 0.5,
@@ -280,7 +275,7 @@ const SlicedWaves = ({
   lightMode = false,
   paused = false,
   dpr,
-  className = "",
+  className = '',
   ...rest
 }: SlicedWavesProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -313,7 +308,7 @@ const SlicedWaves = ({
     opacity: clamp(opacity, 0, 1),
     lightMode,
     paused,
-    dpr,
+    dpr
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -321,39 +316,31 @@ const SlicedWaves = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: false,
-      stencil: false,
+      stencil: false
     });
     if (!container || !canvas || !gl) return undefined;
 
-    const floatTarget = !!gl.getExtension("EXT_color_buffer_float");
+    const floatTarget = !!gl.getExtension('EXT_color_buffer_float');
     const lightScale = floatTarget ? 1 : 0.25;
-    const barProgram = link(gl, BAR_VERTEX, BAR_FRAGMENT, ["aCorner", "aShape", "aTop", "aBottom"]);
-    const compositeProgram = link(gl, QUAD_VERTEX, COMPOSITE, ["aCorner"]);
+    const barProgram = link(gl, BAR_VERTEX, BAR_FRAGMENT, ['aCorner', 'aShape', 'aTop', 'aBottom']);
+    const compositeProgram = link(gl, QUAD_VERTEX, COMPOSITE, ['aCorner']);
     if (!barProgram || !compositeProgram) return undefined;
-    const bar = locate(gl, barProgram, [
-      "uView",
-      "uAngle",
-      "uGlow",
-      "uSlices",
-      "uBase",
-      "uHalfBar",
-      "uScale",
-    ]);
+    const bar = locate(gl, barProgram, ['uView', 'uAngle', 'uGlow', 'uSlices', 'uBase', 'uHalfBar', 'uScale']);
     const composite = locate(gl, compositeProgram, [
-      "uLight",
-      "uResolution",
-      "uScale",
-      "uExposure",
-      "uGrain",
-      "uTime",
-      "uFade",
-      "uOpacity",
-      "uLightMode",
+      'uLight',
+      'uResolution',
+      'uScale',
+      'uExposure',
+      'uGrain',
+      'uTime',
+      'uFade',
+      'uOpacity',
+      'uLightMode'
     ]);
 
     const cornerBuffer = gl.createBuffer();
@@ -388,8 +375,8 @@ const SlicedWaves = ({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const framebuffer = gl.createFramebuffer();
 
-    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const colorCache = new Map<string, number[]>();
     let instances = new Float32Array(0);
     const pointer = { x: 0, y: 0, inside: false };
@@ -403,7 +390,7 @@ const SlicedWaves = ({
       focus: DISTANCE,
       focusVelocity: 0,
       lift: 0,
-      liftX: 0,
+      liftX: 0
     };
     let raf = 0;
     let last = 0;
@@ -416,11 +403,11 @@ const SlicedWaves = ({
       let rgb = [1, 1, 1];
       if (probe && value) {
         probe.clearRect(0, 0, 1, 1);
-        probe.fillStyle = "#000000";
+        probe.fillStyle = '#000000';
         probe.fillStyle = /^[0-9a-f]{3,8}$/i.test(value) ? `#${value}` : value;
         probe.fillRect(0, 0, 1, 1);
         const [r, g, b] = probe.getImageData(0, 0, 1, 1).data;
-        rgb = [r, g, b].map((v) => Math.pow(v / 255, 2.2));
+        rgb = [r, g, b].map(v => Math.pow(v / 255, 2.2));
       }
       colorCache.set(value, rgb);
       return rgb;
@@ -443,29 +430,9 @@ const SlicedWaves = ({
       state.targetHeight = canvas.height;
       gl.bindTexture(gl.TEXTURE_2D, lightTexture);
       if (floatTarget) {
-        gl.texImage2D(
-          gl.TEXTURE_2D,
-          0,
-          gl.RGBA16F,
-          canvas.width,
-          canvas.height,
-          0,
-          gl.RGBA,
-          gl.HALF_FLOAT,
-          null,
-        );
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, canvas.width, canvas.height, 0, gl.RGBA, gl.HALF_FLOAT, null);
       } else {
-        gl.texImage2D(
-          gl.TEXTURE_2D,
-          0,
-          gl.RGBA,
-          canvas.width,
-          canvas.height,
-          0,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          null,
-        );
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       }
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lightTexture, 0);
@@ -519,10 +486,8 @@ const SlicedWaves = ({
       for (const b of bars) {
         const hw = halfBar * b.scale;
         const across = b.sx / Math.max(w, 1);
-        const lift =
-          state.lift * Math.exp(-Math.pow((b.sx - state.liftX) / Math.max(w * 0.12, 60), 2));
-        const blurPx =
-          (0.5 + s.blur * 0.6 + blurScale * Math.abs(focus / b.Z - 1)) * (s.lightMode ? 0.55 : 1);
+        const lift = state.lift * Math.exp(-Math.pow((b.sx - state.liftX) / Math.max(w * 0.12, 60), 2));
+        const blurPx = (0.5 + s.blur * 0.6 + blurScale * Math.abs(focus / b.Z - 1)) * (s.lightMode ? 0.55 : 1);
         for (let r = 0; r < s.ribbons; r++) {
           const offset = (r - (s.ribbons - 1) / 2) * separation;
           const wave =
@@ -545,9 +510,7 @@ const SlicedWaves = ({
           instances[o + 7] = blurPx;
           writePalette(palette, tone + 0.22, o + 8);
           instances[o + 11] =
-            (0.75 + 0.25 * noise(b.i * 0.9 + r * 7.7 - t * 1.2)) *
-            (1 + lift * 0.6) *
-            (0.4 + 0.6 * eased);
+            (0.75 + 0.25 * noise(b.i * 0.9 + r * 7.7 - t * 1.2)) * (1 + lift * 0.6) * (0.4 + 0.6 * eased);
           count++;
         }
       }
@@ -665,8 +628,7 @@ const SlicedWaves = ({
       const rect = container.getBoundingClientRect();
       pointer.x = event.clientX - rect.left;
       pointer.y = event.clientY - rect.top;
-      pointer.inside =
-        pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
+      pointer.inside = pointer.x >= 0 && pointer.y >= 0 && pointer.x <= rect.width && pointer.y <= rect.height;
       wake();
     };
 
@@ -682,17 +644,17 @@ const SlicedWaves = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) {
         last = 0;
         wake();
       }
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
 
     wakeRef.current = () => {
@@ -706,9 +668,9 @@ const SlicedWaves = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteFramebuffer(framebuffer);
       gl.deleteTexture(lightTexture);
       gl.deleteBuffer(cornerBuffer);
@@ -726,11 +688,7 @@ const SlicedWaves = ({
   });
 
   return (
-    <div
-      ref={containerRef}
-      className={`sliced-waves-container${className ? ` ${className}` : ""}`}
-      {...rest}
-    >
+    <div ref={containerRef} className={`sliced-waves-container${className ? ` ${className}` : ''}`} {...rest}>
       <canvas ref={canvasRef} className="sliced-waves-canvas" aria-hidden="true" />
     </div>
   );

@@ -1,8 +1,8 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useMemo, useRef } from "react";
-import "./GradientWaves.css";
+import { useEffect, useMemo, useRef, type CSSProperties } from 'react';
+import './GradientWaves.css';
 
 export interface GradientWavesProps {
   horizonColor?: string;
@@ -26,7 +26,7 @@ export interface GradientWavesProps {
   brightness?: number;
   opacity?: number;
   grain?: number;
-  quality?: "low" | "medium" | "high";
+  quality?: 'low' | 'medium' | 'high';
   intro?: boolean;
   mouseInteraction?: boolean;
   parallaxStrength?: number;
@@ -52,8 +52,8 @@ interface View {
   height: number;
 }
 
-const ROOT = "gradient-waves-container";
-const CANVAS = "gradient-waves-canvas";
+const ROOT = 'gradient-waves-container';
+const CANVAS = 'gradient-waves-canvas';
 
 const MAX_SWELLS = 4;
 const SWELL_SECONDS = 3.2;
@@ -227,15 +227,15 @@ const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2,
 let probe: CanvasRenderingContext2D | null = null;
 
 const parseColor = (value: string, fallback: RGB | null): RGB | null => {
-  if (value === "transparent") return null;
-  if (typeof document === "undefined") return fallback;
-  if (!probe) probe = document.createElement("canvas").getContext("2d");
+  if (value === 'transparent') return null;
+  if (typeof document === 'undefined') return fallback;
+  if (!probe) probe = document.createElement('canvas').getContext('2d');
   if (!probe) return fallback;
-  probe.fillStyle = "#000000";
+  probe.fillStyle = '#000000';
   probe.fillStyle = value;
   const text = probe.fillStyle;
-  if (text.startsWith("#")) {
-    const hex = Number.parseInt(text.slice(1), 16);
+  if (text.startsWith('#')) {
+    const hex = parseInt(text.slice(1), 16);
     return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
   }
   const match = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?/.exec(text);
@@ -285,14 +285,13 @@ const groundAt = (point: number[], aspect: number, s: View, look: number[]) => {
 };
 
 const prefersReduced = () =>
-  typeof window !== "undefined" &&
-  (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
+  typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
 
 export default function GradientWaves({
-  horizonColor = "#5227FF",
-  waveColor = "#FF9FFC",
-  crestColor = "#FFFFFF",
-  backgroundColor = "transparent",
+  horizonColor = '#5227FF',
+  waveColor = '#FF9FFC',
+  crestColor = '#FFFFFF',
+  backgroundColor = 'transparent',
   lightMode = false,
   speed = 0.4,
   amplitude = 2.5,
@@ -310,7 +309,7 @@ export default function GradientWaves({
   brightness = 1,
   opacity = 1,
   grain = 0.2,
-  quality = "medium",
+  quality = 'medium',
   intro = true,
   mouseInteraction = true,
   parallaxStrength = 0.5,
@@ -318,18 +317,12 @@ export default function GradientWaves({
   swellOnClick = true,
   paused = false,
   dpr = 2,
-  className = "",
-  style,
+  className = '',
+  style
 }: GradientWavesProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const horizon = useMemo(
-    (): RGB => parseColor(horizonColor, [0.32, 0.15, 1]) ?? [0.32, 0.15, 1],
-    [horizonColor],
-  );
-  const wave = useMemo(
-    (): RGB => parseColor(waveColor, [1, 0.62, 0.99]) ?? [1, 0.62, 0.99],
-    [waveColor],
-  );
+  const horizon = useMemo((): RGB => parseColor(horizonColor, [0.32, 0.15, 1]) ?? [0.32, 0.15, 1], [horizonColor]);
+  const wave = useMemo((): RGB => parseColor(waveColor, [1, 0.62, 0.99]) ?? [1, 0.62, 0.99], [waveColor]);
   const crest = useMemo((): RGB => parseColor(crestColor, [1, 1, 1]) ?? [1, 1, 1], [crestColor]);
   const paper = useMemo(() => parseColor(backgroundColor, null), [backgroundColor]);
 
@@ -354,7 +347,7 @@ export default function GradientWaves({
     sheen: Math.max(0, sheen),
     brightness: Math.max(0, brightness),
     opacity: clamp(opacity, 0, 1),
-    grain: typeof grain === "number" ? Math.max(0, grain) : grain ? 0.05 : 0,
+    grain: typeof grain === 'number' ? Math.max(0, grain) : grain ? 0.05 : 0,
     steps: QUALITY[quality] ?? QUALITY.medium,
     intro,
     mouseInteraction,
@@ -362,7 +355,7 @@ export default function GradientWaves({
     mouseStrength: clamp(mouseStrength, 0, 1),
     swellOnClick,
     paused,
-    dpr: Math.max(0.5, dpr),
+    dpr: Math.max(0.5, dpr)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -375,16 +368,16 @@ export default function GradientWaves({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    const canvas = document.createElement("canvas");
+    const canvas = document.createElement('canvas');
     canvas.className = CANVAS;
     container.appendChild(canvas);
-    const gl = canvas.getContext("webgl2", {
+    const gl = canvas.getContext('webgl2', {
       alpha: true,
       antialias: false,
       depth: false,
       stencil: false,
       premultipliedAlpha: true,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!gl) {
       canvas.remove();
@@ -399,7 +392,7 @@ export default function GradientWaves({
     }
     gl.attachShader(program, vertex);
     gl.attachShader(program, fragment);
-    gl.bindAttribLocation(program, 0, "aPosition");
+    gl.bindAttribLocation(program, 0, 'aPosition');
     gl.linkProgram(program);
     gl.deleteShader(vertex);
     gl.deleteShader(fragment);
@@ -409,39 +402,39 @@ export default function GradientWaves({
       return undefined;
     }
     const names = [
-      "uResolution",
-      "uTime",
-      "uClock",
-      "uAmplitude",
-      "uWaveScale",
-      "uWaveRatio",
-      "uSwell",
-      "uTurbulence",
-      "uHeight",
-      "uTilt",
-      "uZoom",
-      "uLook",
-      "uFogDepth",
-      "uBrightness",
-      "uOpacity",
-      "uGrain",
-      "uHorizon",
-      "uWave",
-      "uCrest",
-      "uBackground",
-      "uOpaque",
-      "uLight",
-      "uSun",
-      "uRelief",
-      "uSheen",
-      "uSteps",
-      "uStride",
-      "uIntro",
-      "uSwells",
-      "uSwellWidth",
+      'uResolution',
+      'uTime',
+      'uClock',
+      'uAmplitude',
+      'uWaveScale',
+      'uWaveRatio',
+      'uSwell',
+      'uTurbulence',
+      'uHeight',
+      'uTilt',
+      'uZoom',
+      'uLook',
+      'uFogDepth',
+      'uBrightness',
+      'uOpacity',
+      'uGrain',
+      'uHorizon',
+      'uWave',
+      'uCrest',
+      'uBackground',
+      'uOpaque',
+      'uLight',
+      'uSun',
+      'uRelief',
+      'uSheen',
+      'uSteps',
+      'uStride',
+      'uIntro',
+      'uSwells',
+      'uSwellWidth'
     ];
     const u: Record<string, WebGLUniformLocation | null> = {};
-    names.forEach((name) => {
+    names.forEach(name => {
       u[name] = gl.getUniformLocation(program, name);
     });
     const vao = gl.createVertexArray();
@@ -471,7 +464,7 @@ export default function GradientWaves({
       steer: [0, 0],
       swells: [] as Swell[],
       quiet: 0,
-      seen: null as typeof settings | null,
+      seen: null as typeof settings | null
     };
 
     const fit = () => {
@@ -532,7 +525,7 @@ export default function GradientWaves({
         u.uSun,
         Math.cos(altitude) * Math.cos(angle),
         Math.cos(altitude) * Math.sin(angle),
-        Math.sin(altitude),
+        Math.sin(altitude)
       );
       gl.uniform1f(u.uRelief, s.relief);
       gl.uniform1f(u.uSheen, s.sheen);
@@ -545,12 +538,7 @@ export default function GradientWaves({
       const shown = Math.min(1, progress / 0.22);
       const crest = 160 * Math.pow(3 / 160, easeInOut(Math.max(0, (progress - 0.1) / 0.9)));
       const settle = clamp((progress - 0.75) / 0.25, 0, 1);
-      gl.uniform3f(
-        u.uIntro,
-        shown * shown * (3 - 2 * shown),
-        crest,
-        1 - settle * settle * (3 - 2 * settle),
-      );
+      gl.uniform3f(u.uIntro, shown * shown * (3 - 2 * shown), crest, 1 - settle * settle * (3 - 2 * settle));
       swellData.fill(0);
       let swellPeak = 0;
       state.swells.forEach((swell, index) => {
@@ -594,13 +582,11 @@ export default function GradientWaves({
       const steerY = steering ? 0.5 - state.pointer[1] : 0;
       state.steer[0] += (steerX - state.steer[0]) * steerEase;
       state.steer[1] += (steerY - state.steer[1]) * steerEase;
-      const turning =
-        Math.abs(steerX - state.steer[0]) + Math.abs(steerY - state.steer[1]) > 0.0005;
-      state.swells = state.swells.filter((swell) => state.clock - swell.at < SWELL_SECONDS);
+      const turning = Math.abs(steerX - state.steer[0]) + Math.abs(steerY - state.steer[1]) > 0.0005;
+      state.swells = state.swells.filter(swell => state.clock - swell.at < SWELL_SECONDS);
 
       const still = s.paused || reduced;
-      const transient =
-        moving || turning || state.swells.length > 0 || introProgress(s, reduced) < 1;
+      const transient = moving || turning || state.swells.length > 0 || introProgress(s, reduced) < 1;
       if (state.seen !== s || transient || !still) state.quiet = 0;
       else state.quiet += 1;
       state.seen = s;
@@ -627,7 +613,7 @@ export default function GradientWaves({
           event.clientX >= rect.left &&
           event.clientX <= rect.right &&
           event.clientY >= rect.top &&
-          event.clientY <= rect.bottom,
+          event.clientY <= rect.bottom
       };
     };
 
@@ -654,50 +640,43 @@ export default function GradientWaves({
         return;
       const point = local(event);
       if (!point.inside) return;
-      const ground = groundAt(
-        [point.x, point.y],
-        state.width / Math.max(state.height, 1),
-        s,
-        state.look,
-      );
+      const ground = groundAt([point.x, point.y], state.width / Math.max(state.height, 1), s, state.look);
       if (!ground) return;
       state.swells.push({ x: ground[0], y: ground[1], at: state.clock });
       if (state.swells.length > MAX_SWELLS) state.swells.shift();
       wake();
     };
 
-    const visibility = new IntersectionObserver((entries) => {
-      state.visible = entries.some((entry) => entry.isIntersecting);
+    const visibility = new IntersectionObserver(entries => {
+      state.visible = entries.some(entry => entry.isIntersecting);
       wake();
     });
     visibility.observe(container);
     const sizes = new ResizeObserver(measure);
     sizes.observe(container);
     measure();
-    document.addEventListener("visibilitychange", wake);
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown);
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onDown);
+    document.documentElement.addEventListener('pointerleave', onLeave);
     state.raf = requestAnimationFrame(tick);
 
     return () => {
       cancelAnimationFrame(state.raf);
       wakeRef.current = null;
-      document.removeEventListener("visibilitychange", wake);
+      document.removeEventListener('visibilitychange', wake);
       visibility.disconnect();
       sizes.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onDown);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onDown);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
       gl.deleteProgram(program);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
       canvas.remove();
     };
   }, []);
 
-  return (
-    <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(" ")} style={style} />
-  );
+  return <div ref={containerRef} className={[ROOT, className].filter(Boolean).join(' ')} style={style} />;
 }

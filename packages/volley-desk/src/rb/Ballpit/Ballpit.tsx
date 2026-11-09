@@ -1,7 +1,7 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import { type CSSProperties, useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from 'react';
 
 const FOV = 50;
 const CAMERA_Z = 20;
@@ -10,7 +10,7 @@ const MAX_SPEED = 16;
 const STRIDE = 12;
 const SLOP = 0.01;
 
-export type BallpitMaterial = "satin" | "matte" | "gloss" | "frosted" | "metal";
+export type BallpitMaterial = 'satin' | 'matte' | 'gloss' | 'frosted' | 'metal';
 
 export interface BallpitProps {
   count?: number;
@@ -27,7 +27,7 @@ export interface BallpitProps {
   followCursor?: boolean;
   cursorSize?: number;
   grab?: boolean;
-  clickEffect?: "burst" | "none";
+  clickEffect?: 'burst' | 'none';
   lightColor?: string;
   lightIntensity?: number;
   exposure?: number;
@@ -51,15 +51,8 @@ const MATERIALS: Record<string, Material> = {
   satin: { roughness: 0.42, metalness: 0, coat: 0.35, coatRoughness: 0.22, scatter: 1, frost: 0 },
   matte: { roughness: 0.92, metalness: 0, coat: 0, coatRoughness: 0.5, scatter: 0.5, frost: 0 },
   gloss: { roughness: 0.2, metalness: 0, coat: 1, coatRoughness: 0.08, scatter: 1, frost: 0 },
-  frosted: {
-    roughness: 0.55,
-    metalness: 0,
-    coat: 0.6,
-    coatRoughness: 0.18,
-    scatter: 1.5,
-    frost: 1,
-  },
-  metal: { roughness: 0.3, metalness: 1, coat: 0, coatRoughness: 0.2, scatter: 0, frost: 0 },
+  frosted: { roughness: 0.55, metalness: 0, coat: 0.6, coatRoughness: 0.18, scatter: 1.5, frost: 1 },
+  metal: { roughness: 0.3, metalness: 1, coat: 0, coatRoughness: 0.2, scatter: 0, frost: 0 }
 };
 
 const VERTEX = `#version 300 es
@@ -263,30 +256,28 @@ const link = (gl: WebGL2RenderingContext) => {
 
 const toLinear = (value: string | number): number[] => {
   let rgb: number[];
-  if (typeof value === "number") {
+  if (typeof value === 'number') {
     rgb = [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255];
   } else {
-    let hex = String(value || "#ffffff")
-      .replace("#", "")
+    let hex = String(value || '#ffffff')
+      .replace('#', '')
       .trim();
     if (hex.length === 3 || hex.length === 4)
       hex = hex
         .slice(0, 3)
-        .split("")
-        .map((c) => c + c)
-        .join("");
-    const num = Number.parseInt(hex.slice(0, 6), 16);
-    rgb = Number.isNaN(num)
-      ? [1, 1, 1]
-      : [((num >> 16) & 255) / 255, ((num >> 8) & 255) / 255, (num & 255) / 255];
+        .split('')
+        .map(c => c + c)
+        .join('');
+    const num = parseInt(hex.slice(0, 6), 16);
+    rgb = Number.isNaN(num) ? [1, 1, 1] : [((num >> 16) & 255) / 255, ((num >> 8) & 255) / 255, (num & 255) / 255];
   }
-  return rgb.map((c) => Math.pow(c, 2.2));
+  return rgb.map(c => Math.pow(c, 2.2));
 };
 
 const Ballpit = ({
   count = 200,
-  colors = ["#ffffff"],
-  material = "satin",
+  colors = ['#ffffff'],
+  material = 'satin',
   minSize = 0.5,
   maxSize = 1,
   gravity = 0.5,
@@ -298,23 +289,23 @@ const Ballpit = ({
   followCursor = true,
   cursorSize = 1,
   grab = true,
-  clickEffect = "burst",
-  lightColor = "#ffffff",
+  clickEffect = 'burst',
+  lightColor = '#ffffff',
   lightIntensity = 1,
   exposure = 1,
   shadows = 0.6,
   intro = true,
   dpr,
-  className = "",
-  style,
+  className = '',
+  style
 }: BallpitProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wakeRef = useRef<(() => void) | null>(null);
   const settings = {
     count: Math.round(clamp(count, 1, 4000)),
-    colors: Array.isArray(colors) && colors.length ? colors : ["#ffffff"],
-    material: MATERIALS[material] ? material : "satin",
+    colors: Array.isArray(colors) && colors.length ? colors : ['#ffffff'],
+    material: MATERIALS[material] ? material : 'satin',
     minSize: Math.max(0.05, Math.min(minSize, maxSize)),
     maxSize: Math.max(0.05, Math.max(minSize, maxSize)),
     gravity,
@@ -332,7 +323,7 @@ const Ballpit = ({
     exposure: Math.max(0, exposure),
     shadows: clamp(shadows, 0, 1),
     intro,
-    dpr,
+    dpr
   };
   type Settings = typeof settings;
   const settingsRef = useRef(settings);
@@ -341,29 +332,21 @@ const Ballpit = ({
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
-    const gl = canvas?.getContext("webgl2", {
+    const gl = canvas?.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
       antialias: false,
       depth: true,
       stencil: false,
-      powerPreference: "high-performance",
+      powerPreference: 'high-performance'
     });
     if (!container || !canvas || !gl) return undefined;
     const shader = link(gl);
     if (!shader) return undefined;
     const u = shader.uniforms;
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-    const view = {
-      width: 1,
-      height: 1,
-      ratio: 1,
-      halfW: 9,
-      halfH: 9,
-      fit: 1,
-      tan: Math.tan((FOV * Math.PI) / 360),
-    };
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const view = { width: 1, height: 1, ratio: 1, halfW: 9, halfH: 9, fit: 1, tan: Math.tan((FOV * Math.PI) / 360) };
     const projection = new Float32Array(16);
 
     const vao = gl.createVertexArray();
@@ -405,8 +388,8 @@ const Ballpit = ({
     let table = new Int32Array(2);
     let starts = new Int32Array(2);
     let palette: number[][] = [];
-    let paletteKey = "";
-    let lastSizes = "";
+    let paletteKey = '';
+    let lastSizes = '';
 
     const allocate = (total: number) => {
       const grow = (old: Float32Array, width = 1) => {
@@ -444,16 +427,7 @@ const Ballpit = ({
       gl.bufferData(gl.ARRAY_BUFFER, data.byteLength, gl.DYNAMIC_DRAW);
     };
 
-    const pointer = {
-      x: 0,
-      y: 0,
-      inside: false,
-      down: false,
-      downX: 0,
-      downY: 0,
-      downAt: 0,
-      moved: false,
-    };
+    const pointer = { x: 0, y: 0, inside: false, down: false, downX: 0, downY: 0, downAt: 0, moved: false };
     const cursor = { x: 0, y: 0, z: 0, r: 0, tx: 0, ty: 0, vx: 0, vy: 0 };
     const light = { x: 0, y: 5, z: 6, flash: 0 };
     const held = { index: -1, ox: 0, oy: 0, tx: 0, ty: 0, vx: 0, vy: 0 };
@@ -506,7 +480,7 @@ const Ballpit = ({
 
     const applyPalette = (s: Settings) => {
       palette = s.colors.map(toLinear);
-      paletteKey = s.colors.join("|");
+      paletteKey = s.colors.join('|');
     };
 
     const sync = (s: Settings, first: boolean) => {
@@ -529,7 +503,7 @@ const Ballpit = ({
         lastSizes = key;
         applySizes(s);
       }
-      if (s.colors.join("|") !== paletteKey) applyPalette(s);
+      if (s.colors.join('|') !== paletteKey) applyPalette(s);
     };
 
     let contacts = new Float32Array(0);
@@ -544,10 +518,7 @@ const Ballpit = ({
       grid.z0 = -Math.max(s.depth, s.maxSize) - cell;
       grid.nx = Math.max(1, Math.ceil((view.halfW * 2 + cell * 2) * grid.scale) + 1);
       grid.ny = Math.max(1, Math.ceil((view.halfH * 2 + cell * 2) * grid.scale) + 1);
-      grid.nz = Math.max(
-        1,
-        Math.ceil((Math.max(s.depth, s.maxSize) * 2 + cell * 2) * grid.scale) + 1,
-      );
+      grid.nz = Math.max(1, Math.ceil((Math.max(s.depth, s.maxSize) * 2 + cell * 2) * grid.scale) + 1);
       const cells = grid.nx * grid.ny * grid.nz;
       if (table.length < cells + 1) {
         table = new Int32Array(cells + 1);
@@ -567,15 +538,7 @@ const Ballpit = ({
       for (let i = 0; i < n; i++) sorted[starts[cellOf[i]]++] = i;
     };
 
-    const wall = (
-      i: number,
-      gap: number,
-      nx: number,
-      ny: number,
-      nz: number,
-      bounce: number,
-      margin: number,
-    ) => {
+    const wall = (i: number, gap: number, nx: number, ny: number, nz: number, bounce: number, margin: number) => {
       if (gap >= margin || contactCount * 8 >= contacts.length) return;
       const approach = vx[i] * nx + vy[i] * ny + vz[i] * nz;
       const o = contactCount * 8;
@@ -883,7 +846,7 @@ const Ballpit = ({
       const dy = ray[1] / len;
       const dz = ray[2] / len;
       let best = -1;
-      let bestT = Number.POSITIVE_INFINITY;
+      let bestT = Infinity;
       for (let i = 0; i < n; i++) {
         const ox = -px[i];
         const oy = -py[i];
@@ -937,11 +900,7 @@ const Ballpit = ({
       view.tan = aspect > MAX_ASPECT ? (base * MAX_ASPECT) / aspect : base;
       view.halfH = view.tan * CAMERA_Z;
       view.halfW = view.halfH * aspect;
-      view.fit = clamp(
-        Math.sqrt((view.halfW * view.halfH) / (base * base * CAMERA_Z * CAMERA_Z * MAX_ASPECT)),
-        0.4,
-        1,
-      );
+      view.fit = clamp(Math.sqrt((view.halfW * view.halfH) / (base * base * CAMERA_Z * CAMERA_Z * MAX_ASPECT)), 0.4, 1);
       const f = 1 / view.tan;
       const near = 1;
       const far = 80;
@@ -1046,8 +1005,7 @@ const Ballpit = ({
       elapsed += dt;
       glide = Math.max(0, glide - dt);
       sync(s, false);
-      const targetR =
-        s.followCursor && pointer.inside && held.index < 0 ? s.cursorSize * view.fit : 0;
+      const targetR = s.followCursor && pointer.inside && held.index < 0 ? s.cursorSize * view.fit : 0;
       cursor.r += (targetR - cursor.r) * (1 - Math.exp(-dt / 0.12));
       const follow = 1 - Math.exp(-dt / 0.06);
       const fromX = cursor.x;
@@ -1078,10 +1036,7 @@ const Ballpit = ({
       let moved = 0;
       for (let i = 0; i < n; i++) {
         const k = i * 3;
-        const d =
-          Math.abs(px[i] - still[k]) +
-          Math.abs(py[i] - still[k + 1]) +
-          Math.abs(pz[i] - still[k + 2]);
+        const d = Math.abs(px[i] - still[k]) + Math.abs(py[i] - still[k + 1]) + Math.abs(pz[i] - still[k + 2]);
         if (d > moved) moved = d;
         still[k] = px[i];
         still[k + 1] = py[i];
@@ -1137,18 +1092,14 @@ const Ballpit = ({
           cursor.x = cursor.tx;
           cursor.y = cursor.ty;
         }
-        if (
-          pointer.down &&
-          Math.hypot(event.clientX - pointer.downX, event.clientY - pointer.downY) > 6
-        )
+        if (pointer.down && Math.hypot(event.clientX - pointer.downX, event.clientY - pointer.downY) > 6)
           pointer.moved = true;
       }
       if (pointer.inside || was) wake();
     };
 
     const interactive = (target: EventTarget | null) =>
-      target instanceof Element &&
-      target.closest('a, button, input, textarea, select, label, [role="button"]');
+      target instanceof Element && target.closest('a, button, input, textarea, select, label, [role="button"]');
 
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || !inside(event) || interactive(event.target)) return;
@@ -1170,7 +1121,7 @@ const Ballpit = ({
           held.ty = py[i];
           held.vx = 0;
           held.vy = 0;
-          if (event.pointerType === "mouse") event.preventDefault();
+          if (event.pointerType === 'mouse') event.preventDefault();
         }
       }
       wake();
@@ -1191,7 +1142,7 @@ const Ballpit = ({
         pointer.down &&
         !pointer.moved &&
         performance.now() - pointer.downAt < 400 &&
-        s.clickEffect === "burst" &&
+        s.clickEffect === 'burst' &&
         !reduce &&
         inside(event)
       ) {
@@ -1212,17 +1163,17 @@ const Ballpit = ({
 
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(container);
-    const intersection = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const intersection = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible) wake();
     });
     intersection.observe(container);
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
-    window.addEventListener("pointercancel", onPointerCancel, { passive: true });
-    document.documentElement.addEventListener("pointerleave", onPointerLeave);
-    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointerup', onPointerUp, { passive: true });
+    window.addEventListener('pointercancel', onPointerCancel, { passive: true });
+    document.documentElement.addEventListener('pointerleave', onPointerLeave);
+    document.addEventListener('visibilitychange', onVisibility);
     resize();
     wakeRef.current = wake;
 
@@ -1231,17 +1182,17 @@ const Ballpit = ({
       wakeRef.current = null;
       resizeObserver.disconnect();
       intersection.disconnect();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerCancel);
-      document.documentElement.removeEventListener("pointerleave", onPointerLeave);
-      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      document.documentElement.removeEventListener('pointerleave', onPointerLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
       gl.deleteBuffer(quad);
       gl.deleteBuffer(instances);
       gl.deleteVertexArray(vao);
       gl.deleteProgram(shader.program);
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
   }, []);
 
@@ -1253,13 +1204,9 @@ const Ballpit = ({
     <div
       ref={containerRef}
       className={className}
-      style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden", ...style }}
+      style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden', ...style }}
     >
-      <canvas
-        ref={canvasRef}
-        style={{ display: "block", width: "100%", height: "100%" }}
-        aria-hidden="true"
-      />
+      <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} aria-hidden="true" />
     </div>
   );
 };

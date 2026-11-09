@@ -1,14 +1,13 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line.
-"use client";
+'use client';
 
-import type React from "react";
-import { isValidElement, useEffect, useMemo, useRef, useState } from "react";
+import React, { isValidElement, useEffect, useMemo, useRef, useState } from 'react';
 
-import "./GridMotion.css";
+import './GridMotion.css';
 
 export type GridMotionItem = React.ReactNode | { src: string; alt?: string };
 
-export type GridMotionDirection = "alternate" | "left" | "right";
+export type GridMotionDirection = 'alternate' | 'left' | 'right';
 
 export type GridMotionProps = {
   items?: GridMotionItem[];
@@ -27,16 +26,16 @@ export type GridMotionProps = {
   fade?: number;
   tileColor?: string;
   textColor?: string;
-  theme?: "dark" | "light";
+  theme?: 'dark' | 'light';
   className?: string;
   style?: React.CSSProperties;
 };
 
 type TileData =
-  | { kind: "empty" }
-  | { kind: "node"; node: React.ReactNode }
-  | { kind: "image"; src: string; alt: string }
-  | { kind: "text"; text: string };
+  | { kind: 'empty' }
+  | { kind: 'node'; node: React.ReactNode }
+  | { kind: 'image'; src: string; alt: string }
+  | { kind: 'text'; text: string };
 
 type Motion = {
   offsets: number[];
@@ -47,20 +46,19 @@ type Motion = {
 
 const THEMES = {
   dark: {
-    tile: "#1b1922",
-    text: "rgba(255, 255, 255, 0.78)",
-    border: "rgba(255, 255, 255, 0.07)",
+    tile: '#1b1922',
+    text: 'rgba(255, 255, 255, 0.78)',
+    border: 'rgba(255, 255, 255, 0.07)'
   },
   light: {
-    tile: "#f4f4f5",
-    text: "#3f3f46",
-    border: "rgba(24, 24, 27, 0.08)",
-  },
+    tile: '#f4f4f5',
+    text: '#3f3f46',
+    border: 'rgba(24, 24, 27, 0.08)'
+  }
 };
 
-const DIRECTIONS: GridMotionDirection[] = ["alternate", "left", "right"];
-const IMAGE =
-  /^(https?:\/\/|\/\/|\/|\.\.?\/|data:image\/|blob:)|\.(avif|gif|jpe?g|png|svg|webp)(\?.*)?$/i;
+const DIRECTIONS: GridMotionDirection[] = ['alternate', 'left', 'right'];
+const IMAGE = /^(https?:\/\/|\/\/|\/|\.\.?\/|data:image\/|blob:)|\.(avif|gif|jpe?g|png|svg|webp)(\?.*)?$/i;
 const INERTIA = [0.42, 0.32, 0.26, 0.22];
 const PACE = [1, 0.86, 1.12, 0.94];
 
@@ -83,28 +81,26 @@ const feather = (side: string, zone: number) => {
     const alpha = t * t * t * (t * (t * 6 - 15) + 10);
     return `rgba(0, 0, 0, ${alpha.toFixed(4)}) ${(100 - t * zone).toFixed(2)}%`;
   });
-  return `linear-gradient(${side}, ${stops.join(", ")}, ${mirrored.join(", ")})`;
+  return `linear-gradient(${side}, ${stops.join(', ')}, ${mirrored.join(', ')})`;
 };
 
 const toTile = (item: GridMotionItem): TileData => {
-  if (item === null || item === undefined || item === false) return { kind: "empty" };
-  if (isValidElement(item)) return { kind: "node", node: item };
-  if (typeof item === "object" && "src" in item && typeof item.src === "string") {
-    return { kind: "image", src: item.src, alt: item.alt ?? "" };
+  if (item === null || item === undefined || item === false) return { kind: 'empty' };
+  if (isValidElement(item)) return { kind: 'node', node: item };
+  if (typeof item === 'object' && 'src' in item && typeof item.src === 'string') {
+    return { kind: 'image', src: item.src, alt: item.alt ?? '' };
   }
   const text = String(item).trim();
-  return IMAGE.test(text) ? { kind: "image", src: text, alt: "" } : { kind: "text", text };
+  return IMAGE.test(text) ? { kind: 'image', src: text, alt: '' } : { kind: 'text', text };
 };
 
-const EMPTY: TileData = { kind: "empty" };
+const EMPTY: TileData = { kind: 'empty' };
 
 const Tile = ({ tile }: { tile: TileData }) => (
   <div className="grid-motion__tile">
-    {tile.kind === "image" && (
-      <img src={tile.src} alt={tile.alt} draggable={false} decoding="async" />
-    )}
-    {tile.kind === "text" && <span className="grid-motion__text">{tile.text}</span>}
-    {tile.kind === "node" && tile.node}
+    {tile.kind === 'image' && <img src={tile.src} alt={tile.alt} draggable={false} decoding="async" />}
+    {tile.kind === 'text' && <span className="grid-motion__text">{tile.text}</span>}
+    {tile.kind === 'node' && tile.node}
   </div>
 );
 
@@ -117,7 +113,7 @@ const GridMotion = ({
   angle = -12,
   tilt = 0,
   speed = 24,
-  direction = "alternate",
+  direction = 'alternate',
   parallax = 0.5,
   spotlight = 0.6,
   dim = 0.35,
@@ -125,18 +121,13 @@ const GridMotion = ({
   fade = 0.5,
   tileColor,
   textColor,
-  theme = "dark",
-  className = "",
-  style,
+  theme = 'dark',
+  className = '',
+  style
 }: GridMotionProps) => {
   const rootRef = useRef<HTMLDivElement>(null);
   const planeRef = useRef<HTMLDivElement>(null);
-  const motionRef = useRef<Motion>({
-    offsets: [],
-    shifts: [],
-    intro: 0,
-    pointer: { x: 0, y: 0, active: false },
-  });
+  const motionRef = useRef<Motion>({ offsets: [], shifts: [], intro: 0, pointer: { x: 0, y: 0, active: false } });
   const [size, setSize] = useState({ width: 0, height: 0 });
   const palette = THEMES[theme] ?? THEMES.dark;
   const settings = {
@@ -146,11 +137,11 @@ const GridMotion = ({
     angle,
     tilt: clamp(tilt, 0, 75),
     speed,
-    direction: DIRECTIONS.includes(direction) ? direction : "alternate",
+    direction: DIRECTIONS.includes(direction) ? direction : 'alternate',
     parallax: clamp(parallax, 0, 1),
     spotlight: clamp(spotlight, 0, 1),
     dim: clamp(dim, 0, 1),
-    fade: clamp(fade, 0, 1),
+    fade: clamp(fade, 0, 1)
   };
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -164,10 +155,7 @@ const GridMotion = ({
     const sin = Math.abs(Math.sin(turn));
     const planeHeight = ((width * sin + height * cos) / Math.max(0.3, Math.cos(lean))) * 1.12;
     const planeWidth = (width * cos + height * sin) * (1 + Math.sin(lean) * 0.9) * 1.12;
-    const tileHeight = Math.max(
-      16,
-      (planeHeight - settings.gap * (settings.rows - 1)) / settings.rows,
-    );
+    const tileHeight = Math.max(16, (planeHeight - settings.gap * (settings.rows - 1)) / settings.rows);
     const tileWidth = tileHeight * settings.aspect;
     const step = tileWidth + settings.gap;
     const perRow = Math.ceil(planeWidth / step) + 1;
@@ -182,7 +170,7 @@ const GridMotion = ({
       period,
       copies: Math.ceil(planeWidth / period) + 2,
       top: (planeHeight - settings.rows * tileHeight - (settings.rows - 1) * settings.gap) / 2,
-      perspective: Math.max(width, height) * 1.5,
+      perspective: Math.max(width, height) * 1.5
     };
   }, [size, settings.angle, settings.tilt, settings.rows, settings.gap, settings.aspect]);
 
@@ -194,9 +182,7 @@ const GridMotion = ({
     const observer = new ResizeObserver(() => {
       const width = Math.round(root.clientWidth);
       const height = Math.round(root.clientHeight);
-      setSize((current) =>
-        current.width === width && current.height === height ? current : { width, height },
-      );
+      setSize(current => (current.width === width && current.height === height ? current : { width, height }));
     });
     observer.observe(root);
     const motion = motionRef.current;
@@ -206,23 +192,23 @@ const GridMotion = ({
       motion.pointer.active = true;
     };
     const onUp = (event: PointerEvent) => {
-      if (event.pointerType === "touch") motion.pointer.active = false;
+      if (event.pointerType === 'touch') motion.pointer.active = false;
     };
     const onLeave = () => {
       motion.pointer.active = false;
     };
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onMove, { passive: true });
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("blur", onLeave);
-    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('pointerdown', onMove, { passive: true });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('blur', onLeave);
+    document.documentElement.addEventListener('pointerleave', onLeave);
     return () => {
       observer.disconnect();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerdown", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("blur", onLeave);
-      document.documentElement.removeEventListener("pointerleave", onLeave);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerdown', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('blur', onLeave);
+      document.documentElement.removeEventListener('pointerleave', onLeave);
     };
   }, []);
 
@@ -231,17 +217,17 @@ const GridMotion = ({
     const plane = planeRef.current;
     if (!root || !plane || !layout) return undefined;
 
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const motion = motionRef.current;
     const rowEls = Array.from(plane.children) as HTMLElement[];
-    const tileEls = rowEls.map((row) => Array.from(row.children) as HTMLElement[]);
-    const spots = tileEls.map((list) => new Float32Array(list.length));
-    const written = tileEls.map((list) => new Float32Array(list.length));
+    const tileEls = rowEls.map(row => Array.from(row.children) as HTMLElement[]);
+    const spots = tileEls.map(list => new Float32Array(list.length));
+    const written = tileEls.map(list => new Float32Array(list.length));
     let raf = 0;
     let last = performance.now();
     let visible = true;
     let alive = true;
-    if (motion.intro >= 1) plane.style.opacity = "1";
+    if (motion.intro >= 1) plane.style.opacity = '1';
 
     const frame = (now: number) => {
       raf = 0;
@@ -261,8 +247,7 @@ const GridMotion = ({
       const halfHeight = root.clientHeight / 2 || 1;
       const px = (motion.pointer.x - rect.left) * scale - halfWidth;
       const py = (motion.pointer.y - rect.top) * scale - halfHeight;
-      const inside =
-        motion.pointer.active && Math.abs(px) <= halfWidth && Math.abs(py) <= halfHeight;
+      const inside = motion.pointer.active && Math.abs(px) <= halfWidth && Math.abs(py) <= halfHeight;
       const lean = (s.tilt * Math.PI) / 180;
       const turn = (s.angle * Math.PI) / 180;
       const depth = layout.perspective;
@@ -279,23 +264,18 @@ const GridMotion = ({
       const settle = 1 - Math.exp(-dt / 0.22);
 
       rowEls.forEach((row, r) => {
-        const drift = s.direction === "left" ? -1 : s.direction === "right" ? 1 : r % 2 ? 1 : -1;
+        const drift = s.direction === 'left' ? -1 : s.direction === 'right' ? 1 : r % 2 ? 1 : -1;
         if (motion.offsets[r] === undefined) {
           motion.offsets[r] = r * layout.step * 0.37;
           motion.shifts[r] = 0;
         }
         if (!reduce) motion.offsets[r] += s.speed * drift * PACE[r % PACE.length] * dt;
         const target = reduce ? 0 : s.parallax * layout.tileWidth * 1.2 * nudge * (r % 2 ? -1 : 1);
-        motion.shifts[r] +=
-          (target - motion.shifts[r]) * (1 - Math.exp(-dt / INERTIA[r % INERTIA.length]));
+        motion.shifts[r] += (target - motion.shifts[r]) * (1 - Math.exp(-dt / INERTIA[r % INERTIA.length]));
         const x = -layout.period + wrap(motion.offsets[r] + motion.shifts[r], layout.period);
         row.style.transform = `translate3d(${x.toFixed(2)}px, 0, 0)`;
 
-        const rowY =
-          layout.top +
-          r * (layout.tileHeight + s.gap) +
-          layout.tileHeight / 2 -
-          layout.planeHeight / 2;
+        const rowY = layout.top + r * (layout.tileHeight + s.gap) + layout.tileHeight / 2 - layout.planeHeight / 2;
         const left = x - layout.planeWidth / 2 + layout.tileWidth / 2;
         const list = tileEls[r];
         const values = spots[r];
@@ -307,12 +287,9 @@ const GridMotion = ({
             wanted = 1 - smoothstep(0.25, 1, distance);
           }
           values[k] += (wanted - values[k]) * settle;
-          if (
-            Math.abs(values[k] - marks[k]) > 0.004 ||
-            (wanted === 0 && values[k] < 0.004 && marks[k] !== 0)
-          ) {
+          if (Math.abs(values[k] - marks[k]) > 0.004 || (wanted === 0 && values[k] < 0.004 && marks[k] !== 0)) {
             marks[k] = values[k] < 0.004 ? 0 : values[k];
-            list[k].style.setProperty("--spot", marks[k].toFixed(3));
+            list[k].style.setProperty('--spot', marks[k].toFixed(3));
           }
         }
       });
@@ -320,8 +297,8 @@ const GridMotion = ({
       if (visible) raf = requestAnimationFrame(frame);
     };
 
-    const visibility = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+    const visibility = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
       if (visible && !raf) {
         last = performance.now();
         raf = requestAnimationFrame(frame);
@@ -340,32 +317,32 @@ const GridMotion = ({
   const rowTiles = layout
     ? Array.from({ length: settings.rows }, (_, r) =>
         Array.from({ length: layout.perRow }, (_, j) =>
-          tiles.length ? tiles[(r * layout.perRow + j) % tiles.length] : EMPTY,
-        ),
+          tiles.length ? tiles[(r * layout.perRow + j) % tiles.length] : EMPTY
+        )
       )
     : [];
   const mask =
     settings.fade > 0
-      ? `${feather("to right", settings.fade * 34)}, ${feather("to bottom", settings.fade * 44)}`
+      ? `${feather('to right', settings.fade * 34)}, ${feather('to bottom', settings.fade * 44)}`
       : undefined;
 
   return (
     <div
       ref={rootRef}
-      className={`grid-motion${grayscale ? " grid-motion--gray" : ""}${className ? ` ${className}` : ""}`}
+      className={`grid-motion${grayscale ? ' grid-motion--gray' : ''}${className ? ` ${className}` : ''}`}
       style={
         {
-          "--gm-tile": tileColor ?? palette.tile,
-          "--gm-text": textColor ?? palette.text,
-          "--gm-border": palette.border,
-          "--gm-radius": `${Math.max(0, radius)}px`,
-          "--gm-dim": settings.dim,
+          '--gm-tile': tileColor ?? palette.tile,
+          '--gm-text': textColor ?? palette.text,
+          '--gm-border': palette.border,
+          '--gm-radius': `${Math.max(0, radius)}px`,
+          '--gm-dim': settings.dim,
           perspective: layout && settings.tilt > 0 ? `${layout.perspective}px` : undefined,
           maskImage: mask,
           WebkitMaskImage: mask,
-          maskComposite: mask ? "intersect" : undefined,
-          WebkitMaskComposite: mask ? "source-in" : undefined,
-          ...style,
+          maskComposite: mask ? 'intersect' : undefined,
+          WebkitMaskComposite: mask ? 'source-in' : undefined,
+          ...style
         } as React.CSSProperties
       }
     >
@@ -379,10 +356,10 @@ const GridMotion = ({
               width: layout.planeWidth,
               height: layout.planeHeight,
               transform: `translate(-50%, -50%) rotateX(${settings.tilt}deg) rotateZ(${settings.angle}deg)`,
-              "--gm-gap": `${settings.gap}px`,
-              "--gm-tile-w": `${layout.tileWidth}px`,
-              "--gm-tile-h": `${layout.tileHeight}px`,
-              "--gm-font": `${clamp(layout.tileHeight * 0.12, 12, 32)}px`,
+              '--gm-gap': `${settings.gap}px`,
+              '--gm-tile-w': `${layout.tileWidth}px`,
+              '--gm-tile-h': `${layout.tileHeight}px`,
+              '--gm-font': `${clamp(layout.tileHeight * 0.12, 12, 32)}px`
             } as React.CSSProperties
           }
         >
