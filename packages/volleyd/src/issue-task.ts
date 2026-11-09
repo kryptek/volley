@@ -217,27 +217,32 @@ export function parseDependsOn(
     /** The text of each clause on this line. */
     const clauses: string[] = [];
     const deps = DEPS_LINE.exec(raw);
+    // A `Depends on` clause may follow a `deps:` clause on the same line: scan past its end.
+    let from = 0;
     if (deps !== null) {
       const text = deps[1] ?? "";
-      clauses.push(text.slice(0, clauseEnd(text)));
-    } else {
-      DEPENDS_LABEL.lastIndex = 0;
-      for (let m = DEPENDS_LABEL.exec(raw); m !== null; m = DEPENDS_LABEL.exec(raw)) {
-        const after = raw.slice(m.index + m[0].length);
-        const end = clauseEnd(after);
-        const text = after.slice(0, end);
-        const colon = m[1] !== undefined;
-        DEPENDS_LABEL.lastIndex = m.index + m[0].length + Math.max(end, 1);
-        if (quoted(raw, m.index + m[0].search(/depends/i))) {
-          DEPENDS_LABEL.lastIndex = m.index + m[0].length;
-          continue;
-        }
-        // Without its colon the label is a clause only when a reference follows it.
-        if (!colon && !new RegExp(ISSUE_REF.source, "i").test(text.replace(/\([^)]*\)/g, " ")))
-          continue;
-        clauses.push(text);
-      }
+      const end = clauseEnd(text);
+      clauses.push(text.slice(0, end));
+      from = raw.length - text.length + end;
     }
+    DEPENDS_LABEL.lastIndex = from;
+    for (let m = DEPENDS_LABEL.exec(raw); m !== null; m = DEPENDS_LABEL.exec(raw)) {
+      const after = raw.slice(m.index + m[0].length);
+      const end = clauseEnd(after);
+      const text = after.slice(0, end);
+      const colon = m[1] !== undefined;
+      DEPENDS_LABEL.lastIndex = m.index + m[0].length + Math.max(end, 1);
+      if (quoted(raw, m.index + m[0].search(/depends/i))) {
+        DEPENDS_LABEL.lastIndex = m.index + m[0].length;
+        continue;
+      }
+      // Without its colon the label is a clause only when a reference follows it.
+      if (!colon && !new RegExp(ISSUE_REF.source, "i").test(text.replace(/\([^)]*\)/g, " ")))
+        continue;
+      clauses.push(text);
+    }
+    /** The line after this one's last list item (an empty label reads the items below it). */
+    let next = i + 1;
     for (const clause of clauses) {
       declared = true;
       const text = clause.trim();
@@ -251,7 +256,7 @@ export function parseDependsOn(
         continue;
       }
       // Empty label: the references are the list items that follow (blank lines allowed before).
-      let j = i + 1;
+      let j = next;
       while (j < lines.length && (lines[j] ?? "").trim() === "") j++;
       let items = 0;
       for (; j < lines.length; j++) {
@@ -265,8 +270,9 @@ export function parseDependsOn(
           `empty dependency line '${raw.trim()}' (list the issues on it or as '- #N' items below it, or write 'none')`,
         );
       }
-      i = j - 1;
+      next = j;
     }
+    i = next - 1;
   }
   return { declared, refs };
 }

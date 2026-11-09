@@ -114,6 +114,20 @@ describe("parseDependsOn", () => {
       }
       expect(() => parseDependsOn("Intro.\n\nDepends on #5 or #6")).toThrow(/line 3\b/);
     });
+
+    it("a Depends on clause after a deps: clause on the same line is read too", () => {
+      expect(parseDependsOn("deps: #3. Also depends on #4.")).toEqual({
+        declared: true,
+        refs: [3, 4],
+      });
+      expect(() => parseDependsOn("deps: #3. Depends on #4 then #5")).toThrow(/'then'/);
+    });
+
+    it("an error in a later clause on the line names that line, not the list item's", () => {
+      expect(() => parseDependsOn("Depends on:. Depends on #5 then #6\n- #7")).toThrow(
+        /'Depends on:\. Depends on #5 then #6' on line 1\b/,
+      );
+    });
   });
 
   it("refuses a cross-repository reference", () => {
