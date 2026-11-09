@@ -31,6 +31,7 @@ global settings file cheaply. On a broker that requires authentication the hooks
 - [Usage statusLine](#usage-statusline)
 - [Mailbox drain](#mailbox-drain)
 - [Coordinator sessions](#coordinator-sessions)
+- [Owner wake](#owner-wake)
 - [Heavy-operation leases](#heavy-operation-leases)
 - [Configuration](#configuration)
 - [State files](#state-files)
@@ -166,7 +167,8 @@ hooks ends with `progress/heartbeat` (`PostToolUse` heartbeats after every tool 
 | `PostModelSwitch` | registry entry with `to_model` (also remembered in `model.json`) | — |
 | `UserPromptSubmit` | as `PostToolUse`, then an `activity` tick `prompt received` ([work log](#work-log-activity-ticks)), after the drained mail is stored and acked; never any of the prompt text | drained mail |
 | `PostToolUse` (all tools) | `resumed` if the last activity was `idle` / `awaiting_input`; `ack` per drained message; at most every 30 s, the registry entry again when the MCP server's own register (startup auto-register, the agent's `vol_register`) has replaced the harness model or dropped a field SessionStart remembered (`session_url`, `workspace`, `workspace_title`); the [work log](#work-log-activity-ticks)'s held-back tick once its 5 s window is over | drained mail |
-| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars) and `tool_calls` (this session's [work log](#work-log-activity-ticks) count; its pending tick is dropped). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true` and `activity.json` records it | — |
+| `Stop` | `idle` with `text` = `last_assistant_message` (first 500 chars) and `tool_calls` (this session's [work log](#work-log-activity-ticks) count; its pending tick is dropped). Coordinator whose turn ends in `?`: also `awaiting_input` with the whole `question`, taken from the unclipped message. When the input's `background_tasks` lists a task still running and the turn did not end in a question, `idle` carries `background_wait: true, wait: "background_task"` and `activity.json` records it. A coordinator owning a wave in flight: `wait: "owner_wake"` once the [owner wake](#owner-wake) is armed, else the turn is blocked once | `decision: "block"` with the fallback command ([Owner wake](#owner-wake)) |
+| `Stop` (`async`, `asyncRewake`) | — (the [owner-wake](#owner-wake) waiter: one subscription on the owned waves' digests; exit 2 wakes the session) | the wake line, as a system reminder |
 | `Notification` | `agent_needs_input` / `idle_prompt` / `permission_prompt` → `awaiting_input` (`notification_type`, `text`); `quota_auto_resume_*` → `awaiting_input` with `class: "credit"`; `agent_completed` → `idle` with `completed: true`; anything else → heartbeat only | — |
 | `PreCompact` | — (copies STEERING.md to `.volley/steering.snapshot.md`) | — |
 | `PreToolUse` (all tools) | `activity` tick with a one-line summary of the call and `tool_calls`, at most once per 5 s per session; the newest line in a window is published at the next slot ([work log](#work-log-activity-ticks)) | — |
@@ -382,6 +384,54 @@ items above land on an id that reads as an ordinary agent; the wave `--owner`, t
 owner chip and `★ yours`, and the v0.2 owner smoke all expect `coordinator-xxxx`. A separate
 registry (a smoke run) is a different `VOLLEY_NAMESPACE`, not a different prefix.
 
+## Owner wake
+
+A coordinator session that submits a wave is woken, as a resumed turn, when the wave needs it:
+it completes (or its release is done), it is stopped, its `release_go` opens, or something
+escalates to the owner. Nothing is for the coordinator to remember: the hooks arm it at every
+`Stop` (SPEC §4.6.16).
+
+- **The waiter.** The template's `Stop` group has a second entry, `src/hooks/owner-wake.ts`,
+  with `"async": true, "asyncRewake": true, "timeout": 14700`: Claude Code runs it in the
+  background and wakes the session when it exits 2, showing its stderr as a system reminder. In
+  agent mode, or when the session owns no wave, it exits 0 at once (one retained read of
+  `volley/_waves/+/state`).
+- **Which waves.** Those whose retained state is `running` or `releasing` and whose
+  `coordinator.agent_id` is this session's agent id (the agent bound to the owner's coordinator
+  name). A second session under the same name is not the bound agent, so it arms nothing; after
+  an MCP restart or a compaction the name rebinds and the next `Stop` reads it again.
+- **One waiter, no replay.** It takes `<state dir>/owner-wake.lock` (`{ pid, armed_at }`); while
+  that pid lives, every later `Stop`'s waiter exits 0 at once. A lock whose pid is dead (its session
+  ended) is taken over. It subscribes `volley/_waves/+/digest` with MQTT 5 Retain Handling 2 (no
+  retained replay), and drops a digest whose `generated_at` precedes `armed_at` (an MQTT 3.1.1
+  broker's retained copy, a QoS 1 redelivery).
+- **The wake.** The first digest of an owned wave: `owner-wake.json` (`{ wave, trigger,
+  generated_at, woke_at }`), the lock released, and on stderr, exit 2:
+  `` [volley owner-wake] wave <wave>: <trigger> — <summary line>. Run `volleyd digest <wave>` (and `volleyd inbox` when it says waiting for you) and carry the wave on; the next Stop re-arms this wake. ``
+- **No digest.** Every owned wave left `running` / `releasing` (archived, the owner changed):
+  after a 10 s settle (`VOLLEY_OWNER_WAKE_SETTLE_MS`; a wave's state goes out just before its
+  digest), exit 0, waking nothing.
+- **The fallback wake.** Claude Code enforces `timeout` on an `asyncRewake` hook, and a hook killed
+  there wakes nobody. So at `armed_at + VOLLEY_OWNER_WAKE_MAX_S` (default 14400, 300 s under the
+  template's timeout) with an owned wave still in flight, the waiter wakes the session itself with
+  `[volley owner-wake] wave <wave> still in flight after 4 h; re-armed.`: a short turn whose `Stop`
+  re-arms.
+- **A session that ends** wakes nothing and leaves nothing running: its waiter exits when its
+  parent process goes away, and its lock is stale for the next session's first `Stop`.
+- **What it publishes.** The sync `Stop` hook waits up to 2 s for the waiter's live lock (the two
+  run in parallel); with it, `idle` and the `idle_prompt` that follows carry `background_wait:
+  true, wait: "owner_wake"`, the wave state's `coordinator` reads `working` with `wait`, `volleyd
+  status` says `owner: <name> · online · waiting on wave events`, and the Desk shows `idle —
+  waiting on wave events`.
+- **The block.** A coordinator that owns a wave in flight, at a turn that did not end in a question,
+  with no live background task, no lock after the 2 s and `stop_hook_active` false (a session
+  whose settings lack the waiter), is kept from ending its turn once: `{ "decision": "block",
+  "reason": "wave <wave> is in flight and nothing will wake this session when it ends. Run in the
+  background now: volley sub --pattern \"volley/_waves/<wave>/digest\" --max-messages 1
+  --timeout 14400 (then end your turn); install the Volley hooks to make this automatic: …" }`.
+  Its `idle` carries no flag, so volleyd notices it (`n-owner-asleep-<wave>`, the volleyd README).
+  With `stop_hook_active: true`, a live background task or a question, it never blocks.
+
 ## Heavy-operation leases
 
 `pre-tool-use-lease.ts` (PreToolUse, matcher `Bash`) keeps heavy commands inside volleyd's lease
@@ -442,6 +492,8 @@ is loaded. Write `match` patterns for the forms your agents actually use.
 | `VOLLEY_WORKSPACE_TITLE` | `cmux list-workspaces --json` | Coordinator: the workspace's title, published as `workspace_title` on the registry entry. |
 | `VOLLEY_HOOKS_STATE_DIR` | `~/.volley/hooks` | Coordinator state root; also where `statusline-chain.json` lives. |
 | `VOLLEY_HOOKS_TIMEOUT_MS` | `10000` | Hard deadline per hook run. |
+| `VOLLEY_OWNER_WAKE_MAX_S` | `14400` | The [owner-wake](#owner-wake) waiter's fallback wake (keep it under the template's `timeout`, 14700). |
+| `VOLLEY_OWNER_WAKE_SETTLE_MS` | `10000` | How long the waiter waits for a digest once every owned wave left `running` / `releasing`. |
 | `VOLLEY_HOOKS_DEBUG` | unset | `1` prints swallowed errors on stderr. |
 | `VOLLEY_LEASE_CLI` | this repo's `volley-cli`, else `volley` | Shell fragment the lease hook uses to invoke the CLI. |
 | `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE` | as volley-mcp | Used when `agent.json` does not set them. `install.sh --broker-url` / `--namespace` put them in every command's prefix, which overrides the session's own value. |
@@ -459,7 +511,7 @@ In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STE
 `resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model), `registry-fields.json` (`{ "fields": { "session_url"?, "workspace"?, "workspace_title"? }, "checked_at"?, "workspace_source"? }`: SessionStart's registry fields and the drain hooks' last registry check),
 `hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published),
 `work-log.json` + `work-log.lock` (the [work log](#work-log-activity-ticks)'s session, tool-call count and rate limit) and, for
-coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
+coordinators, `identity.json` (registry lookup cache, hit or miss), `owner-wake.lock` (the [owner-wake](#owner-wake) waiter's `{ pid, armed_at }`) and `owner-wake.json` (its last wake). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).
 
 ## Tests
 
@@ -503,6 +555,14 @@ Observed with Claude Code 2.1 on 2026-10-18, hooks writing their stdin to files 
   `scratchpad_dir`, and on later events `prompt_id`, `permission_mode`, `effort`.
 - **`/model` fires `PreModelSwitch` then, after the confirmation dialog, `PostModelSwitch`**, both
   with `from_model`, `to_model`, `requested_model`, `source: "command"`.
+- **`asyncRewake` on `Stop` (owner wake).** Built on 2026-11-08 against the hooks reference, with
+  Claude Code 2.1.319 installed: an `asyncRewake` command hook runs in the background, Claude Code
+  still enforces its `timeout`, and exit 2 wakes an idle session at once with the hook's stderr as
+  a system reminder. The end-to-end wake (a real coordinator session submitting a wave, ending its
+  turn with nothing armed, woken by its digest) is for the owner smoke to confirm: the tests run
+  the waiter as a process against an in-process broker. If a Claude Code version does not honour
+  `asyncRewake` on `Stop`, the same script can run as a `PostToolUse` entry (matcher `""`, same
+  lock); the `Stop` block stays.
 - **A plain-text question at the end of a turn does not fire `agent_needs_input`.** `Stop` fires
   at once with the question in `last_assistant_message`; about 60 s later `Notification` fires
   `idle_prompt` with the generic message `Claude is waiting for your input`. Hence coordinator

@@ -1493,6 +1493,23 @@ Decisions autopilot answers never ring, so an autopilot night ends in one digest
 `blocked` push per genuine escalation. `volleyd digest <wave>` prints it as markdown; the Desk's
 digest card shows it in the wave window while the wave has ended or has an escalation open.
 
+**The owner wake.** The digest also wakes the session that owns the wave, if it has the Volley
+hooks (SPEC §4.6.16; the hooks README's *Owner wake*): their `Stop` hook holds one subscription
+on the owned waves' digests and wakes the Claude Code session, as a resumed turn, on every
+trigger above, so a coordinator carries the wave on without remembering to arm a wait. volleyd's
+part is twofold:
+
+- `volleyd run` warns when the owner's session has no hooks (its registry entry was never
+  re-published with `model_source`):
+  `warning: owner <name> (<agent id>) has no Volley hooks in this session: nothing will wake it when <wave> ends (the Desk and phone still get the digest); install …`.
+- An online owner of a `running` / `releasing` wave that sits at an idle prompt with nothing armed
+  (`awaiting_input` with no `question` and no `background_wait`) for
+  `autopilot.owner_wake_grace_s` (default 120) gets the owner-only notice
+  `n-owner-asleep-<wave>`: title `<wave>: your session will not be woken`, the `volley sub`
+  command to run in that session, `pointers.link` its `session_url`. The phone rings once; nothing
+  blocks. It is answered `superseded` when a `background_wait` arrives, the owner goes offline or
+  the wave ends.
+
 ---
 
 ## Needs-you inbox
@@ -1669,7 +1686,7 @@ status, a decision opened, escalated or resolved, an inbox item, a gate, the end
 
 | presence | state | when |
 |---|---|---|
-| online | `working` / `awaiting_input` | its attention (an `awaiting_input` progress until anything else but `idle` or `heartbeat`) |
+| online | `working` / `awaiting_input` | its attention (an `awaiting_input` progress until anything else but `idle` or `heartbeat`); an `idle` or `awaiting_input` with `background_wait` is `working` with `coordinator.wait` (`background_task`, or `owner_wake`: [the owner wake](#the-morning-digest)) |
 | offline | `reconnecting` | a coordinator name whose bound agent went away less than `autopilot.reconnect_grace_s` (default 900) ago; never an agent-id owner, which nothing can rebind |
 | offline | `gone` | past that, while something in the wave only the owner can answer waits: an open, unheld decision autopilot escalated (every open unheld one with autopilot off), an open owner-only inbox item, a merge-ready gate under `merge: manual` |
 | offline | `away` | past that, with nothing waiting: autopilot runs the wave |
@@ -1681,6 +1698,7 @@ prints the owner with its presence:
 
 ```
 owner: coord-main (via coordinator-c7d9) · online
+owner: coord-main (via coordinator-c7d9) · online · waiting on wave events   (coordinator.wait set)
 owner: coord-main (via coordinator-c7d9) · away (autopilot) · last seen 2h ago
 owner: coord-main (via coordinator-c7d9) · away · last seen 5m ago      (autopilot off)
 owner: coord-main (via coordinator-c7d9) · gone · 1 decision waits for you
