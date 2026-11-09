@@ -267,6 +267,12 @@ export interface AutopilotConfig {
    */
   reconnect_grace_s: number;
   /**
+   * How long an online owner of a running wave may idle at its prompt with nothing armed to wake
+   * it (no question, no `background_wait`) before volleyd opens `n-owner-asleep-<wave>` (SPEC
+   * §4.6.16, owner wake).
+   */
+  owner_wake_grace_s: number;
+  /**
    * How long a red head classified as an infra incident is held and re-checked before the owner
    * is asked (`ci_failed`, escalated `budget_exhausted`).
    */
@@ -809,8 +815,16 @@ export interface CoordinatorAttention {
   question?: string;
   session_url?: string;
   workspace?: string;
+  /**
+   * What an owner idling `working` waits on (SPEC §4.3 `wait`): a live background task, or the
+   * hooks' owner wake. Absent when it is not waiting on events.
+   */
+  wait?: CoordinatorWait;
   last_seen: string;
 }
+
+/** SPEC §4.3 `wait`. */
+export type CoordinatorWait = "background_task" | "owner_wake";
 
 /** What one cleanup run removed, by kind (`wave_cleaned.removed`; zeros included). */
 export interface CleanupCounts {

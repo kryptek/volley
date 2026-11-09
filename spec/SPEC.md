@@ -625,6 +625,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `autopilot.merge_transient_retry_max` — default 1, 0..10: automatic `retry` answers to a `merge_refused` whose transient ladder was spent, per task (§4.6.16).
 - `autopilot.delete_branch` — boolean, default `false`: a merge also deletes the PR's head branch (§4.6.17).
 - `autopilot.reconnect_grace_s` — default 900, 60..86400: how long a coordinator name's waves read `reconnecting` (§4.6.1).
+- `autopilot.owner_wake_grace_s` — default 120, 10..86400: how long an online owner of a running wave may idle with nothing to wake it before `n-owner-asleep-<wave>` opens (§4.6.16).
 - `autopilot.incident_wait_max_s` — default 14400, 60..86400: how long a red head classified as an infra incident is held before its `ci_failed` decision (§4.6.16).
 - `autopilot.fix_flake_max` — default 3, 0..20: the flake fixers one wave may add (§4.6.16).
 - `autopilot.digest_min_interval_s` — default 1800, 0..86400 (§4.6.16).

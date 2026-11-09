@@ -796,6 +796,13 @@
               "default": 900,
               "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
             },
+            "owner_wake_grace_s": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 86400,
+              "default": 120,
+              "description": "How long an online owner of a running or releasing wave may sit at an idle prompt with nothing armed to wake it (awaiting_input with no question and no background_wait) before the supervisor opens the owner-only notice n-owner-asleep-<wave> (spec section 4.6.16, owner wake)."
+            },
             "incident_wait_max_s": {
               "type": "integer",
               "minimum": 60,
