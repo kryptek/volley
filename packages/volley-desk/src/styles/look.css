@@ -73,6 +73,13 @@
   stroke-width: 7;
   opacity: 0.45;
 }
+/* Flat cables (lite surface, or past the blur budget): no filter, so the wide strokes are softer. */
+.tethers[data-flat] .tether-shadow {
+  opacity: 0.16;
+}
+.tethers[data-flat] .tether-glow {
+  opacity: 0.2;
+}
 .tether-core {
   stroke-width: 2.4;
   opacity: 0.9;

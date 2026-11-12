@@ -17,12 +17,20 @@
  * while a sway is live. Under reduced motion, at phone width or with the
  * tethers off nothing moves: no pulses, no sway.
  *
+ * A browser renders each blurred group into a buffer the size of the group's
+ * filter region in device pixels, so the blur's memory grows with the box
+ * around every cable: a 23-agent wave on a 3x phone was about 840 MB in
+ * WebKit, and the page was killed. On the lite surface (`a11y/surface.ts`),
+ * or once that buffer would pass `BLUR_BUDGET_PX`, the cables are flat
+ * (`data-flat`): the same shadow and glow strokes, softer, with no filter.
+ *
  * A task with no agent running and a CI hold gets a CI panel window
  * (`windows/wave/CiPanel.tsx`, #488), cabled to its wave window like an agent
  * window, so a missing cable never reads as a stall.
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useReducedMotion } from "../a11y/motion";
+import { useLiteSurface } from "../a11y/surface";
 import { NARROW_PX, useViewportWidth } from "../canvas/useViewport";
 import { PULSE_MS, PulsePool, type Sway, kickSway, stepSway, swaySettled } from "./tetherPulses";
 
@@ -68,6 +76,32 @@ export function sagOf(t: Tether): number {
   return Math.min(SAG_MAX, SAG_FACTOR * Math.hypot(p3.x - p0.x, p3.y - p0.y));
 }
 
+/** The device pixels one blurred group may cover (64 MB of RGBA) before the cables go flat. */
+export const BLUR_BUDGET_PX = 16_000_000;
+/** What the strokes, the sag and the shadow's offset add around the cables' end points. */
+const BLUR_PAD = SAG_MAX + 12;
+/** The filter region is the group's box plus 10 % on every side. */
+const FILTER_REGION = 1.2;
+
+/** The device pixels the blur filter covers for one group of these cables at `dpr`. */
+export function blurArea(tethers: readonly Tether[], dpr: number): number {
+  if (tethers.length === 0) return 0;
+  let x0 = Number.POSITIVE_INFINITY;
+  let y0 = Number.POSITIVE_INFINITY;
+  let x1 = Number.NEGATIVE_INFINITY;
+  let y1 = Number.NEGATIVE_INFINITY;
+  for (const t of tethers) {
+    const { p0, p3 } = tetherControls(t);
+    x0 = Math.min(x0, p0.x, p3.x);
+    y0 = Math.min(y0, p0.y, p3.y);
+    x1 = Math.max(x1, p0.x, p3.x);
+    y1 = Math.max(y1, p0.y, p3.y);
+  }
+  const w = (x1 - x0 + 2 * BLUR_PAD) * FILTER_REGION;
+  const h = (y1 - y0 + 2 * BLUR_PAD) * FILTER_REGION;
+  return w * h * dpr * dpr;
+}
+
 const r = (n: number) => Math.round(n * 10) / 10;
 
 export function tetherPath(t: Tether, sag = 0): string {
@@ -110,6 +144,7 @@ export function Tethers({
   const reduced = useReducedMotion();
   const narrow = useViewportWidth() < NARROW_PX;
   const still = reduced || narrow;
+  const lite = useLiteSurface();
   // Nothing moves on cables that are static or not drawn.
   const idle = still || !on;
 
@@ -214,7 +249,10 @@ export function Tethers({
   );
 
   if (!on) return null;
+  const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+  const flat = lite || blurArea(tethers, dpr) > BLUR_BUDGET_PX;
   const blur = `${id}-blur`;
+  const filter = flat ? undefined : `url(#${blur})`;
   const drawn = tethers.map((t) => {
     const sway = sways.current.get(t.id);
     return { t, sway, d: tetherPath(t, sagOf(t) + (sway?.x ?? 0)) };
@@ -229,18 +267,21 @@ export function Tethers({
       height="4000"
       aria-hidden="true"
       data-still={still ? "" : undefined}
+      data-flat={flat ? "" : undefined}
     >
-      <defs>
-        <filter id={blur} x="-10%" y="-10%" width="120%" height="120%">
-          <feGaussianBlur stdDeviation="4" />
-        </filter>
-      </defs>
-      <g className="tether-shadows" filter={`url(#${blur})`} transform="translate(0 12)">
+      {!flat && (
+        <defs>
+          <filter id={blur} x="-10%" y="-10%" width="120%" height="120%">
+            <feGaussianBlur stdDeviation="4" />
+          </filter>
+        </defs>
+      )}
+      <g className="tether-shadows" filter={filter} transform="translate(0 12)">
         {drawn.map(({ t, d }) => (
           <path key={t.id} className="tether-shadow" d={d} />
         ))}
       </g>
-      <g className="tether-glows" filter={`url(#${blur})`}>
+      <g className="tether-glows" filter={filter}>
         {drawn.map(({ t, d }) => (
           <path key={t.id} className="tether-glow" d={d} stroke={t.accent} data-agent={t.id} />
         ))}

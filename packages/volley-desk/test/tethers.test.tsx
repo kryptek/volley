@@ -2,10 +2,13 @@ import { act, render } from "@testing-library/react";
 import { Profiler } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { REDUCED_MOTION_QUERY } from "../src/a11y/motion";
+import { LITE_SURFACE_QUERY } from "../src/a11y/surface";
 import {
+  BLUR_BUDGET_PX,
   SAG_MAX,
   type Tether,
   Tethers,
+  blurArea,
   sagOf,
   tetherControls,
   tetherPath,
@@ -48,6 +51,21 @@ const reduceMotion = () => {
   window.matchMedia = (q: string) =>
     ({ ...realMatchMedia(q), matches: q === REDUCED_MOTION_QUERY }) as MediaQueryList;
 };
+const liteSurface = () => {
+  window.matchMedia = (q: string) =>
+    ({ ...realMatchMedia(q), matches: q === LITE_SURFACE_QUERY }) as MediaQueryList;
+};
+const setDpr = (v: number) =>
+  Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: v });
+/** A phone's large wave: one wave window, `n` agent windows stacked in one column. */
+const column = (n: number): Tether[] =>
+  Array.from({ length: n }, (_, i) => ({
+    id: `c${i}`,
+    waveId: "w",
+    wave: { x: 1326, y: 0, w: 366 },
+    agent: { x: 402, y: i * 506 },
+    accent: "#6ee7f9",
+  }));
 const fakeClock = () =>
   vi.useFakeTimers({
     toFake: [
@@ -303,5 +321,41 @@ describe("Tethers", () => {
     expect(container.querySelector(".tether-pulses")).toBeNull();
     expect(container.querySelectorAll("path.tether-pulse")).toHaveLength(0);
     expect(container.querySelectorAll("[data-sway]")).toHaveLength(0);
+  });
+
+  it("blurArea is the device pixels one blurred group's filter covers, growing with the wave", () => {
+    expect(blurArea([], 3)).toBe(0);
+    const small = blurArea(column(2), 1);
+    expect(blurArea(column(2), 3)).toBe(small * 9);
+    expect(blurArea(column(20), 1)).toBeGreaterThan(small * 5);
+    // The wave that crashed a phone's page: 20 agents in a column at 3x is far past the budget.
+    expect(blurArea(column(20), 3)).toBeGreaterThan(BLUR_BUDGET_PX);
+    expect(blurArea(tethers, 2)).toBeLessThan(BLUR_BUDGET_PX);
+  });
+
+  it("on the lite surface the cables are flat: no blur filter, however small the wave", () => {
+    liteSurface();
+    const { container } = render(<Tethers on tethers={tethers} />);
+    expect(container.querySelector("svg.tethers")).toHaveAttribute("data-flat");
+    expect(container.querySelectorAll("svg.tethers filter")).toHaveLength(0);
+    expect(container.querySelectorAll("svg.tethers [filter]")).toHaveLength(0);
+    // Shadow, glow, core and highlight are all still drawn.
+    expect(container.querySelectorAll("path.tether-shadow")).toHaveLength(3);
+    expect(container.querySelectorAll("path.tether-glow")).toHaveLength(3);
+    expect(container.querySelectorAll("path.tether-core")).toHaveLength(3);
+  });
+
+  it("past the blur budget the cables go flat on any screen, and blur again under it", () => {
+    setDpr(2);
+    try {
+      const { container, rerender } = render(<Tethers on tethers={column(40)} />);
+      expect(container.querySelector("svg.tethers")).toHaveAttribute("data-flat");
+      expect(container.querySelectorAll("svg.tethers [filter]")).toHaveLength(0);
+      rerender(<Tethers on tethers={tethers} />);
+      expect(container.querySelector("svg.tethers")).not.toHaveAttribute("data-flat");
+      expect(container.querySelectorAll("svg.tethers [filter]")).toHaveLength(2);
+    } finally {
+      setDpr(1);
+    }
   });
 });
