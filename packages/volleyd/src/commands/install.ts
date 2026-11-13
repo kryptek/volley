@@ -32,8 +32,9 @@ The plist keeps VOLLEYD_HOME, VOLLEY_BROKER_URL, VOLLEY_NAMESPACE and, when set,
 volley-sim (VOLLEY_SIMULATED=1, as \`volley setup --simulated\` does) it also keeps
 VOLLEY_SIMULATED and VOLLEY_SIM_HOME and puts the simulator's fakes first on PATH. Its PATH is
 a fixed list, never your shell's: ~/.volley/bin, bun's directory, Homebrew's, /usr/local/bin, the
-cmux app's bin, ~/.local/bin, ~/.bun/bin and the other install dirs that exist on this machine,
-/usr/bin:/bin:/usr/sbin:/sbin. The same from any terminal.
+cmux app's bin, the Rex Server bundle's (where Rex keeps its command-line tool, rex), ~/.local/bin,
+~/.bun/bin and the other install dirs that exist on this machine, /usr/bin:/bin:/usr/sbin:/sbin.
+The same from any terminal.
 The cmux socket password (\`volley setup\` stores it) never goes in the plist either: volleyd
 reads $VOLLEYD_HOME/cmux.json (mode 0600) each time it runs cmux.
 Broker credentials never go in the plist: the daemon reads $VOLLEYD_HOME/broker.json (mode 0600,

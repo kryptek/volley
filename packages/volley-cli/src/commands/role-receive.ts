@@ -22,6 +22,7 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { stableServicePath } from "../setup/service-path";
 import { renderSystemd, volleydUnitSpec } from "../setup/services";
+import { isLocalTerminal } from "../setup/terminal";
 import { defaultAuthDir } from "./auth";
 import { LAUNCHD_LABEL, SYSTEMD_UNIT, peerFile } from "./peer";
 
@@ -54,7 +55,7 @@ import { LAUNCHD_LABEL, SYSTEMD_UNIT, peerFile } from "./peer";
 
 const HELP = `Usage:
   volley role receive supervisor <bundle> --from <old machine>
-                      [--local-terminal cmux|tmux] [--local-agents never] [--broker-url <url>]
+                      [--local-terminal cmux|tmux|rex] [--local-agents never] [--broker-url <url>]
 
 Run by volleyd over ssh on the supervisor's new machine (a supervisor move): restores the
 bundle's journals, config and account registry, makes this machine the supervisor's own in
@@ -63,7 +64,7 @@ login, installs and starts volleyd, and prints a pairing code for the old machin
 
 Options:
   --from <name>            The machine the supervisor moves from (the bundle's)
-  --local-terminal <t>     fleet.local_terminal here: cmux or tmux
+  --local-terminal <t>     fleet.local_terminal here: cmux, tmux or rex
   --local-agents never     fleet.local_agents here: no agents on this machine
   --broker-url <url>       The broker as volleyd here reaches it (default: this machine's
                            tunnel, mqtt://127.0.0.1:<peer.json remote_port>)
@@ -153,8 +154,8 @@ export async function runReceive(
   }
   if (bundlePath === undefined || extra.length > 0) return usage("needs exactly one <bundle>");
   if (v.from === undefined || !NAME.test(v.from)) return usage("needs --from <old machine>");
-  if (v["local-terminal"] !== undefined && !["cmux", "tmux"].includes(v["local-terminal"])) {
-    return usage("--local-terminal must be cmux or tmux");
+  if (v["local-terminal"] !== undefined && !isLocalTerminal(v["local-terminal"])) {
+    return usage("--local-terminal must be cmux, tmux or rex");
   }
   if (v["local-agents"] !== undefined && v["local-agents"] !== "never") {
     return usage("--local-agents takes only never");

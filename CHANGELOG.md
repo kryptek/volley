@@ -2,6 +2,18 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.17.0 — 2026-11-09
+
+### Added
+
+- **volleyd: a Rex host adapter.** `fleet.local_terminal: rex` runs the supervisor's local agents
+  in Rex sessions labelled `volley-<wave>-<task>-<role>`: launch from the sealed launch script,
+  screen tails, inbox and wake typing, resize by read-back, consented kill, cleanup. Unset, the
+  local terminal is the first installed of Rex, cmux and tmux. `volley setup`'s Terminal step
+  finds Rex's command-line tool in its app bundle and puts it on the services' PATH; the fence
+  admits exactly the shapes the adapter sends. `agent_spawned.terminal` and the screen channel's
+  `source` gain `rex`. (#653)
+
 ## 0.16.0 — 2026-11-09
 
 ### Added

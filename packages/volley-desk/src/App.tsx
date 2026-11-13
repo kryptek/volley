@@ -1629,8 +1629,11 @@ export default function App() {
                   onRaise={() => popouts.raise(id)}
                   fontPx={popouts.fontPx}
                   onFont={(d) => popouts.setFontPx(popouts.fontPx + d)}
-                  // Only volleyd's agents on a paired machine (tmux) have a terminal it can size (#403).
-                  {...(control && a.task && a.screen?.source === "tmux"
+                  // volleyd can size a tmux terminal (#403) and ask Rex for a size (it answers
+                  // whether Rex applied it); a cmux window's size is the user's.
+                  {...(control &&
+                  a.task &&
+                  (a.screen?.source === "tmux" || a.screen?.source === "rex")
                     ? { onSize: (size: TerminalSize) => sendTerminalSize(control, id, size) }
                     : {})}
                 />

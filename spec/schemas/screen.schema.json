@@ -23,8 +23,8 @@
               "description": "Content hash of lines; publishers skip unchanged captures."
             },
             "source": {
-              "enum": ["cmux", "tmux"],
-              "description": "Capture mechanism: cmux for agents on the supervisor's own host, tmux for agents on a remote (SSH + tmux) host."
+              "enum": ["cmux", "tmux", "rex"],
+              "description": "Capture mechanism: the supervisor's own host's terminal (cmux, tmux or rex, by fleet.local_terminal), tmux for agents on a remote (SSH + tmux) host."
             }
           }
         }

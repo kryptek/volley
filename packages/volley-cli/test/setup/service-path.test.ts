@@ -53,6 +53,28 @@ describe("stableServicePath", () => {
     );
   });
 
+  it("on a Mac with Rex: the Rex Server bundle's command-line directory, after cmux's", () => {
+    const rex = `${HOME}/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS`;
+    const exists = fs("/Applications/cmux.app/Contents/Resources/bin", rex, `${HOME}/.local/bin`);
+    expect(stableServicePath({ home: HOME, bun: "/usr/bin/bun", exists })).toBe(
+      [
+        `${HOME}/.volley/bin`,
+        "/usr/bin",
+        "/usr/local/bin",
+        "/Applications/cmux.app/Contents/Resources/bin",
+        rex,
+        `${HOME}/.local/bin`,
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+      ].join(":"),
+    );
+    // Not there: not on the PATH.
+    expect(stableServicePath({ home: HOME, bun: "/usr/bin/bun", exists: fs() })).not.toContain(
+      "com.superlogical.rex",
+    );
+  });
+
   it("on Linux: Linuxbrew, nix and snap when present", () => {
     const exists = fs("/home/linuxbrew/.linuxbrew/bin", "/snap/bin", `${HOME}/.nix-profile/bin`);
     expect(stableServicePath({ home: HOME, bun: "/usr/bin/bun", exists })).toBe(

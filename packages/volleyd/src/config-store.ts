@@ -144,18 +144,20 @@ function overrideErrors(value: unknown): PathError[] {
 }
 
 /**
- * `fleet.local_terminal`, resolved: null is `cmux` on macOS when cmux is installed
- * (`cmuxFound`), else `tmux` (every Linux supervisor; a Mac without cmux). cmux is a Mac app, so
- * a `cmux` set off macOS (a hand-edited config.yaml) is `tmux` too.
+ * `fleet.local_terminal`, resolved: a set `tmux` or `rex` is kept as set (a missing tool fails
+ * the launch, saying how to add it); null is the first installed (`found`) of `rex`, then `cmux`
+ * on macOS, else `tmux` (every Linux supervisor without Rex; a Mac with neither). cmux is a Mac
+ * app, so a `cmux` set off macOS (a hand-edited config.yaml) is `tmux` too.
  */
 export function resolveLocalTerminal(
   set: LocalTerminal | null | undefined,
   platform: NodeJS.Platform,
-  cmuxFound: () => boolean,
+  found: (t: LocalTerminal) => boolean,
 ): LocalTerminal {
-  if (set === "tmux" || (set === "cmux" && platform === "darwin")) return set;
+  if (set === "tmux" || set === "rex" || (set === "cmux" && platform === "darwin")) return set;
   if (set === "cmux") return "tmux";
-  return platform === "darwin" && cmuxFound() ? "cmux" : "tmux";
+  if (found("rex")) return "rex";
+  return platform === "darwin" && found("cmux") ? "cmux" : "tmux";
 }
 
 /** `fleet.local_agents`, resolved: null is `fallback` when any host is configured, else `always`. */

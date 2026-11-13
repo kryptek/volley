@@ -109,6 +109,24 @@ describe("Getting started › This computer", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows Terminal: rex when the setup plan found volleyd starts local agents in Rex", async () => {
+    const rex = {
+      ...PLAN,
+      steps: PLAN.steps.map((s, i) =>
+        i === 0
+          ? {
+              ...s,
+              found: [...s.found, "Terminal: rex (volleyd starts local agents in Rex sessions)"],
+            }
+          : s,
+      ),
+    };
+    mount({ handlers: { setup_plan: () => ({ ok: true, result: rex }) } });
+    await waitFor(() => expect(row("Terminal")).toHaveTextContent("rex"));
+    expect(row("Terminal")).not.toHaveTextContent("tmux");
+    expect(row("Terminal")).toHaveAttribute("data-state", "ok");
+  });
+
   it("a missing tool shows ✕ and its fix, never a blank", async () => {
     mount({
       supervisor: { ...SUPERVISOR, versions: { ...SUPERVISOR.versions, gh: null } },

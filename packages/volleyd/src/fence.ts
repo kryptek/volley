@@ -135,6 +135,19 @@ import { AGENT_BRANCH } from "./worktree";
  *       has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
  *       send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
  *       send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
+ *   rex (local agents, hosts/local-rex.ts, under `fleet.local_terminal: rex`) — exact shapes
+ *     only, each starting with exactly the global flags `--autostart=false --timeout 10s` (no
+ *     other global flag: never -S or -C); sessions targeted by id only (SESSION_ID
+ *     `session:<uuid>`, BLOCK_ID `block:<uuid>`; a label is never a target, Rex labels are not
+ *     unique):
+ *     new <AGENT_SESSION label> -c <dir> --json -- bash .volley/launch.sh (with the LaunchToken
+ *       sealed for <dir>) · ls --json · session inspect <SESSION_ID> --json ·
+ *       block call -s <SESSION_ID> -b <BLOCK_ID> format <REX_SCREEN_FORMAT> | blob_read
+ *       {"id":<n>,"offset":<n>,"max_bytes":<n ≤ 65536>} | size | resize
+ *       {"columns":<n>,"rows":<n>} (n in 20..500) ·
+ *       send-key -s <SESSION_ID> -b <BLOCK_ID> enter|esc (up|down|space: PICKER) ·
+ *       send -s <SESSION_ID> -b <BLOCK_ID> -- <TYPED_TEXT> · kill <SESSION_ID> = CONSENT
+ *     (never do, run, split, api, server, events, wait, capture)
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -186,7 +199,7 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
  *   volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
  *   supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
- *   --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
+ *   --from <name> [--local-terminal cmux|tmux|rex] [--local-agents never] [--broker-url
  *   mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
  *   ssh-back probe); base64 -d to that bundle path (the copy).
  *   A broker move's, here: brew services stop|start mosquitto · sudo -n snap|systemctl
@@ -260,8 +273,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   SUDO_ASKPASS is refused, except MACHINE ADD's password form with exactly the token's helper
  *   and `SSH_ASKPASS_REQUIRE=force` (no SUDO_ASKPASS: sudo runs on the box, from its own helper).
  *
- * TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
- *   with its token, checked by identity like consent tokens:
+ * TYPED_TEXT (cmux send, tmux send-keys -l, rex send: what is typed into an agent's terminal),
+ *   each only with its token, checked by identity like consent tokens:
  *     LAUNCH_COMMAND   with a LaunchToken (`sealLaunchScript`: volleyd rendered that launch.sh)
  *     `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
  *                      minted when an approved model_switch decision is acted on); <id> is a
@@ -273,10 +286,11 @@ import { AGENT_BRANCH } from "./worktree";
  *     WAKE_TEXT        with a WakeToken (`mintWakeToken`, minted when an idle agent did not ack
  *                      a mailbox message in time), typed once per token; nothing else with it
  *
- * PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
- *   `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
- *   one item version after the screen showed its picker) naming that key; `Enter` and `Escape`
- *   need no token. No other key name is ever sent.
+ * PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space`,
+ *   `tmux send-keys -t <t> Up|Down|Space` and `rex send-key … up|down|space` only with a
+ *   PickerToken (`mintPickerToken`, minted for one item version after the screen showed its
+ *   picker) naming that key; `Enter` and `Escape` (Rex: `enter`, `esc`) need no token. No other
+ *   key name is ever sent.
  *
  * SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
  *   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
@@ -2102,6 +2116,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
         : deny("claude (only from .volley/launch.sh)");
     case "tmux":
       return localTmux(args, opts);
+    case "rex":
+      return rex(args, opts);
     case "curl":
       return entryCurl(args, opts);
     case "volley":
@@ -2596,7 +2612,8 @@ function isDeskVerb(a: readonly string[]): boolean {
  * shape: `peer retarget --to <dest> [--port <n>] [--tunnel ssh|none]` (`peer_retarget`), `peer join
  * <code> --to <dest> --name <name> --target <dest> --tunnel none` (a supervisor move re-pairing the
  * old machine), the Desk's verbs (`isDeskVerb`), and `role receive supervisor <bundle> --from
- * <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url mqtt://127.0.0.1:<n>]`.
+ * <name> [--local-terminal cmux|tmux|rex] [--local-agents never] [--broker-url
+ * mqtt://127.0.0.1:<n>]`.
  */
 export function isRoleRemoteVolley(a: readonly string[]): boolean {
   const [group, verb, ...rest] = a;
@@ -2626,7 +2643,10 @@ export function isRoleRemoteVolley(a: readonly string[]): boolean {
     if (rest[0] !== "supervisor" || !isBundlePath(rest[1] ?? "")) return false;
     if (rest[2] !== "--from" || !AGENT_ID.test(rest[3] ?? "")) return false;
     let i = 4;
-    if (rest[i] === "--local-terminal" && (rest[i + 1] === "cmux" || rest[i + 1] === "tmux"))
+    if (
+      rest[i] === "--local-terminal" &&
+      (rest[i + 1] === "cmux" || rest[i + 1] === "tmux" || rest[i + 1] === "rex")
+    )
       i += 2;
     if (rest[i] === "--local-agents" && rest[i + 1] === "never") i += 2;
     if (rest[i] === "--broker-url" && isTunnelBrokerUrl(rest[i + 1] ?? "")) i += 2;
@@ -3547,6 +3567,124 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
   if (spec === undefined) return deny(`tmux ${sub}`);
   const v = checkArgs(`tmux ${sub}`, rest, spec);
   return v.kind === "allow" && sub === "new-session" ? newSessionSealed(rest, opts) : v;
+}
+
+/**
+ * The global flags every rex call starts with: no server autostart (a missing server is the
+ * owner's to start: Rex's app runs its own), and Rex's own bound on the call.
+ */
+export const REX_GLOBAL = ["--autostart=false", "--timeout", "10s"] as const;
+/** The largest screen read (bytes) a `format` or `blob_read` block call asks Rex for. */
+export const REX_SCREEN_MAX_BYTES = 65536;
+/** `block call … format <this>`: the screen as plain text, trimmed, the first 64 KiB. */
+export const REX_SCREEN_FORMAT = `{"format":"text","trim":true,"max_bytes":${REX_SCREEN_MAX_BYTES}}`;
+const REX_SESSION_ID = /^session:[0-9a-f-]{36}$/;
+const REX_BLOCK_ID = /^block:[0-9a-f-]{36}$/;
+/** Rex's key names for the Host's (hosts/local-rex.ts REX_KEYS), the other way round. */
+const REX_KEY_NAMES: Record<string, string> = {
+  enter: "Enter",
+  esc: "Escape",
+  up: "Up",
+  down: "Down",
+  space: "Space",
+};
+
+/** A JSON object argument with exactly `keys`, each a non-negative integer passing `ok`. */
+function rexJsonInts(
+  text: string,
+  keys: readonly string[],
+  ok: (k: string, n: number) => boolean,
+): boolean {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  const have = Object.keys(o);
+  return (
+    have.length === keys.length &&
+    keys.every((k) => {
+      const n = o[k];
+      return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 && ok(k, n);
+    })
+  );
+}
+
+/**
+ * Rex (hosts/local-rex.ts, `fleet.local_terminal: rex`): Rex runs and types commands in an
+ * agent's shell, so every subcommand has an exact argv shape (see the header), each after the
+ * pinned REX_GLOBAL flags. The launch command of a sealed launch script is the only command a
+ * session starts with, TYPED_TEXT the only text sent into one, and a session is reached by its id.
+ */
+function rex(args: string[], opts: FenceOptions): Verdict {
+  if (!sameArgv(args.slice(0, REX_GLOBAL.length), REX_GLOBAL))
+    return deny("rex (only with --autostart=false --timeout 10s, and no other global flag)");
+  const [sub = "", ...rest] = args.slice(REX_GLOBAL.length);
+  const verb = `rex ${sub}`.trim();
+  const target = (a: readonly string[]) =>
+    a[0] === "-s" &&
+    REX_SESSION_ID.test(a[1] ?? "") &&
+    a[2] === "-b" &&
+    REX_BLOCK_ID.test(a[3] ?? "");
+  switch (sub) {
+    case "new": {
+      const [label, c, cwd = "", json, dashes, ...cmd] = rest;
+      return isAgentSession(label) &&
+        c === "-c" &&
+        absPath(cwd) &&
+        json === "--json" &&
+        dashes === "--" &&
+        sameArgv(cmd, TMUX_LAUNCH_COMMAND.split(" ")) &&
+        sealedFor(opts, cwd)
+        ? ALLOW
+        : deny("rex new (only the sealed launch script, in its worktree, in a wave-shaped label)");
+    }
+    case "ls":
+      return sameArgv(rest, ["--json"]) ? ALLOW : deny(verb);
+    case "session":
+      return rest.length === 3 &&
+        rest[0] === "inspect" &&
+        REX_SESSION_ID.test(rest[1] ?? "") &&
+        rest[2] === "--json"
+        ? ALLOW
+        : deny("rex session (only inspect <session id> --json)");
+    case "block": {
+      if (rest[0] !== "call" || !target(rest.slice(1)))
+        return deny("rex block (only call -s <session id> -b <block id>)");
+      const [method = "", ...arg] = rest.slice(5);
+      const ok =
+        (method === "size" && arg.length === 0) ||
+        (arg.length === 1 &&
+          ((method === "format" && arg[0] === REX_SCREEN_FORMAT) ||
+            (method === "blob_read" &&
+              rexJsonInts(arg[0] ?? "", ["id", "offset", "max_bytes"], (k, n) =>
+                k === "max_bytes" ? n >= 1 && n <= REX_SCREEN_MAX_BYTES : true,
+              )) ||
+            (method === "resize" &&
+              rexJsonInts(arg[0] ?? "", ["columns", "rows"], (_k, n) => isTmuxSize(String(n))))));
+      return ok ? ALLOW : deny(`rex block call ${method}`.trim());
+    }
+    case "send-key": {
+      const key = REX_KEY_NAMES[rest[4] ?? ""];
+      return rest.length === 5 && target(rest) && key !== undefined && keyAllowed(key, opts)
+        ? ALLOW
+        : deny(verb);
+    }
+    case "send": {
+      if (rest.length !== 6 || !target(rest) || rest[4] !== "--") return deny(verb);
+      const why = typedTextRefusal(rest[5] ?? "", opts);
+      return why === null ? ALLOW : deny(`rex send (${why})`);
+    }
+    case "kill":
+      return rest.length === 1 && REX_SESSION_ID.test(rest[0] ?? "")
+        ? { kind: "consent", verb }
+        : deny(verb);
+    default:
+      return deny(verb);
+  }
 }
 
 /**

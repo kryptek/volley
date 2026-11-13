@@ -61,7 +61,8 @@ export interface LaunchSpec {
   size?: TermSize;
   /**
    * The coordinator role (SPEC §4.6.25): `command` is `bash .volley/coordinator.sh`, sealed by this
-   * token, and `name` is its session (`volley-coordinator-<name>`), taken as it is. tmux hosts only.
+   * token, and `name` is its session (`volley-coordinator-<name>`), taken as it is. tmux hosts
+   * only (the cmux and Rex hosts refuse it).
    */
   coordinator?: CoordinatorToken;
 }
@@ -82,9 +83,10 @@ export interface SessionEnd {
 }
 
 /**
- * A machine agents run on. `local-cmux` (this package) runs them in cmux workspaces on the
- * daemon's own host; a remote host (ssh + tmux) implements the same interface. Every child
- * process a host starts goes through the fenced `exec`.
+ * A machine agents run on. The daemon's own host runs them in cmux workspaces (`local-cmux`),
+ * detached tmux sessions (`local-tmux`) or Rex sessions (`local-rex`), by `fleet.local_terminal`;
+ * a remote host (ssh + tmux) implements the same interface. Every child process a host starts
+ * goes through the fenced `exec`.
  */
 export interface Host {
   /** `local`, or a remote host's name from the wave file's per-task `host:` key. */
@@ -116,8 +118,8 @@ export interface Host {
   sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
   /**
    * Resize the workspace's terminal to `size`, or back to its launch size (`"launch"`): the
-   * Desk's Terminal popout (#403). False when this host has no way to (cmux); rejects when the
-   * resize failed.
+   * Desk's Terminal popout (#403). False when this host has no way to (cmux) or the terminal
+   * kept its own size (Rex, when a client owns the block); rejects when the resize failed.
    */
   resize(workspace: string, size: TermSize | "launch"): Promise<boolean>;
   /**

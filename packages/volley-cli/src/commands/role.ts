@@ -56,7 +56,7 @@ const HELP = `Usage:
                                      Plan a move, print its sheet, ask once, run it and stream
                                      each step (\`--dry-run\`: the sheet only; exit 1 when blocked)
   volley role rollback <move_id>     Undo a done move (within 7 days) as a new move the other way
-  volley role receive supervisor <bundle> --from <old machine> [--local-terminal cmux|tmux]
+  volley role receive supervisor <bundle> --from <old machine> [--local-terminal cmux|tmux|rex]
                       [--local-agents never] [--broker-url <url>]
                                      The new machine's half of a supervisor move (volleyd runs it
                                      over ssh; \`volley role receive --help\` for more)

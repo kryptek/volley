@@ -292,14 +292,17 @@ export interface AutopilotConfig {
 export type LocalAgentsMode = "always" | "fallback" | "never";
 
 /** The terminal agents on the supervisor's own machine run in (config `fleet.local_terminal`). */
-export type LocalTerminal = "cmux" | "tmux";
+export type LocalTerminal = "cmux" | "tmux" | "rex";
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
 export interface FleetConfig {
   local_name: string | null;
   /** null: `fallback` when any `hosts.<name>` is configured, else `always` (`effective()` resolves it). */
   local_agents: LocalAgentsMode | null;
-  /** null: `cmux` on macOS when cmux is installed, else `tmux` (`resolveLocalTerminal`). */
+  /**
+   * null: `rex` when Rex's command-line tool is installed, else `cmux` on macOS when cmux is
+   * installed, else `tmux` (`resolveLocalTerminal`).
+   */
   local_terminal: LocalTerminal | null;
   /** The own machine's profile while it is the fallback (no paired machine eligible). */
   fallback: FallbackProfile;
